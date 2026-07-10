@@ -23,7 +23,7 @@ The canonical Markdown contract is `templates/video-summary-template.md` and is 
 ## Code Contributor Contract
 
 - Use project-relative paths derived from `__dirname`, `PROJECT_ROOT`, or script location. Never commit a maintainer's drive letter, home directory, username, cookie path, or temporary path.
-- Do not commit `workspace/`, `runtime/`, `node_modules/`, `dist/`, logs, SQLite databases, cookies, generated media, model files, or local shortcuts.
+- Do not commit `workspace/`, `runtime/`, `node_modules/`, `dist/`, logs, SQLite databases, cookies, generated media, model files, or local shortcuts. Runtime dependencies belong in the pinned setup manifests and portable release build.
 - Keep ordinary user releases dependency-free by changing `scripts/build-portable-release.ps1` when a new runtime dependency is added.
 - Update `THIRD_PARTY_NOTICES.md`, `runtime-requirements.txt`, and release documentation whenever dependency versions or licenses change.
 - Preserve the API-first boundary: Agents do not directly mutate SQLite or application indexes.

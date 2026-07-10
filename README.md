@@ -126,7 +126,7 @@ GET /api/templates/video-summary
 
 工具由应用进程启动并记录日志。Agent 不应绕过 API 直接运行项目脚本。工具请求立即返回 HTTP `202`，之后通过运行接口轮询 `queued -> running -> succeeded/failed/cancelled/timeout`；排队响应包含资源池、阶段、队位、等待原因和预计等待时间。
 
-项目通过 npm 自带 FFmpeg 和 yt-dlp，不依赖系统 PATH。faster-whisper 使用 `runtime/python` 下的 CPython 3.12、`runtime/faster-whisper` 虚拟环境，以及 `runtime/models/small` 和 `runtime/models/large-v3-turbo` 模型。CUDA 12 的 cuBLAS/cuDNN 也安装在同一虚拟环境。
+项目将 FFmpeg（通过 `imageio-ffmpeg` 固定轮子）与 yt-dlp 固定安装到 `runtime/faster-whisper`，不依赖系统 PATH，也不在 `npm ci` 时运行第三方 Python 检查或下载媒体工具。faster-whisper 使用 `runtime/python` 下的 CPython 3.12、同一个项目虚拟环境，以及 `runtime/models/small` 和 `runtime/models/large-v3-turbo` 模型。CUDA 12 的 cuBLAS/cuDNN 也安装在该环境。
 
 重新部署完整 ASR 运行时：
 

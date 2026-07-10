@@ -14,9 +14,6 @@ This inventory is a practical release checklist, not legal advice. Release publi
 | mammoth | 1.11.0 | BSD-2-Clause | DOCX text extraction for RAG attachments, [mwilliamson/mammoth.js](https://github.com/mwilliamson/mammoth.js) |
 | pdf-parse | 1.1.1 | MIT | PDF text extraction for RAG attachments, [autokent/pdf-parse](https://gitlab.com/autokent/pdf-parse) |
 | sql.js | 1.14.1 | MIT | SQLite/WASM persistence, [sql-js/sql.js](https://github.com/sql-js/sql.js) |
-| yt-dlp-exec wrapper | 1.0.2 | MIT | Project-local yt-dlp launcher, [microlinkhq/yt-dlp-exec](https://github.com/microlinkhq/yt-dlp-exec) |
-| yt-dlp executable | 2026.07.04 in the current runtime | Unlicense | Media acquisition, [yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp) |
-| ffmpeg-static package and bundled FFmpeg | package 5.2.0 / FFmpeg 6.0 essentials build | GPL-3.0-or-later | Media merge, audio conversion, and frame extraction; [eugeneware/ffmpeg-static](https://github.com/eugeneware/ffmpeg-static), [FFmpeg](https://ffmpeg.org/) |
 
 The npm dependency tree also contains MIT, ISC, BSD-2-Clause, BSD-3-Clause, Apache-2.0, Python-2.0, and similarly permissive transitive packages. Their package license files are preserved inside bundled `node_modules`; `package-lock.json` is the authoritative version inventory.
 
@@ -31,6 +28,8 @@ The npm dependency tree also contains MIT, ISC, BSD-2-Clause, BSD-3-Clause, Apac
 | NumPy | 2.5.1 | BSD-3-Clause and bundled notices | PCM and tensor processing, [numpy/numpy](https://github.com/numpy/numpy) |
 | huggingface-hub | 1.23.0 | Apache-2.0 | Model snapshot acquisition for source builds |
 | ONNX Runtime | 1.27.0 | MIT | Tokenizer/runtime support |
+| imageio-ffmpeg / FFmpeg | 0.6.0 / 7.1 essentials build | BSD-2-Clause wrapper / GPL-3.0-or-later binary | Project-local FFmpeg provider, [imageio/imageio-ffmpeg](https://github.com/imageio/imageio-ffmpeg), [FFmpeg](https://ffmpeg.org/) |
+| yt-dlp | 2026.07.04 | Unlicense | Project-local media acquisition module, [yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp) |
 | `Systran/faster-whisper-small` | revision `536b0662742c02347bc0e980a01041f333bce120` | MIT | Default multilingual ASR model |
 | `mobiuslabsgmbh/faster-whisper-large-v3-turbo` | revision `0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf` | MIT | Optional quality model |
 
@@ -44,11 +43,11 @@ Users who cannot or do not want to accept the NVIDIA terms should use a CPU-only
 
 ## GPL Corresponding Source
 
-The current FFmpeg executable reports `ffmpeg version 6.0-essentials_build-www.gyan.dev` and `--enable-gpl --enable-version3`. A publisher distributing that binary must satisfy GPL source obligations. At minimum:
+The prepared runtime's imageio-ffmpeg 0.6.0 executable reports `ffmpeg version 7.1-essentials_build-www.gyan.dev` with `--enable-gpl --enable-version3`. A publisher distributing it must satisfy GPL source obligations. At minimum:
 
 1. Publish the exact application source corresponding to the release tag.
 2. Preserve `LICENSE` and this notice in the binary archive.
-3. Publish or provide a durable written offer for the corresponding FFmpeg 6.0 source and the GPL-covered linked build inputs. Start from [FFmpeg 6.0 source](https://ffmpeg.org/releases/ffmpeg-6.0.tar.xz) and the build provenance at [gyan.dev FFmpeg builds](https://www.gyan.dev/ffmpeg/builds/).
+3. Publish or provide a durable written offer for the corresponding FFmpeg 7.1 source and the GPL-covered linked build inputs. Start from [FFmpeg 7.1 source](https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz) and the build provenance at [gyan.dev FFmpeg builds](https://www.gyan.dev/ffmpeg/builds/).
 4. Keep the source offer available for the period required by GPLv3 section 6.
 
 The safest GitHub release layout is to attach the portable core archive, model archive, both SHA-256 files, a corresponding-source archive/source offer, and this notice to the same release. Splitting the model for GitHub's file-size limit does not change any component's license.

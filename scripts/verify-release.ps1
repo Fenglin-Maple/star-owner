@@ -22,16 +22,18 @@ $required = @(
   "package.json",
   "package-lock.json",
   "node_modules\electron\dist\electron.exe",
-  "node_modules\ffmpeg-static\ffmpeg.exe",
-  "node_modules\yt-dlp-exec\bin\yt-dlp.exe",
   "node_modules\mermaid\dist\mermaid.min.js",
   "node_modules\mammoth\package.json",
   "node_modules\pdf-parse\package.json",
   "runtime\python\cpython-3.12.13-windows-x86_64-none\python.exe",
   "runtime\faster-whisper\Lib\site-packages\faster_whisper",
+  "runtime\faster-whisper\Lib\site-packages\imageio_ffmpeg\binaries",
+  "runtime\faster-whisper\Lib\site-packages\yt_dlp",
   "runtime\models\small\model.bin"
 )
 $required | ForEach-Object { Require-Path $_ }
+$ffmpegBinary = Get-ChildItem -LiteralPath (Join-Path $root "runtime\faster-whisper\Lib\site-packages\imageio_ffmpeg\binaries") -File -Filter "ffmpeg-*" -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $ffmpegBinary) { throw "Required project-local imageio-ffmpeg binary is missing." }
 
 $scanRoots = @("src", "scripts", "tools", "templates", "packaging")
 $scanFiles = foreach ($relative in $scanRoots) {

@@ -6,9 +6,10 @@ const { spawnSync } = require('child_process');
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const WHISPER_PYTHON = path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'Scripts', 'python.exe');
 const WHISPER_CLI = path.join(PROJECT_ROOT, 'tools', 'faster-whisper-cli.py');
+const IMAGEIO_BINARIES = path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'Lib', 'site-packages', 'imageio_ffmpeg', 'binaries');
 const LOCAL_BINARIES = {
-  ffmpeg: optionalModulePath('ffmpeg-static'),
-  'yt-dlp': path.join(path.dirname(require.resolve('yt-dlp-exec/package.json')), 'bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'),
+  ffmpeg: findFirst(IMAGEIO_BINARIES, process.platform === 'win32' ? /^ffmpeg-.*\.exe$/i : /^ffmpeg-/i),
+  'yt-dlp': WHISPER_PYTHON,
   'faster-whisper': process.env.FASTER_WHISPER_BIN || WHISPER_PYTHON
 };
 
@@ -463,16 +464,22 @@ function readNetscapeCookies(file) {
 }
 
 function requireCommand(command) {
-  if (!commandAvailable(command)) throw new Error(`未找到 ${command}，请先安装并加入 PATH。`);
-}
-
-function commandAvailable(command) {
-  return Boolean(resolveCommand(command));
+  if (!dependencyStatus(command).available) throw new Error(`未找到 ${command}，请先运行 npm run setup:asr。`);
 }
 
 function dependencyStatus(command) {
   const executable = resolveCommand(command);
   if (!executable) return { command, available: false, source: '' };
+  if (command === 'yt-dlp' && executable === WHISPER_PYTHON) {
+    const probe = spawnSync(executable, ['-m', 'yt_dlp', '--version'], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    return {
+      command,
+      available: probe.status === 0,
+      source: `${executable} -m yt_dlp`,
+      version: String(probe.stdout || '').trim(),
+      message: probe.status === 0 ? '项目 Python 中的 yt-dlp 可用' : String(probe.stderr || '').trim()
+    };
+  }
   if (command !== 'faster-whisper' || executable !== WHISPER_PYTHON || !fs.existsSync(WHISPER_CLI)) {
     return { command, available: true, source: executable };
   }
@@ -509,19 +516,11 @@ function resolveCommand(command) {
 function run(command, args) {
   const executable = resolveCommand(command);
   if (!executable) throw new Error(`未找到 ${command}，请先安装并加入 PATH。`);
-  const finalArgs = command === 'faster-whisper' && executable === WHISPER_PYTHON && fs.existsSync(WHISPER_CLI)
-    ? [WHISPER_CLI, ...args]
-    : args;
+  let finalArgs = args;
+  if (command === 'faster-whisper' && executable === WHISPER_PYTHON && fs.existsSync(WHISPER_CLI)) finalArgs = [WHISPER_CLI, ...args];
+  if (command === 'yt-dlp' && executable === WHISPER_PYTHON) finalArgs = ['-m', 'yt_dlp', ...args];
   const result = spawnSync(executable, finalArgs, { stdio: 'inherit', shell: false, windowsHide: true });
   if (result.status !== 0) throw new Error(`${command} 执行失败，退出码 ${result.status}`);
-}
-
-function optionalModulePath(moduleName) {
-  try {
-    return require(moduleName);
-  } catch {
-    return '';
-  }
 }
 
 function findFirst(dir, pattern) {
@@ -538,4 +537,4 @@ function* walk(root) {
   }
 }
 
-module.exports = { assessSubtitle };
+module.exports = { assessSubtitle, resolveCommand };

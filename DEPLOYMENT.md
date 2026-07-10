@@ -52,7 +52,7 @@ npm run verify:release
 npm start
 ```
 
-`npm run setup:asr` installs Python, CUDA Python wheels, faster-whisper, and both models under `runtime/`. It does not install them globally. `runtime-requirements.txt` pins the ASR environment.
+The root `postinstall` only checks whether Electron's executable exists and, when needed, invokes the official `node_modules/electron/install.js`; it inherits `ELECTRON_MIRROR` and proxy environment variables. `npm run setup:asr` installs Python, CUDA Python wheels, faster-whisper, imageio-ffmpeg, yt-dlp, and both models under `runtime/`. It does not install them globally. `runtime-requirements.txt` pins the complete ASR/media environment, so `npm ci` itself does not run Python probes or media-binary downloaders.
 
 ## 3. Build a Portable Archive
 
@@ -123,6 +123,7 @@ Before a public release, also verify the RAG supplier dialog, remote model pull 
 - If the GPU service cannot start, update the NVIDIA driver or enable CPU ASR after reviewing the performance tradeoff.
 - If Mermaid cannot render a diagram, the document preview shows a local error and the source block; correct the Mermaid syntax rather than loading a CDN.
 - If model pulling returns 404, the Base URL is usually one path level too high or low. It must resolve `<baseUrl>/models` and `<baseUrl>/chat/completions`.
+- If `npm ci` times out while Electron itself is downloaded from GitHub, retry from a network that can reach GitHub Releases. In mainland China, a one-session mirror override is `$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'; npm ci`; do not commit personal registry or proxy settings.
 - If a model returns no reasoning panel, confirm the provider exposes an explicit compatible reasoning field; the application does not reveal or synthesize hidden chain-of-thought.
 - If tool calls fail, verify that the selected model really implements OpenAI-compatible function calling and that its model capability switch is enabled.
 - In restricted RAG sessions, CMD and paths outside the selected sandbox intentionally wait for an in-app approval dialog.
