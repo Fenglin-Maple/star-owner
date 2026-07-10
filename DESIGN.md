@@ -358,7 +358,7 @@ The task-page performance popover always opens, including before the first claim
 
 Brand: `星⭐收藏家`.
 
-The app uses a minimal flat rounded icon: a star over three layered collection bookmarks. The reproducible source is `scripts/generate-icon.py`, which writes `assets/star-note.png` and `assets/star-note.ico` without remote assets or font dependencies.
+The app uses a minimal flat mobile-style icon: a white rounded-square tile containing a star over three layered collection bookmarks. The reproducible source is `scripts/generate-icon.py`, which writes `assets/star-note.png` and `assets/star-note.ico` without remote assets or font dependencies.
 
 Window behavior:
 
@@ -366,14 +366,15 @@ Window behavior:
 - default size `1350 x 836`;
 - startup always restores and centers the default size instead of preserving a previous resize or maximized state;
 - minimum size `980 x 680`;
-- collapsible left navigation;
+- narrow collapsible left navigation with one standalone page, three expandable page groups, and fixed bottom utilities;
+- content grids consume the width released by a collapsed sidebar instead of only translating left;
 - no page-level scrolling at the default size;
 - internal scrolling for task, tool, run, log, and workspace inventories;
 - themed thin scrollbars, custom selects, checkboxes, ranges, and focus states;
 - animated bottom-right operation notifications;
 - seven persisted themes.
 - each theme has its own startup loader colors; theme changes use a point-origin radial View Transition that fades into the destination palette.
-- non-Claude navigation uses Microsoft YaHei UI with fixed icon and text columns; Claude Code keeps its dedicated font family.
+- restrained navigation type scale and weight with fixed icon/text columns; Claude Code keeps its dedicated font family.
 
 Pages:
 
@@ -381,12 +382,15 @@ Pages:
 - Bilibili login: persistent WebView, encrypted account vault, one-click login, SMS bridge.
 - Collections: folder discovery and full collection sync.
 - Tasks: explicit Agent target activation, a compact progress band, primary search, collapsible advanced filters, batch state, and agent performance.
-- RAG assistant: persistent session list, streaming conversation surface, and a model/knowledge/sandbox inspector; supplier configuration lives in a focused modal.
+- Work Preparation group: Bilibili login, Collections, and Tasks.
+- Status Query group: Work Agent, Tool modules, Run logs, and Agent API.
+- Document Browse group: RAG assistant, Markdown library, and Export.
+- RAG assistant: persistent session list and streaming conversation surface; session settings are hidden by default and open in a focused modal. Provider/model selectors also remain available at the lower-right of the composer, and a session context menu opens editing or guarded deletion.
 - Markdown library: accepted-document index by user and collection, BV/owner/title search, favorite/publish date filters, duration range, four time sort modes, and on-demand in-app Markdown preview with local frames.
 - Work Agent: independent Worker sessions, current assignments, performance, pause, and reactivation.
 - Export: completed Markdown selection across users/collections, a persistent export queue, seven filename metadata controls, and destination-folder export.
 - Tool modules: module enable state, usage, prompts, outputs, and open-source attribution.
-- Run logs: queued/running history with stage, pool/lane, queue reason, estimated wait, commands, logs, and terminal result.
+- Run logs: first-level per-tool status summaries and second-level individual queued/running history with stage, pool/lane, queue reason, estimated wait, commands, logs, and terminal result.
 - Agent API: compact tool usage bars, expandable analytics, and API reference.
 - Settings: themes, seven artifact filename fields, multiple workspace libraries, default selection, live GPU/resource-pool state, manual CPU ASR enablement, and runtime state.
 - README: a rendered, user-facing summary of this design, Agent onboarding, tools, artifact rules, and RAG export. The page reads the root `README.md` directly so the application and repository share one source.
@@ -446,6 +450,8 @@ Knowledge retrieval:
 - require the model system prompt to cite source title and collection and avoid claims not present in results.
 
 Conversation state persists in SQLite. Each session stores provider/model selection, selected collections, sandbox, permission mode, system prompt, token totals, and optional compressed summary. Messages store visible attachment metadata but not duplicate attachment bodies. Text/PDF/DOCX extraction and media files live in the session sandbox. Per-model accounting consumes provider usage fields when present and falls back to a clearly approximate character estimate.
+
+The session settings inspector is modal rather than permanently occupying chat width. It contains title, provider/model, capability, knowledge, sandbox, permission, and usage controls. The compact composer selectors update the same persisted provider/model fields, so switching from either surface remains synchronized. Each provider owns an independent multi-select enabled-model list; sessions reference one provider and one enabled model at a time.
 
 The tool loop permits at most six model/tool rounds per user turn. Supported tools cover knowledge search, sandbox file list/read/write, Windows CMD, hidden-browser web search/page reading, opening the default browser, and an isolated same-model subagent call. Tool calls, reasoning deltas, content deltas, completion state, and errors stream to the renderer. Cancellation aborts the active provider request and command child process.
 

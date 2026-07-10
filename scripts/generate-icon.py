@@ -21,10 +21,10 @@ def star_points(center_x, center_y, outer_radius, inner_radius, points=5):
     return vertices
 
 
-def bookmark(draw, box, fill):
+def bookmark(draw, box, fill, radius_ratio=0.17):
     left, top, right, bottom = box
     width = right - left
-    corner = round(width * 0.17)
+    corner = round(width * radius_ratio)
     notch_y = round(bottom - width * 0.28)
     center_x = (left + right) / 2
     draw.rounded_rectangle((left, top, right, top + corner * 2), radius=corner, fill=fill)
@@ -36,21 +36,22 @@ def make_icon():
     image = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
-    # A high-contrast, flat mark that remains readable in the 16 px taskbar size.
-    ink = (20, 27, 40, 255)
-    cyan = (52, 199, 218, 255)
-    pink = (226, 84, 128, 255)
-    paper = (248, 250, 252, 255)
-    yellow = (255, 205, 66, 255)
+    # White mobile-app tile plus a compact bookmark/star mark that stays clear at 16 px.
+    ink = (28, 39, 58, 255)
+    cyan = (42, 190, 216, 255)
+    pink = (222, 82, 127, 255)
+    paper = (255, 255, 255, 255)
+    outline = (220, 226, 234, 255)
+    yellow = (255, 198, 48, 255)
 
-    draw.rounded_rectangle((30, 30, 994, 994), radius=224, fill=ink)
-    bookmark(draw, (176, 232, 654, 800), cyan)
-    bookmark(draw, (238, 182, 716, 824), pink)
-    bookmark(draw, (300, 142, 824, 868), paper)
-    draw.polygon(star_points(562, 423, 174, 78), fill=yellow)
+    draw.rounded_rectangle((40, 40, 984, 984), radius=218, fill=paper, outline=outline, width=18)
+    bookmark(draw, (205, 258, 588, 778), cyan)
+    bookmark(draw, (436, 218, 819, 778), pink)
+    bookmark(draw, (282, 180, 742, 838), ink, radius_ratio=0.15)
+    draw.polygon(star_points(512, 410, 168, 76), fill=yellow)
 
-    # One small accent gives the symbol a recognizable top-right silhouette.
-    draw.ellipse((716, 202, 774, 260), fill=cyan)
+    # A tiny white glint keeps the star lively without adding visual noise.
+    draw.polygon(star_points(620, 288, 31, 13, points=4), fill=paper)
     return image
 
 

@@ -2,12 +2,14 @@
   const $ = (selector) => document.querySelector(selector);
   const elements = {
     page: $('#page-rag'), sessionList: $('#ragSessionList'), sessionSearch: $('#ragSessionSearch'), newSession: $('#ragNewSession'), usageSummary: $('#ragUsageSummary'),
-    chatTitle: $('#ragChatTitle'), chatMeta: $('#ragChatMeta'), contextPercent: $('#ragContextPercent'), contextBar: $('#ragContextBar'), compact: $('#ragCompact'), deleteSession: $('#ragDeleteSession'),
+    chatTitle: $('#ragChatTitle'), chatMeta: $('#ragChatMeta'), contextPercent: $('#ragContextPercent'), contextBar: $('#ragContextBar'), compact: $('#ragCompact'), deleteSession: $('#ragDeleteSession'), openSessionSettings: $('#ragOpenSessionSettings'),
     messages: $('#ragMessages'), runStatus: $('#ragRunStatus'), pendingAttachments: $('#ragPendingAttachments'), composer: $('#ragComposer'), input: $('#ragInput'), attach: $('#ragAttach'), send: $('#ragSend'), stop: $('#ragStop'),
-    providerSelect: $('#ragProviderSelect'), modelSelect: $('#ragModelSelect'), capabilities: $('#ragModelCapabilities'), refreshState: $('#ragRefreshState'), openProviders: $('#ragOpenProviders'),
+    providerSelect: $('#ragProviderSelect'), modelSelect: $('#ragModelSelect'), composerProviderSelect: $('#ragComposerProviderSelect'), composerModelSelect: $('#ragComposerModelSelect'), capabilities: $('#ragModelCapabilities'), refreshState: $('#ragRefreshState'), openProviders: $('#ragOpenProviders'),
     knowledgeToggle: $('#ragKnowledgeToggle'), knowledgeMenu: $('#ragKnowledgeMenu'), knowledgeCount: $('#ragKnowledgeCount'), selectedKnowledge: $('#ragSelectedKnowledge'),
     sandboxPath: $('#ragSandboxPath'), chooseSandbox: $('#ragChooseSandbox'), createSandbox: $('#ragCreateSandbox'), permissionBadge: $('#ragPermissionBadge'),
     inputTokens: $('#ragInputTokens'), outputTokens: $('#ragOutputTokens'), totalTokens: $('#ragTotalTokens'), sessionRequests: $('#ragSessionRequests'),
+    sessionSettingsModal: $('#ragSessionSettingsModal'), closeSessionSettings: $('#ragCloseSessionSettings'), sessionTitleInput: $('#ragSessionTitleInput'),
+    sessionContextMenu: $('#ragSessionContextMenu'), contextEdit: $('#ragContextEdit'), contextDelete: $('#ragContextDelete'),
     providerModal: $('#ragProviderModal'), closeProviders: $('#ragCloseProviders'), providerList: $('#ragProviderList'), newProvider: $('#ragNewProvider'), providerId: $('#ragProviderId'), providerName: $('#ragProviderName'), providerType: $('#ragProviderType'), providerBaseUrl: $('#ragProviderBaseUrl'), providerApiKey: $('#ragProviderApiKey'), providerTemperature: $('#ragProviderTemperature'), providerMaxTokens: $('#ragProviderMaxTokens'), providerHeaders: $('#ragProviderHeaders'), saveProvider: $('#ragSaveProvider'), deleteProvider: $('#ragDeleteProvider'), fetchModels: $('#ragFetchModels'), remoteModels: $('#ragRemoteModels'), remoteModelCount: $('#ragRemoteModelCount'),
     approvalModal: $('#ragApprovalModal'), approvalAction: $('#ragApprovalAction'), approvalTarget: $('#ragApprovalTarget'), approvalDetail: $('#ragApprovalDetail'), denyApproval: $('#ragDenyApproval'), approveOnce: $('#ragApproveOnce'), approveFull: $('#ragApproveFull')
   };
@@ -58,6 +60,7 @@
       button.className = `rag-session-item${session.id === activeSessionId ? ' active' : ''}`;
       button.innerHTML = `<strong>${escapeHtml(session.title || '新对话')}</strong><span><em>${escapeHtml(session.modelId || '未选择模型')}</em><time>${relativeTime(session.updatedAt)}</time></span>`;
       button.addEventListener('click', () => selectSession(session.id));
+      button.addEventListener('contextmenu', (event) => openSessionContextMenu(event, session.id));
       elements.sessionList.appendChild(button);
     }
     if (!sessions.length) elements.sessionList.innerHTML = '<div class="rag-list-empty">暂无会话</div>';
@@ -83,11 +86,14 @@
     elements.attach.disabled = !enabled || streaming;
     elements.send.disabled = !enabled || streaming || (!elements.input.value.trim() && !pendingAttachments.length);
     elements.deleteSession.disabled = !enabled || streaming;
+    elements.openSessionSettings.disabled = !enabled || streaming;
     elements.chooseSandbox.disabled = !enabled || streaming;
     elements.createSandbox.disabled = !enabled || streaming;
     elements.compact.disabled = !enabled || streaming || !session?.modelCapabilities?.supportsCompression || (session?.messages?.length || 0) < 4;
     elements.chatTitle.textContent = session?.title || '选择或创建会话';
     elements.chatMeta.textContent = session ? `${providerName(session.providerId)} / ${session.modelId || '未选择模型'}` : '尚未配置模型';
+    elements.sessionTitleInput.value = session?.title || '';
+    elements.sessionTitleInput.disabled = !enabled || streaming;
     const percent = Number(session?.contextPercent || 0);
     elements.contextPercent.textContent = `${percent}%`;
     elements.contextBar.style.width = `${Math.min(100, percent)}%`;
@@ -111,13 +117,62 @@
   }
 
   function renderProviderAndModelSelects(session) {
-    elements.providerSelect.innerHTML = '<option value="">选择供应商</option>' + state.providers.map((provider) => `<option value="${escapeAttr(provider.id)}">${escapeHtml(provider.name)}</option>`).join('');
-    elements.providerSelect.value = session?.providerId || '';
     const provider = state.providers.find((item) => item.id === session?.providerId);
-    elements.modelSelect.innerHTML = '<option value="">选择模型</option>' + (provider?.enabledModels || []).map((model) => `<option value="${escapeAttr(model.id)}">${escapeHtml(model.name || model.id)}</option>`).join('');
-    elements.modelSelect.value = session?.modelId || '';
-    elements.providerSelect.disabled = !session || streaming;
-    elements.modelSelect.disabled = !session || streaming || !provider?.enabledModels?.length;
+    const providerOptions = '<option value="">选择供应商</option>' + state.providers.map((item) => `<option value="${escapeAttr(item.id)}">${escapeHtml(item.name)}</option>`).join('');
+    const modelOptions = '<option value="">选择模型</option>' + (provider?.enabledModels || []).map((model) => `<option value="${escapeAttr(model.id)}">${escapeHtml(model.name || model.id)}</option>`).join('');
+    for (const select of [elements.providerSelect, elements.composerProviderSelect]) {
+      select.innerHTML = providerOptions;
+      select.value = session?.providerId || '';
+      select.disabled = !session || streaming;
+    }
+    for (const select of [elements.modelSelect, elements.composerModelSelect]) {
+      select.innerHTML = modelOptions;
+      select.value = session?.modelId || '';
+      select.disabled = !session || streaming || !provider?.enabledModels?.length;
+    }
+  }
+
+  function openSessionSettingsModal() {
+    if (!state.activeSession || streaming) return;
+    hideSessionContextMenu();
+    elements.sessionSettingsModal.hidden = false;
+    requestAnimationFrame(() => elements.sessionTitleInput.focus());
+  }
+
+  function closeSessionSettingsModal() {
+    elements.sessionSettingsModal.hidden = true;
+    elements.knowledgeMenu.classList.remove('open');
+    elements.knowledgeToggle.setAttribute('aria-expanded', 'false');
+  }
+
+  async function openSessionContextMenu(event, sessionId) {
+    event.preventDefault();
+    const x = event.clientX;
+    const y = event.clientY;
+    if (sessionId !== activeSessionId) await selectSession(sessionId);
+    elements.contextDelete.dataset.confirm = '';
+    elements.contextDelete.querySelector('span').textContent = '删除会话';
+    elements.sessionContextMenu.hidden = false;
+    const width = elements.sessionContextMenu.offsetWidth;
+    const height = elements.sessionContextMenu.offsetHeight;
+    elements.sessionContextMenu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - width - 8))}px`;
+    elements.sessionContextMenu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - height - 8))}px`;
+  }
+
+  function hideSessionContextMenu() {
+    elements.sessionContextMenu.hidden = true;
+    elements.contextDelete.dataset.confirm = '';
+    elements.contextDelete.querySelector('span').textContent = '删除会话';
+  }
+
+  async function deleteActiveSession() {
+    if (!activeSessionId || streaming) return;
+    await window.orchestrator.ragDeleteSession(activeSessionId);
+    activeSessionId = '';
+    localStorage.removeItem('ragActiveSessionId');
+    closeSessionSettingsModal();
+    hideSessionContextMenu();
+    await refresh('', { quiet: true });
   }
 
   function renderCapabilities(model) {
@@ -298,6 +353,12 @@
     elements.runStatus.classList.toggle('active', active);
     elements.runStatus.innerHTML = active ? `<span class="rag-thinking-dots"><i></i><i></i><i></i></span><span>${escapeHtml(status || '模型正在思考')}</span>` : '';
     elements.deleteSession.disabled = active || !state.activeSession;
+    elements.openSessionSettings.disabled = active || !state.activeSession;
+    elements.sessionTitleInput.disabled = active || !state.activeSession;
+    elements.providerSelect.disabled = active || !state.activeSession;
+    elements.modelSelect.disabled = active || !state.activeSession;
+    elements.composerProviderSelect.disabled = active || !state.activeSession;
+    elements.composerModelSelect.disabled = active || !state.activeSession;
     elements.compact.disabled = active || !state.activeSession || !state.activeSession?.modelCapabilities?.supportsCompression || (state.activeSession?.messages?.length || 0) < 4;
   }
 
@@ -516,11 +577,41 @@
       renderInspector();
     } catch (error) { notify('附件导入失败', error.message || String(error), 'error'); }
   });
-  elements.providerSelect.addEventListener('change', async () => {
-    const provider = state.providers.find((item) => item.id === elements.providerSelect.value);
+  async function changeSessionProvider(providerId) {
+    const provider = state.providers.find((item) => item.id === providerId);
+    if (!provider) return refresh(activeSessionId, { quiet: true });
     await updateSession({ providerId: provider?.id || '', modelId: provider?.enabledModels?.[0]?.id || '' });
-  });
+  }
+  elements.providerSelect.addEventListener('change', () => changeSessionProvider(elements.providerSelect.value));
+  elements.composerProviderSelect.addEventListener('change', () => changeSessionProvider(elements.composerProviderSelect.value));
   elements.modelSelect.addEventListener('change', () => updateSession({ modelId: elements.modelSelect.value }));
+  elements.composerModelSelect.addEventListener('change', () => updateSession({ modelId: elements.composerModelSelect.value }));
+  const saveSessionTitle = async () => {
+    const title = elements.sessionTitleInput.value.trim() || '新对话';
+    if (title !== state.activeSession?.title) await updateSession({ title }, { quiet: false });
+  };
+  elements.sessionTitleInput.addEventListener('change', saveSessionTitle);
+  elements.sessionTitleInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); elements.sessionTitleInput.blur(); }
+  });
+  elements.openSessionSettings.addEventListener('click', openSessionSettingsModal);
+  elements.closeSessionSettings.addEventListener('click', closeSessionSettingsModal);
+  elements.sessionSettingsModal.addEventListener('click', (event) => { if (event.target === elements.sessionSettingsModal) closeSessionSettingsModal(); });
+  elements.contextEdit.addEventListener('click', () => { hideSessionContextMenu(); openSessionSettingsModal(); });
+  elements.contextDelete.addEventListener('click', async () => {
+    if (elements.contextDelete.dataset.confirm !== '1') {
+      elements.contextDelete.dataset.confirm = '1';
+      elements.contextDelete.querySelector('span').textContent = '再次点击确认删除';
+      setTimeout(() => {
+        if (!elements.sessionContextMenu.hidden) {
+          elements.contextDelete.dataset.confirm = '';
+          elements.contextDelete.querySelector('span').textContent = '删除会话';
+        }
+      }, 2600);
+      return;
+    }
+    await deleteActiveSession();
+  });
   elements.refreshState.addEventListener('click', () => refresh(activeSessionId));
   elements.knowledgeToggle.addEventListener('click', () => {
     const open = !elements.knowledgeMenu.classList.contains('open');
@@ -529,6 +620,19 @@
   });
   document.addEventListener('click', (event) => {
     if (!event.target.closest('.rag-knowledge-picker')) elements.knowledgeMenu.classList.remove('open');
+    if (!event.target.closest('.rag-context-menu')) hideSessionContextMenu();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    if (!elements.providerModal.hidden) closeProviderModal();
+    else if (!elements.sessionSettingsModal.hidden) closeSessionSettingsModal();
+    else hideSessionContextMenu();
+  });
+  window.addEventListener('resize', hideSessionContextMenu);
+  document.addEventListener('click', (event) => {
+    if (!event.target.closest('[data-page]')) return;
+    hideSessionContextMenu();
+    closeSessionSettingsModal();
   });
   elements.chooseSandbox.addEventListener('click', async () => {
     const result = await window.orchestrator.ragChooseSandbox();
@@ -553,10 +657,7 @@
       setTimeout(() => { elements.deleteSession.dataset.confirm = ''; elements.deleteSession.title = '删除会话'; }, 2600);
       return;
     }
-    await window.orchestrator.ragDeleteSession(activeSessionId);
-    activeSessionId = '';
-    localStorage.removeItem('ragActiveSessionId');
-    await refresh('', { quiet: true });
+    await deleteActiveSession();
   });
   elements.openProviders.addEventListener('click', openProviderModal);
   elements.closeProviders.addEventListener('click', closeProviderModal);

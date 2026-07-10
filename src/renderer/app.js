@@ -1,5 +1,6 @@
 ﻿const pages = document.querySelectorAll('.page');
 const navItems = document.querySelectorAll('.nav-item');
+const navGroups = document.querySelectorAll('.nav-group');
 const apiBadge = document.querySelector('#apiBadge');
 const userName = document.querySelector('#userName');
 const userAvatar = document.querySelector('#userAvatar');
@@ -983,6 +984,10 @@ async function transitionTheme(theme, origin, displayName = theme) {
 
 function setPage(name) {
   navItems.forEach((item) => item.classList.toggle('active', item.dataset.page === name));
+  const activeItem = [...navItems].find((item) => item.dataset.page === name);
+  navGroups.forEach((group) => group.classList.toggle('contains-active', Boolean(group.contains(activeItem))));
+  const activeGroup = activeItem?.closest('.nav-group');
+  if (activeGroup) setNavGroupOpen(activeGroup, true);
   pages.forEach((page) => page.classList.toggle('active', page.id === `page-${name}`));
   if (name === 'login') {
     openLoginWorkspace().catch((error) => showToast(TEXT.toastError, error.message || String(error), 'error'));
@@ -994,6 +999,28 @@ function setPage(name) {
     updateSyncCollectionState();
   }
   if (name === 'readme') loadReadme().catch((error) => showToast(TEXT.toastError, error.message || String(error), 'error'));
+}
+
+function setNavGroupOpen(target, open) {
+  if (!target) return;
+  if (open) {
+    navGroups.forEach((group) => {
+      const selected = group === target;
+      group.classList.toggle('open', selected);
+      group.querySelector('.nav-group-toggle')?.setAttribute('aria-expanded', String(selected));
+    });
+    localStorage.setItem('sidebarOpenGroup', target.dataset.navGroup || '');
+    return;
+  }
+  target.classList.remove('open');
+  target.querySelector('.nav-group-toggle')?.setAttribute('aria-expanded', 'false');
+  if (localStorage.getItem('sidebarOpenGroup') === target.dataset.navGroup) localStorage.removeItem('sidebarOpenGroup');
+}
+
+function restoreNavGroup() {
+  const wanted = localStorage.getItem('sidebarOpenGroup');
+  const group = [...navGroups].find((item) => item.dataset.navGroup === wanted);
+  if (group) setNavGroupOpen(group, true);
 }
 
 async function loadReadme() {
@@ -1519,21 +1546,43 @@ function renderTools(tools) {
 function renderRuns(runs) {
   runList.innerHTML = '';
   if (!runs.length) return runList.appendChild(emptyRow(TEXT.noRuns, TEXT.noRunsHint));
+  const groups = new Map();
   for (const run of runs.slice(0, 200)) {
-    const queueSummary = run.status === 'queued'
-      ? `\u6392\u961f ${run.queuePosition || '-'} / ${run.queueLength || '-'} \u00b7 ${humanizeQueueReason(run.queueReason)}`
-      : `${run.resourcePool || '-'} / ${run.resourceLane || '-'}`;
-    const progressSummary = run.asrProgress
-      ? `ASR ${Math.round(Number(run.asrProgress.progress || 0) * 100)}% \u00b7 ${run.asrProgress.phase || '-'} \u00b7 ${Number(run.asrProgress.audioSeconds || 0).toFixed(1)}s / ${Number(run.asrProgress.totalSeconds || 0).toFixed(1)}s`
-      : queueSummary;
-    runList.appendChild(settingRow({
-      icon: iconRun(),
-      title: `${run.toolName || run.toolId}  /  ${run.workerId || run.agentName || '-'}`,
-      subtitle: `${run.taskId}  /  ${run.stage || '-'}  /  ${progressSummary}`,
-      right: `<span class="state-tag ${statusClass(run.status)}">${escapeHtml(run.status)}</span>`,
-      detail: `<div class="tool-detail"><div class="run-resource-grid"><div><span>\u9636\u6bb5</span><strong>${escapeHtml(run.stage || '-')}</strong></div><div><span>\u8d44\u6e90\u6c60 / \u901a\u9053</span><strong>${escapeHtml(`${run.resourcePool || '-'} / ${run.resourceLane || '-'}`)}</strong></div><div><span>\u961f\u5217\u4f4d\u7f6e</span><strong>${escapeHtml(run.queuePosition ? `${run.queuePosition} / ${run.queueLength || run.queuePosition}` : '-')}</strong></div><div><span>\u7b49\u5f85\u539f\u56e0</span><strong>${escapeHtml(run.status === 'queued' ? humanizeQueueReason(run.queueReason) : '-')}</strong></div><div><span>\u9884\u4f30\u7b49\u5f85</span><strong>${escapeHtml(run.estimatedWaitMs ? formatMilliseconds(run.estimatedWaitMs) : '-')}</strong></div><div><span>${TEXT.exitCode}</span><strong>${escapeHtml(run.exitCode ?? '-')}</strong></div></div><div><h4>${TEXT.command}</h4><pre>${escapeHtml(run.actualCommand || run.command || '')}</pre></div><div><h4>${TEXT.logFile}</h4><pre>${escapeHtml(run.logFile || '')}</pre></div><div class="detail-grid"><div><span>\u521b\u5efa</span><strong>${escapeHtml(run.createdAt || '-')}</strong></div><div><span>${TEXT.started}</span><strong>${escapeHtml(run.startedAt || '-')}</strong></div><div><span>${TEXT.finished}</span><strong>${escapeHtml(run.finishedAt || '-')}</strong></div></div>${run.error ? `<div class="run-error">${escapeHtml(run.error)}</div>` : ''}</div>`
-    }));
+    const key = run.toolId || run.toolName || 'unknown-tool';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(run);
   }
+  for (const [toolId, toolRuns] of groups) {
+    const counts = { running: 0, queued: 0, succeeded: 0, failed: 0 };
+    for (const run of toolRuns) {
+      if (run.status === 'running') counts.running += 1;
+      else if (run.status === 'queued') counts.queued += 1;
+      else if (['succeeded', 'done'].includes(run.status)) counts.succeeded += 1;
+      else if (['failed', 'rejected', 'timeout'].includes(run.status)) counts.failed += 1;
+    }
+    const latest = toolRuns[0];
+    const groupStatus = counts.running ? 'running' : counts.queued ? 'queued' : counts.failed ? 'failed' : 'succeeded';
+    const history = toolRuns.map((run) => renderRunHistoryItem(run)).join('');
+    const row = settingRow({
+      icon: iconRun(),
+      title: latest.toolName || toolId,
+      subtitle: `共 ${toolRuns.length} 次 · 运行 ${counts.running} · 排队 ${counts.queued} · 成功 ${counts.succeeded} · 失败 ${counts.failed}`,
+      right: `<span class="state-tag ${statusClass(groupStatus)}">${counts.running ? '运行中' : counts.queued ? '排队中' : counts.failed ? '有失败' : '正常'}</span>`,
+      detail: `<div class="run-tool-overview"><div class="run-status-strip"><span class="run" style="--count:${counts.running}">运行 ${counts.running}</span><span class="queue" style="--count:${counts.queued}">排队 ${counts.queued}</span><span class="ok" style="--count:${counts.succeeded}">成功 ${counts.succeeded}</span><span class="bad" style="--count:${counts.failed}">失败 ${counts.failed}</span></div><div class="run-tool-latest"><span>最近执行</span><strong>${escapeHtml(formatDateTime(latest.finishedAt || latest.startedAt || latest.createdAt, true))}</strong><span>${escapeHtml(latest.workerId || latest.agentName || '-')}</span></div></div><div class="run-history-list">${history}</div>`
+    });
+    row.classList.add('run-tool-group');
+    runList.appendChild(row);
+  }
+}
+
+function renderRunHistoryItem(run) {
+  const queueSummary = run.status === 'queued'
+    ? `排队 ${run.queuePosition || '-'} / ${run.queueLength || '-'} · ${humanizeQueueReason(run.queueReason)}`
+    : `${run.resourcePool || '-'} / ${run.resourceLane || '-'}`;
+  const progressSummary = run.asrProgress
+    ? `ASR ${Math.round(Number(run.asrProgress.progress || 0) * 100)}% · ${run.asrProgress.phase || '-'} · ${Number(run.asrProgress.audioSeconds || 0).toFixed(1)}s / ${Number(run.asrProgress.totalSeconds || 0).toFixed(1)}s`
+    : queueSummary;
+  return `<details class="run-history-item"><summary><span class="state-tag ${statusClass(run.status)}">${escapeHtml(run.status)}</span><strong>${escapeHtml(run.workerId || run.agentName || '-')}</strong><span>${escapeHtml(run.taskId || '-')}</span><time>${escapeHtml(formatDateTime(run.finishedAt || run.startedAt || run.createdAt, true))}</time><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></summary><div class="run-history-detail"><p>${escapeHtml(`${run.stage || '-'} · ${progressSummary}`)}</p><div class="run-resource-grid"><div><span>阶段</span><strong>${escapeHtml(run.stage || '-')}</strong></div><div><span>资源池 / 通道</span><strong>${escapeHtml(`${run.resourcePool || '-'} / ${run.resourceLane || '-'}`)}</strong></div><div><span>队列位置</span><strong>${escapeHtml(run.queuePosition ? `${run.queuePosition} / ${run.queueLength || run.queuePosition}` : '-')}</strong></div><div><span>等待原因</span><strong>${escapeHtml(run.status === 'queued' ? humanizeQueueReason(run.queueReason) : '-')}</strong></div><div><span>预估等待</span><strong>${escapeHtml(run.estimatedWaitMs ? formatMilliseconds(run.estimatedWaitMs) : '-')}</strong></div><div><span>${TEXT.exitCode}</span><strong>${escapeHtml(run.exitCode ?? '-')}</strong></div></div><div><h4>${TEXT.command}</h4><pre>${escapeHtml(run.actualCommand || run.command || '')}</pre></div><div><h4>${TEXT.logFile}</h4><pre>${escapeHtml(run.logFile || '')}</pre></div><div class="detail-grid"><div><span>创建</span><strong>${escapeHtml(run.createdAt || '-')}</strong></div><div><span>${TEXT.started}</span><strong>${escapeHtml(run.startedAt || '-')}</strong></div><div><span>${TEXT.finished}</span><strong>${escapeHtml(run.finishedAt || '-')}</strong></div></div>${run.error ? `<div class="run-error">${escapeHtml(run.error)}</div>` : ''}</div></details>`;
 }
 
 function renderWorkers(workers) {
@@ -2027,6 +2076,11 @@ function iconRun() { return '<svg viewBox="0 0 24 24"><path d="M5 4l14 8-14 8z"/
 function iconWorker() { return '<svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M18 8h4M20 6v4"/></svg>'; }
 
 navItems.forEach((item) => item.addEventListener('click', () => setPage(item.dataset.page)));
+navGroups.forEach((group) => group.querySelector('.nav-group-toggle')?.addEventListener('click', () => {
+  const shouldOpen = !group.classList.contains('open') || document.body.classList.contains('sidebar-collapsed');
+  if (document.body.classList.contains('sidebar-collapsed')) setSidebarCollapsed(false);
+  setNavGroupOpen(group, shouldOpen);
+}));
 document.querySelector('#userProfile')?.addEventListener('click', () => {
   if (!currentUser?.isLogin) setPage('login');
 });
@@ -2218,7 +2272,8 @@ document.querySelector('#addExportSelection')?.addEventListener('click', () => {
 });
 document.querySelector('#clearExportQueue')?.addEventListener('click', () => { exportQueue.clear(); renderExportQueue(); });
 document.querySelector('#runMarkdownExport')?.addEventListener('click', async (event) => {
-  event.currentTarget.disabled = true;
+  const button = event.currentTarget;
+  button.disabled = true;
   try {
     const result = await window.orchestrator.exportMarkdown({
       taskIds: [...exportQueue],
@@ -2237,7 +2292,7 @@ document.querySelector('#runMarkdownExport')?.addEventListener('click', async (e
   } catch (error) {
     showToast(TEXT.toastError, error.message || String(error), 'error');
   } finally {
-    event.currentTarget.disabled = exportQueue.size === 0;
+    button.disabled = exportQueue.size === 0;
   }
 });
 document.querySelector('#copyAgentPrompt')?.addEventListener('click', async () => {
@@ -2492,6 +2547,7 @@ applyI18n();
 renderThemeChoices();
 applyTheme(localStorage.getItem('themeId') || 'night');
 setSidebarCollapsed(localStorage.getItem('sidebarCollapsed') === '1');
+restoreNavGroup();
 setLoginEndpointReady(false, TEXT.loginEndpointWaiting);
 setSmsChallenge(null);
 renderToolHealth();

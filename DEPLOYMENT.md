@@ -22,7 +22,7 @@ Usage:
 5. Log in from the application's Bilibili WebView and select a default Workspace.
 6. Windows may show an unknown-publisher warning until releases are code-signed.
 
-The built-in RAG assistant does not require another local runtime. To use it, open `RAG 助手`, add an OpenAI-compatible or NewAPI-compatible provider, enter the API root (commonly ending in `/v1`), save it, pull the remote model list, and enable the models you intend to use. API keys remain in the local application database in Electron `safeStorage` form where supported and are never included in release archives.
+The built-in RAG assistant does not require another local runtime. To use it, open `文档浏览 -> RAG 助手`, add an OpenAI-compatible or NewAPI-compatible provider, enter the API root (commonly ending in `/v1`), save it, pull the remote model list, and enable one or more models. Multiple providers and multiple enabled models per provider can be saved. A session can switch provider/model from the composer, while its title, model, knowledge, sandbox, permission, and usage settings live in the title-bar settings dialog. API keys remain in the local application database in Electron `safeStorage` form where supported and are never included in release archives.
 
 The application creates `workspace/` beside itself and uses only project-relative runtime paths. Moving the extracted directory is supported. User cookies, SQLite data, task artifacts, and generated Markdown are never included in a public release archive.
 
