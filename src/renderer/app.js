@@ -138,7 +138,7 @@ const TEXT = {
   copyMarkdown: '\u590d\u5236 Markdown',
   openFile: '\u6253\u5f00\u6587\u4ef6',
   readmeLoading: '\u6b63\u5728\u8bfb\u53d6 README...',
-  overviewTitle: '\u661f\u2b50\u6536\u85cf\u5bb6\u5df2\u5c31\u7eea',
+  overviewTitle: '\u661f\u85cf\u5bb6\u5df2\u5c31\u7eea',
   overviewHint: '\u540c\u6b65\u6536\u85cf\u5939\u540e\uff0cagent \u53ef\u901a\u8fc7 API \u9886\u53d6\u4efb\u52a1\uff0c\u5e76\u8bf7\u6c42\u5e94\u7528\u4ee3\u4e3a\u6267\u884c\u5de5\u5177\u3002',
   metricCollections: '\u6536\u85cf\u5939',
   metricTasks: '\u4efb\u52a1',

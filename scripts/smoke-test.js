@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 const { initWorkspace, WORKSPACE_ROOT } = require('../src/core/workspace');
 const { Store } = require('../src/core/store');
 const { ToolRunner } = require('../src/core/tool-runner');
@@ -9,6 +10,7 @@ const { videoArtifactName } = require('../src/core/workspace');
 const { assessSubtitle } = require('../tools/video-tool');
 const { validateSubmission } = require('../src/core/validation');
 const { promoteMindMap } = require('../src/core/markdown');
+const { DependencyManager } = require('../src/core/dependency-manager');
 
 (async () => {
   if (assessSubtitle([], 120).reason !== 'SUBTITLE_EMPTY') throw new Error('empty subtitle validation failed');
@@ -25,6 +27,30 @@ const { promoteMindMap } = require('../src/core/markdown');
   fs.rmSync(dbFile, { force: true });
 
   const store = await Store.open(dbFile);
+  const dependencyRoot = path.join(WORKSPACE_ROOT, 'smoke-dependency-root');
+  fs.mkdirSync(dependencyRoot, { recursive: true });
+  const dependencyManager = new DependencyManager({ store, projectRoot: dependencyRoot, version: '9.9.9' });
+  const missingDependencies = dependencyManager.state();
+  if (missingDependencies.ready || !missingDependencies.needsPrompt || !missingDependencies.missingRequired.includes('runtime-base') || !missingDependencies.missingRequired.includes('model-small')) throw new Error('dependency availability detection failed');
+  dependencyManager.acknowledgePrompt(false);
+  if (dependencyManager.state().needsPrompt) throw new Error('dependency first-run acknowledgement failed');
+  const runtimeDefinition = dependencyManager.definitions().find((item) => item.id === 'runtime-base');
+  const archiveSource = path.join(dependencyRoot, 'archive-source');
+  const portableRoot = path.join(archiveSource, 'Star-Owner-v0.3.0-win-x64-core');
+  fs.mkdirSync(path.join(portableRoot, 'runtime', 'python', 'cpython-3.12.13-windows-x86_64-none'), { recursive: true });
+  fs.mkdirSync(path.join(portableRoot, 'runtime', 'faster-whisper', 'Lib', 'site-packages', 'faster_whisper'), { recursive: true });
+  fs.mkdirSync(path.join(portableRoot, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(portableRoot, 'runtime', 'python', 'cpython-3.12.13-windows-x86_64-none', 'python.exe'), 'test runtime');
+  fs.writeFileSync(path.join(portableRoot, 'runtime', 'faster-whisper', 'Lib', 'site-packages', 'faster_whisper', '__init__.py'), 'test runtime');
+  fs.writeFileSync(path.join(portableRoot, 'src', 'must-not-extract.txt'), 'application source');
+  const legacyArchive = path.join(dependencyRoot, 'legacy-core.zip');
+  createArchive(legacyArchive, archiveSource, path.basename(portableRoot));
+  let rejectedCoreAsRuntime = false;
+  try { await dependencyManager.extractArchive(legacyArchive, runtimeDefinition, false); } catch { rejectedCoreAsRuntime = true; }
+  if (!rejectedCoreAsRuntime) throw new Error('ordinary dependency extraction accepted non-runtime core paths');
+  await dependencyManager.extractArchive(legacyArchive, runtimeDefinition, true);
+  if (!fs.existsSync(path.join(dependencyRoot, runtimeDefinition.probes[0])) || !fs.existsSync(path.join(dependencyRoot, runtimeDefinition.probes[1]))) throw new Error('legacy core runtime fallback extraction failed');
+  if (fs.existsSync(path.join(dependencyRoot, 'src', 'must-not-extract.txt'))) throw new Error('legacy core fallback extracted application files');
   const defaultFilenameMetadata = store.getFilenameMetadata();
   if (Object.values(defaultFilenameMetadata).some((enabled) => enabled !== true)) throw new Error('filename metadata defaults failed');
   store.setFilenameMetadata({ tags: false, title: false });
@@ -213,6 +239,7 @@ const { promoteMindMap } = require('../src/core/markdown');
   fs.rmSync(validationRoot, { recursive: true, force: true });
   fs.rmSync(recoveryArtifactDir, { recursive: true, force: true });
   fs.rmSync(extraRoot, { recursive: true, force: true });
+  fs.rmSync(dependencyRoot, { recursive: true, force: true });
   fs.rmSync(dbFile, { force: true });
   console.log('smoke ok');
 })().catch((error) => {
@@ -234,4 +261,9 @@ function waitForRun(store, runId) {
       }
     }, 100);
   });
+}
+
+function createArchive(archive, sourceRoot, item) {
+  const result = spawnSync('tar.exe', ['-a', '-c', '-f', archive, '-C', sourceRoot, item], { windowsHide: true, encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`Could not create dependency fixture: ${result.stderr || result.stdout}`);
 }

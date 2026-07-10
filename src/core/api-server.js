@@ -138,7 +138,7 @@ class ApiServer {
   buildApiManifest(worker = null) {
     const base = this.url();
     return {
-      product: '星⭐收藏家',
+      product: '星藏家',
       protocolVersion: '2.1',
       baseUrl: base,
       worker: worker ? this.publicWorker(worker) : null,

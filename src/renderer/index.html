@@ -3,16 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>星⭐收藏家</title>
+    <title>星藏家</title>
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./rag.css" />
+    <link rel="stylesheet" href="./ai.css" />
   </head>
   <body class="theme-night">
     <div class="window">
       <header class="windowbar">
         <div class="window-left">
           <img class="app-mark" src="../../assets/star-note.png" alt="" />
-          <span class="app-title">星⭐<b>收藏家</b></span>
+          <span class="app-title">星<b>藏家</b></span>
         </div>
         <div class="window-status">
           <span id="apiBadge">API...</span>
@@ -67,6 +68,19 @@
                 <button class="nav-item nav-subitem" data-page="api" title="Agent API"><svg viewBox="0 0 24 24"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"/></svg><span>Agent API</span></button>
               </div>
             </div>
+            <div class="nav-group" data-nav-group="ai">
+              <button class="nav-group-toggle" type="button" aria-expanded="false" title="AI">
+                <svg viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="5"/></svg>
+                <span>AI</span>
+                <svg class="nav-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+              </button>
+              <div class="nav-submenu">
+                <button class="nav-item nav-subitem" data-page="rag" title="RAG 助手"><svg viewBox="0 0 24 24"><path d="M4 5h16v12H8l-4 4zM8 9h8M8 13h5"/><path d="M17 3v4M15 5h4"/></svg><span>RAG 助手</span></button>
+                <button class="nav-item nav-subitem" data-page="internal-agents" title="Agent"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v2M18 5l2-2M6 5L4 3"/></svg><span>Agent</span></button>
+                <button class="nav-item nav-subitem" data-page="single-agent" title="单任务模式"><svg viewBox="0 0 24 24"><path d="M5 3h14v18H5zM8 8h8M8 12h5M8 16h7"/></svg><span>单任务模式</span></button>
+                <button class="nav-item nav-subitem" data-page="ai-models" title="AI 模型配置"><svg viewBox="0 0 24 24"><path d="M4 7h16M7 3v8M4 17h16M17 13v8"/></svg><span>AI 模型配置</span></button>
+              </div>
+            </div>
             <div class="nav-group" data-nav-group="documents">
               <button class="nav-group-toggle" type="button" aria-expanded="false" title="文档浏览">
                 <svg viewBox="0 0 24 24"><path d="M4 5h6a4 4 0 0 1 4 4v11a4 4 0 0 0-4-4H4zM20 5h-6v15a4 4 0 0 1 4-4h2z"/></svg>
@@ -74,7 +88,6 @@
                 <svg class="nav-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
               </button>
               <div class="nav-submenu">
-                <button class="nav-item nav-subitem" data-page="rag" title="RAG 助手"><svg viewBox="0 0 24 24"><path d="M4 5h16v12H8l-4 4zM8 9h8M8 13h5"/><path d="M17 3v4M15 5h4"/></svg><span>RAG 助手</span></button>
                 <button class="nav-item nav-subitem" data-page="documents" title="文档库"><svg viewBox="0 0 24 24"><path d="M6 3h9l3 3v15H6zM15 3v4h4M9 11h6M9 15h6"/></svg><span data-i18n="navDocuments"></span></button>
                 <button class="nav-item nav-subitem" data-page="export" title="导出"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg><span data-i18n="navExport"></span></button>
               </div>
@@ -390,6 +403,83 @@
             </div>
           </section>
 
+          <section class="page ai-page" id="page-internal-agents">
+            <div class="page-head ai-page-head">
+              <div><h1>应用内 Agent</h1><p>使用已配置模型并行领取当前库存任务，调用同一工具、租约和验收流程。</p></div>
+              <button id="aiNewAgent" class="primary-button" type="button">新建 Agent</button>
+            </div>
+            <div class="ai-metric-grid">
+              <div><span>会话</span><strong id="aiMetricSessions">0</strong></div>
+              <div><span>工作中</span><strong id="aiMetricRunning">0</strong></div>
+              <div><span>已完成</span><strong id="aiMetricCompleted">0</strong></div>
+              <div><span>失败</span><strong id="aiMetricFailed">0</strong></div>
+            </div>
+            <section class="ai-agent-workbench">
+              <aside class="ai-session-sidebar">
+                <div class="ai-panel-title"><div><strong>Agent 会话</strong><span>可并行持续接单</span></div><button id="aiRefreshAgents" class="icon-action" type="button" title="刷新"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v6h-6"/></svg></button></div>
+                <div id="aiAgentSessionList" class="ai-agent-session-list"></div>
+              </aside>
+              <div id="aiAgentDetail" class="ai-agent-detail">
+                <div class="ai-empty"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M5 21a7 7 0 0 1 14 0"/></svg><strong>选择或创建一个 Agent</strong><span>每个会话都有独立 Worker ID、模型、收藏夹目标和工作记录。</span></div>
+              </div>
+            </section>
+          </section>
+
+          <section class="page ai-page" id="page-single-agent">
+            <div class="page-head ai-page-head">
+              <div><h1>单任务模式</h1><p>粘贴一个 BV 号或视频链接，直接生成到指定目录，并同步归档到内置知识库。</p></div>
+            </div>
+            <div class="single-agent-layout">
+              <section class="section-block single-agent-form">
+                <div class="section-title"><div><h2>任务参数</h2><p>输出目录与内置收藏夹均为必填项。</p></div></div>
+                <label class="wide"><span>BV 号 / Bilibili 视频链接</span><input id="singleVideoInput" placeholder="BV... 或 https://www.bilibili.com/video/BV..." /></label>
+                <div class="single-form-grid">
+                  <label><span>内置收藏夹</span><select id="singleCollectionSelect"></select></label>
+                  <button id="singleCreateCollection" class="secondary-button field-button" type="button">新建收藏夹</button>
+                  <label><span>模型供应商</span><select id="singleProviderSelect"></select></label>
+                  <label><span>模型</span><select id="singleModelSelect"></select></label>
+                  <label><span>关键帧数量</span><input id="singleFrames" type="number" min="4" max="30" value="12" /></label>
+                  <label><span>热评数量</span><input id="singleComments" type="number" min="0" max="3" value="3" /></label>
+                </div>
+                <label><span>指定输出目录</span><div class="path-picker"><input id="singleOutputDir" readonly placeholder="必须选择一个目录" /><button id="singleChooseOutput" class="secondary-button" type="button">选择目录</button></div></label>
+                <label><span>任务要求微调</span><textarea id="singleRequirements" rows="5" placeholder="例如：重点解释代码实现、保留所有关键参数、面向有前端经验的读者……"></textarea></label>
+                <button id="singleStart" class="primary-button single-start-button" type="button">创建并开始处理</button>
+              </section>
+              <section class="section-block single-agent-monitor">
+                <div class="section-title"><div><h2>实时工作区</h2><p>显示思考流、正文生成和工具进度。</p></div><select id="singleSessionSelect"><option value="">选择单任务会话</option></select></div>
+                <div id="singleAgentDetail" class="single-agent-detail"><div class="ai-empty compact"><strong>尚未开始单任务</strong><span>任务开始后可离开本页面，处理会在后台继续。</span></div></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="page ai-model-page" id="page-ai-models">
+            <div class="page-head ai-page-head">
+              <div><h1>AI 模型配置</h1><p>统一管理 RAG 助手、应用内 Agent 与单任务模式使用的供应商和模型。</p></div>
+              <button id="aiModelNewProvider" class="primary-button" type="button">新建供应商</button>
+            </div>
+            <section class="ai-model-workbench">
+              <aside class="ai-model-provider-pane">
+                <div class="ai-panel-title"><div><strong>供应商</strong><span>OpenAI / NewAPI 兼容</span></div></div>
+                <div id="aiModelProviderList" class="rag-provider-list"></div>
+              </aside>
+              <div class="ai-model-editor">
+                <div class="rag-provider-form">
+                  <input id="aiModelProviderId" type="hidden" />
+                  <label><span>名称</span><input id="aiModelProviderName" placeholder="例如：本地 NewAPI" /></label>
+                  <label><span>接口规范</span><select id="aiModelProviderType"><option value="openai">OpenAI compatible</option><option value="newapi">NewAPI compatible</option></select></label>
+                  <label class="wide"><span>Base URL</span><input id="aiModelProviderBaseUrl" placeholder="https://api.example.com/v1" /></label>
+                  <label class="wide"><span>API Key</span><input id="aiModelProviderApiKey" type="password" autocomplete="off" placeholder="留空则保留已保存密钥" /></label>
+                  <label><span>温度</span><input id="aiModelProviderTemperature" type="number" min="0" max="2" step="0.1" value="0.2" /></label>
+                  <label><span>最大输出 Token</span><input id="aiModelProviderMaxTokens" type="number" min="256" step="256" value="8192" /></label>
+                  <label class="wide"><span>额外请求头 JSON</span><textarea id="aiModelProviderHeaders" rows="2" placeholder='{"X-Header":"value"}'></textarea></label>
+                </div>
+                <div class="ai-model-actions"><button id="aiModelDeleteProvider" class="secondary-button danger-button" type="button">删除</button><span></span><button id="aiModelSaveProvider" class="secondary-button" type="button">保存配置</button><button id="aiModelFetchModels" class="primary-button" type="button">拉取远程模型</button></div>
+                <div class="rag-model-select-head"><div><strong>可用模型</strong><span>启用后可分配给 RAG 与工作 Agent</span></div><span id="aiModelRemoteCount">0 个</span></div>
+                <div id="aiModelRemoteModels" class="rag-remote-models"></div>
+              </div>
+            </section>
+          </section>
+
           <section class="page rag-page" id="page-rag">
             <div class="rag-workbench">
               <aside class="rag-session-pane">
@@ -466,6 +556,13 @@
                 </div>
                 <div id="workspaceList" class="workspace-list"></div>
               </section>
+              <section class="section-block dependency-settings">
+                <div class="section-title">
+                  <div><h2>项目依赖包</h2><p>检查并从项目 GitHub Release 下载缺失的运行时与模型。</p></div>
+                  <button id="dependencyRefresh" class="secondary-button compact-button" type="button">重新检查</button>
+                </div>
+                <div id="dependencyList" class="dependency-list"></div>
+              </section>
               <section class="section-block resource-settings">
                 <div class="section-title scheduler-title">
                   <div><h2>资源调度</h2><p>统一管理 API、下载、FFmpeg、磁盘与 ASR 并发。</p></div>
@@ -519,6 +616,32 @@
           </section>
         </main>
       </div>
+    </div>
+    <div id="aiAgentCreateModal" class="rag-modal" hidden>
+      <section class="rag-modal-dialog compact ai-create-dialog" role="dialog" aria-modal="true" aria-labelledby="aiAgentCreateTitle">
+        <header><div><h2 id="aiAgentCreateTitle">新建应用内 Agent</h2><p>选择模型与任务库存，可同时启动多个会话。</p></div><button id="aiCloseAgentCreate" class="icon-action" type="button" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M5 5l14 14M19 5L5 19"/></svg></button></header>
+        <div class="ai-create-form">
+          <label><span>会话名称</span><input id="aiAgentTitle" placeholder="例如：AIcode 整理 Agent 1" /></label>
+          <div class="ai-create-grid"><label><span>供应商</span><select id="aiAgentProvider"></select></label><label><span>模型</span><select id="aiAgentModel"></select></label></div>
+          <label><span>任务收藏夹</span><select id="aiAgentCollection"></select></label>
+          <label><span>额外工作要求</span><textarea id="aiAgentRequirements" rows="5" placeholder="留空则使用视频总结标准模板与默认规则。"></textarea></label>
+        </div>
+        <footer><button id="aiCancelAgentCreate" class="secondary-button" type="button">取消</button><span></span><button id="aiCreateAgentOnly" class="secondary-button" type="button">仅创建</button><button id="aiCreateAgentStart" class="primary-button" type="button">创建并启动</button></footer>
+      </section>
+    </div>
+    <div id="aiCollectionModal" class="rag-modal" hidden>
+      <section class="rag-modal-dialog compact ai-collection-dialog" role="dialog" aria-modal="true" aria-labelledby="aiCollectionTitle">
+        <header><div><h2 id="aiCollectionTitle">新建内置收藏夹</h2><p>归属于内置用户，可在 RAG、文档库与导出中筛选。</p></div><button id="aiCloseCollection" class="icon-action" type="button" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M5 5l14 14M19 5L5 19"/></svg></button></header>
+        <div class="ai-create-form"><label><span>收藏夹名称</span><input id="aiCollectionName" placeholder="例如：临时研究、产品调研" /></label></div>
+        <footer><button id="aiCancelCollection" class="secondary-button" type="button">取消</button><span></span><span></span><button id="aiSaveCollection" class="primary-button" type="button">创建</button></footer>
+      </section>
+    </div>
+    <div id="dependencyPromptModal" class="rag-modal dependency-prompt-modal" hidden>
+      <section class="rag-modal-dialog compact" role="dialog" aria-modal="true" aria-labelledby="dependencyPromptTitle">
+        <header><div><h2 id="dependencyPromptTitle">需要补全项目依赖</h2><p>首次启动检查发现运行时或默认 ASR 模型缺失。</p></div></header>
+        <div class="dependency-prompt-body"><div class="dependency-prompt-icon"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg></div><div><strong>从星藏家 GitHub Release 自动下载</strong><p>文件只会保存和解压到当前应用目录的 <code>runtime/</code>。下载过程会显示实时进度，并优先校验 Release 提供的 SHA-256。</p></div><div id="dependencyPromptMissing" class="chip-row"></div></div>
+        <footer><button id="dependencyPromptLater" class="secondary-button" type="button">稍后处理</button><span></span><span></span><button id="dependencyPromptDownload" class="primary-button" type="button">同意并开始下载</button></footer>
+      </section>
     </div>
     <div id="ragSessionSettingsModal" class="rag-modal" hidden>
       <section class="rag-modal-dialog rag-session-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="ragSessionSettingsTitle">
@@ -590,5 +713,6 @@
     <script src="../../node_modules/mermaid/dist/mermaid.min.js"></script>
     <script src="./app.js"></script>
     <script src="./rag.js"></script>
+    <script src="./ai.js"></script>
   </body>
 </html>

@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-Star Owner (星⭐收藏家) is licensed under `GPL-3.0-or-later`. Third-party components remain under their own licenses; the project license does not replace or relicense them. A portable release is an aggregate containing separate executables, libraries, models, and application code.
+Star Owner (星藏家) is licensed under `GPL-3.0-or-later`. Third-party components remain under their own licenses; the project license does not replace or relicense them. A portable release is an aggregate containing separate executables, libraries, models, and application code.
 
 This inventory is a practical release checklist, not legal advice. Release publishers should review the upstream terms again when dependency versions change.
 

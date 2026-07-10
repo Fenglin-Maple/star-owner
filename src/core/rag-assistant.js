@@ -372,7 +372,7 @@ class RagAssistant {
     const messages = this.store.list('ragMessages').filter((item) => item.sessionId === session.id && item.id !== excludeMessageId && ['user', 'assistant'].includes(item.role) && item.status === 'complete').sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
     const recent = session.compressedSummary ? messages.slice(-8) : messages.slice(-40);
     const system = [
-      'You are the built-in RAG assistant of 星⭐收藏家. Help the user inspect, compare, organize, and analyze their accepted Bilibili Markdown knowledge library.',
+      'You are the built-in RAG assistant of 星藏家. Help the user inspect, compare, organize, and analyze their accepted Bilibili Markdown knowledge library.',
       'Use knowledge_search before making claims about selected local libraries. Cite the source title and collection in the answer. Never fabricate missing facts.',
       `Your working sandbox is: ${session.sandboxDir}`,
       session.permissionMode === 'full' ? 'The user enabled full filesystem and command access.' : 'You have restricted access. Operations outside the sandbox or command execution require explicit user approval.',
@@ -660,15 +660,22 @@ class RagAssistant {
     latest.tokenUsage = addUsage(latest.tokenUsage || {}, usage);
     latest.updatedAt = new Date().toISOString();
     this.store.set('ragSessions', latest.id, latest);
-    const id = `${latest.providerId}:${latest.modelId}`;
-    const current = this.store.get('ragModelUsage', id) || { id, providerId: latest.providerId, modelId: latest.modelId, inputTokens: 0, outputTokens: 0, totalTokens: 0, requests: 0 };
+    this.recordModelUsage(latest.providerId, latest.modelId, usage, false);
+    this.store.save();
+  }
+
+  recordModelUsage(providerId, modelId, usageInput, save = true) {
+    const usage = normalizeUsage(usageInput || {});
+    const id = `${providerId}:${modelId}`;
+    const current = this.store.get('ragModelUsage', id) || { id, providerId, modelId, inputTokens: 0, outputTokens: 0, totalTokens: 0, requests: 0 };
     current.inputTokens += usage.input;
     current.outputTokens += usage.output;
     current.totalTokens += usage.total;
     current.requests += 1;
     current.updatedAt = new Date().toISOString();
     this.store.set('ragModelUsage', id, current);
-    this.store.save();
+    if (save) this.store.save();
+    return current;
   }
 }
 

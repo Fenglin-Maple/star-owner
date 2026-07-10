@@ -61,7 +61,7 @@ async function startFakeProvider() {
     if (toolResult) {
       sse(response, [
         { choices: [{ delta: { content: '根据本地知识库，' } }] },
-        { choices: [{ delta: { content: toolResult.content.includes('星收藏家测试文档') ? '已找到测试文档。' : '未找到资料。' } }] },
+        { choices: [{ delta: { content: toolResult.content.includes('星藏家测试文档') ? '已找到测试文档。' : '未找到资料。' } }] },
         { choices: [], usage: { prompt_tokens: 60, completion_tokens: 11, total_tokens: 71 } }
       ]);
       return;
@@ -95,10 +95,10 @@ async function startFakeProvider() {
   try {
     const store = await Store.open(path.join(root, 'rag-test.sqlite'));
     const markdown = path.join(root, 'knowledge.md');
-    fs.writeFileSync(markdown, '# 星收藏家测试文档\n\nRAG 助手可以检索收藏夹中的 Markdown 内容。\n', 'utf8');
+    fs.writeFileSync(markdown, '# 星藏家测试文档\n\nRAG 助手可以检索收藏夹中的 Markdown 内容。\n', 'utf8');
     store.upsertUser({ id: 'rag-user', mid: 'rag-user', name: '测试用户' });
     store.upsertCollection({ id: 'rag-collection', name: 'AI 收藏夹', userId: 'rag-user', userName: '测试用户' });
-    store.upsertTask({ id: 'rag-task', collectionId: 'rag-collection', bvid: 'BVRAGTEST', title: '星收藏家测试文档', owner: '测试 UP', status: 'done', outputMarkdown: markdown, completedAt: new Date().toISOString() });
+    store.upsertTask({ id: 'rag-task', collectionId: 'rag-collection', bvid: 'BVRAGTEST', title: '星藏家测试文档', owner: '测试 UP', status: 'done', outputMarkdown: markdown, completedAt: new Date().toISOString() });
     store.commit();
 
     const events = [];
@@ -129,7 +129,7 @@ async function startFakeProvider() {
     assert(first.content.includes('已找到测试文档'), 'knowledge tool round trip failed');
     assert(first.reasoning.includes('先检索'), 'reasoning stream was not captured');
     assert(first.toolEvents[0]?.name === 'knowledge_search' && first.toolEvents[0]?.status === 'succeeded', 'streamed tool call was not assembled');
-    assert(first.toolEvents[0].output.includes('星收藏家测试文档'), 'knowledge retrieval did not return the selected document');
+    assert(first.toolEvents[0].output.includes('星藏家测试文档'), 'knowledge retrieval did not return the selected document');
     const firstApiRequest = fake.requests.find((item) => item.stream === true);
     assert(firstApiRequest.messages.filter((item) => item.role === 'user').length === 1, 'current user message was duplicated in model history');
     const storedUser = store.list('ragMessages').find((item) => item.role === 'user');

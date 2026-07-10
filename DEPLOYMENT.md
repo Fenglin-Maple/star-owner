@@ -8,21 +8,24 @@ Recommended GitHub release assets:
 
 ```text
 Star-Owner-v<version>-win-x64-core.zip
+Star-Owner-v<version>-runtime-win-x64.zip
 Star-Owner-v<version>-model-small.zip
+Star-Owner-v<version>-model-large-v3-turbo.zip   (optional)
 ```
 
-The core archive contains Electron, all npm dependencies, Mermaid, FFmpeg, yt-dlp, CPython 3.12, faster-whisper, CTranslate2, and CUDA/cuDNN runtime libraries. The model archive contains the multilingual `small` model under its ready-to-use `runtime/models/small` relative path. GitHub uses two assets because the current all-in-one Windows archive is about 2.05GiB and exceeds the platform's 2GB per-file limit. Users do not install Node.js, Python, FFmpeg, yt-dlp, CUDA Toolkit, packages, or a model downloader.
+The core archive contains Electron, all npm dependencies, Mermaid, and may include the base media/ASR runtime for immediate startup. The runtime repair asset contains `runtime/python` and `runtime/faster-whisper`; model assets preserve `runtime/models/<model>` paths. Assets remain separate because complete Windows distributions can exceed GitHub's 2GB per-file limit. Users do not install Node.js, Python, FFmpeg, yt-dlp, CUDA Toolkit, packages, or a model downloader.
 
 Usage:
 
 1. Read `THIRD_PARTY_NOTICES.md`, especially the NVIDIA runtime terms.
 2. Extract the core archive to a writable directory. Do not run it from inside the ZIP.
-3. Extract the model archive into the extracted core directory. Confirm `runtime/models/small/model.bin` exists beside the application files.
-4. Double-click `Start-StarOwner.cmd`.
-5. Log in from the application's Bilibili WebView and select a default Workspace.
-6. Windows may show an unknown-publisher warning until releases are code-signed.
+3. Double-click `Start-StarOwner.cmd`.
+4. If a required runtime or model is missing, accept the first-start prompt. The app downloads the matching assets from this repository's Releases, verifies SHA-256 when published, checks archive paths, and installs only under `runtime/`.
+5. Download progress and repair controls remain available in `设置 -> 项目依赖包`. Manual overlay extraction is still supported for offline installations.
+6. Log in from the application's Bilibili WebView and select a default Workspace.
+7. Windows may show an unknown-publisher warning until releases are code-signed.
 
-The built-in RAG assistant does not require another local runtime. To use it, open `文档浏览 -> RAG 助手`, add an OpenAI-compatible or NewAPI-compatible provider, enter the API root (commonly ending in `/v1`), save it, pull the remote model list, and enable one or more models. Multiple providers and multiple enabled models per provider can be saved. A session can switch provider/model from the composer, while its title, model, knowledge, sandbox, permission, and usage settings live in the title-bar settings dialog. API keys remain in the local application database in Electron `safeStorage` form where supported and are never included in release archives.
+The AI features do not require another local model runtime. Open `AI -> AI 模型配置`, add an OpenAI-compatible or NewAPI-compatible provider, enter the API root (commonly ending in `/v1`), save it, pull the remote model list, and enable one or more models. This shared configuration powers `AI -> RAG 助手`, collection-working internal Agents, and single-task Agents. Multiple providers and enabled models can be saved. API keys remain in the local application database in Electron `safeStorage` form where supported and are never included in release archives.
 
 The application creates `workspace/` beside itself and uses only project-relative runtime paths. Moving the extracted directory is supported. User cookies, SQLite data, task artifacts, and generated Markdown are never included in a public release archive.
 
@@ -65,7 +68,7 @@ npm run verify:release
 npm run package:portable
 ```
 
-The output is written below `dist/`, which is excluded from Git. The default command creates the GitHub-safe core and `small` model ZIPs plus a SHA-256 file for each.
+The output is written below `dist/`, which is excluded from Git. The default command creates the GitHub-safe portable core, runtime repair archive, and `small` model ZIP plus a SHA-256 file for each.
 
 Available model modes:
 
@@ -76,7 +79,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -Mod
 powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle small -SeparateModelAsset
 ```
 
-- `small -SeparateModelAsset`: recommended GitHub release; produces a core ZIP and a ready-to-overlay `small` model ZIP.
+- `small -SeparateModelAsset`: recommended GitHub release; produces a core ZIP, runtime repair ZIP, and ready-to-overlay `small` model ZIP.
 - `small`: produces an immediately usable all-in-one archive for channels that permit files larger than 2GB.
 - `none`: core runtime for a separately published model archive.
 - `all`: includes both models and is too large for GitHub as one file; add `-SeparateModelAsset` to emit the core, `small`, and `large-v3-turbo` assets separately.
@@ -115,9 +118,25 @@ See `AGENTS.md` for the complete worker and contributor contract.
 
 Before a public release, also verify the RAG supplier dialog, remote model pull against a test-compatible endpoint, one streaming response, one knowledge search, restricted-mode approval, and context compression. Never configure a maintainer API key in the database used to assemble a release.
 
+Also verify one internal collection Agent and one single-task run with a disposable compatible provider: confirm streamed output, Worker accounting, material-tool queueing, Markdown validation, cache cleanup, the canonical `内置用户/<内置收藏夹>` archive, and the second copy in the requested external directory. Remove the test provider and test Workspace before building release assets.
+
+### Release asset contract for in-app installation
+
+Publish all dependency assets under the same tagged Release as the portable core whenever possible. The app first looks for exact `v<app version>` filenames, then checks latest and recent releases for a compatible filename pattern. Dependency archives must begin with `runtime/`; absolute paths and `..` are rejected. For compatibility with an older Release lacking a dedicated runtime asset, the app may select its portable core archive but extracts only the two validated runtime subtrees.
+
+```text
+Star-Owner-v<version>-runtime-win-x64.zip
+Star-Owner-v<version>-runtime-win-x64.zip.sha256
+Star-Owner-v<version>-model-small.zip
+Star-Owner-v<version>-model-small.zip.sha256
+```
+
+The runtime archive must contain both `runtime/python/cpython-3.12.13-windows-x86_64-none/python.exe` and `runtime/faster-whisper/Lib/site-packages/faster_whisper`. The default model archive must contain `runtime/models/small/model.bin`. Without these probes, extraction succeeds but installation is reported as incomplete.
+
 ## 6. Troubleshooting
 
 - Tool health is visible on the Startup page.
+- Dependency availability, download progress, and reinstall actions are visible in Settings. A partial or failed download remains non-active and can be retried.
 - GPU queue state and memory are visible in Settings and `GET /api/scheduler`.
 - If a portable build says Electron is missing, the archive was assembled incorrectly; do not ask the user to run `npm install` inside it.
 - If the GPU service cannot start, update the NVIDIA driver or enable CPU ASR after reviewing the performance tradeoff.

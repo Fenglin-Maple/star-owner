@@ -1,12 +1,12 @@
-# 星⭐收藏家 Design
+# 星藏家 Design
 
 ## 1. Product Goal
 
-星⭐收藏家 is a local Electron desktop workbench for turning Bilibili favorite-folder videos into structured Markdown through multiple external agents.
+星藏家 is a local Electron desktop workbench for turning Bilibili favorite-folder videos into structured Markdown through external or application-managed agents.
 
 The desktop app owns orchestration, persistence, credentials, task leasing, tool execution, validation, and artifact inventory. Codex, Claude Code, and other agents use the local HTTP API to claim one task at a time, ask the app to execute media tools, and submit their final work.
 
-The video pipeline stops at task and tool orchestration and does not automatically create summaries by itself. Separately, the built-in RAG assistant analyzes Markdown that has already passed submission validation.
+The same pipeline has two workers: external agents use the local HTTP API, while internal agents use a main-process manager and user-configured compatible models. Both paths share Worker identity, leases, ToolRunner resources, validation, cleanup, final naming, analytics, and Workspace archives. Separately, the built-in RAG assistant analyzes Markdown that has already passed submission validation.
 
 ## 2. Core Boundaries
 
@@ -24,13 +24,16 @@ The video pipeline stops at task and tool orchestration and does not automatical
 
 ```mermaid
 flowchart LR
-  User["Desktop user"] --> UI["星⭐收藏家 Electron UI"]
+  User["Desktop user"] --> UI["星藏家 Electron UI"]
   UI --> Main["Electron main process"]
   Main --> Bili["Persistent Bilibili WebView session"]
   Main --> DB["SQLite / sql.js"]
   Main --> API["Local Agent HTTP API"]
   Main --> RAG["Built-in RAG assistant"]
+  Main --> Internal["Internal Agent manager"]
   RAG --> Provider["OpenAI / NewAPI compatible provider"]
+  Internal --> Provider
+  Internal --> Runner
   RAG --> Library
   API --> Agent["Codex / Claude / other agent"]
   Agent --> API
@@ -51,6 +54,8 @@ Runtime modules:
 - `src/core/workspace.js`: path safety and workspace layout.
 - `src/core/bili.js`: Bilibili session APIs and cookie export.
 - `src/core/rag-assistant.js`: compatible providers, RAG sessions, retrieval, streaming, model tools, approvals, and usage accounting.
+- `src/core/internal-agent-manager.js`: persistent internal Worker sessions, collection queues, single-task mode, streaming generation, validation, cleanup, and dual archive output.
+- `src/core/dependency-manager.js`: project-relative dependency probes, GitHub Release resolution, queued download, SHA-256 verification, safe extraction, and install progress.
 - `src/renderer/*`: frameless desktop UI.
 
 ## 4. Persistence
@@ -356,7 +361,7 @@ The task-page performance popover always opens, including before the first claim
 
 ## 13. UI Design
 
-Brand: `星⭐收藏家`.
+Brand: `星藏家`.
 
 The app uses a minimal flat mobile-style icon: a white rounded-square tile containing a star over three layered collection bookmarks. The reproducible source is `scripts/generate-icon.py`, which writes `assets/star-note.png` and `assets/star-note.ico` without remote assets or font dependencies.
 
@@ -366,7 +371,7 @@ Window behavior:
 - default size `1350 x 836`;
 - startup always restores and centers the default size instead of preserving a previous resize or maximized state;
 - minimum size `980 x 680`;
-- narrow collapsible left navigation with one standalone page, three expandable page groups, and fixed bottom utilities;
+- narrow collapsible left navigation with standalone Startup, four expandable page groups, and fixed bottom utilities;
 - content grids consume the width released by a collapsed sidebar instead of only translating left;
 - no page-level scrolling at the default size;
 - internal scrolling for task, tool, run, log, and workspace inventories;
@@ -383,8 +388,12 @@ Pages:
 - Collections: folder discovery and full collection sync.
 - Tasks: explicit Agent target activation, a compact progress band, primary search, collapsible advanced filters, batch state, and agent performance.
 - Work Preparation group: Bilibili login, Collections, and Tasks.
+- AI group: RAG assistant, internal collection Agent sessions, single-task Agent, and shared AI model configuration.
 - Status Query group: Work Agent, Tool modules, Run logs, and Agent API.
-- Document Browse group: RAG assistant, Markdown library, and Export.
+- Document Browse group: Markdown library and Export.
+- Internal Agent: concurrent persistent sessions, each bound to an app-owned Worker ID, provider/model, collection, progress stream, token usage, and pause/stop controls.
+- Single-task Agent: direct BV/URL input, adjustable material requirements, mandatory external destination, internal collection creation, live generation, Workspace archive, and a second complete artifact copy.
+- AI Model Configuration: the shared multi-provider/multi-model source for RAG, collection Agents, and single-task Agents.
 - RAG assistant: persistent session list and streaming conversation surface; session settings are hidden by default and open in a focused modal. Provider/model selectors also remain available at the lower-right of the composer, and a session context menu opens editing or guarded deletion.
 - Markdown library: accepted-document index by user and collection, BV/owner/title search, favorite/publish date filters, duration range, four time sort modes, and on-demand in-app Markdown preview with local frames.
 - Work Agent: independent Worker sessions, current assignments, performance, pause, and reactivation.
@@ -392,7 +401,7 @@ Pages:
 - Tool modules: module enable state, usage, prompts, outputs, and open-source attribution.
 - Run logs: first-level per-tool status summaries and second-level individual queued/running history with stage, pool/lane, queue reason, estimated wait, commands, logs, and terminal result.
 - Agent API: compact tool usage bars, expandable analytics, and API reference.
-- Settings: themes, seven artifact filename fields, multiple workspace libraries, default selection, live GPU/resource-pool state, manual CPU ASR enablement, and runtime state.
+- Settings: themes, seven artifact filename fields, multiple workspace libraries, default selection, live GPU/resource-pool state, manual CPU ASR enablement, runtime state, and dependency download/repair controls.
 - README: a rendered, user-facing summary of this design, Agent onboarding, tools, artifact rules, and RAG export. The page reads the root `README.md` directly so the application and repository share one source.
 
 ## 14. Startup Strategy
@@ -466,11 +475,32 @@ Security model:
 
 The current retrieval engine is deterministic lexical RAG rather than an embedding/vector database. This avoids an additional model dependency and works offline, while keeping a future embedding index behind the same collection/session boundary.
 
-## 17. Open-Source Distribution
+## 17. Internal Agent Execution
+
+The internal Agent manager persists sessions in SQLite and registers each one through the same Worker store as external callers. Queue sessions claim only from their selected collection, so multiple internal sessions can work concurrently without changing the desktop collection activated for external agents. Claim ownership is synchronous, leases are renewed while app-managed tools are queued or running, and interrupted app sessions recover in a paused state after restart.
+
+For each task the manager runs the material bundle, refreshes task metadata from `info.json`, sends the template, subtitles, ASR transcript, comments, manifest, metadata, and optionally up to four keyframes to the selected model, streams explicit reasoning/content fields to the renderer, and validates the draft. One repair attempt includes concrete validator errors. Accepted work runs cache cleanup and the same `finalizeSubmissionArtifacts` path as the public API. Usage is recorded in both the session and shared per-model accounting.
+
+Single-task mode creates a normal enabled task under the reserved `内置用户` identity and a user-selected internal collection. It requires an external output directory. On acceptance, the canonical artifact remains in the default Workspace and a collision-safe full directory copy is created under the requested destination. Internal collections are ordinary catalog sources after completion, so no special-case RAG, library, or export index is required.
+
+## 18. Managed Dependencies
+
+The dependency manager probes only project-relative paths. Required packages are the Windows media/ASR runtime and the default multilingual `small` model; `large-v3-turbo` is optional. A missing required package triggers one consent prompt per application version. Downloads are serialized, stream progress to the renderer, resolve exact current-version assets first and compatible recent Release assets second, verify a sibling `.sha256` when provided, reject unsafe archive entries, and extract into the application root. For older Releases without a dedicated runtime asset, the manager can safely extract only `runtime/python` and `runtime/faster-whisper` from the portable core archive.
+
+Release asset contracts:
+
+- `Star-Owner-v<version>-runtime-win-x64.zip` contains `runtime/python` and `runtime/faster-whisper`;
+- `Star-Owner-v<version>-model-small.zip` contains `runtime/models/small`;
+- `Star-Owner-v<version>-model-large-v3-turbo.zip` contains `runtime/models/large-v3-turbo`;
+- each asset should have a same-name `.sha256` text asset.
+
+Core portable archives may bundle the base runtime for immediate startup. The separate runtime asset remains the repair/source-clone installation path. Model assets stay separate to respect GitHub per-file limits. After an ASR package is installed, ToolRunner re-probes and starts the persistent GPU service when possible; CPU ASR remains opt-in.
+
+## 19. Open-Source Distribution
 
 The repository tracks application source, lockfiles, templates, packaging scripts, documentation, and a pinned `runtime-requirements.txt`. It intentionally ignores `node_modules/`, the generated project-local `runtime/`, ASR models, `workspace/`, databases, logs, archives, and machine shortcuts. FFmpeg is supplied by the pinned imageio-ffmpeg wheel and yt-dlp by its pinned Python package inside the same runtime; portable archives include that prepared runtime. A small root `postinstall` compensates for Electron packages that expose `install.js` without automatically running it, and does nothing when the Electron executable is already present.
 
-Ordinary users receive GitHub Release portable assets assembled by `scripts/build-portable-release.ps1`. Because the complete Windows `small` archive exceeds GitHub's 2GB per-asset limit, the default release is a core archive plus a `small` model archive whose contents preserve the `runtime/models/small` relative path. Extracting both into the same application root provides every runtime tool needed for normal operation; no global Node, Python, FFmpeg, yt-dlp, CUDA Toolkit, package installation, or model download is required. Single-archive builds remain available for distribution channels that accept larger files, and the optional quality model is always suitable for a separate asset.
+Ordinary users receive GitHub Release portable assets assembled by `scripts/build-portable-release.ps1`. Because complete Windows distributions can exceed GitHub's 2GB per-asset limit, the default release separates the portable core, repairable runtime, and model archives. The application can install missing Release assets itself, so users do not need global Node, Python, FFmpeg, yt-dlp, CUDA Toolkit, package installation, or a model downloader. Single-archive builds remain available for distribution channels that accept larger files.
 
 Project-owned code is `GPL-3.0-or-later`. Third-party software and model data retain their own terms. The current imageio-ffmpeg executable is a GPL-enabled FFmpeg 7.1 build, while CUDA/cuDNN packages use NVIDIA proprietary redistribution terms. `THIRD_PARTY_NOTICES.md` is the release authority for component versions, source obligations, and license boundaries. Portable archives are aggregates and must preserve all included notices.
 

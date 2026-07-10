@@ -98,6 +98,19 @@ class ToolRunner {
     return this.getState();
   }
 
+  async ensureGpuAsr() {
+    if (!this.initialized) return this.initialize();
+    if (this.gpuAsr.state === 'ready' || this.gpuAsr.state === 'busy') return this.getState();
+    this.gpuAsr.model = this.config.asrModel;
+    await this.refreshGpuState();
+    if (!this.gpu.available) throw new Error(this.gpu.error || 'NVIDIA GPU is unavailable.');
+    if (this.gpu.freeMiB < this.config.gpuStartupReserveMiB) throw new Error(`GPU free memory ${this.gpu.freeMiB} MiB is below startup reserve ${this.config.gpuStartupReserveMiB} MiB.`);
+    await this.gpuAsr.start();
+    await this.refreshGpuState();
+    this.notifyState(true);
+    return this.getState();
+  }
+
   loadConfig() {
     const saved = this.store.get('settings', 'toolScheduler') || {};
     this.config = normalizeConfig({ ...DEFAULT_CONFIG, ...saved });

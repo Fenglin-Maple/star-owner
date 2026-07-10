@@ -2,7 +2,7 @@
 
 ## Product Goal
 
-Star Owner (星⭐收藏家) turns a user's Bilibili favorite folders into a managed queue of comprehensive, timestamp-linked, illustrated Markdown knowledge documents. The desktop application is the single source of truth for identities, task leases, tools, paths, submissions, and artifacts.
+Star Owner (星藏家) turns a user's Bilibili favorite folders into a managed queue of comprehensive, timestamp-linked, illustrated Markdown knowledge documents. The desktop application is the single source of truth for identities, task leases, tools, paths, submissions, and artifacts.
 
 ## Worker Agent Contract
 
@@ -33,6 +33,16 @@ The canonical Markdown contract is `templates/video-summary-template.md` and is 
 ## Built-in RAG Assistant Contract
 
 - Treat the RAG assistant as an analysis client for accepted Markdown, not as a replacement for the external Worker submission protocol.
+- Application-managed video Agents are a separate feature from RAG. They use the same Worker store, ToolRunner, leases, validation, cleanup, artifact finalization, and analytics as external Workers, but their orchestration is owned by `src/core/internal-agent-manager.js`.
+- Single-task mode creates an ordinary task under `内置用户` and a selected internal collection, then archives the accepted artifact in the default Workspace and copies it to the explicitly selected external destination.
+- RAG, collection Agents, and single-task Agents share provider/model records and per-model usage accounting. Never expose decrypted API keys to the renderer or logs.
+
+## Dependency Asset Contract
+
+- Dependency archives are GitHub Release assets, not Git-tracked runtime files.
+- Archive entries must remain under `runtime/`; extraction rejects absolute paths and `..` traversal.
+- Required Release assets use `Star-Owner-v<version>-runtime-win-x64.zip` and `Star-Owner-v<version>-model-small.zip`, preferably with matching `.sha256` assets.
+- Do not change a dependency probe or asset layout without updating `dependency-manager.js`, the release builder, README, DESIGN, and DEPLOYMENT together.
 - Never expose decrypted provider API keys to preload or renderer code.
 - Keep provider requests OpenAI-compatible and capability-gated; unsupported multimodal, reasoning, image, tool, compression, or subagent behavior must degrade honestly.
 - Preserve the per-session sandbox boundary and approval flow for outside paths, CMD, private/local URLs, and default-browser opening.

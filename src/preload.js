@@ -47,6 +47,18 @@ contextBridge.exposeInMainWorld('orchestrator', {
   ragImportAttachments: (sessionId) => ipcRenderer.invoke('rag:attachments-import', sessionId),
   ragResolveApproval: (payload) => ipcRenderer.invoke('rag:approval-resolve', payload),
   ragRenderMarkdown: (markdown) => ipcRenderer.invoke('rag:render-markdown', markdown),
+  internalAgentState: () => ipcRenderer.invoke('internal-agent:state'),
+  internalAgentCreateCollection: (name) => ipcRenderer.invoke('internal-agent:collection-create', name),
+  internalAgentCreateSession: (payload) => ipcRenderer.invoke('internal-agent:session-create', payload),
+  internalAgentCreateSingle: (payload) => ipcRenderer.invoke('internal-agent:single-create', payload),
+  internalAgentStart: (sessionId) => ipcRenderer.invoke('internal-agent:start', sessionId),
+  internalAgentPause: (sessionId) => ipcRenderer.invoke('internal-agent:pause', sessionId),
+  internalAgentStop: (sessionId) => ipcRenderer.invoke('internal-agent:stop', sessionId),
+  internalAgentDelete: (sessionId) => ipcRenderer.invoke('internal-agent:delete', sessionId),
+  internalAgentChooseOutput: () => ipcRenderer.invoke('internal-agent:choose-output'),
+  dependencyState: () => ipcRenderer.invoke('dependencies:state'),
+  dependencyAcknowledge: (payload) => ipcRenderer.invoke('dependencies:acknowledge', payload),
+  dependencyDownload: (packageId) => ipcRenderer.invoke('dependencies:download', packageId),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximizeWindow: () => ipcRenderer.invoke('window:maximize-toggle'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
@@ -69,5 +81,15 @@ contextBridge.exposeInMainWorld('orchestrator', {
     const listener = (_event, data) => callback(data);
     ipcRenderer.on('rag:event', listener);
     return () => ipcRenderer.removeListener('rag:event', listener);
+  },
+  onInternalAgentEvent: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on('internal-agent:event', listener);
+    return () => ipcRenderer.removeListener('internal-agent:event', listener);
+  },
+  onDependencyEvent: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on('dependency:event', listener);
+    return () => ipcRenderer.removeListener('dependency:event', listener);
   }
 });

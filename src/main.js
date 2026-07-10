@@ -6,6 +6,8 @@ const MarkdownIt = require('markdown-it');
 const { buildAnalytics } = require('./core/analytics');
 const { ApiServer } = require('./core/api-server');
 const { BiliClient } = require('./core/bili');
+const { DependencyManager } = require('./core/dependency-manager');
+const { InternalAgentManager } = require('./core/internal-agent-manager');
 const { promoteMindMap } = require('./core/markdown');
 const { RagAssistant } = require('./core/rag-assistant');
 const { Store } = require('./core/store');
@@ -13,7 +15,8 @@ const { ToolRunner } = require('./core/tool-runner');
 const { initWorkspace, timestampForFile, videoArtifactName, WORKSPACE_ROOT } = require('./core/workspace');
 
 const BILI_SESSION = 'persist:bili-orchestrator';
-const PRODUCT_NAME = '星⭐收藏家';
+const PRODUCT_NAME = '星藏家';
+const PACKAGE_VERSION = require('../package.json').version;
 const DEFAULT_WINDOW = { width: 1350, height: 836 };
 const README_FILE = path.join(__dirname, '..', 'README.md');
 const markdownRenderer = new MarkdownIt({ html: false, linkify: true, typographer: false });
@@ -26,6 +29,8 @@ let store = null;
 let bili = null;
 let toolRunner = null;
 let ragAssistant = null;
+let internalAgentManager = null;
+let dependencyManager = null;
 let currentUser = null;
 let backendReady = false;
 let toolHealth = [];
@@ -100,6 +105,26 @@ async function bootstrap() {
     onEvent: publishEvent,
     onState: () => sendRuntime()
   });
+  internalAgentManager = new InternalAgentManager({
+    store,
+    toolRunner,
+    ragAssistant,
+    bili,
+    getCurrentUser: () => currentUser,
+    emit: publishInternalAgentEvent
+  });
+  dependencyManager = new DependencyManager({
+    store,
+    projectRoot: path.resolve(__dirname, '..'),
+    version: PACKAGE_VERSION,
+    emit: publishDependencyEvent,
+    onInstalled: async (packageId) => {
+      if (packageId === 'model-small' || packageId === 'runtime-base') {
+        try { await toolRunner.ensureGpuAsr(); } catch (error) { publishEvent({ type: 'asr-reload-required', error: error.message }); }
+      }
+      sendRuntime();
+    }
+  });
   const registeredTools = store.listTools();
   toolHealth = registeredTools.map((tool) => ({
     toolId: tool.id,
@@ -156,6 +181,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   apiServer?.stop();
+  internalAgentManager?.shutdown();
   toolRunner?.shutdown();
   for (const pending of pendingRagApprovals.values()) pending.resolve({ approved: false });
   pendingRagApprovals.clear();
@@ -169,6 +195,7 @@ ipcMain.handle('app:get-runtime', async () => ({
   toolHealth,
   scheduler: toolRunner?.getState() || null,
   filenameMetadata: store?.getFilenameMetadata() || null,
+  dependencies: dependencyManager?.state() || null,
   backendReady,
   bootstrap: bootstrapState
 }));
@@ -277,6 +304,7 @@ ipcMain.handle('store:snapshot', async () => {
     toolRuns: store.listToolRuns(),
     workspaces: store.listWorkspaces(),
     workers: store.listWorkers(),
+    internalAgentSessions: internalAgentManager?.state().sessions || [],
     activeCollection: store.getActiveCollection(),
     analytics: buildAnalytics(store),
     scheduler: toolRunner?.getState() || null,
@@ -546,6 +574,66 @@ ipcMain.handle('rag:approval-resolve', async (_event, payload = {}) => {
 
 ipcMain.handle('rag:render-markdown', async (_event, markdown) => markdownRenderer.render(String(markdown || '')));
 
+ipcMain.handle('internal-agent:state', async () => internalAgentManager ? internalAgentManager.state() : { providers: [], sessions: [], collections: [], internalCollections: [] });
+
+ipcMain.handle('internal-agent:collection-create', async (_event, name) => {
+  assertBackendReady();
+  const collection = internalAgentManager.createInternalCollection(name);
+  publishEvent({ type: 'internal-collection-created', collectionId: collection.id, collectionName: collection.name });
+  return collection;
+});
+
+ipcMain.handle('internal-agent:session-create', async (_event, payload) => {
+  assertBackendReady();
+  return internalAgentManager.createSession(payload || {});
+});
+
+ipcMain.handle('internal-agent:single-create', async (_event, payload) => {
+  assertBackendReady();
+  return internalAgentManager.createSingleTask(payload || {});
+});
+
+ipcMain.handle('internal-agent:start', async (_event, sessionId) => {
+  assertBackendReady();
+  return internalAgentManager.start(sessionId);
+});
+
+ipcMain.handle('internal-agent:pause', async (_event, sessionId) => {
+  assertBackendReady();
+  return internalAgentManager.pause(sessionId);
+});
+
+ipcMain.handle('internal-agent:stop', async (_event, sessionId) => {
+  assertBackendReady();
+  return internalAgentManager.stop(sessionId);
+});
+
+ipcMain.handle('internal-agent:delete', async (_event, sessionId) => {
+  assertBackendReady();
+  return internalAgentManager.deleteSession(sessionId);
+});
+
+ipcMain.handle('internal-agent:choose-output', async () => {
+  assertBackendReady();
+  const result = await dialog.showOpenDialog(mainWindow, { title: '选择单任务输出目录', properties: ['openDirectory', 'createDirectory'] });
+  return { canceled: result.canceled, path: result.filePaths[0] || '' };
+});
+
+ipcMain.handle('dependencies:state', async () => dependencyManager?.state() || null);
+
+ipcMain.handle('dependencies:acknowledge', async (_event, payload = {}) => {
+  assertBackendReady();
+  const state = dependencyManager.acknowledgePrompt(Boolean(payload.download));
+  if (payload.download) dependencyManager.downloadRequired().catch((error) => publishDependencyEvent({ type: 'dependency-error', error: error.message }));
+  sendRuntime();
+  return state;
+});
+
+ipcMain.handle('dependencies:download', async (_event, packageId) => {
+  assertBackendReady();
+  return dependencyManager.download(packageId);
+});
+
 ipcMain.handle('window:minimize', async () => mainWindow?.minimize());
 ipcMain.handle('window:maximize-toggle', async () => {
   if (!mainWindow) return false;
@@ -656,6 +744,7 @@ function sendRuntime() {
     toolHealth,
     scheduler: toolRunner?.getState() || null,
     filenameMetadata: store?.getFilenameMetadata() || null,
+    dependencies: dependencyManager?.state() || null,
     backendReady,
     bootstrap: bootstrapState
   });
@@ -665,6 +754,20 @@ function publishEvent(event) {
   const record = { createdAt: new Date().toISOString(), ...event };
   if (store && event.type !== 'collection-sync-progress') store.recordActivity(record);
   mainWindow?.webContents.send('app:event', record);
+}
+
+function publishInternalAgentEvent(event) {
+  const record = { createdAt: new Date().toISOString(), ...event };
+  if (store && event.type !== 'stream' && event.type !== 'session-updated') {
+    store.recordActivity({ ...record, type: `internal-agent-${event.type}` });
+  }
+  mainWindow?.webContents.send('internal-agent:event', record);
+}
+
+function publishDependencyEvent(event) {
+  const record = { createdAt: new Date().toISOString(), ...event };
+  mainWindow?.webContents.send('dependency:event', record);
+  if (event.type === 'dependency-error') publishEvent(event);
 }
 
 function exportMarkdownTasks(directory, taskIds, filenameMetadata) {
