@@ -4,21 +4,23 @@ This guide has two paths: a dependency-free portable build for ordinary users, a
 
 ## 1. Portable Release for Users
 
-Recommended GitHub release asset:
+Recommended GitHub release assets:
 
 ```text
-StarNote-BiliNote-v<version>-win-x64-small.zip
+StarNote-BiliNote-v<version>-win-x64-core.zip
+StarNote-BiliNote-v<version>-model-small.zip
 ```
 
-The `small` portable archive contains Electron, all npm dependencies, Mermaid, FFmpeg, yt-dlp, CPython 3.12, faster-whisper, CTranslate2, CUDA/cuDNN runtime libraries, and the multilingual `small` model. Users do not install Node.js, Python, FFmpeg, yt-dlp, CUDA Toolkit, or a model downloader.
+The core archive contains Electron, all npm dependencies, Mermaid, FFmpeg, yt-dlp, CPython 3.12, faster-whisper, CTranslate2, and CUDA/cuDNN runtime libraries. The model archive contains the multilingual `small` model under its ready-to-use `runtime/models/small` relative path. GitHub uses two assets because the current all-in-one Windows archive is about 2.05GiB and exceeds the platform's 2GB per-file limit. Users do not install Node.js, Python, FFmpeg, yt-dlp, CUDA Toolkit, packages, or a model downloader.
 
 Usage:
 
 1. Read `THIRD_PARTY_NOTICES.md`, especially the NVIDIA runtime terms.
-2. Extract the archive to a writable directory. Do not run it from inside the ZIP.
-3. Double-click `Start-StarNote.cmd`.
-4. Log in from the application's Bilibili WebView and select a default Workspace.
-5. Windows may show an unknown-publisher warning until releases are code-signed.
+2. Extract the core archive to a writable directory. Do not run it from inside the ZIP.
+3. Extract the model archive into the extracted core directory. Confirm `runtime/models/small/model.bin` exists beside the application files.
+4. Double-click `Start-StarNote.cmd`.
+5. Log in from the application's Bilibili WebView and select a default Workspace.
+6. Windows may show an unknown-publisher warning until releases are code-signed.
 
 The application creates `workspace/` beside itself and uses only project-relative runtime paths. Moving the extracted directory is supported. User cookies, SQLite data, task artifacts, and generated Markdown are never included in a public release archive.
 
@@ -61,7 +63,7 @@ npm run verify:release
 npm run package:portable
 ```
 
-The output is written below `dist/`, which is excluded from Git.
+The output is written below `dist/`, which is excluded from Git. The default command creates the GitHub-safe core and `small` model ZIPs plus a SHA-256 file for each.
 
 Available model modes:
 
@@ -69,11 +71,13 @@ Available model modes:
 powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle none
 powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle small
 powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle all
+powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle small -SeparateModelAsset
 ```
 
-- `small`: recommended public release, immediately usable and normally easier to keep below GitHub's per-asset limit.
+- `small -SeparateModelAsset`: recommended GitHub release; produces a core ZIP and a ready-to-overlay `small` model ZIP.
+- `small`: produces an immediately usable all-in-one archive for channels that permit files larger than 2GB.
 - `none`: core runtime for a separately published model archive.
-- `all`: includes both models and may exceed GitHub's 2GB per-file limit. Publish core and model archives separately if warned.
+- `all`: includes both models and is too large for GitHub as one file; add `-SeparateModelAsset` to emit the core, `small`, and `large-v3-turbo` assets separately.
 
 The builder copies only application/runtime inputs. It creates a fresh empty `workspace/`; it never copies the maintainer's SQLite database, cookies, downloaded videos, generated documents, logs, or shortcuts.
 
@@ -101,9 +105,9 @@ See `AGENTS.md` for the complete worker and contributor contract.
 
 1. Run `npm run verify:release`.
 2. Confirm `git status` contains no `workspace/`, `runtime/`, `node_modules/`, logs, archives, SQLite files, cookies, or machine-specific shortcuts.
-3. Build the portable archive and verify its SHA-256 file.
+3. Build the portable core/model assets and verify every SHA-256 file.
 4. Test extraction and launch in a clean Windows account or VM.
-5. Attach `LICENSE`, `THIRD_PARTY_NOTICES.md`, and GPL corresponding-source/source-offer material.
+5. Attach `LICENSE`, `THIRD_PARTY_NOTICES.md`, and GPL corresponding-source/source-offer material beside both release assets.
 6. Publish the source from the exact Git tag used to build the binary.
 7. Do not upload credentials, Bilibili cookies, account names, task databases, or generated media without permission.
 

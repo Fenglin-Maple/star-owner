@@ -49,7 +49,7 @@ The current FFmpeg executable reports `ffmpeg version 6.0-essentials_build-www.g
 3. Publish or provide a durable written offer for the corresponding FFmpeg 6.0 source and the GPL-covered linked build inputs. Start from [FFmpeg 6.0 source](https://ffmpeg.org/releases/ffmpeg-6.0.tar.xz) and the build provenance at [gyan.dev FFmpeg builds](https://www.gyan.dev/ffmpeg/builds/).
 4. Keep the source offer available for the period required by GPLv3 section 6.
 
-The safest GitHub release layout is to attach the portable binary archive, its SHA-256 file, a corresponding-source archive/source offer, and this notice to the same release.
+The safest GitHub release layout is to attach the portable core archive, model archive, both SHA-256 files, a corresponding-source archive/source offer, and this notice to the same release. Splitting the model for GitHub's file-size limit does not change any component's license.
 
 ## Online Services
 

@@ -13,7 +13,7 @@
     "test:asr-service": "node scripts/asr-service-test.js",
     "setup:asr": "powershell -ExecutionPolicy Bypass -File scripts/setup-faster-whisper.ps1",
     "verify:release": "powershell -ExecutionPolicy Bypass -File scripts/verify-release.ps1",
-    "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle small"
+    "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle small -SeparateModelAsset"
   },
   "engines": {
     "node": ">=22"
