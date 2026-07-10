@@ -1,0 +1,237 @@
+const fs = require('fs');
+const path = require('path');
+const { initWorkspace, WORKSPACE_ROOT } = require('../src/core/workspace');
+const { Store } = require('../src/core/store');
+const { ToolRunner } = require('../src/core/tool-runner');
+const { buildAnalytics } = require('../src/core/analytics');
+const { ApiServer, finalizeSubmissionArtifacts } = require('../src/core/api-server');
+const { videoArtifactName } = require('../src/core/workspace');
+const { assessSubtitle } = require('../tools/video-tool');
+const { validateSubmission } = require('../src/core/validation');
+const { promoteMindMap } = require('../src/core/markdown');
+
+(async () => {
+  if (assessSubtitle([], 120).reason !== 'SUBTITLE_EMPTY') throw new Error('empty subtitle validation failed');
+  if (assessSubtitle([{ from: 0, to: 9 }], 120).reason !== 'SUBTITLE_COVERAGE_TOO_LOW') throw new Error('subtitle coverage validation failed');
+  if (assessSubtitle([{ from: 0, to: 60 }, { from: 60, to: 120 }, { from: 120, to: 300 }], 120).reason !== 'SUBTITLE_DURATION_MISMATCH') throw new Error('subtitle duration validation failed');
+  if (!assessSubtitle([{ from: 0, to: 10 }, { from: 10, to: 20 }, { from: 20, to: 60 }], 120).valid) throw new Error('valid subtitle was rejected');
+  const legacyMarkdown = '# Title\n\n## 小结\n\nSummary\n\n## 目录\n\nContents\n\n## 正文\n\nBody\n\n## 思维导图\n\n```mermaid\nmindmap\n  root((Test))\n```\n\n## 处理记录\n\nDone\n';
+  const promotedMarkdown = promoteMindMap(legacyMarkdown);
+  if (!(promotedMarkdown.indexOf('## 小结') < promotedMarkdown.indexOf('## 思维导图') && promotedMarkdown.indexOf('## 思维导图') < promotedMarkdown.indexOf('## 目录'))) throw new Error('legacy mind-map promotion failed');
+  if (!promotedMarkdown.includes('## 正文\n\nBody') || !promotedMarkdown.includes('```mermaid\nmindmap')) throw new Error('mind-map promotion damaged Markdown sections');
+
+  initWorkspace();
+  const dbFile = path.join(WORKSPACE_ROOT, 'smoke-orchestrator.sqlite');
+  fs.rmSync(dbFile, { force: true });
+
+  const store = await Store.open(dbFile);
+  const defaultFilenameMetadata = store.getFilenameMetadata();
+  if (Object.values(defaultFilenameMetadata).some((enabled) => enabled !== true)) throw new Error('filename metadata defaults failed');
+  store.setFilenameMetadata({ tags: false, title: false });
+  if (store.getFilenameMetadata().tags !== false || store.getFilenameMetadata().title !== false || store.getFilenameMetadata().bvid !== true) throw new Error('filename metadata persistence failed');
+  store.setFilenameMetadata(defaultFilenameMetadata);
+  const artifactName = videoArtifactName({ bvid: 'BVTEST', title: 'Title', owner: 'UP', publishedAt: '2026-01-02T00:00:00Z', favoriteAddedAt: '2026-02-03T00:00:00Z', tags: ['AI', 'Code'] }, { name: 'Collection' });
+  if (!artifactName.includes('[BV-BVTEST]') || !artifactName.includes('[\u53d1\u5e03\u65e5-20260102]') || !artifactName.includes('[\u6536\u85cf\u65e5-20260203]') || !artifactName.includes('[\u6807\u7b7e-AI+Code]')) throw new Error('artifact metadata naming failed');
+  store.upsertUser({ id: 'u1', name: 'smoke-user', mid: '1' });
+  store.upsertCollection({ id: 'c1', name: 'AIcode', userId: 'u1' });
+  store.upsertTask({ id: 'c1:BVTEST', collectionId: 'c1', bvid: 'BVTEST', status: 'pending', createdAt: new Date().toISOString() });
+  store.upsertTask({ id: 'c1:BVOLD', collectionId: 'c1', bvid: 'BVOLD', title: 'Old favorite', status: 'pending', favoriteAddedAt: '2025-01-01T00:00:00.000Z', createdAt: '2025-01-01T00:00:00.000Z' });
+  store.upsertTask({ id: 'c1:BVNEW', collectionId: 'c1', bvid: 'BVNEW', title: 'New favorite', status: 'pending', favoriteAddedAt: '2999-01-01T00:00:00.000Z', createdAt: '2999-01-01T00:00:00.000Z' });
+  store.commit();
+
+  const task = store.getTask('c1:BVTEST');
+  if (!task || task.status !== 'pending') throw new Error('store smoke failed');
+  if (store.listTasks({ collectionId: 'c1' })[0]?.id !== 'c1:BVNEW') throw new Error('favorite-date task sorting failed');
+  store.updateTasksEnabled(['c1:BVOLD'], false);
+  if (store.getTask('c1:BVOLD')?.enabled !== false) throw new Error('task enable state failed');
+
+  const defaultWorkspace = store.getDefaultWorkspace();
+  if (!defaultWorkspace?.isDefault) throw new Error('default workspace initialization failed');
+  const extraRoot = path.join(WORKSPACE_ROOT, 'smoke-library');
+  const extraWorkspace = store.addWorkspace({ name: 'Smoke library', root: extraRoot });
+  store.setDefaultWorkspace(extraWorkspace.id);
+  if (store.getDefaultWorkspace()?.id !== extraWorkspace.id) throw new Error('workspace selection failed');
+
+  store.upsertCollection({ id: 'c2', name: 'Claim smoke', userId: 'u1', userName: 'smoke-user' });
+  store.upsertTask({ id: 'c2:BVDISABLED', collectionId: 'c2', bvid: 'BVDISABLED', title: 'Disabled', status: 'pending', enabled: false, favoriteAddedAt: '2999-01-01T00:00:00.000Z' });
+  store.upsertTask({ id: 'c2:BVENABLED', collectionId: 'c2', bvid: 'BVENABLED', title: 'Enabled', status: 'pending', enabled: true, favoriteAddedAt: '2025-01-01T00:00:00.000Z' });
+  store.commit();
+  store.setActiveCollection('c2');
+  if (store.getActiveCollection()?.id !== 'c2') throw new Error('active collection persistence failed');
+  const healthRunner = new ToolRunner({ store });
+  const canonicalArgs = healthRunner.buildArgs({
+    task: { bvid: 'BVTEST', url: 'bilibili://video/123' },
+    action: 'info',
+    collection: {},
+    artifactDir: WORKSPACE_ROOT,
+    options: {}
+  });
+  if (!canonicalArgs.includes('BVTEST') || canonicalArgs.includes('bilibili://video/123')) throw new Error('tool target must prefer bvid over app-deep-link URL');
+  const toolHealth = await healthRunner.probeTools(store.listTools());
+  if (toolHealth.length !== store.listTools().length || toolHealth.some((item) => !item.responded)) throw new Error('tool interface health probe failed');
+  const api = new ApiServer({ store, bili: {}, toolRunner: healthRunner, getCurrentUser: () => null, getToolHealth: () => toolHealth });
+  await api.start(0);
+  const registerResponse = await fetch(`${api.url()}/api/workers/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tool: 'codex', model: 'smoke-model', sessionLabel: 'smoke' })
+  });
+  const registration = await registerResponse.json();
+  if (!registerResponse.ok || !registration.workerId) throw new Error('worker registration failed');
+  const manifestResponse = await fetch(`${api.url()}/api/manifest?workerId=${registration.workerId}`);
+  const manifest = await manifestResponse.json();
+  if (!manifestResponse.ok || manifest.worker?.workerId !== registration.workerId || !manifest.endpoints?.length) throw new Error('API manifest failed');
+  const templateResponse = await fetch(`${api.url()}/api/templates/video-summary`);
+  const template = await templateResponse.json();
+  if (!templateResponse.ok || !template.template?.includes('## 字幕比对')) throw new Error('Markdown template API failed');
+  const summaryPosition = template.template.indexOf('## 小结');
+  const mindMapPosition = template.template.indexOf('## 思维导图');
+  const contentsPosition = template.template.indexOf('## 目录');
+  if (!(summaryPosition >= 0 && mindMapPosition > summaryPosition && contentsPosition > mindMapPosition)) throw new Error('Markdown opening order failed');
+  const healthResponse = await fetch(`${api.url()}/api/tool-health`);
+  const healthPayload = await healthResponse.json();
+  if (!healthResponse.ok || healthPayload.tools?.length !== toolHealth.length) throw new Error('tool health API failed');
+  const activeResponse = await fetch(`${api.url()}/api/active-collection`);
+  const active = await activeResponse.json();
+  if (!activeResponse.ok || active.collection?.id !== 'c2') throw new Error('active collection API failed');
+  const claimResponse = await fetch(`${api.url()}/api/tasks/claim`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ workerId: registration.workerId })
+  });
+  const claim = await claimResponse.json();
+  if (!claimResponse.ok || claim.task?.bvid !== 'BVENABLED') throw new Error('disabled task was claimable');
+  const pausedWorker = store.updateWorker(registration.workerId, { status: 'paused', pauseReason: 'smoke pause' });
+  if (pausedWorker.status !== 'paused') throw new Error('worker pause failed');
+  const pausedClaimResponse = await fetch(`${api.url()}/api/tasks/claim`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ workerId: registration.workerId })
+  });
+  const pausedClaim = await pausedClaimResponse.json();
+  api.stop();
+  if (pausedClaimResponse.status !== 423 || pausedClaim.userMessage !== '来自用户的信息，你需要暂停工作') throw new Error('paused worker allocation guard failed');
+
+  store.setDefaultWorkspace(defaultWorkspace.id);
+  store.removeWorkspace(extraWorkspace.id);
+
+  store.recordTaskEvent('c1:BVTEST', 'claimed', { workerId: registration.workerId });
+  store.recordTaskEvent('c1:BVTEST', 'completed', { workerId: registration.workerId, processingSeconds: 60, videoDuration: 120 });
+  const stats = buildAnalytics(store).collections.c1;
+  if (stats.agents[0]?.workerId !== registration.workerId || stats.agents[0]?.weightedTimeRatio !== 0.5) throw new Error('per-worker weighted analytics failed');
+
+  const tools = store.listTools();
+  if (!tools.some((tool) => tool.id === 'asr' && tool.enabled)) throw new Error('tool registry smoke failed');
+  store.createToolRun({
+    id: 'run1',
+    taskId: 'c1:BVTEST',
+    toolId: 'video-info',
+    status: 'running',
+    createdAt: new Date().toISOString()
+  });
+  store.updateToolRun('run1', { status: 'succeeded', exitCode: 0 });
+  if (store.getToolRun('run1')?.status !== 'succeeded') throw new Error('tool run smoke failed');
+
+  const artifactDir = path.join(WORKSPACE_ROOT, 'smoke-artifact');
+  fs.mkdirSync(artifactDir, { recursive: true });
+  fs.writeFileSync(path.join(artifactDir, 'cache.mp4'), 'temporary media');
+  fs.writeFileSync(path.join(artifactDir, 'summary.md'), '# keep');
+  const namingRoot = path.join(WORKSPACE_ROOT, 'smoke-naming-root');
+  const namingDraft = path.join(namingRoot, 'draft');
+  fs.mkdirSync(path.join(namingDraft, 'frames'), { recursive: true });
+  fs.writeFileSync(path.join(namingDraft, 'draft.md'), '# summary');
+  fs.writeFileSync(path.join(namingDraft, 'info.json'), JSON.stringify({ tags: ['AI'] }));
+  fs.writeFileSync(path.join(namingDraft, 'frames', 'frame.jpg'), 'frame');
+  const finalized = finalizeSubmissionArtifacts({
+    task: { bvid: 'BVFINAL', title: 'Final title', owner: 'UP', publishedAt: '2026-01-02T00:00:00Z', favoriteAddedAt: '2026-02-03T00:00:00Z', tags: ['AI'], allowedRoot: namingRoot },
+    collection: { name: 'Collection' },
+    validation: { artifactDir: namingDraft, markdownFile: path.join(namingDraft, 'draft.md'), metadataFile: path.join(namingDraft, 'info.json') },
+    filenameMetadata: defaultFilenameMetadata
+  });
+  if (!fs.existsSync(finalized.markdownFile) || !fs.existsSync(finalized.metadataFile) || !fs.existsSync(path.join(finalized.artifactDir, 'frames', 'frame.jpg'))) throw new Error('artifact finalization lost files');
+  if (path.basename(finalized.markdownFile, '.md') !== path.basename(finalized.artifactDir)) throw new Error('artifact directory and Markdown names diverged');
+  const validationRoot = path.join(WORKSPACE_ROOT, 'smoke-validation-root');
+  fs.mkdirSync(validationRoot, { recursive: true });
+  const metadataFile = path.join(validationRoot, 'info.json');
+  const validMarkdown = path.join(validationRoot, 'valid.md');
+  const invalidMarkdown = path.join(validationRoot, 'invalid.md');
+  const opening = '## 小结\n\nSummary\n\n## 思维导图\n\n```mermaid\nmindmap\n  root((Test))\n```\n\n## 目录\n\n- Contents\n\n## 字幕比对\n\nASR 选择说明\n\n## 评论分析\n\nNone\n\n## 处理记录\n\nDone\n';
+  fs.writeFileSync(metadataFile, '{}');
+  fs.writeFileSync(validMarkdown, opening);
+  fs.writeFileSync(invalidMarkdown, opening.replace('## 思维导图\n\n```mermaid\nmindmap\n  root((Test))\n```\n\n## 目录', '## 目录\n\n## 思维导图\n\nNo diagram'));
+  const validationTask = { allowedRoot: validationRoot };
+  if (!validateSubmission(validationTask, { artifactDir: validationRoot, markdownFile: validMarkdown, metadataFile }).ok) throw new Error('valid Mermaid opening was rejected');
+  if (validateSubmission(validationTask, { artifactDir: validationRoot, markdownFile: invalidMarkdown, metadataFile }).ok) throw new Error('invalid Mermaid opening was accepted');
+  const recoveryArtifactDir = path.join(WORKSPACE_ROOT, 'smoke-recovery-artifact');
+  fs.mkdirSync(recoveryArtifactDir, { recursive: true });
+  fs.writeFileSync(path.join(recoveryArtifactDir, 'recover.mp4'), 'recover me');
+  store.createToolRun({
+    id: 'recovery-run',
+    taskId: 'c1:BVTEST',
+    collectionId: 'c1',
+    toolId: 'clean-cache',
+    toolName: '清理视频缓存',
+    action: 'clean-cache',
+    workerId: registration.workerId,
+    status: 'queued',
+    artifactDir: recoveryArtifactDir,
+    logFile: path.join(recoveryArtifactDir, 'recovery.log'),
+    options: {},
+    timeoutMs: 60000,
+    createdAt: new Date().toISOString()
+  });
+  const runner = new ToolRunner({ store });
+  await runner.initialize({ startGpuService: false });
+  if (runner.getState().config.cpuAsrEnabled !== false || runner.getState().services.cpu.state !== 'stopped') {
+    throw new Error('CPU ASR must remain disabled and unloaded by default');
+  }
+  await waitForRun(store, 'recovery-run');
+  if (store.getToolRun('recovery-run')?.status !== 'succeeded' || fs.existsSync(path.join(recoveryArtifactDir, 'recover.mp4'))) {
+    throw new Error('persisted queued run recovery failed');
+  }
+  const cleanTool = store.get('tools', 'clean-cache');
+  const run = runner.start({
+    task: {
+      id: 'c1:BVTEST',
+      bvid: 'BVTEST',
+      status: 'claimed',
+      allowedRoot: WORKSPACE_ROOT,
+      artifactDir
+    },
+    tool: cleanTool,
+    collection: {},
+    workerId: registration.workerId
+  });
+  await waitForRun(store, run.id);
+  if (store.getToolRun(run.id)?.status !== 'succeeded') throw new Error('tool runner execution smoke failed');
+  if (fs.existsSync(path.join(artifactDir, 'cache.mp4'))) throw new Error('clean-cache did not remove media cache');
+  if (!fs.existsSync(path.join(artifactDir, 'summary.md'))) throw new Error('clean-cache removed non-cache artifact');
+  runner.shutdown();
+
+  fs.rmSync(artifactDir, { recursive: true, force: true });
+  fs.rmSync(namingRoot, { recursive: true, force: true });
+  fs.rmSync(validationRoot, { recursive: true, force: true });
+  fs.rmSync(recoveryArtifactDir, { recursive: true, force: true });
+  fs.rmSync(extraRoot, { recursive: true, force: true });
+  fs.rmSync(dbFile, { force: true });
+  console.log('smoke ok');
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+
+function waitForRun(store, runId) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const timer = setInterval(() => {
+      const run = store.getToolRun(runId);
+      if (run && ['succeeded', 'failed', 'cancelled', 'timeout'].includes(run.status)) {
+        clearInterval(timer);
+        resolve(run);
+      } else if (Date.now() - started > 10000) {
+        clearInterval(timer);
+        reject(new Error(`Timed out waiting for tool run: ${runId}`));
+      }
+    }, 100);
+  });
+}

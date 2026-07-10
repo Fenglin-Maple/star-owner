@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>星笺 BiliNote</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="theme-night">
+    <div class="window">
+      <header class="windowbar">
+        <div class="window-left">
+          <img class="app-mark" src="../../assets/star-note.png" alt="" />
+          <span class="app-title">星笺 <b>BiliNote</b></span>
+        </div>
+        <div class="window-status">
+          <span id="apiBadge">API...</span>
+          <div id="userProfile" class="user-profile">
+            <img id="userAvatar" alt="" />
+            <span id="userName"></span>
+            <div class="profile-popover">
+              <div id="profileTitle" class="popover-title"></div>
+              <div id="profileCollections" class="popover-list"></div>
+            </div>
+          </div>
+        </div>
+        <div class="window-controls">
+          <button id="winMin" aria-label="minimize"></button>
+          <button id="winMax" aria-label="maximize"></button>
+          <button id="winClose" aria-label="close"></button>
+        </div>
+      </header>
+
+      <div class="app" id="appShell">
+        <aside class="sidebar">
+          <button id="sidebarToggle" class="menu-button" aria-label="toggle sidebar" title="toggle sidebar">
+            <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </button>
+          <nav class="nav">
+            <button class="nav-item active" data-page="overview" title="overview">
+              <svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7v8a1 1 0 0 1-1 1h-5v-6H10v6H5a1 1 0 0 1-1-1z"/></svg>
+              <span data-i18n="navOverview"></span>
+            </button>
+            <button class="nav-item" data-page="login" title="login">
+              <svg viewBox="0 0 24 24"><path d="M15 3h4a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1h-4M10 17l5-5-5-5M15 12H3"/></svg>
+              <span data-i18n="navLogin"></span>
+            </button>
+            <button class="nav-item" data-page="collections" title="collections">
+              <svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v10a2 2 0 0 1-2 2H4z"/></svg>
+              <span data-i18n="navCollections"></span>
+            </button>
+            <button class="nav-item" data-page="tasks" title="tasks">
+              <svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+              <span data-i18n="navTasks"></span>
+            </button>
+            <button class="nav-item" data-page="documents" title="documents">
+              <svg viewBox="0 0 24 24"><path d="M6 3h9l3 3v15H6zM15 3v4h4M9 11h6M9 15h6M9 7h2"/></svg>
+              <span data-i18n="navDocuments"></span>
+            </button>
+            <button class="nav-item" data-page="workers" title="workers">
+              <svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+              <span data-i18n="navWorkers"></span>
+            </button>
+            <button class="nav-item" data-page="export" title="export">
+              <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+              <span data-i18n="navExport"></span>
+            </button>
+            <button class="nav-item" data-page="tools" title="tools">
+              <svg viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5 5L4 17v3h3l5.7-5.7a4 4 0 0 0 5-5l-2.4 2.4-3-3z"/></svg>
+              <span data-i18n="navTools"></span>
+            </button>
+            <button class="nav-item" data-page="runs" title="runs">
+              <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 9h8M8 13h5"/></svg>
+              <span data-i18n="navRuns"></span>
+            </button>
+            <button class="nav-item" data-page="api" title="api">
+              <svg viewBox="0 0 24 24"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"/></svg>
+              <span>Agent API</span>
+            </button>
+          </nav>
+          <div class="nav-bottom">
+            <button class="nav-item" data-page="settings" title="settings">
+              <svg viewBox="0 0 24 24"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5zM19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1a7 7 0 0 0-1.8-1L14.4 3h-4l-.4 3.1a7 7 0 0 0-1.8 1l-2.4-1-2 3.4 2 1.5a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a7 7 0 0 0 1.8 1l.4 3.1h4l.4-3.1a7 7 0 0 0 1.8-1l2.4 1 2-3.4-2-1.5c.1-.3.1-.7.1-1z"/></svg>
+              <span data-i18n="navSettings"></span>
+            </button>
+            <button class="nav-item" data-page="readme" title="README">
+              <svg viewBox="0 0 24 24"><path d="M6 3h9l3 3v15H6zM15 3v4h4M9 11h6M9 15h6M9 7h2"/></svg>
+              <span data-i18n="navReadme"></span>
+            </button>
+          </div>
+        </aside>
+
+        <main class="main">
+          <div id="startupLoader" class="accent-line startup-loader" aria-hidden="true"><span id="startupLoaderBar"></span></div>
+
+          <section class="page active overview-layout" id="page-overview">
+            <div class="page-head overview-head">
+              <h1 data-i18n="overviewTitle"></h1>
+              <p data-i18n="overviewHint"></p>
+            </div>
+            <section id="bootstrapPanel" class="bootstrap-panel">
+              <div class="bootstrap-copy">
+                <strong id="bootstrapTitle">Starting backend...</strong>
+                <span id="bootstrapMessage">Preparing...</span>
+              </div>
+              <div class="bootstrap-track"><span id="bootstrapBar"></span></div>
+            </section>
+            <div class="stat-grid">
+              <div class="stat-card"><span data-i18n="metricCollections"></span><strong id="metricCollections">0</strong></div>
+              <div class="stat-card"><span data-i18n="metricTasks"></span><strong id="metricTasks">0</strong></div>
+              <div class="stat-card"><span data-i18n="metricDone"></span><strong id="metricDone">0</strong></div>
+              <div class="stat-card"><span data-i18n="metricRuns"></span><strong id="metricRuns">0</strong></div>
+            </div>
+            <section class="section-block tool-health-panel">
+              <div class="section-title tool-health-title">
+                <div><h2 data-i18n="toolInterfaceStatus"></h2><p data-i18n="toolInterfaceStatusHint"></p></div>
+                <span id="toolHealthSummary" class="muted-count">0 / 6</span>
+              </div>
+              <div id="toolHealthGrid" class="tool-health-grid" aria-live="polite"></div>
+            </section>
+            <details class="quickstart-disclosure">
+              <summary>
+                <div><strong data-i18n="quickStart"></strong><span data-i18n="quickStartHint"></span></div>
+                <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+              </summary>
+              <div class="quickstart-content">
+                <div class="quickstart-actions"><span data-i18n="agentPromptTitle"></span><button id="copyAgentPrompt" class="secondary-button compact-button" data-i18n="copyPrompt"></button></div>
+                <pre id="agentPromptTemplate"></pre>
+              </div>
+            </details>
+            <section class="section-block activity-panel">
+              <div class="section-title"><h2 data-i18n="recentStatus"></h2><span id="activityCount" class="muted-count">0</span></div>
+              <pre id="eventLog"></pre>
+            </section>
+          </section>
+
+          <section class="page login-layout" id="page-login">
+            <div class="page-head">
+              <h1 data-i18n="loginTitle"></h1>
+              <p data-i18n="loginHint"></p>
+            </div>
+            <div class="browser-panel">
+              <webview id="biliView" partition="persist:bili-orchestrator" src="https://www.bilibili.com" allowpopups></webview>
+            </div>
+            <aside class="side-sheet">
+              <h2 data-i18n="loginStatus"></h2>
+              <p data-i18n="loginStatusHint"></p>
+              <div class="account-manager">
+                <label><span data-i18n="savedAccount"></span><select id="credentialSelect"></select></label>
+                <label><span data-i18n="accountName"></span><input id="credentialUsername" autocomplete="username" /></label>
+                <label><span data-i18n="accountPassword"></span><input id="credentialPassword" type="password" autocomplete="current-password" /></label>
+                <label><span data-i18n="accountNote"></span><input id="credentialNote" /></label>
+                <div class="button-row">
+                  <button id="saveCredential" class="secondary-button" data-i18n="saveAccount"></button>
+                  <button id="deleteCredential" class="secondary-button" data-i18n="deleteAccount"></button>
+                </div>
+                <button id="oneClickLogin" class="primary-button" data-i18n="oneClickLogin"></button>
+              </div>
+              <div id="smsPanel" class="sms-panel">
+                <div class="sms-head">
+                  <strong data-i18n="smsTitle"></strong>
+                  <span id="smsStatus" data-i18n="smsWaiting"></span>
+                </div>
+                <div class="button-row">
+                  <button id="sendSmsCode" class="secondary-button" data-i18n="sendSms"></button>
+                  <button id="refreshSmsState" class="secondary-button" data-i18n="refresh"></button>
+                </div>
+                <label><span data-i18n="smsCode"></span><input id="smsCodeInput" autocomplete="one-time-code" inputmode="numeric" /></label>
+                <button id="submitSmsCode" class="primary-button" data-i18n="confirmSms"></button>
+              </div>
+              <button id="checkLogin" class="primary-button" data-i18n="checkLogin"></button>
+              <pre id="loginOutput"></pre>
+            </aside>
+          </section>
+
+          <section class="page" id="page-collections">
+            <div class="page-head">
+              <h1 data-i18n="collectionsTitle"></h1>
+              <p data-i18n="collectionsHint"></p>
+            </div>
+            <section class="section-block">
+              <div class="section-title">
+                <h2 data-i18n="syncSettings"></h2>
+                <button id="loadFolders" class="secondary-button" data-i18n="loadFolders"></button>
+              </div>
+              <div class="form-row">
+                <label><span data-i18n="favoriteFolder"></span><select id="folderSelect"><option value="" data-i18n="readFoldersFirst"></option></select></label>
+                <label><span data-i18n="label"></span><input id="labelInput" value="bili" /></label>
+                <button id="syncCollection" class="primary-button" data-i18n="syncTasks" disabled></button>
+              </div>
+              <div id="syncProgress" class="sync-progress" aria-live="polite">
+                <div><span id="syncProgressLabel" data-i18n="syncPreparing"></span><strong id="syncProgressPercent">0%</strong></div>
+                <div class="sync-progress-track"><span id="syncProgressBar"></span></div>
+              </div>
+              <pre id="collectionOutput"></pre>
+            </section>
+          </section>
+
+          <section class="page" id="page-tasks">
+            <div class="page-head">
+              <h1 data-i18n="tasksTitle"></h1>
+              <p data-i18n="tasksHint"></p>
+            </div>
+            <section class="task-target-bar">
+              <div class="task-target-copy">
+                <span data-i18n="activeAgentTarget"></span>
+                <strong id="activeCollectionLabel" data-i18n="noActiveCollection"></strong>
+              </div>
+              <div class="task-target-controls">
+                <label><span data-i18n="inventoryUser"></span><select id="taskUserSelect"></select></label>
+                <label><span data-i18n="inventoryCollection"></span><select id="taskCollectionSelect"></select></label>
+                <button id="activateCollection" class="primary-button compact-button" data-i18n="activateCollection"></button>
+                <button id="refreshTasks" class="icon-action" data-i18n-title="refresh" aria-label="refresh"><svg viewBox="0 0 24 24"><path d="M20 6v5h-5M4 18v-5h5M18.5 9A7 7 0 0 0 6.2 6.2L4 9M5.5 15A7 7 0 0 0 17.8 17.8L20 15"/></svg></button>
+              </div>
+            </section>
+            <section class="task-analytics-band">
+              <div class="analytics-heading">
+                <div><span data-i18n="currentInventory"></span><strong id="taskContextLabel">-</strong></div>
+                <div class="progress-copy"><strong id="taskProgressPercent">0%</strong><span id="taskProgressLabel">0 / 0</span></div>
+              </div>
+              <div class="collection-progress"><span id="taskProgressBar"></span></div>
+              <div class="metric-strip">
+                <div><span data-i18n="enabledTasks"></span><strong id="taskMetricEnabled">0</strong></div>
+                <div><span data-i18n="claimedTasks"></span><strong id="taskMetricClaimed">0</strong></div>
+                <div><span data-i18n="failedTasks"></span><strong id="taskMetricFailed">0</strong></div>
+                <div><span data-i18n="disabledTasks"></span><strong id="taskMetricDisabled">0</strong></div>
+                <div class="agent-summary" role="button" tabindex="0" aria-controls="agentPerformanceDetails" aria-expanded="false"><span data-i18n="agentPerformance"></span><div id="agentPerformancePreview"></div></div>
+              </div>
+            </section>
+            <section class="section-block task-workbench">
+              <div class="task-list-header">
+                <div><h2 data-i18n="videoTasks"></h2><span id="taskFilterSummary">0</span><span id="taskSelectionSummary">0</span></div>
+                <div class="selection-actions">
+                  <button id="selectVisibleTasks" class="secondary-button compact-button" data-i18n="selectVisible"></button>
+                  <button id="invertVisibleTasks" class="secondary-button compact-button" data-i18n="invertSelection"></button>
+                  <span class="toolbar-divider"></span>
+                  <button id="enableSelectedTasks" class="secondary-button compact-button" data-i18n="enableSelected"></button>
+                  <button id="disableSelectedTasks" class="secondary-button compact-button danger-button" data-i18n="disableSelected"></button>
+                </div>
+              </div>
+              <div class="task-primary-filters">
+                <label class="task-search"><span data-i18n="searchTasks"></span><input id="taskSearch" type="search" data-i18n-placeholder="searchTasksPlaceholder" /></label>
+                <label><span data-i18n="sortByFavorite"></span><select id="taskSort"><option value="desc" data-i18n="newestFirst"></option><option value="asc" data-i18n="oldestFirst"></option></select></label>
+                <button id="taskFilterToggle" class="secondary-button compact-button filter-toggle" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 5h16l-6 7v5l-4 2v-7z"/></svg><span data-i18n="advancedFilters"></span></button>
+              </div>
+              <div id="taskAdvancedFilters" class="task-advanced-filters">
+                <label><span data-i18n="favoriteDateFrom"></span><input id="taskDateFrom" type="date" /></label>
+                <label><span data-i18n="favoriteDateTo"></span><input id="taskDateTo" type="date" /></label>
+                <div class="duration-filter">
+                  <div><span data-i18n="durationRange"></span><strong id="durationRangeLabel">0:00 - 0:00</strong></div>
+                  <div class="dual-range"><input id="durationMin" type="range" min="0" max="1" value="0" /><input id="durationMax" type="range" min="0" max="1" value="1" /></div>
+                </div>
+              </div>
+              <div id="agentPerformanceDetails" class="agent-performance-details"></div>
+              <div id="taskList" class="setting-list task-list"></div>
+            </section>
+          </section>
+
+          <section class="page" id="page-workers">
+            <div class="page-head">
+              <h1 data-i18n="workersTitle"></h1>
+              <p data-i18n="workersHint"></p>
+            </div>
+            <div class="worker-metrics">
+              <div><span data-i18n="workerTotal"></span><strong id="workerMetricTotal">0</strong></div>
+              <div><span data-i18n="workerActive"></span><strong id="workerMetricActive">0</strong></div>
+              <div><span data-i18n="workerPaused"></span><strong id="workerMetricPaused">0</strong></div>
+              <div><span data-i18n="workerWorking"></span><strong id="workerMetricWorking">0</strong></div>
+            </div>
+            <section class="section-block worker-inventory">
+              <div class="section-title"><div><h2 data-i18n="workerSessions"></h2><p data-i18n="workerSessionsHint"></p></div><button id="refreshWorkers" class="secondary-button compact-button" data-i18n="refresh"></button></div>
+              <div id="workerList" class="setting-list"></div>
+            </section>
+          </section>
+
+          <section class="page document-library-page" id="page-documents">
+            <div class="page-head document-library-head">
+              <div><h1 data-i18n="documentsTitle"></h1><p data-i18n="documentsHint"></p></div>
+              <span id="documentResultSummary" class="muted-count">0</span>
+            </div>
+            <section class="section-block document-filter-panel">
+              <div class="document-primary-filters">
+                <label><span data-i18n="inventoryUser"></span><select id="documentUserSelect"></select></label>
+                <label><span data-i18n="inventoryCollection"></span><select id="documentCollectionSelect"></select></label>
+                <label class="document-search"><span data-i18n="searchTasks"></span><input id="documentSearch" type="search" data-i18n-placeholder="searchTasksPlaceholder" /></label>
+                <label><span data-i18n="documentSort"></span><select id="documentSort"><option value="favorite-desc" data-i18n="favoriteNewest"></option><option value="favorite-asc" data-i18n="favoriteOldest"></option><option value="published-desc" data-i18n="publishedNewest"></option><option value="published-asc" data-i18n="publishedOldest"></option></select></label>
+                <button id="documentFilterToggle" class="secondary-button compact-button filter-toggle" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 5h16l-6 7v5l-4 2v-7z"/></svg><span data-i18n="advancedFilters"></span></button>
+              </div>
+              <div id="documentAdvancedFilters" class="document-advanced-filters">
+                <label><span data-i18n="favoriteDateFrom"></span><input id="documentFavoriteFrom" type="date" /></label>
+                <label><span data-i18n="favoriteDateTo"></span><input id="documentFavoriteTo" type="date" /></label>
+                <label><span data-i18n="publishedDateFrom"></span><input id="documentPublishedFrom" type="date" /></label>
+                <label><span data-i18n="publishedDateTo"></span><input id="documentPublishedTo" type="date" /></label>
+                <div class="duration-filter document-duration-filter"><div><span data-i18n="durationRange"></span><strong id="documentDurationLabel">0:00 - 0:00</strong></div><div class="dual-range"><input id="documentDurationMin" type="range" min="0" max="1" value="0" /><input id="documentDurationMax" type="range" min="0" max="1" value="1" /></div></div>
+              </div>
+            </section>
+            <div class="document-library-layout">
+              <section class="section-block document-index-panel">
+                <div class="document-panel-title"><strong data-i18n="documentList"></strong><span id="documentListCount">0</span></div>
+                <div id="documentList" class="document-list"></div>
+              </section>
+              <section class="section-block document-preview-panel">
+                <div class="document-preview-toolbar">
+                  <div><strong id="documentPreviewTitle" data-i18n="selectDocument"></strong><span id="documentPreviewMeta"></span><code id="documentPreviewPath"></code></div>
+                  <button id="openDocumentFile" class="secondary-button compact-button" data-i18n="openFile" disabled></button>
+                </div>
+                <article id="documentPreview" class="markdown-document document-preview"><div class="document-preview-empty"><strong data-i18n="selectDocument"></strong><span data-i18n="selectDocumentHint"></span></div></article>
+              </section>
+            </div>
+          </section>
+
+          <section class="page" id="page-export">
+            <div class="page-head">
+              <h1 data-i18n="exportTitle"></h1>
+              <p data-i18n="exportHint"></p>
+            </div>
+            <div class="export-layout">
+              <section class="section-block export-source-panel">
+                <div class="section-title"><div><h2 data-i18n="completedLibrary"></h2><p data-i18n="completedLibraryHint"></p></div><button id="addExportSelection" class="secondary-button compact-button" data-i18n="addToExport"></button></div>
+                <div class="export-filters">
+                  <label><span data-i18n="inventoryUser"></span><select id="exportUserSelect"></select></label>
+                  <label><span data-i18n="inventoryCollection"></span><select id="exportCollectionSelect"></select></label>
+                  <label><span data-i18n="searchTasks"></span><input id="exportSearch" type="search" data-i18n-placeholder="searchTasksPlaceholder" /></label>
+                </div>
+                <div class="export-select-row"><button id="selectAllExportSource" class="secondary-button compact-button" data-i18n="selectVisible"></button><button id="invertExportSource" class="secondary-button compact-button" data-i18n="invertSelection"></button><span id="exportSourceSummary">0</span></div>
+                <div id="exportSourceList" class="export-task-list"></div>
+              </section>
+              <section class="section-block export-queue-panel">
+                <div class="section-title"><div><h2 data-i18n="exportQueue"></h2><p id="exportQueueSummary">0</p></div><button id="clearExportQueue" class="secondary-button compact-button" data-i18n="clear"></button></div>
+                <div id="exportQueueList" class="export-queue-list"></div>
+                <fieldset class="metadata-options">
+                  <legend data-i18n="filenameMetadata"></legend>
+                  <label><input id="exportMetaBvid" class="app-checkbox" type="checkbox" checked /><span>BV 号</span></label>
+                  <label><input id="exportMetaTitle" class="app-checkbox" type="checkbox" checked /><span data-i18n="videoTitle"></span></label>
+                  <label><input id="exportMetaOwner" class="app-checkbox" type="checkbox" checked /><span data-i18n="uploader"></span></label>
+                  <label><input id="exportMetaCollection" class="app-checkbox" type="checkbox" checked /><span data-i18n="sourceCollection"></span></label>
+                  <label><input id="exportMetaPublished" class="app-checkbox" type="checkbox" checked /><span data-i18n="publishedDate"></span></label>
+                  <label><input id="exportMetaFavorite" class="app-checkbox" type="checkbox" checked /><span data-i18n="favoriteDate"></span></label>
+                  <label><input id="exportMetaTags" class="app-checkbox" type="checkbox" checked /><span data-i18n="videoTags"></span></label>
+                </fieldset>
+                <button id="runMarkdownExport" class="primary-button export-run-button" data-i18n="chooseFolderExport"></button>
+              </section>
+            </div>
+          </section>
+
+          <section class="page" id="page-tools">
+            <div class="page-head">
+              <h1 data-i18n="toolsTitle"></h1>
+              <p data-i18n="toolsHint"></p>
+            </div>
+            <section class="section-block">
+              <div class="section-title">
+                <h2 data-i18n="execTools"></h2>
+                <button id="refreshTools" class="secondary-button" data-i18n="refresh"></button>
+              </div>
+              <div id="toolList" class="setting-list"></div>
+            </section>
+          </section>
+
+          <section class="page" id="page-runs">
+            <div class="page-head">
+              <h1 data-i18n="runsTitle"></h1>
+              <p data-i18n="runsHint"></p>
+            </div>
+            <section class="section-block">
+              <div class="section-title">
+                <h2 data-i18n="toolRuns"></h2>
+                <button id="refreshRuns" class="secondary-button" data-i18n="refresh"></button>
+              </div>
+              <div id="runList" class="setting-list"></div>
+            </section>
+          </section>
+
+          <section class="page" id="page-api">
+            <div class="page-head">
+              <h1>Agent API</h1>
+              <p data-i18n="apiHint"></p>
+            </div>
+            <div class="api-dashboard">
+              <section class="section-block api-tool-panel">
+                <div class="section-title"><div><h2 data-i18n="toolUsageAnalytics"></h2><p data-i18n="toolUsageHint"></p></div></div>
+                <div id="apiToolAnalytics" class="setting-list"></div>
+              </section>
+              <section class="section-block api-doc-panel">
+                <div class="section-title"><h2 data-i18n="apiQuickReference"></h2><button id="copyApiDocs" class="secondary-button compact-button" data-i18n="copy"></button></div>
+                <pre id="apiDocs"></pre>
+              </section>
+            </div>
+          </section>
+
+          <section class="page" id="page-settings">
+            <div class="page-head">
+              <h1 data-i18n="settingsTitle"></h1>
+              <p data-i18n="settingsHint"></p>
+            </div>
+            <div class="settings-primary">
+              <section class="section-block theme-settings">
+                <div class="section-title">
+                  <h2 data-i18n="themeTitle"></h2>
+                </div>
+                <div id="themeChoices" class="theme-grid"></div>
+              </section>
+              <section class="section-block filename-settings">
+                <div class="section-title"><div><h2 data-i18n="artifactNaming"></h2><p data-i18n="artifactNamingHint"></p></div></div>
+                <div id="filenameMetadataChoices" class="filename-metadata-grid">
+                  <label><input class="app-checkbox" type="checkbox" data-filename-meta="bvid" checked /><span>BV 号</span></label>
+                  <label><input class="app-checkbox" type="checkbox" data-filename-meta="title" checked /><span data-i18n="videoTitle"></span></label>
+                  <label><input class="app-checkbox" type="checkbox" data-filename-meta="owner" checked /><span data-i18n="uploader"></span></label>
+                  <label><input class="app-checkbox" type="checkbox" data-filename-meta="publishedAt" checked /><span data-i18n="publishedDate"></span></label>
+                  <label><input class="app-checkbox" type="checkbox" data-filename-meta="favoriteAddedAt" checked /><span data-i18n="favoriteDate"></span></label>
+                  <label><input class="app-checkbox" type="checkbox" data-filename-meta="collection" checked /><span data-i18n="sourceCollection"></span></label>
+                  <label><input class="app-checkbox" type="checkbox" data-filename-meta="tags" checked /><span data-i18n="videoTags"></span></label>
+                </div>
+                <div class="filename-preview"><span data-i18n="filenamePreview"></span><code id="filenamePreview"></code></div>
+              </section>
+            </div>
+            <div class="settings-side">
+              <section class="section-block workspace-settings">
+                <div class="section-title">
+                  <div><h2 data-i18n="workspaceLibraries"></h2><p data-i18n="workspaceLibrariesHint"></p></div>
+                  <button id="addWorkspace" class="secondary-button compact-button" data-i18n="addWorkspace"></button>
+                </div>
+                <div id="workspaceList" class="workspace-list"></div>
+              </section>
+              <section class="section-block resource-settings">
+                <div class="section-title scheduler-title">
+                  <div><h2>资源调度</h2><p>统一管理 API、下载、FFmpeg、磁盘与 ASR 并发。</p></div>
+                  <span id="schedulerStatus" class="muted-count">启动中</span>
+                </div>
+                <div class="scheduler-asr-row">
+                  <div>
+                    <strong>CPU ASR 辅助通道</strong>
+                    <span id="cpuAsrHint">默认关闭，仅在手动开启后加载模型。</span>
+                  </div>
+                  <label class="switch" title="开启或关闭 CPU ASR 服务">
+                    <input id="cpuAsrToggle" type="checkbox" />
+                    <span></span>
+                  </label>
+                </div>
+                <div class="gpu-memory-row">
+                  <div><span id="gpuMemoryLabel">GPU 显存</span><strong id="gpuMemoryValue">检测中</strong></div>
+                  <div class="gpu-memory-track"><span id="gpuMemoryBar"></span></div>
+                </div>
+                <div id="schedulerPoolGrid" class="scheduler-pool-grid"></div>
+              </section>
+              <section class="section-block runtime-settings">
+                <div class="section-title"><h2 data-i18n="runtimeInfo"></h2></div>
+                <div class="setting-list compact-settings">
+                  <div class="setting-row">
+                    <div class="row-icon"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></div>
+                    <div class="row-main"><h3 data-i18n="sidebarWidth"></h3><p data-i18n="sidebarHint"></p></div>
+                    <button id="sidebarToggleInSettings" class="secondary-button compact-button" data-i18n="toggle"></button>
+                  </div>
+                </div>
+                <div id="settingsOutput" class="runtime-summary"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="page readme-layout" id="page-readme">
+            <div class="page-head readme-head">
+              <div>
+                <h1 data-i18n="readmeTitle"></h1>
+                <p data-i18n="readmeHint"></p>
+              </div>
+              <div class="readme-actions">
+                <button id="copyReadme" class="secondary-button compact-button" data-i18n="copyMarkdown"></button>
+                <button id="openReadme" class="secondary-button compact-button" data-i18n="openFile"></button>
+              </div>
+            </div>
+            <section class="section-block readme-panel">
+              <div class="readme-source"><span>README.md</span><code id="readmePath"></code></div>
+              <article id="readmeContent" class="readme-document"><p data-i18n="readmeLoading"></p></article>
+            </section>
+          </section>
+        </main>
+      </div>
+    </div>
+    <div id="toastViewport" class="toast-viewport" aria-live="polite" aria-atomic="true"></div>
+    <script src="../../node_modules/mermaid/dist/mermaid.min.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

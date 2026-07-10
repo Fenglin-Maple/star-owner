@@ -1,0 +1,10 @@
+faster-whisper==1.2.1
+ctranslate2==4.8.1
+av==18.0.0
+numpy==2.5.1
+huggingface-hub==1.23.0
+tokenizers==0.23.1
+onnxruntime==1.27.0
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cuda-nvrtc-cu12==12.9.86
+nvidia-cudnn-cu12==9.24.0.43

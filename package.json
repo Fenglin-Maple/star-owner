@@ -1,0 +1,29 @@
+{
+  "name": "bili-agent-orchestrator",
+  "productName": "星笺 BiliNote",
+  "version": "0.2.0",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "description": "星笺 BiliNote：Bilibili 收藏视频 Markdown 多 Agent 本地编排工作台。",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "smoke": "node scripts/smoke-test.js",
+    "test:scheduler": "node scripts/resource-scheduler-test.js",
+    "test:asr-service": "node scripts/asr-service-test.js",
+    "setup:asr": "powershell -ExecutionPolicy Bypass -File scripts/setup-faster-whisper.ps1",
+    "verify:release": "powershell -ExecutionPolicy Bypass -File scripts/verify-release.ps1",
+    "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle small"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "electron": "^43.0.0",
+    "ffmpeg-static": "^5.2.0",
+    "markdown-it": "^14.3.0",
+    "mermaid": "^11.16.0",
+    "sql.js": "^1.14.1",
+    "yt-dlp-exec": "^1.0.2"
+  }
+}
