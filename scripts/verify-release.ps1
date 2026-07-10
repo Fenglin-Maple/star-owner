@@ -25,6 +25,8 @@ $required = @(
   "node_modules\ffmpeg-static\ffmpeg.exe",
   "node_modules\yt-dlp-exec\bin\yt-dlp.exe",
   "node_modules\mermaid\dist\mermaid.min.js",
+  "node_modules\mammoth\package.json",
+  "node_modules\pdf-parse\package.json",
   "runtime\python\cpython-3.12.13-windows-x86_64-none\python.exe",
   "runtime\faster-whisper\Lib\site-packages\faster_whisper",
   "runtime\models\small\model.bin"
@@ -55,6 +57,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Smoke test failed." }
   & npm run test:scheduler
   if ($LASTEXITCODE -ne 0) { throw "Scheduler test failed." }
+  & npm run test:rag
+  if ($LASTEXITCODE -ne 0) { throw "RAG assistant test failed." }
   & npm audit --audit-level=high
   if ($LASTEXITCODE -ne 0) { throw "npm audit reported a high-severity issue." }
 } finally {

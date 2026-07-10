@@ -30,11 +30,22 @@ The canonical Markdown contract is `templates/video-summary-template.md` and is 
 - Use `apply_patch` for scoped source edits and keep unrelated refactors out of focused changes.
 - Run `npm run verify:release` before publishing or opening a release pull request.
 
+## Built-in RAG Assistant Contract
+
+- Treat the RAG assistant as an analysis client for accepted Markdown, not as a replacement for the external Worker submission protocol.
+- Never expose decrypted provider API keys to preload or renderer code.
+- Keep provider requests OpenAI-compatible and capability-gated; unsupported multimodal, reasoning, image, tool, compression, or subagent behavior must degrade honestly.
+- Preserve the per-session sandbox boundary and approval flow for outside paths, CMD, private/local URLs, and default-browser opening.
+- Knowledge retrieval must only read validation-accepted `done` tasks selected by the user for the current session.
+- Provider-supplied usage is authoritative when present. Any local estimate must remain distinguishable in implementation and documentation.
+- Add or update `scripts/rag-assistant-test.js` for provider protocol, tool-loop, retrieval, approval, attachment, compression, or usage changes.
+
 ## Required Tests
 
 ```powershell
 npm run smoke
 npm run test:scheduler
+npm run test:rag
 npm run test:asr-service
 npm audit --audit-level=high
 ```

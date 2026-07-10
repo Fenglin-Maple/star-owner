@@ -7,6 +7,7 @@ const { buildAnalytics } = require('./core/analytics');
 const { ApiServer } = require('./core/api-server');
 const { BiliClient } = require('./core/bili');
 const { promoteMindMap } = require('./core/markdown');
+const { RagAssistant } = require('./core/rag-assistant');
 const { Store } = require('./core/store');
 const { ToolRunner } = require('./core/tool-runner');
 const { initWorkspace, timestampForFile, videoArtifactName, WORKSPACE_ROOT } = require('./core/workspace');
@@ -24,9 +25,11 @@ let apiServer = null;
 let store = null;
 let bili = null;
 let toolRunner = null;
+let ragAssistant = null;
 let currentUser = null;
 let backendReady = false;
 let toolHealth = [];
+const pendingRagApprovals = new Map();
 let bootstrapState = {
   phase: 'starting',
   progress: 0.04,
@@ -62,6 +65,12 @@ function createWindow() {
     sendBootstrap();
     sendRuntime();
   });
+  mainWindow.webContents.on('console-message', (details) => {
+    if (details.level === 'error') console.error(`[renderer] ${details.message} (${details.sourceId}:${details.lineNumber})`);
+  });
+  mainWindow.webContents.on('did-fail-load', (_event, code, description, url) => {
+    console.error(`[renderer-load] ${code} ${description} ${url}`);
+  });
 }
 
 function biliSession() {
@@ -73,6 +82,16 @@ async function bootstrap() {
   initWorkspace();
   emitBootstrap('Opening SQLite database...', 0.32);
   store = await Store.open();
+  ragAssistant = new RagAssistant({
+    store,
+    workspaceRoot: store.getDefaultWorkspace()?.root || WORKSPACE_ROOT,
+    encryptSecret,
+    decryptSecret,
+    emit: (event) => mainWindow?.webContents.send('rag:event', event),
+    requestApproval: requestRagApproval,
+    browseHidden,
+    openExternal: (url) => shell.openExternal(url)
+  });
   emitBootstrap('Preparing Bilibili session...', 0.52);
   bili = new BiliClient(biliSession);
   emitBootstrap('Registering tool runner...', 0.66);
@@ -138,6 +157,8 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   apiServer?.stop();
   toolRunner?.shutdown();
+  for (const pending of pendingRagApprovals.values()) pending.resolve({ approved: false });
+  pendingRagApprovals.clear();
 });
 
 ipcMain.handle('app:get-runtime', async () => ({
@@ -428,6 +449,103 @@ ipcMain.handle('scheduler:update', async (_event, patch = {}) => {
   return state;
 });
 
+ipcMain.handle('rag:state', async (_event, sessionId) => {
+  if (ragAssistant) return ragAssistant.state(sessionId);
+  return { loading: true, providers: [], sessions: [], activeSession: null, knowledgeCatalog: [], modelUsage: [] };
+});
+
+ipcMain.handle('rag:provider-save', async (_event, payload) => {
+  assertBackendReady();
+  return ragAssistant.saveProvider(payload || {});
+});
+
+ipcMain.handle('rag:provider-delete', async (_event, providerId) => {
+  assertBackendReady();
+  return ragAssistant.deleteProvider(providerId);
+});
+
+ipcMain.handle('rag:models-fetch', async (_event, providerId) => {
+  assertBackendReady();
+  return ragAssistant.fetchModels(providerId);
+});
+
+ipcMain.handle('rag:models-update', async (_event, payload) => {
+  assertBackendReady();
+  return ragAssistant.updateProviderModels(payload?.providerId, payload?.models || []);
+});
+
+ipcMain.handle('rag:session-create', async (_event, payload) => {
+  assertBackendReady();
+  return ragAssistant.createSession(payload || {});
+});
+
+ipcMain.handle('rag:session-update', async (_event, payload) => {
+  assertBackendReady();
+  return ragAssistant.updateSession(payload?.sessionId, payload?.patch || {});
+});
+
+ipcMain.handle('rag:session-delete', async (_event, sessionId) => {
+  assertBackendReady();
+  return ragAssistant.deleteSession(sessionId);
+});
+
+ipcMain.handle('rag:session-compact', async (_event, sessionId) => {
+  assertBackendReady();
+  return ragAssistant.compact(sessionId);
+});
+
+ipcMain.handle('rag:send', async (_event, payload) => {
+  assertBackendReady();
+  return ragAssistant.send(payload?.sessionId, payload || {});
+});
+
+ipcMain.handle('rag:stop', async (_event, sessionId) => {
+  assertBackendReady();
+  return ragAssistant.cancel(sessionId);
+});
+
+ipcMain.handle('rag:choose-sandbox', async () => {
+  assertBackendReady();
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '选择 RAG 会话沙盒目录',
+    properties: ['openDirectory', 'createDirectory']
+  });
+  return { canceled: result.canceled, path: result.filePaths[0] || '' };
+});
+
+ipcMain.handle('rag:create-sandbox', async () => {
+  assertBackendReady();
+  const root = store.getDefaultWorkspace()?.root || WORKSPACE_ROOT;
+  const directory = path.join(root, '.star-note', 'rag-sandboxes', `sandbox-${timestampForFile()}`);
+  fs.mkdirSync(directory, { recursive: true });
+  return { path: directory };
+});
+
+ipcMain.handle('rag:attachments-import', async (_event, sessionId) => {
+  assertBackendReady();
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '添加到 RAG 对话',
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: '支持的资料与媒体', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'mp4', 'webm', 'mov', 'mp3', 'wav', 'm4a', 'ogg', 'flac', 'pdf', 'md', 'txt', 'docx', 'json', 'csv'] },
+      { name: '全部文件', extensions: ['*'] }
+    ]
+  });
+  if (result.canceled) return { canceled: true, attachments: [] };
+  return { canceled: false, attachments: await ragAssistant.importFiles(sessionId, result.filePaths) };
+});
+
+ipcMain.handle('rag:approval-resolve', async (_event, payload = {}) => {
+  const pending = pendingRagApprovals.get(String(payload.id || ''));
+  if (!pending) return { resolved: false };
+  pendingRagApprovals.delete(String(payload.id));
+  clearTimeout(pending.timer);
+  pending.resolve({ approved: Boolean(payload.approved), fullAccess: Boolean(payload.fullAccess) });
+  return { resolved: true };
+});
+
+ipcMain.handle('rag:render-markdown', async (_event, markdown) => markdownRenderer.render(String(markdown || '')));
+
 ipcMain.handle('window:minimize', async () => mainWindow?.minimize());
 ipcMain.handle('window:maximize-toggle', async () => {
   if (!mainWindow) return false;
@@ -448,6 +566,70 @@ function decryptSecret(secret) {
   if (!secret) return '';
   if (secret.mode === 'safeStorage') return safeStorage.decryptString(Buffer.from(secret.value, 'base64'));
   return secret.value || '';
+}
+
+function requestRagApproval(request) {
+  const id = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingRagApprovals.delete(id);
+      resolve({ approved: false, reason: 'approval timeout' });
+    }, 120000);
+    pendingRagApprovals.set(id, { resolve, timer });
+    mainWindow?.webContents.send('rag:event', { type: 'approval-request', approval: { id, ...request } });
+  });
+}
+
+async function browseHidden(value, options = {}) {
+  const url = new URL(String(value || ''));
+  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Hidden browser only supports HTTP(S).');
+  const browser = new BrowserWindow({
+    show: false,
+    width: 1180,
+    height: 820,
+    webPreferences: {
+      partition: 'persist:rag-hidden-browser',
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      images: false
+    }
+  });
+  browser.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  const blockPrivateNavigation = (event) => {
+    try {
+      const candidate = new URL(event.url || '');
+      if (!options.allowPrivate && isPrivateNetworkHost(candidate.hostname)) event.preventDefault();
+    } catch {
+      event.preventDefault();
+    }
+  };
+  browser.webContents.on('will-navigate', blockPrivateNavigation);
+  browser.webContents.on('will-redirect', blockPrivateNavigation);
+  try {
+    await Promise.race([
+      browser.loadURL(url.toString()),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Hidden browser timed out.')), 25000))
+    ]);
+    const result = await browser.webContents.executeJavaScript(`(() => {
+      const title = document.title || '';
+      const text = (document.body?.innerText || '').replace(/\\n{3,}/g, '\\n\\n').slice(0, 50000);
+      const links = [...document.querySelectorAll('a[href]')].slice(0, 40).map((a) => ({ text: (a.innerText || '').trim().slice(0, 160), href: a.href })).filter((item) => item.text && /^https?:/.test(item.href));
+      return { title, url: location.href, text, links };
+    })()`, true);
+    return JSON.stringify(result, null, 2);
+  } finally {
+    if (!browser.isDestroyed()) browser.destroy();
+  }
+}
+
+function isPrivateNetworkHost(host) {
+  const value = String(host || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  return value === 'localhost' || value.endsWith('.localhost') || value === '::' || value === '::1'
+    || /^0\./.test(value) || /^127\./.test(value) || /^10\./.test(value) || /^192\.168\./.test(value)
+    || /^169\.254\./.test(value) || /^172\.(1[6-9]|2\d|3[01])\./.test(value)
+    || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(value)
+    || /^(fc|fd|fe8|fe9|fea|feb)/.test(value);
 }
 
 function assertBackendReady() {

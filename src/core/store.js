@@ -69,6 +69,12 @@ class Store {
     return rows;
   }
 
+  delete(scope, id) {
+    const stmt = this.db.prepare('DELETE FROM kv WHERE scope = ? AND id = ?');
+    stmt.run([scope, String(id)]);
+    stmt.free();
+  }
+
   listRecent(scope, limit = 200) {
     const safeLimit = Math.max(1, Math.min(2000, Number(limit) || 200));
     const stmt = this.db.prepare('SELECT data FROM kv WHERE scope = ? ORDER BY updated_at DESC LIMIT ?');

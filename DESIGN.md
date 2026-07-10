@@ -6,7 +6,7 @@
 
 The desktop app owns orchestration, persistence, credentials, task leasing, tool execution, validation, and artifact inventory. Codex, Claude Code, and other agents use the local HTTP API to claim one task at a time, ask the app to execute media tools, and submit their final work.
 
-The current project stops at task and tool orchestration. It does not automatically create summaries by itself.
+The video pipeline stops at task and tool orchestration and does not automatically create summaries by itself. Separately, the built-in RAG assistant analyzes Markdown that has already passed submission validation.
 
 ## 2. Core Boundaries
 
@@ -29,6 +29,9 @@ flowchart LR
   Main --> Bili["Persistent Bilibili WebView session"]
   Main --> DB["SQLite / sql.js"]
   Main --> API["Local Agent HTTP API"]
+  Main --> RAG["Built-in RAG assistant"]
+  RAG --> Provider["OpenAI / NewAPI compatible provider"]
+  RAG --> Library
   API --> Agent["Codex / Claude / other agent"]
   Agent --> API
   API --> Runner["App ToolRunner"]
@@ -47,6 +50,7 @@ Runtime modules:
 - `src/core/analytics.js`: collection, agent, and tool usage statistics.
 - `src/core/workspace.js`: path safety and workspace layout.
 - `src/core/bili.js`: Bilibili session APIs and cookie export.
+- `src/core/rag-assistant.js`: compatible providers, RAG sessions, retrieval, streaming, model tools, approvals, and usage accounting.
 - `src/renderer/*`: frameless desktop UI.
 
 ## 4. Persistence
@@ -72,6 +76,11 @@ The generic `kv` table currently stores these scopes:
 - `workspaces`
 - `settings` (including the active collection target)
 - `credentials`
+- `ragProviders`
+- `ragSessions`
+- `ragMessages`
+- `ragAttachments`
+- `ragModelUsage`
 
 Task records are migrated on startup so legacy tasks default to `enabled: true`.
 
@@ -349,7 +358,7 @@ The task-page performance popover always opens, including before the first claim
 
 Brand: `星⭐收藏家`.
 
-The app uses an original anime-inspired blue-haired note keeper icon. The icon is generated locally by `scripts/generate-icon.py` into `assets/star-note.png` and `assets/star-note.ico`.
+The app uses a minimal flat rounded icon: a star over three layered collection bookmarks. The reproducible source is `scripts/generate-icon.py`, which writes `assets/star-note.png` and `assets/star-note.ico` without remote assets or font dependencies.
 
 Window behavior:
 
@@ -372,6 +381,7 @@ Pages:
 - Bilibili login: persistent WebView, encrypted account vault, one-click login, SMS bridge.
 - Collections: folder discovery and full collection sync.
 - Tasks: explicit Agent target activation, a compact progress band, primary search, collapsible advanced filters, batch state, and agent performance.
+- RAG assistant: persistent session list, streaming conversation surface, and a model/knowledge/sandbox inspector; supplier configuration lives in a focused modal.
 - Markdown library: accepted-document index by user and collection, BV/owner/title search, favorite/publish date filters, duration range, four time sort modes, and on-demand in-app Markdown preview with local frames.
 - Work Agent: independent Worker sessions, current assignments, performance, pause, and reactivation.
 - Export: completed Markdown selection across users/collections, a persistent export queue, seven filename metadata controls, and destination-folder export.
@@ -412,7 +422,45 @@ Export safeguards:
 - emit a timestamped machine-readable manifest for every batch;
 - never delete source workspace artifacts.
 
-## 16. Open-Source Distribution
+## 16. Built-in RAG Assistant
+
+The assistant is intentionally separate from the external video Worker protocol. It reads accepted knowledge documents, but it cannot mark video tasks complete or bypass submission validation.
+
+Provider contract:
+
+- `openai` and `newapi` currently share the OpenAI-compatible `GET /models` and `POST /chat/completions` wire format;
+- the configured Base URL is the API root immediately before `/models` and `/chat/completions`;
+- API keys are encrypted with Electron `safeStorage` when the platform exposes it and are never returned to the renderer;
+- arbitrary extra request headers support self-hosted gateways without hard-coding vendor rules;
+- streaming accepts SSE and providers that return ordinary JSON despite `stream: true`;
+- reasoning is displayed only from explicit provider fields such as `reasoning_content`, `reasoning`, or `thinking`.
+
+Model records are user-verifiable capability declarations. The app stores context window and switches for tools, reasoning, vision, audio, image output, compression, and subagents. A switch enables the corresponding request shape or UI; it does not emulate a capability absent from the upstream model.
+
+Knowledge retrieval:
+
+- catalog only `done` tasks whose accepted Markdown path still exists;
+- group collections by Bilibili user and allow multiple collections per session;
+- split Markdown by headings and bounded character windows, cache by file modification time, and rank passages with title-aware lexical matching;
+- inject retrieved passages before inference when tools are disabled, or expose `knowledge_search` when tools are enabled;
+- require the model system prompt to cite source title and collection and avoid claims not present in results.
+
+Conversation state persists in SQLite. Each session stores provider/model selection, selected collections, sandbox, permission mode, system prompt, token totals, and optional compressed summary. Messages store visible attachment metadata but not duplicate attachment bodies. Text/PDF/DOCX extraction and media files live in the session sandbox. Per-model accounting consumes provider usage fields when present and falls back to a clearly approximate character estimate.
+
+The tool loop permits at most six model/tool rounds per user turn. Supported tools cover knowledge search, sandbox file list/read/write, Windows CMD, hidden-browser web search/page reading, opening the default browser, and an isolated same-model subagent call. Tool calls, reasoning deltas, content deltas, completion state, and errors stream to the renderer. Cancellation aborts the active provider request and command child process.
+
+Security model:
+
+- restricted mode allows paths inside the session sandbox;
+- outside-sandbox paths, CMD, private/local browsing, and default-browser opening require renderer approval;
+- an approval can allow once, deny, or promote the session to full access;
+- full access broadens filesystem/CMD authority but still restricts browser tools to HTTP(S);
+- approval requests expire after two minutes and are denied when the app exits;
+- hidden pages run in an isolated sandboxed Electron partition with Node disabled, popups denied, and the browser window never shown.
+
+The current retrieval engine is deterministic lexical RAG rather than an embedding/vector database. This avoids an additional model dependency and works offline, while keeping a future embedding index behind the same collection/session boundary.
+
+## 17. Open-Source Distribution
 
 The repository tracks application source, lockfiles, templates, packaging scripts, and documentation. It intentionally ignores `node_modules/`, `runtime/`, models, `workspace/`, databases, logs, archives, and machine shortcuts. This keeps Git reviewable and prevents credentials or multi-gigabyte binaries from entering history.
 

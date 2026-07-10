@@ -11,6 +11,8 @@ This inventory is a practical release checklist, not legal advice. Release publi
 | Electron | 43.1.0 | MIT | Desktop runtime, [electron/electron](https://github.com/electron/electron) |
 | Mermaid | 11.16.0 | MIT | Offline mind-map rendering, [mermaid-js/mermaid](https://github.com/mermaid-js/mermaid) |
 | markdown-it | 14.3.0 | MIT | Markdown parsing, [markdown-it/markdown-it](https://github.com/markdown-it/markdown-it) |
+| mammoth | 1.11.0 | BSD-2-Clause | DOCX text extraction for RAG attachments, [mwilliamson/mammoth.js](https://github.com/mwilliamson/mammoth.js) |
+| pdf-parse | 1.1.1 | MIT | PDF text extraction for RAG attachments, [autokent/pdf-parse](https://gitlab.com/autokent/pdf-parse) |
 | sql.js | 1.14.1 | MIT | SQLite/WASM persistence, [sql-js/sql.js](https://github.com/sql-js/sql.js) |
 | yt-dlp-exec wrapper | 1.0.2 | MIT | Project-local yt-dlp launcher, [microlinkhq/yt-dlp-exec](https://github.com/microlinkhq/yt-dlp-exec) |
 | yt-dlp executable | 2026.07.04 in the current runtime | Unlicense | Media acquisition, [yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp) |

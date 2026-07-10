@@ -22,6 +22,8 @@ Usage:
 5. Log in from the application's Bilibili WebView and select a default Workspace.
 6. Windows may show an unknown-publisher warning until releases are code-signed.
 
+The built-in RAG assistant does not require another local runtime. To use it, open `RAG 助手`, add an OpenAI-compatible or NewAPI-compatible provider, enter the API root (commonly ending in `/v1`), save it, pull the remote model list, and enable the models you intend to use. API keys remain in the local application database in Electron `safeStorage` form where supported and are never included in release archives.
+
 The application creates `workspace/` beside itself and uses only project-relative runtime paths. Moving the extracted directory is supported. User cookies, SQLite data, task artifacts, and generated Markdown are never included in a public release archive.
 
 ### Hardware
@@ -111,6 +113,8 @@ See `AGENTS.md` for the complete worker and contributor contract.
 6. Publish the source from the exact Git tag used to build the binary.
 7. Do not upload credentials, Bilibili cookies, account names, task databases, or generated media without permission.
 
+Before a public release, also verify the RAG supplier dialog, remote model pull against a test-compatible endpoint, one streaming response, one knowledge search, restricted-mode approval, and context compression. Never configure a maintainer API key in the database used to assemble a release.
+
 ## 6. Troubleshooting
 
 - Tool health is visible on the Startup page.
@@ -118,3 +122,7 @@ See `AGENTS.md` for the complete worker and contributor contract.
 - If a portable build says Electron is missing, the archive was assembled incorrectly; do not ask the user to run `npm install` inside it.
 - If the GPU service cannot start, update the NVIDIA driver or enable CPU ASR after reviewing the performance tradeoff.
 - If Mermaid cannot render a diagram, the document preview shows a local error and the source block; correct the Mermaid syntax rather than loading a CDN.
+- If model pulling returns 404, the Base URL is usually one path level too high or low. It must resolve `<baseUrl>/models` and `<baseUrl>/chat/completions`.
+- If a model returns no reasoning panel, confirm the provider exposes an explicit compatible reasoning field; the application does not reveal or synthesize hidden chain-of-thought.
+- If tool calls fail, verify that the selected model really implements OpenAI-compatible function calling and that its model capability switch is enabled.
+- In restricted RAG sessions, CMD and paths outside the selected sandbox intentionally wait for an in-app approval dialog.

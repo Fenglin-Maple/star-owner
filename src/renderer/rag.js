@@ -1,0 +1,597 @@
+(() => {
+  const $ = (selector) => document.querySelector(selector);
+  const elements = {
+    page: $('#page-rag'), sessionList: $('#ragSessionList'), sessionSearch: $('#ragSessionSearch'), newSession: $('#ragNewSession'), usageSummary: $('#ragUsageSummary'),
+    chatTitle: $('#ragChatTitle'), chatMeta: $('#ragChatMeta'), contextPercent: $('#ragContextPercent'), contextBar: $('#ragContextBar'), compact: $('#ragCompact'), deleteSession: $('#ragDeleteSession'),
+    messages: $('#ragMessages'), runStatus: $('#ragRunStatus'), pendingAttachments: $('#ragPendingAttachments'), composer: $('#ragComposer'), input: $('#ragInput'), attach: $('#ragAttach'), send: $('#ragSend'), stop: $('#ragStop'),
+    providerSelect: $('#ragProviderSelect'), modelSelect: $('#ragModelSelect'), capabilities: $('#ragModelCapabilities'), refreshState: $('#ragRefreshState'), openProviders: $('#ragOpenProviders'),
+    knowledgeToggle: $('#ragKnowledgeToggle'), knowledgeMenu: $('#ragKnowledgeMenu'), knowledgeCount: $('#ragKnowledgeCount'), selectedKnowledge: $('#ragSelectedKnowledge'),
+    sandboxPath: $('#ragSandboxPath'), chooseSandbox: $('#ragChooseSandbox'), createSandbox: $('#ragCreateSandbox'), permissionBadge: $('#ragPermissionBadge'),
+    inputTokens: $('#ragInputTokens'), outputTokens: $('#ragOutputTokens'), totalTokens: $('#ragTotalTokens'), sessionRequests: $('#ragSessionRequests'),
+    providerModal: $('#ragProviderModal'), closeProviders: $('#ragCloseProviders'), providerList: $('#ragProviderList'), newProvider: $('#ragNewProvider'), providerId: $('#ragProviderId'), providerName: $('#ragProviderName'), providerType: $('#ragProviderType'), providerBaseUrl: $('#ragProviderBaseUrl'), providerApiKey: $('#ragProviderApiKey'), providerTemperature: $('#ragProviderTemperature'), providerMaxTokens: $('#ragProviderMaxTokens'), providerHeaders: $('#ragProviderHeaders'), saveProvider: $('#ragSaveProvider'), deleteProvider: $('#ragDeleteProvider'), fetchModels: $('#ragFetchModels'), remoteModels: $('#ragRemoteModels'), remoteModelCount: $('#ragRemoteModelCount'),
+    approvalModal: $('#ragApprovalModal'), approvalAction: $('#ragApprovalAction'), approvalTarget: $('#ragApprovalTarget'), approvalDetail: $('#ragApprovalDetail'), denyApproval: $('#ragDenyApproval'), approveOnce: $('#ragApproveOnce'), approveFull: $('#ragApproveFull')
+  };
+
+  let state = { providers: [], sessions: [], activeSession: null, knowledgeCatalog: [], modelUsage: [] };
+  let activeSessionId = localStorage.getItem('ragActiveSessionId') || '';
+  let pendingAttachments = [];
+  let streaming = null;
+  let currentApproval = null;
+  let editingProviderId = '';
+  let remoteModelSaveTimer = null;
+  let streamRenderTimer = null;
+  let initialized = false;
+
+  async function refresh(sessionId = activeSessionId, { quiet = false } = {}) {
+    try {
+      state = await window.orchestrator.ragState(sessionId || '');
+      if (state.loading) {
+        renderAll();
+        setTimeout(() => refresh(activeSessionId, { quiet: true }), 500);
+        return;
+      }
+      activeSessionId = state.activeSession?.id || state.sessions[0]?.id || '';
+      if (activeSessionId) localStorage.setItem('ragActiveSessionId', activeSessionId);
+      renderAll();
+      initialized = true;
+    } catch (error) {
+      if (!quiet) notify('RAG 助手尚未就绪', error.message || String(error), 'error');
+      if (!initialized) setTimeout(() => refresh(activeSessionId, { quiet: true }), 1200);
+    }
+  }
+
+  function renderAll() {
+    renderSessions();
+    renderInspector();
+    renderMessages();
+    renderUsageSummary();
+    if (!elements.providerModal.hidden) renderProviderManager();
+  }
+
+  function renderSessions() {
+    const query = String(elements.sessionSearch.value || '').trim().toLowerCase();
+    const sessions = state.sessions.filter((session) => !query || `${session.title} ${session.modelId}`.toLowerCase().includes(query));
+    elements.sessionList.innerHTML = '';
+    for (const session of sessions) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = `rag-session-item${session.id === activeSessionId ? ' active' : ''}`;
+      button.innerHTML = `<strong>${escapeHtml(session.title || '新对话')}</strong><span><em>${escapeHtml(session.modelId || '未选择模型')}</em><time>${relativeTime(session.updatedAt)}</time></span>`;
+      button.addEventListener('click', () => selectSession(session.id));
+      elements.sessionList.appendChild(button);
+    }
+    if (!sessions.length) elements.sessionList.innerHTML = '<div class="rag-list-empty">暂无会话</div>';
+  }
+
+  function renderUsageSummary() {
+    const total = state.modelUsage.reduce((sum, item) => sum + Number(item.totalTokens || 0), 0);
+    const requests = state.modelUsage.reduce((sum, item) => sum + Number(item.requests || 0), 0);
+    elements.usageSummary.innerHTML = `<span>全部模型累计</span><strong>${formatNumber(total)} tokens</strong><span>${formatNumber(requests)} 次请求 / ${state.modelUsage.length} 个模型</span>`;
+  }
+
+  async function selectSession(id) {
+    activeSessionId = id;
+    pendingAttachments = [];
+    localStorage.setItem('ragActiveSessionId', id);
+    await refresh(id, { quiet: true });
+  }
+
+  function renderInspector() {
+    const session = state.activeSession;
+    const enabled = Boolean(session);
+    elements.input.disabled = !enabled || streaming;
+    elements.attach.disabled = !enabled || streaming;
+    elements.send.disabled = !enabled || streaming || (!elements.input.value.trim() && !pendingAttachments.length);
+    elements.deleteSession.disabled = !enabled || streaming;
+    elements.chooseSandbox.disabled = !enabled || streaming;
+    elements.createSandbox.disabled = !enabled || streaming;
+    elements.compact.disabled = !enabled || streaming || !session?.modelCapabilities?.supportsCompression || (session?.messages?.length || 0) < 4;
+    elements.chatTitle.textContent = session?.title || '选择或创建会话';
+    elements.chatMeta.textContent = session ? `${providerName(session.providerId)} / ${session.modelId || '未选择模型'}` : '尚未配置模型';
+    const percent = Number(session?.contextPercent || 0);
+    elements.contextPercent.textContent = `${percent}%`;
+    elements.contextBar.style.width = `${Math.min(100, percent)}%`;
+    elements.contextBar.className = percent >= 90 ? 'danger' : (percent >= 72 ? 'warning' : '');
+
+    renderProviderAndModelSelects(session);
+    renderCapabilities(session?.modelCapabilities);
+    renderKnowledge(session);
+    elements.sandboxPath.textContent = session?.sandboxDir || '尚未创建会话';
+    elements.permissionBadge.textContent = session?.permissionMode === 'full' ? '完全访问' : '有限权限';
+    elements.permissionBadge.style.color = session?.permissionMode === 'full' ? 'var(--red)' : '';
+    for (const button of document.querySelectorAll('[data-rag-permission]')) button.classList.toggle('active', button.dataset.ragPermission === (session?.permissionMode || 'restricted'));
+
+    const usage = session?.tokenUsage || {};
+    elements.inputTokens.textContent = formatNumber(usage.input || 0);
+    elements.outputTokens.textContent = formatNumber(usage.output || 0);
+    elements.totalTokens.textContent = formatNumber(usage.total || 0);
+    const stats = state.modelUsage.find((item) => item.providerId === session?.providerId && item.modelId === session?.modelId);
+    elements.sessionRequests.textContent = `${formatNumber(stats?.requests || 0)} 次请求`;
+    renderPendingAttachments();
+  }
+
+  function renderProviderAndModelSelects(session) {
+    elements.providerSelect.innerHTML = '<option value="">选择供应商</option>' + state.providers.map((provider) => `<option value="${escapeAttr(provider.id)}">${escapeHtml(provider.name)}</option>`).join('');
+    elements.providerSelect.value = session?.providerId || '';
+    const provider = state.providers.find((item) => item.id === session?.providerId);
+    elements.modelSelect.innerHTML = '<option value="">选择模型</option>' + (provider?.enabledModels || []).map((model) => `<option value="${escapeAttr(model.id)}">${escapeHtml(model.name || model.id)}</option>`).join('');
+    elements.modelSelect.value = session?.modelId || '';
+    elements.providerSelect.disabled = !session || streaming;
+    elements.modelSelect.disabled = !session || streaming || !provider?.enabledModels?.length;
+  }
+
+  function renderCapabilities(model) {
+    if (!model?.id) {
+      elements.capabilities.innerHTML = '<span>尚未选择模型</span>';
+      return;
+    }
+    const capabilities = [
+      ['工具', model.supportsTools], ['推理', model.supportsReasoning], ['视觉', model.supportsVision], ['音频', model.supportsAudio], ['图片返回', model.supportsImages], ['压缩', model.supportsCompression], ['子 Agent', model.supportsSubagents]
+    ];
+    elements.capabilities.innerHTML = capabilities.map(([name, on]) => `<span class="${on ? 'on' : ''}">${name}</span>`).join('');
+  }
+
+  function renderKnowledge(session) {
+    const selected = new Set(session?.knowledgeCollectionIds || []);
+    const groups = groupBy(state.knowledgeCatalog, (item) => item.userName);
+    elements.knowledgeMenu.innerHTML = '';
+    for (const [user, collections] of groups) {
+      const heading = document.createElement('div');
+      heading.className = 'rag-knowledge-user';
+      heading.textContent = user;
+      elements.knowledgeMenu.appendChild(heading);
+      for (const collection of collections) {
+        const label = document.createElement('label');
+        label.className = 'rag-knowledge-option';
+        label.innerHTML = `<input type="checkbox" value="${escapeAttr(collection.id)}" ${selected.has(collection.id) ? 'checked' : ''}><span>${escapeHtml(collection.name)}</span><small>${collection.documentCount} 篇</small>`;
+        label.querySelector('input').addEventListener('change', updateKnowledgeSelection);
+        elements.knowledgeMenu.appendChild(label);
+      }
+    }
+    if (!state.knowledgeCatalog.length) elements.knowledgeMenu.innerHTML = '<div class="rag-list-empty">暂无已完成 Markdown</div>';
+    const selectedItems = state.knowledgeCatalog.filter((item) => selected.has(item.id));
+    elements.knowledgeCount.textContent = `${selectedItems.length} 个`;
+    elements.selectedKnowledge.innerHTML = selectedItems.map((item) => `<div class="rag-knowledge-chip"><span title="${escapeAttr(`${item.userName} / ${item.name}`)}">${escapeHtml(item.name)}</span><button type="button" data-remove-knowledge="${escapeAttr(item.id)}" aria-label="移除">×</button></div>`).join('');
+    for (const button of elements.selectedKnowledge.querySelectorAll('[data-remove-knowledge]')) button.addEventListener('click', () => removeKnowledge(button.dataset.removeKnowledge));
+  }
+
+  async function updateKnowledgeSelection() {
+    if (!activeSessionId) return;
+    const ids = [...elements.knowledgeMenu.querySelectorAll('input:checked')].map((input) => input.value);
+    await updateSession({ knowledgeCollectionIds: ids });
+  }
+
+  async function removeKnowledge(id) {
+    const ids = (state.activeSession?.knowledgeCollectionIds || []).filter((item) => item !== id);
+    await updateSession({ knowledgeCollectionIds: ids });
+  }
+
+  async function updateSession(patch, { quiet = true } = {}) {
+    if (!activeSessionId) return;
+    try {
+      await window.orchestrator.ragUpdateSession({ sessionId: activeSessionId, patch });
+      await refresh(activeSessionId, { quiet: true });
+    } catch (error) {
+      if (!quiet) notify('会话设置保存失败', error.message || String(error), 'error');
+      else notify('设置未保存', error.message || String(error), 'error');
+    }
+  }
+
+  async function renderMessages() {
+    const session = state.activeSession;
+    if (!session?.messages?.length && !streaming) {
+      elements.messages.innerHTML = '<div class="rag-empty-state"><svg viewBox="0 0 24 24"><path d="M4 5h16v12H8l-4 4zM8 9h8M8 13h5"/></svg><strong>让知识库真正参与对话</strong><span>配置供应商、选择模型和收藏夹知识库后，可进行跨文档查阅、整理与分析。</span></div>';
+      return;
+    }
+    const messages = [...(session?.messages || [])];
+    if (streaming && streaming.sessionId === session?.id && !messages.some((item) => item.id === streaming.id)) messages.push(streaming);
+    elements.messages.innerHTML = '';
+    for (const message of messages) elements.messages.appendChild(await createMessageElement(message));
+    elements.messages.scrollTop = elements.messages.scrollHeight;
+  }
+
+  async function createMessageElement(message) {
+    const article = document.createElement('article');
+    article.className = `rag-message ${message.role || 'assistant'} ${message.status || ''}`;
+    article.dataset.messageId = message.id;
+    const role = message.role === 'user' ? '你' : '助手';
+    article.innerHTML = `<div class="rag-message-avatar">${message.role === 'user' ? 'U' : 'AI'}</div><div class="rag-message-body"><div class="rag-message-head"><strong>${role}</strong><span>${formatTime(message.createdAt)}</span></div><div class="rag-message-extras"></div><div class="rag-message-content"></div></div>`;
+    await fillMessage(article, message);
+    return article;
+  }
+
+  async function fillMessage(article, message) {
+    const extras = article.querySelector('.rag-message-extras');
+    extras.innerHTML = '';
+    if (message.reasoning) {
+      const details = document.createElement('details');
+      details.className = 'rag-reasoning';
+      details.innerHTML = `<summary>模型推理流</summary><pre>${escapeHtml(message.reasoning)}</pre>`;
+      extras.appendChild(details);
+    }
+    if (message.toolEvents?.length) extras.appendChild(toolList(message.toolEvents));
+    if (message.attachments?.length) {
+      const attachments = document.createElement('div');
+      attachments.className = 'rag-pending-attachments';
+      attachments.innerHTML = message.attachments.map((item) => `<span class="rag-attachment-chip"><span>${escapeHtml(item.name)}</span></span>`).join('');
+      extras.appendChild(attachments);
+    }
+    const content = article.querySelector('.rag-message-content');
+    if (message.error) content.textContent = message.error;
+    else content.innerHTML = await window.orchestrator.ragRenderMarkdown(message.content || '');
+    if (message.status === 'streaming') content.insertAdjacentHTML('beforeend', '<span class="rag-stream-caret"></span>');
+  }
+
+  function toolList(tools) {
+    const list = document.createElement('div');
+    list.className = 'rag-tool-list';
+    list.innerHTML = tools.map((item) => `<div class="rag-tool-event ${escapeAttr(item.status || 'running')}"><i></i><span>${escapeHtml(toolLabel(item.name))}</span><time>${escapeHtml(item.status || 'running')}</time></div>`).join('');
+    return list;
+  }
+
+  function scheduleStreamRender() {
+    if (streamRenderTimer) return;
+    streamRenderTimer = setTimeout(async () => {
+      streamRenderTimer = null;
+      if (!streaming) return;
+      let article = elements.messages.querySelector(`[data-message-id="${cssEscape(streaming.id)}"]`);
+      if (!article) {
+        elements.messages.querySelector('.rag-empty-state')?.remove();
+        article = await createMessageElement(streaming);
+        elements.messages.appendChild(article);
+      } else {
+        await fillMessage(article, streaming);
+      }
+      elements.messages.scrollTop = elements.messages.scrollHeight;
+    }, 45);
+  }
+
+  function renderPendingAttachments() {
+    elements.pendingAttachments.innerHTML = pendingAttachments.map((item) => `<div class="rag-attachment-chip"><span title="${escapeAttr(item.path)}">${escapeHtml(item.name)}</span><button type="button" data-remove-attachment="${escapeAttr(item.id)}" aria-label="移除">×</button></div>`).join('');
+    for (const button of elements.pendingAttachments.querySelectorAll('[data-remove-attachment]')) button.addEventListener('click', () => {
+      pendingAttachments = pendingAttachments.filter((item) => item.id !== button.dataset.removeAttachment);
+      renderInspector();
+    });
+  }
+
+  async function createSession() {
+    const provider = state.providers.find((item) => item.enabledModels?.length) || state.providers[0];
+    if (!provider) {
+      openProviderModal();
+      notify('先配置模型供应商', '保存 Base URL 与 API Key，再拉取并选择模型。', 'info');
+      return;
+    }
+    const session = await window.orchestrator.ragCreateSession({ providerId: provider.id, modelId: provider.enabledModels?.[0]?.id || '' });
+    activeSessionId = session.id;
+    pendingAttachments = [];
+    await refresh(session.id, { quiet: true });
+    elements.input.focus();
+  }
+
+  async function sendMessage(event) {
+    event?.preventDefault();
+    if (!activeSessionId || streaming) return;
+    const content = elements.input.value.trim();
+    if (!content && !pendingAttachments.length) return;
+    const attachmentIds = pendingAttachments.map((item) => item.id);
+    elements.input.value = '';
+    autoGrowInput();
+    pendingAttachments = [];
+    streaming = { id: `stream-${Date.now()}`, sessionId: activeSessionId, role: 'assistant', content: '', reasoning: '', toolEvents: [], status: 'streaming', createdAt: new Date().toISOString() };
+    setGenerating(true, '正在连接模型');
+    renderPendingAttachments();
+    try {
+      await window.orchestrator.ragSend({ sessionId: activeSessionId, content, attachmentIds });
+    } catch (error) {
+      notify('生成失败', error.message || String(error), 'error');
+      streaming = null;
+      setGenerating(false);
+      await refresh(activeSessionId, { quiet: true });
+    }
+  }
+
+  function setGenerating(active, status = '') {
+    elements.stop.hidden = !active;
+    elements.send.hidden = active;
+    elements.input.disabled = active || !state.activeSession;
+    elements.attach.disabled = active || !state.activeSession;
+    elements.runStatus.classList.toggle('active', active);
+    elements.runStatus.innerHTML = active ? `<span class="rag-thinking-dots"><i></i><i></i><i></i></span><span>${escapeHtml(status || '模型正在思考')}</span>` : '';
+    elements.deleteSession.disabled = active || !state.activeSession;
+    elements.compact.disabled = active || !state.activeSession || !state.activeSession?.modelCapabilities?.supportsCompression || (state.activeSession?.messages?.length || 0) < 4;
+  }
+
+  function openProviderModal() {
+    elements.providerModal.hidden = false;
+    editingProviderId = editingProviderId || state.providers[0]?.id || '';
+    renderProviderManager();
+  }
+
+  function closeProviderModal() { elements.providerModal.hidden = true; }
+
+  function renderProviderManager() {
+    elements.providerList.innerHTML = state.providers.map((provider) => `<button type="button" class="rag-provider-item ${provider.id === editingProviderId ? 'active' : ''}" data-provider-id="${escapeAttr(provider.id)}"><strong>${escapeHtml(provider.name)}</strong><span>${escapeHtml(provider.type)} / ${escapeHtml(provider.baseUrl)}</span></button>`).join('');
+    if (!state.providers.length) elements.providerList.innerHTML = '<div class="rag-list-empty">暂无供应商</div>';
+    for (const button of elements.providerList.querySelectorAll('[data-provider-id]')) button.addEventListener('click', () => {
+      editingProviderId = button.dataset.providerId;
+      renderProviderManager();
+    });
+    const provider = state.providers.find((item) => item.id === editingProviderId);
+    elements.providerId.value = provider?.id || '';
+    elements.providerName.value = provider?.name || '';
+    elements.providerType.value = provider?.type || 'openai';
+    elements.providerBaseUrl.value = provider?.baseUrl || '';
+    elements.providerApiKey.value = '';
+    elements.providerApiKey.placeholder = provider?.hasApiKey ? '已安全保存，留空则保持不变' : '输入 API Key；本地免密接口可留空';
+    elements.providerTemperature.value = provider?.temperature ?? 0.2;
+    elements.providerMaxTokens.value = provider?.maxOutputTokens || 8192;
+    elements.providerHeaders.value = Object.keys(provider?.extraHeaders || {}).length ? JSON.stringify(provider.extraHeaders, null, 2) : '';
+    elements.deleteProvider.disabled = !provider;
+    renderRemoteModels(provider);
+  }
+
+  function renderRemoteModels(provider) {
+    const source = mergeModels(provider?.remoteModels || [], provider?.enabledModels || []);
+    const enabled = new Map((provider?.enabledModels || []).map((item) => [item.id, item]));
+    elements.remoteModelCount.textContent = `${source.length} 个`;
+    elements.remoteModels.innerHTML = '';
+    for (const model of source) {
+      const selected = enabled.get(model.id);
+      const value = { ...model, ...selected };
+      const row = document.createElement('div');
+      row.className = 'rag-remote-model';
+      row.dataset.modelId = model.id;
+      row.innerHTML = `<input class="rag-model-enabled" type="checkbox" ${selected ? 'checked' : ''} aria-label="启用 ${escapeAttr(model.id)}"><strong title="${escapeAttr(model.id)}">${escapeHtml(model.name || model.id)}</strong><input class="rag-model-context" type="number" min="1024" step="1024" value="${Number(value.contextWindow || 128000)}" title="上下文窗口"><button type="button" class="rag-model-cap-toggle ${value.supportsTools ? 'active' : ''}" data-cap="supportsTools" title="工具调用">T</button><button type="button" class="rag-model-cap-toggle ${value.supportsReasoning ? 'active' : ''}" data-cap="supportsReasoning" title="推理流">R</button><button type="button" class="rag-model-cap-toggle ${value.supportsVision ? 'active' : ''}" data-cap="supportsVision" title="视觉">V</button><button type="button" class="rag-model-cap-toggle ${value.supportsAudio ? 'active' : ''}" data-cap="supportsAudio" title="音频">A</button><button type="button" class="rag-model-cap-toggle ${value.supportsImages ? 'active' : ''}" data-cap="supportsImages" title="图片返回">I</button><button type="button" class="rag-model-cap-toggle ${value.supportsCompression ? 'active' : ''}" data-cap="supportsCompression" title="上下文压缩">C</button><button type="button" class="rag-model-cap-toggle ${value.supportsSubagents ? 'active' : ''}" data-cap="supportsSubagents" title="子 Agent">S</button>`;
+      row.querySelector('.rag-model-enabled').addEventListener('change', scheduleModelSave);
+      row.querySelector('.rag-model-context').addEventListener('change', scheduleModelSave);
+      for (const toggle of row.querySelectorAll('.rag-model-cap-toggle')) toggle.addEventListener('click', () => { toggle.classList.toggle('active'); scheduleModelSave(); });
+      elements.remoteModels.appendChild(row);
+    }
+    if (!source.length) elements.remoteModels.innerHTML = '<div class="rag-list-empty">保存配置后点击“拉取远程模型”</div>';
+  }
+
+  async function saveProviderForm() {
+    const provider = await window.orchestrator.ragSaveProvider({
+      id: elements.providerId.value || undefined,
+      name: elements.providerName.value.trim(),
+      type: elements.providerType.value,
+      baseUrl: elements.providerBaseUrl.value.trim(),
+      apiKey: elements.providerApiKey.value,
+      temperature: Number(elements.providerTemperature.value),
+      maxOutputTokens: Number(elements.providerMaxTokens.value),
+      extraHeaders: elements.providerHeaders.value.trim()
+    });
+    editingProviderId = provider.id;
+    await refresh(activeSessionId, { quiet: true });
+    renderProviderManager();
+    return provider;
+  }
+
+  function scheduleModelSave() {
+    if (remoteModelSaveTimer) clearTimeout(remoteModelSaveTimer);
+    remoteModelSaveTimer = setTimeout(saveEnabledModels, 240);
+  }
+
+  async function saveEnabledModels() {
+    const providerId = editingProviderId;
+    if (!providerId) return;
+    const provider = state.providers.find((item) => item.id === providerId);
+    const remote = new Map((provider?.remoteModels || []).map((item) => [item.id, item]));
+    const models = [...elements.remoteModels.querySelectorAll('.rag-remote-model')].filter((row) => row.querySelector('.rag-model-enabled').checked).map((row) => {
+      const base = remote.get(row.dataset.modelId) || { id: row.dataset.modelId, name: row.dataset.modelId };
+      const caps = {};
+      for (const toggle of row.querySelectorAll('[data-cap]')) caps[toggle.dataset.cap] = toggle.classList.contains('active');
+      return { ...base, ...caps, contextWindow: Number(row.querySelector('.rag-model-context').value) || 128000 };
+    });
+    await window.orchestrator.ragUpdateModels({ providerId, models });
+    await refresh(activeSessionId, { quiet: true });
+    editingProviderId = providerId;
+    renderProviderManager();
+  }
+
+  async function fetchRemoteModels() {
+    try {
+      const provider = await saveProviderForm();
+      elements.fetchModels.disabled = true;
+      elements.fetchModels.textContent = '正在拉取...';
+      await window.orchestrator.ragFetchModels(provider.id);
+      await refresh(activeSessionId, { quiet: true });
+      editingProviderId = provider.id;
+      renderProviderManager();
+      notify('模型列表已更新', '请选择需要在会话中使用的模型。', 'success');
+    } catch (error) {
+      notify('模型拉取失败', error.message || String(error), 'error');
+    } finally {
+      elements.fetchModels.disabled = false;
+      elements.fetchModels.textContent = '拉取远程模型';
+    }
+  }
+
+  function newProviderForm() {
+    editingProviderId = '';
+    elements.providerId.value = '';
+    renderProviderManager();
+    elements.providerName.focus();
+  }
+
+  async function deleteProvider() {
+    if (!editingProviderId) return;
+    if (elements.deleteProvider.dataset.confirm !== '1') {
+      elements.deleteProvider.dataset.confirm = '1';
+      elements.deleteProvider.textContent = '再点一次确认';
+      setTimeout(() => { elements.deleteProvider.dataset.confirm = ''; elements.deleteProvider.textContent = '删除'; }, 2600);
+      return;
+    }
+    try {
+      await window.orchestrator.ragDeleteProvider(editingProviderId);
+      editingProviderId = '';
+      await refresh(activeSessionId, { quiet: true });
+      renderProviderManager();
+    } catch (error) { notify('无法删除供应商', error.message || String(error), 'error'); }
+  }
+
+  function showApproval(approval) {
+    currentApproval = approval;
+    elements.approvalAction.textContent = approval.action || '受限操作';
+    elements.approvalTarget.textContent = approval.target || '-';
+    elements.approvalDetail.textContent = approval.detail || '';
+    elements.approvalModal.hidden = false;
+  }
+
+  async function resolveApproval(approved, fullAccess = false) {
+    if (!currentApproval) return;
+    const id = currentApproval.id;
+    currentApproval = null;
+    elements.approvalModal.hidden = true;
+    await window.orchestrator.ragResolveApproval({ id, approved, fullAccess });
+  }
+
+  function handleEvent(event) {
+    if (!event) return;
+    if (event.type === 'approval-request') return showApproval(event.approval);
+    if (event.sessionId && event.sessionId !== activeSessionId) {
+      if (event.type === 'assistant-complete' || event.type === 'assistant-error') refresh(activeSessionId, { quiet: true });
+      return;
+    }
+    if (event.type === 'message') {
+      if (state.activeSession && !state.activeSession.messages.some((item) => item.id === event.message.id)) state.activeSession.messages.push(event.message);
+      renderMessages();
+    } else if (event.type === 'assistant-start') {
+      streaming = { id: event.messageId, sessionId: event.sessionId, role: 'assistant', content: '', reasoning: '', toolEvents: [], status: 'streaming', createdAt: new Date().toISOString() };
+      setGenerating(true, '模型正在思考');
+      scheduleStreamRender();
+    } else if (event.type === 'assistant-delta' && streaming) {
+      if (event.content) streaming.content += event.content;
+      if (event.reasoning) streaming.reasoning += event.reasoning;
+      setGenerating(true, event.reasoning && !streaming.content ? '正在接收模型推理' : '正在流式输出');
+      scheduleStreamRender();
+    } else if (event.type === 'tool' && streaming) {
+      const index = streaming.toolEvents.findIndex((item) => item.id === event.tool.id);
+      if (index >= 0) streaming.toolEvents[index] = event.tool;
+      else streaming.toolEvents.push(event.tool);
+      setGenerating(true, `正在调用 ${toolLabel(event.tool.name)}`);
+      scheduleStreamRender();
+    } else if (event.type === 'assistant-complete') {
+      streaming = null;
+      setGenerating(false);
+      refresh(activeSessionId, { quiet: true });
+    } else if (event.type === 'assistant-error') {
+      streaming = null;
+      setGenerating(false);
+      notify('模型调用结束', event.error || '生成失败', event.message?.status === 'cancelled' ? 'info' : 'error');
+      refresh(activeSessionId, { quiet: true });
+    } else if (event.type === 'session-updated') {
+      refresh(activeSessionId, { quiet: true });
+    }
+  }
+
+  function autoGrowInput() {
+    elements.input.style.height = 'auto';
+    elements.input.style.height = `${Math.min(130, Math.max(34, elements.input.scrollHeight))}px`;
+    elements.send.disabled = !state.activeSession || streaming || (!elements.input.value.trim() && !pendingAttachments.length);
+  }
+
+  function notify(title, message, type = 'info') {
+    const viewport = $('#toastViewport');
+    if (!viewport) return;
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.innerHTML = `<div><strong>${escapeHtml(title)}</strong>${message ? `<span>${escapeHtml(message)}</span>` : ''}</div>`;
+    viewport.appendChild(toast);
+    setTimeout(() => { toast.classList.add('leaving'); setTimeout(() => toast.remove(), 220); }, type === 'error' ? 5200 : 3200);
+  }
+
+  elements.newSession.addEventListener('click', () => createSession().catch((error) => notify('新建会话失败', error.message, 'error')));
+  elements.sessionSearch.addEventListener('input', renderSessions);
+  elements.composer.addEventListener('submit', sendMessage);
+  elements.input.addEventListener('input', autoGrowInput);
+  elements.input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); sendMessage(); }
+  });
+  elements.stop.addEventListener('click', () => window.orchestrator.ragStop(activeSessionId));
+  elements.attach.addEventListener('click', async () => {
+    try {
+      const result = await window.orchestrator.ragImportAttachments(activeSessionId);
+      if (!result.canceled) pendingAttachments.push(...result.attachments);
+      renderInspector();
+    } catch (error) { notify('附件导入失败', error.message || String(error), 'error'); }
+  });
+  elements.providerSelect.addEventListener('change', async () => {
+    const provider = state.providers.find((item) => item.id === elements.providerSelect.value);
+    await updateSession({ providerId: provider?.id || '', modelId: provider?.enabledModels?.[0]?.id || '' });
+  });
+  elements.modelSelect.addEventListener('change', () => updateSession({ modelId: elements.modelSelect.value }));
+  elements.refreshState.addEventListener('click', () => refresh(activeSessionId));
+  elements.knowledgeToggle.addEventListener('click', () => {
+    const open = !elements.knowledgeMenu.classList.contains('open');
+    elements.knowledgeMenu.classList.toggle('open', open);
+    elements.knowledgeToggle.setAttribute('aria-expanded', String(open));
+  });
+  document.addEventListener('click', (event) => {
+    if (!event.target.closest('.rag-knowledge-picker')) elements.knowledgeMenu.classList.remove('open');
+  });
+  elements.chooseSandbox.addEventListener('click', async () => {
+    const result = await window.orchestrator.ragChooseSandbox();
+    if (!result.canceled) await updateSession({ sandboxDir: result.path }, { quiet: false });
+  });
+  elements.createSandbox.addEventListener('click', async () => {
+    const result = await window.orchestrator.ragCreateSandbox();
+    await updateSession({ sandboxDir: result.path }, { quiet: false });
+  });
+  for (const button of document.querySelectorAll('[data-rag-permission]')) button.addEventListener('click', () => updateSession({ permissionMode: button.dataset.ragPermission }, { quiet: false }));
+  elements.compact.addEventListener('click', async () => {
+    elements.compact.disabled = true;
+    elements.compact.textContent = '正在压缩...';
+    try { await window.orchestrator.ragCompactSession(activeSessionId); await refresh(activeSessionId, { quiet: true }); notify('上下文已压缩', '后续请求会携带压缩后的工作记忆。', 'success'); }
+    catch (error) { notify('压缩失败', error.message || String(error), 'error'); }
+    finally { elements.compact.textContent = '压缩上下文'; renderInspector(); }
+  });
+  elements.deleteSession.addEventListener('click', async () => {
+    if (elements.deleteSession.dataset.confirm !== '1') {
+      elements.deleteSession.dataset.confirm = '1';
+      elements.deleteSession.title = '再次点击确认删除';
+      setTimeout(() => { elements.deleteSession.dataset.confirm = ''; elements.deleteSession.title = '删除会话'; }, 2600);
+      return;
+    }
+    await window.orchestrator.ragDeleteSession(activeSessionId);
+    activeSessionId = '';
+    localStorage.removeItem('ragActiveSessionId');
+    await refresh('', { quiet: true });
+  });
+  elements.openProviders.addEventListener('click', openProviderModal);
+  elements.closeProviders.addEventListener('click', closeProviderModal);
+  elements.providerModal.addEventListener('click', (event) => { if (event.target === elements.providerModal) closeProviderModal(); });
+  elements.newProvider.addEventListener('click', newProviderForm);
+  elements.saveProvider.addEventListener('click', async () => {
+    try { await saveProviderForm(); notify('供应商已保存', 'API Key 已通过系统安全存储加密。', 'success'); }
+    catch (error) { notify('保存失败', error.message || String(error), 'error'); }
+  });
+  elements.fetchModels.addEventListener('click', fetchRemoteModels);
+  elements.deleteProvider.addEventListener('click', deleteProvider);
+  elements.denyApproval.addEventListener('click', () => resolveApproval(false));
+  elements.approveOnce.addEventListener('click', () => resolveApproval(true, false));
+  elements.approveFull.addEventListener('click', () => resolveApproval(true, true));
+  elements.messages.addEventListener('click', (event) => {
+    const link = event.target.closest('a[href]');
+    if (!link) return;
+    const href = link.getAttribute('href');
+    if (!/^https?:\/\//i.test(href)) return;
+    event.preventDefault();
+    window.orchestrator.openExternal(href).catch((error) => notify('无法打开链接', error.message, 'error'));
+  });
+  document.querySelector('[data-page="rag"]')?.addEventListener('click', () => refresh(activeSessionId, { quiet: initialized }));
+  window.orchestrator.onRagEvent(handleEvent);
+
+  function providerName(id) { return state.providers.find((item) => item.id === id)?.name || '未配置供应商'; }
+  function groupBy(items, key) { const map = new Map(); for (const item of items || []) { const value = key(item); if (!map.has(value)) map.set(value, []); map.get(value).push(item); } return map; }
+  function mergeModels(...lists) { const map = new Map(); for (const item of lists.flat()) map.set(item.id, { ...(map.get(item.id) || {}), ...item }); return [...map.values()].sort((a, b) => String(a.id).localeCompare(String(b.id))); }
+  function toolLabel(name) { return ({ knowledge_search: '检索知识库', list_files: '列出文件', read_file: '读取文件', write_file: '写入文件', run_command: '执行 CMD', web_search: '联网搜索', browse_url: '读取网页', open_browser: '打开浏览器', spawn_subagent: '调用子 Agent' })[name] || name || '工具'; }
+  function formatNumber(value) { return new Intl.NumberFormat('zh-CN', { notation: Number(value) > 999999 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(Number(value || 0)); }
+  function formatTime(value) { const date = new Date(value || Date.now()); return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(date); }
+  function relativeTime(value) { const delta = Date.now() - new Date(value || 0).getTime(); if (!Number.isFinite(delta)) return ''; if (delta < 60000) return '刚刚'; if (delta < 3600000) return `${Math.floor(delta / 60000)} 分钟`; if (delta < 86400000) return `${Math.floor(delta / 3600000)} 小时`; return `${Math.floor(delta / 86400000)} 天`; }
+  function escapeHtml(value) { return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;'); }
+  function escapeAttr(value) { return escapeHtml(value); }
+  function cssEscape(value) { return globalThis.CSS?.escape ? CSS.escape(String(value)) : String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&'); }
+
+  refresh(activeSessionId, { quiet: true });
+})();

@@ -1,7 +1,7 @@
 {
   "name": "star-owner",
   "productName": "星⭐收藏家",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "license": "GPL-3.0-or-later",
   "description": "星⭐收藏家：Bilibili 收藏视频 Markdown 多 Agent 本地编排工作台。",
@@ -9,6 +9,7 @@
   "scripts": {
     "start": "electron .",
     "smoke": "node scripts/smoke-test.js",
+    "test:rag": "node scripts/rag-assistant-test.js",
     "test:scheduler": "node scripts/resource-scheduler-test.js",
     "test:asr-service": "node scripts/asr-service-test.js",
     "setup:asr": "powershell -ExecutionPolicy Bypass -File scripts/setup-faster-whisper.ps1",
@@ -21,8 +22,10 @@
   "dependencies": {
     "electron": "^43.0.0",
     "ffmpeg-static": "^5.2.0",
+    "mammoth": "^1.11.0",
     "markdown-it": "^14.3.0",
     "mermaid": "^11.16.0",
+    "pdf-parse": "^1.1.1",
     "sql.js": "^1.14.1",
     "yt-dlp-exec": "^1.0.2"
   }

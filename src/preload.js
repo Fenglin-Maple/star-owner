@@ -31,6 +31,22 @@ contextBridge.exposeInMainWorld('orchestrator', {
   openReadme: () => ipcRenderer.invoke('docs:open-readme'),
   openProjectPath: (value) => ipcRenderer.invoke('docs:open-project-path', value),
   openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
+  ragState: (sessionId) => ipcRenderer.invoke('rag:state', sessionId),
+  ragSaveProvider: (payload) => ipcRenderer.invoke('rag:provider-save', payload),
+  ragDeleteProvider: (providerId) => ipcRenderer.invoke('rag:provider-delete', providerId),
+  ragFetchModels: (providerId) => ipcRenderer.invoke('rag:models-fetch', providerId),
+  ragUpdateModels: (payload) => ipcRenderer.invoke('rag:models-update', payload),
+  ragCreateSession: (payload) => ipcRenderer.invoke('rag:session-create', payload),
+  ragUpdateSession: (payload) => ipcRenderer.invoke('rag:session-update', payload),
+  ragDeleteSession: (sessionId) => ipcRenderer.invoke('rag:session-delete', sessionId),
+  ragCompactSession: (sessionId) => ipcRenderer.invoke('rag:session-compact', sessionId),
+  ragSend: (payload) => ipcRenderer.invoke('rag:send', payload),
+  ragStop: (sessionId) => ipcRenderer.invoke('rag:stop', sessionId),
+  ragChooseSandbox: () => ipcRenderer.invoke('rag:choose-sandbox'),
+  ragCreateSandbox: () => ipcRenderer.invoke('rag:create-sandbox'),
+  ragImportAttachments: (sessionId) => ipcRenderer.invoke('rag:attachments-import', sessionId),
+  ragResolveApproval: (payload) => ipcRenderer.invoke('rag:approval-resolve', payload),
+  ragRenderMarkdown: (markdown) => ipcRenderer.invoke('rag:render-markdown', markdown),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximizeWindow: () => ipcRenderer.invoke('window:maximize-toggle'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
@@ -48,5 +64,10 @@ contextBridge.exposeInMainWorld('orchestrator', {
     const listener = (_event, data) => callback(data);
     ipcRenderer.on('app:event', listener);
     return () => ipcRenderer.removeListener('app:event', listener);
+  },
+  onRagEvent: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on('rag:event', listener);
+    return () => ipcRenderer.removeListener('rag:event', listener);
   }
 });

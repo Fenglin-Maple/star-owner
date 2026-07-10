@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>星⭐收藏家</title>
     <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./rag.css" />
   </head>
   <body class="theme-night">
     <div class="window">
@@ -53,9 +54,9 @@
               <svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
               <span data-i18n="navTasks"></span>
             </button>
-            <button class="nav-item" data-page="documents" title="documents">
-              <svg viewBox="0 0 24 24"><path d="M6 3h9l3 3v15H6zM15 3v4h4M9 11h6M9 15h6M9 7h2"/></svg>
-              <span data-i18n="navDocuments"></span>
+            <button class="nav-item" data-page="rag" title="RAG 助手">
+              <svg viewBox="0 0 24 24"><path d="M4 5h16v12H8l-4 4zM8 9h8M8 13h5"/><path d="M17 3v4M15 5h4"/></svg>
+              <span>RAG 助手</span>
             </button>
             <button class="nav-item" data-page="workers" title="workers">
               <svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
@@ -86,6 +87,10 @@
             <button class="nav-item" data-page="readme" title="README">
               <svg viewBox="0 0 24 24"><path d="M6 3h9l3 3v15H6zM15 3v4h4M9 11h6M9 15h6M9 7h2"/></svg>
               <span data-i18n="navReadme"></span>
+            </button>
+            <button class="nav-item" data-page="documents" title="documents">
+              <svg viewBox="0 0 24 24"><path d="M6 3h9l3 3v15H6zM15 3v4h4M9 11h6M9 15h6M9 7h2"/></svg>
+              <span data-i18n="navDocuments"></span>
             </button>
           </div>
         </aside>
@@ -388,6 +393,77 @@
             </div>
           </section>
 
+          <section class="page rag-page" id="page-rag">
+            <div class="rag-workbench">
+              <aside class="rag-session-pane">
+                <div class="rag-pane-head">
+                  <div><strong>RAG 助手</strong><span>知识库分析工作台</span></div>
+                  <button id="ragNewSession" class="icon-action" type="button" title="新建会话" aria-label="新建会话"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+                </div>
+                <label class="rag-session-search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M16 16l5 5"/></svg><input id="ragSessionSearch" type="search" placeholder="搜索会话" /></label>
+                <div id="ragSessionList" class="rag-session-list"></div>
+                <div id="ragUsageSummary" class="rag-usage-summary"></div>
+              </aside>
+
+              <section class="rag-chat-pane">
+                <header class="rag-chat-head">
+                  <div class="rag-chat-identity"><strong id="ragChatTitle">选择或创建会话</strong><span id="ragChatMeta">尚未配置模型</span></div>
+                  <div class="rag-context-meter" title="当前估算上下文占用">
+                    <div><span>上下文</span><strong id="ragContextPercent">0%</strong></div>
+                    <div class="rag-context-track"><span id="ragContextBar"></span></div>
+                  </div>
+                  <button id="ragCompact" class="secondary-button compact-button" type="button" disabled>压缩上下文</button>
+                  <button id="ragDeleteSession" class="icon-action danger-icon" type="button" title="删除会话" aria-label="删除会话" disabled><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/></svg></button>
+                </header>
+                <div id="ragMessages" class="rag-messages" aria-live="polite">
+                  <div class="rag-empty-state"><svg viewBox="0 0 24 24"><path d="M4 5h16v12H8l-4 4zM8 9h8M8 13h5"/></svg><strong>让知识库真正参与对话</strong><span>配置 OpenAI 或 NewAPI 兼容供应商，选择收藏夹知识库后开始分析。</span></div>
+                </div>
+                <div id="ragRunStatus" class="rag-run-status" aria-live="polite"></div>
+                <div id="ragPendingAttachments" class="rag-pending-attachments"></div>
+                <form id="ragComposer" class="rag-composer">
+                  <button id="ragAttach" class="icon-action" type="button" title="添加文件" aria-label="添加文件" disabled><svg viewBox="0 0 24 24"><path d="M21 11.5l-8.5 8.5a6 6 0 0 1-8.5-8.5l9-9a4 4 0 0 1 5.7 5.7l-9 9a2 2 0 1 1-2.8-2.8l8.2-8.2"/></svg></button>
+                  <textarea id="ragInput" rows="1" placeholder="询问、整理或分析已选知识库..." disabled></textarea>
+                  <button id="ragStop" class="icon-action rag-stop-button" type="button" title="停止生成" aria-label="停止生成" hidden><svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10"/></svg></button>
+                  <button id="ragSend" class="primary-button rag-send-button" type="submit" disabled title="发送"><svg viewBox="0 0 24 24"><path d="M4 4l17 8-17 8 3-8zM7 12h14"/></svg></button>
+                </form>
+              </section>
+
+              <aside class="rag-inspector-pane">
+                <div class="rag-inspector-head"><div><strong>会话设置</strong><span>模型、知识与权限</span></div><button id="ragOpenProviders" class="icon-action" type="button" title="供应商管理" aria-label="供应商管理"><svg viewBox="0 0 24 24"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5zM19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1M5.8 6.1l-2 3.4 2 1.5M10.4 3h4l.4 3"/></svg></button></div>
+                <div class="rag-inspector-scroll">
+                  <section class="rag-setting-group">
+                    <div class="rag-setting-title"><strong>模型</strong><button id="ragRefreshState" class="text-button" type="button">刷新</button></div>
+                    <label><span>供应商</span><select id="ragProviderSelect"></select></label>
+                    <label><span>模型</span><select id="ragModelSelect"></select></label>
+                    <div id="ragModelCapabilities" class="rag-capability-list"></div>
+                  </section>
+                  <section class="rag-setting-group">
+                    <div class="rag-setting-title"><strong>知识库</strong><span id="ragKnowledgeCount">0 个</span></div>
+                    <div class="rag-knowledge-picker">
+                      <button id="ragKnowledgeToggle" class="secondary-button" type="button" aria-expanded="false">选择用户 / 收藏夹</button>
+                      <div id="ragKnowledgeMenu" class="rag-knowledge-menu"></div>
+                    </div>
+                    <div id="ragSelectedKnowledge" class="rag-selected-knowledge"></div>
+                  </section>
+                  <section class="rag-setting-group">
+                    <div class="rag-setting-title"><strong>工作沙盒</strong><span id="ragPermissionBadge">有限权限</span></div>
+                    <code id="ragSandboxPath">尚未创建会话</code>
+                    <div class="rag-inline-actions"><button id="ragChooseSandbox" class="secondary-button compact-button" type="button" disabled>选择目录</button><button id="ragCreateSandbox" class="secondary-button compact-button" type="button" disabled>新建沙盒</button></div>
+                    <div class="rag-permission-segment" role="group" aria-label="文件权限">
+                      <button type="button" data-rag-permission="restricted" class="active">有限权限</button>
+                      <button type="button" data-rag-permission="full">完全访问</button>
+                    </div>
+                    <p class="rag-security-note">有限权限下，CMD 与沙盒外访问会逐次请求批准。完全访问允许模型操作计算机其它路径。</p>
+                  </section>
+                  <section class="rag-setting-group rag-token-group">
+                    <div class="rag-setting-title"><strong>Token 统计</strong><span id="ragSessionRequests">0 次请求</span></div>
+                    <div class="rag-token-grid"><div><span>输入</span><strong id="ragInputTokens">0</strong></div><div><span>输出</span><strong id="ragOutputTokens">0</strong></div><div><span>合计</span><strong id="ragTotalTokens">0</strong></div></div>
+                  </section>
+                </div>
+              </aside>
+            </div>
+          </section>
+
           <section class="page" id="page-settings">
             <div class="page-head">
               <h1 data-i18n="settingsTitle"></h1>
@@ -476,8 +552,39 @@
         </main>
       </div>
     </div>
+    <div id="ragProviderModal" class="rag-modal" hidden>
+      <section class="rag-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="ragProviderModalTitle">
+        <header><div><h2 id="ragProviderModalTitle">模型供应商</h2><p>OpenAI 与 NewAPI 兼容接口</p></div><button id="ragCloseProviders" class="icon-action" type="button" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M5 5l14 14M19 5L5 19"/></svg></button></header>
+        <div class="rag-provider-layout">
+          <aside><button id="ragNewProvider" class="secondary-button" type="button">新建供应商</button><div id="ragProviderList" class="rag-provider-list"></div></aside>
+          <div class="rag-provider-editor">
+            <div class="rag-provider-form">
+              <input id="ragProviderId" type="hidden" />
+              <label><span>名称</span><input id="ragProviderName" placeholder="例如：本地 NewAPI" /></label>
+              <label><span>接口规范</span><select id="ragProviderType"><option value="openai">OpenAI compatible</option><option value="newapi">NewAPI compatible</option></select></label>
+              <label class="wide"><span>Base URL</span><input id="ragProviderBaseUrl" placeholder="https://api.example.com/v1" /></label>
+              <label class="wide"><span>API Key</span><input id="ragProviderApiKey" type="password" placeholder="留空则保留已保存密钥" autocomplete="off" /></label>
+              <label><span>温度</span><input id="ragProviderTemperature" type="number" min="0" max="2" step="0.1" value="0.2" /></label>
+              <label><span>最大输出 Token</span><input id="ragProviderMaxTokens" type="number" min="256" step="256" value="8192" /></label>
+              <label class="wide"><span>额外请求头 JSON</span><textarea id="ragProviderHeaders" rows="2" placeholder='{"X-Header":"value"}'></textarea></label>
+            </div>
+            <div class="rag-provider-actions"><button id="ragDeleteProvider" class="secondary-button danger-button" type="button">删除</button><span></span><button id="ragSaveProvider" class="secondary-button" type="button">保存配置</button><button id="ragFetchModels" class="primary-button" type="button">拉取远程模型</button></div>
+            <div class="rag-model-select-head"><div><strong>可用模型</strong><span>多选后可用于不同会话</span></div><span id="ragRemoteModelCount">0</span></div>
+            <div id="ragRemoteModels" class="rag-remote-models"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+    <div id="ragApprovalModal" class="rag-modal rag-approval-modal" hidden>
+      <section class="rag-modal-dialog compact" role="alertdialog" aria-modal="true" aria-labelledby="ragApprovalTitle">
+        <header><div><h2 id="ragApprovalTitle">需要你的批准</h2><p>模型请求了有限权限之外的操作</p></div></header>
+        <div class="rag-approval-body"><span id="ragApprovalAction"></span><strong id="ragApprovalTarget"></strong><p id="ragApprovalDetail"></p></div>
+        <footer><button id="ragDenyApproval" class="secondary-button danger-button" type="button">拒绝</button><span></span><button id="ragApproveOnce" class="secondary-button" type="button">仅本次允许</button><button id="ragApproveFull" class="primary-button" type="button">允许并开启完全访问</button></footer>
+      </section>
+    </div>
     <div id="toastViewport" class="toast-viewport" aria-live="polite" aria-atomic="true"></div>
     <script src="../../node_modules/mermaid/dist/mermaid.min.js"></script>
     <script src="./app.js"></script>
+    <script src="./rag.js"></script>
   </body>
 </html>
