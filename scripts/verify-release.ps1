@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
 $package = Get-Content -LiteralPath (Join-Path $root "package.json") -Raw -Encoding UTF8 | ConvertFrom-Json
-if ($package.name -ne "bili-agent-orchestrator" -or $package.productName -notlike "*BiliNote" -or -not $package.version) {
+if ($package.name -ne "star-owner" -or -not $package.productName -or -not $package.version) {
   throw "package.json UTF-8 metadata validation failed."
 }
 

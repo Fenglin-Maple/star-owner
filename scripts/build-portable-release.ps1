@@ -15,7 +15,7 @@ if ($SeparateModelAsset) {
   if ($ModelBundle -eq "all") { $splitModels += "large-v3-turbo" }
 }
 $folderSuffix = if ($splitModels.Count -gt 0) { "core" } else { $ModelBundle }
-$folderName = "StarNote-BiliNote-v$($package.version)-win-x64-$folderSuffix"
+$folderName = "Star-Owner-v$($package.version)-win-x64-$folderSuffix"
 $stage = Join-Path $distRoot $folderName
 
 function Assert-InsideDist([string]$candidate) {
@@ -56,7 +56,7 @@ $projectItems = @(
 foreach ($relative in $projectItems) {
   Copy-Item -LiteralPath (Join-Path $root $relative) -Destination (Join-Path $stage $relative) -Recurse -Force
 }
-Copy-Item -LiteralPath (Join-Path $root "packaging\Start-StarNote.cmd") -Destination (Join-Path $stage "Start-StarNote.cmd") -Force
+Copy-Item -LiteralPath (Join-Path $root "packaging\Start-StarOwner.cmd") -Destination (Join-Path $stage "Start-StarOwner.cmd") -Force
 Copy-Item -LiteralPath (Join-Path $root "node_modules") -Destination (Join-Path $stage "node_modules") -Recurse -Force
 
 $runtimeTarget = Join-Path $stage "runtime"
@@ -74,13 +74,13 @@ New-Item -ItemType Directory -Path (Join-Path $stage "workspace\users") -Force |
 New-Item -ItemType Directory -Path (Join-Path $stage "workspace\.star-note") -Force | Out-Null
 
 $manifest = [ordered]@{
-  product = "Star Note BiliNote"
+  product = $package.productName
   version = $package.version
   platform = "win-x64"
   modelBundle = if ($splitModels.Count -gt 0) { "external" } else { $ModelBundle }
-  requiredModelAssets = @($splitModels | ForEach-Object { "StarNote-BiliNote-v$($package.version)-model-$_.zip" })
+  requiredModelAssets = @($splitModels | ForEach-Object { "Star-Owner-v$($package.version)-model-$_.zip" })
   builtAt = (Get-Date).ToUniversalTime().ToString("o")
-  launcher = "Start-StarNote.cmd"
+  launcher = "Start-StarOwner.cmd"
   bundled = @("Electron", "Node dependencies", "FFmpeg", "yt-dlp", "Python 3.12", "faster-whisper", "CTranslate2", "CUDA runtime", "Mermaid") + $(if ($splitModels.Count -eq 0 -and $ModelBundle -ne "none") { @("ASR model: $ModelBundle") } else { @() })
 }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $stage "portable-manifest.json") -Encoding utf8
@@ -89,7 +89,7 @@ if (-not $NoArchive) {
   $archive = Join-Path $distRoot "$folderName.zip"
   Write-ReleaseArchive $archive $distRoot $folderName "Portable core"
   foreach ($model in $splitModels) {
-    $modelArchive = Join-Path $distRoot "StarNote-BiliNote-v$($package.version)-model-$model.zip"
+    $modelArchive = Join-Path $distRoot "Star-Owner-v$($package.version)-model-$model.zip"
     Write-ReleaseArchive $modelArchive $root "runtime\models\$model" "Model $model"
   }
 }

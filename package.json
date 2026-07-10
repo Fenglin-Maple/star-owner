@@ -1,10 +1,10 @@
 {
-  "name": "bili-agent-orchestrator",
-  "productName": "星笺 BiliNote",
-  "version": "0.2.0",
+  "name": "star-owner",
+  "productName": "星⭐收藏家",
+  "version": "0.3.0",
   "private": true,
   "license": "GPL-3.0-or-later",
-  "description": "星笺 BiliNote：Bilibili 收藏视频 Markdown 多 Agent 本地编排工作台。",
+  "description": "星⭐收藏家：Bilibili 收藏视频 Markdown 多 Agent 本地编排工作台。",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",

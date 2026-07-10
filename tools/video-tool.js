@@ -70,7 +70,7 @@ function printHealth(action) {
 }
 
 function printHelp() {
-  console.log(`Bili Agent Orchestrator video-tool
+  console.log(`Star Owner video-tool
 
 用法:
   node tools/video-tool.js info <视频链接或BV号> --out <目录> [--cookies <cookie.txt>]

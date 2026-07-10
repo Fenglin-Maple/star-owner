@@ -12,7 +12,7 @@ const { ToolRunner } = require('./core/tool-runner');
 const { initWorkspace, timestampForFile, videoArtifactName, WORKSPACE_ROOT } = require('./core/workspace');
 
 const BILI_SESSION = 'persist:bili-orchestrator';
-const PRODUCT_NAME = '星笺 BiliNote';
+const PRODUCT_NAME = '星⭐收藏家';
 const DEFAULT_WINDOW = { width: 1350, height: 836 };
 const README_FILE = path.join(__dirname, '..', 'README.md');
 const markdownRenderer = new MarkdownIt({ html: false, linkify: true, typographer: false });
@@ -520,7 +520,7 @@ function exportMarkdownTasks(directory, taskIds, filenameMetadata) {
     });
   }
 
-  const manifestFile = path.join(targetRoot, `star-note-rag-manifest-${timestampForFile()}.json`);
+  const manifestFile = path.join(targetRoot, `star-owner-rag-manifest-${timestampForFile()}.json`);
   fs.writeFileSync(manifestFile, `${JSON.stringify({ exportedAt: new Date().toISOString(), filenameMetadata, exported, skipped }, null, 2)}\n`, 'utf8');
   return { directory: targetRoot, manifestFile, exported, skipped };
 }

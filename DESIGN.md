@@ -1,8 +1,8 @@
-# 星笺 BiliNote Design
+# 星⭐收藏家 Design
 
 ## 1. Product Goal
 
-星笺 BiliNote is a local Electron desktop workbench for turning Bilibili favorite-folder videos into structured Markdown through multiple external agents.
+星⭐收藏家 is a local Electron desktop workbench for turning Bilibili favorite-folder videos into structured Markdown through multiple external agents.
 
 The desktop app owns orchestration, persistence, credentials, task leasing, tool execution, validation, and artifact inventory. Codex, Claude Code, and other agents use the local HTTP API to claim one task at a time, ask the app to execute media tools, and submit their final work.
 
@@ -24,7 +24,7 @@ The current project stops at task and tool orchestration. It does not automatica
 
 ```mermaid
 flowchart LR
-  User["Desktop user"] --> UI["星笺 Electron UI"]
+  User["Desktop user"] --> UI["星⭐收藏家 Electron UI"]
   UI --> Main["Electron main process"]
   Main --> Bili["Persistent Bilibili WebView session"]
   Main --> DB["SQLite / sql.js"]
@@ -347,7 +347,7 @@ The task-page performance popover always opens, including before the first claim
 
 ## 13. UI Design
 
-Brand: `星笺 BiliNote`.
+Brand: `星⭐收藏家`.
 
 The app uses an original anime-inspired blue-haired note keeper icon. The icon is generated locally by `scripts/generate-icon.py` into `assets/star-note.png` and `assets/star-note.ico`.
 
@@ -402,7 +402,7 @@ Snapshots, saved credentials, and persisted-login verification load asynchronous
 
 The Export page reads only validation-accepted `done` tasks. Users filter by Bilibili account, favorite folder, BV id, UP owner, or title; select completed Markdown documents; keep selections while switching source collections; and export the queue to a chosen directory.
 
-Filename metadata can independently include BV id, video title, UP owner, source collection, publish date, favorite-added date, and tags. The same token labels are used by workspace artifact naming and export naming. This allows a later RAG importer to classify sources before opening every Markdown body. Each export also writes `star-note-rag-manifest-<timestamp>.json` with source/output paths and normalized video metadata.
+Filename metadata can independently include BV id, video title, UP owner, source collection, publish date, favorite-added date, and tags. The same token labels are used by workspace artifact naming and export naming. This allows a later RAG importer to classify sources before opening every Markdown body. Each export also writes `star-owner-rag-manifest-<timestamp>.json` with source/output paths and normalized video metadata.
 
 Export safeguards:
 

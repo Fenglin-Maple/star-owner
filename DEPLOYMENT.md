@@ -7,8 +7,8 @@ This guide has two paths: a dependency-free portable build for ordinary users, a
 Recommended GitHub release assets:
 
 ```text
-StarNote-BiliNote-v<version>-win-x64-core.zip
-StarNote-BiliNote-v<version>-model-small.zip
+Star-Owner-v<version>-win-x64-core.zip
+Star-Owner-v<version>-model-small.zip
 ```
 
 The core archive contains Electron, all npm dependencies, Mermaid, FFmpeg, yt-dlp, CPython 3.12, faster-whisper, CTranslate2, and CUDA/cuDNN runtime libraries. The model archive contains the multilingual `small` model under its ready-to-use `runtime/models/small` relative path. GitHub uses two assets because the current all-in-one Windows archive is about 2.05GiB and exceeds the platform's 2GB per-file limit. Users do not install Node.js, Python, FFmpeg, yt-dlp, CUDA Toolkit, packages, or a model downloader.
@@ -18,7 +18,7 @@ Usage:
 1. Read `THIRD_PARTY_NOTICES.md`, especially the NVIDIA runtime terms.
 2. Extract the core archive to a writable directory. Do not run it from inside the ZIP.
 3. Extract the model archive into the extracted core directory. Confirm `runtime/models/small/model.bin` exists beside the application files.
-4. Double-click `Start-StarNote.cmd`.
+4. Double-click `Start-StarOwner.cmd`.
 5. Log in from the application's Bilibili WebView and select a default Workspace.
 6. Windows may show an unknown-publisher warning until releases are code-signed.
 
@@ -42,8 +42,8 @@ Requirements for building from source:
 - `uv` for creating the project-local Python runtime
 
 ```powershell
-git clone <repository-url>
-cd bili-agent-orchestrator
+git clone https://github.com/Fenglin-Maple/star-owner.git
+cd star-owner
 npm ci
 npm run setup:asr
 npm run verify:release
