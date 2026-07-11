@@ -4,7 +4,7 @@
     downloadPage: $('#page-cache-download'), libraryPage: $('#page-video-library'),
     inputs: $('#cacheDownloadInputs'), collection: $('#cacheDownloadCollection'), newCollection: $('#cacheNewCollectionName'), createCollection: $('#cacheCreateCollection'), submit: $('#cacheSubmitDownloads'), refresh: $('#cacheRefreshQueue'), jobs: $('#cacheDownloadJobs'), headline: $('#cacheQueueHeadline'), queueSummary: $('#cacheQueueSummary'), metricQueued: $('#cacheMetricQueued'), metricRunning: $('#cacheMetricRunning'), metricDone: $('#cacheMetricDone'), metricFailed: $('#cacheMetricFailed'),
     libraryCollection: $('#videoLibraryCollection'), librarySearch: $('#videoLibrarySearch'), librarySort: $('#videoLibrarySort'), filterToggle: $('#videoLibraryFilterToggle'), advanced: $('#videoLibraryAdvanced'), durationMin: $('#videoLibraryDurationMin'), durationMax: $('#videoLibraryDurationMax'), durationLabel: $('#videoLibraryDurationLabel'), librarySummary: $('#videoLibrarySummary'), list: $('#videoLibraryList'), selectVisible: $('#videoSelectVisible'), invertVisible: $('#videoInvertVisible'), selectedCount: $('#videoSelectedCount'), deleteSelected: $('#videoDeleteSelected'), deleteCollection: $('#videoDeleteCollection'),
-    playerEmpty: $('#videoPlayerEmpty'), playerShell: $('#videoPlayerShell'), player: $('#cacheVideoPlayer'), centerPlay: $('#videoCenterPlay'), playPause: $('#videoPlayPause'), currentTime: $('#videoCurrentTime'), totalTime: $('#videoTotalTime'), timeline: $('#videoTimeline'), mute: $('#videoMute'), volume: $('#videoVolume'), fullscreen: $('#videoFullscreen'), playerTitle: $('#videoPlayerTitle'), playerMeta: $('#videoPlayerMeta'), openExplorer: $('#videoOpenExplorer'),
+    playerEmpty: $('#videoPlayerEmpty'), playerShell: $('#videoPlayerShell'), playerStage: $('#cacheVideoStage'), player: $('#cacheVideoPlayer'), centerPlay: $('#videoCenterPlay'), playPause: $('#videoPlayPause'), currentTime: $('#videoCurrentTime'), totalTime: $('#videoTotalTime'), timeline: $('#videoTimeline'), mute: $('#videoMute'), volume: $('#videoVolume'), fullscreen: $('#videoFullscreen'), playerTitle: $('#videoPlayerTitle'), playerMeta: $('#videoPlayerMeta'), openExplorer: $('#videoOpenExplorer'),
     loginModal: $('#cacheLoginRequiredModal'), loginVideo: $('#cacheLoginRequiredVideo'), loginReason: $('#cacheLoginRequiredReason'), loginLater: $('#cacheLoginLater'), resumeLogin: $('#cacheResumeLogin'), goLogin: $('#cacheGoLogin'),
     confirmModal: $('#cacheConfirmModal'), confirmTitle: $('#cacheConfirmTitle'), confirmMessage: $('#cacheConfirmMessage'), confirmCancel: $('#cacheConfirmCancel'), confirmAccept: $('#cacheConfirmAccept')
   };
@@ -107,6 +107,10 @@
         event.target.checked ? selected.add(item.dataset.cacheVideo) : selected.delete(item.dataset.cacheVideo);
         renderLibrary();
       });
+      const image = item.querySelector('.video-library-thumb img');
+      image?.addEventListener('load', () => {
+        item.querySelector('.video-library-thumb')?.classList.toggle('portrait', image.naturalHeight > image.naturalWidth);
+      }, { once: true });
     }
     if (activeVideoId && !state.videos.some((item) => item.id === activeVideoId)) clearPlayer();
   }
@@ -114,7 +118,8 @@
   function videoItem(video) {
     const thumb = video.cover ? `<img src="${attr(video.cover)}" alt="" loading="lazy" />` : '<svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM10 9l5 3-5 3z"/></svg>';
     const collection = state.collections.find((item) => item.id === video.collectionId);
-    return `<div class="video-library-item ${video.id === activeVideoId ? 'active' : ''} ${video.fileExists ? '' : 'missing'}" data-cache-video="${attr(video.id)}" role="button" tabindex="0"><input class="app-checkbox" type="checkbox" ${selected.has(video.id) ? 'checked' : ''} aria-label="选择 ${attr(video.title || video.bvid)}" /><div class="video-library-thumb">${thumb}</div><div class="video-library-copy"><strong title="${attr(video.title || video.bvid)}">${html(video.title || video.bvid)}</strong><span>${html(video.bvid)} · ${html(video.owner || '未知 UP')} · ${duration(video.duration)}</span><small>${html(collection?.name || '')} · ${html(formatDate(video.downloadedAt))}${video.tags?.length ? ` · ${html(video.tags.slice(0, 4).join(' / '))}` : ''}</small></div><em class="video-file-state ${video.fileExists ? '' : 'missing'}">${video.fileExists ? '可播放' : '文件缺失'}</em></div>`;
+    const orientation = video.orientation === 'portrait' || Number(video.height || 0) > Number(video.width || 0) ? 'portrait' : '';
+    return `<div class="video-library-item ${video.id === activeVideoId ? 'active' : ''} ${video.fileExists ? '' : 'missing'}" data-cache-video="${attr(video.id)}" role="button" tabindex="0"><input class="app-checkbox" type="checkbox" ${selected.has(video.id) ? 'checked' : ''} aria-label="选择 ${attr(video.title || video.bvid)}" /><div class="video-library-thumb ${orientation}">${thumb}</div><div class="video-library-copy"><strong title="${attr(video.title || video.bvid)}">${html(video.title || video.bvid)}</strong><span>${html(video.bvid)} · ${html(video.owner || '未知 UP')} · ${duration(video.duration)}</span><small>${html(collection?.name || '')} · ${html(formatDate(video.downloadedAt))}${video.tags?.length ? ` · ${html(video.tags.slice(0, 4).join(' / '))}` : ''}</small></div><em class="video-file-state ${video.fileExists ? '' : 'missing'}">${video.fileExists ? '可播放' : '文件缺失'}</em></div>`;
   }
 
   function selectVideo(id) {
@@ -140,6 +145,8 @@
     elements.player.pause();
     elements.player.removeAttribute('src');
     elements.player.load();
+    elements.playerShell.removeAttribute('data-orientation');
+    elements.playerStage.style.removeProperty('--video-aspect-ratio');
     elements.playerShell.hidden = true;
     elements.playerEmpty.hidden = false;
   }
@@ -225,7 +232,14 @@
   elements.player.addEventListener('click', togglePlayback);
   elements.player.addEventListener('play', () => { elements.centerPlay.hidden = true; elements.playPause.innerHTML = '<svg viewBox="0 0 24 24"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>'; });
   elements.player.addEventListener('pause', () => { elements.centerPlay.hidden = false; elements.playPause.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></svg>'; });
-  elements.player.addEventListener('loadedmetadata', () => { elements.totalTime.textContent = duration(elements.player.duration); });
+  elements.player.addEventListener('loadedmetadata', () => {
+    elements.totalTime.textContent = duration(elements.player.duration);
+    const width = Number(elements.player.videoWidth || 0);
+    const height = Number(elements.player.videoHeight || 0);
+    const orientation = width && height && height > width ? 'portrait' : 'landscape';
+    elements.playerShell.dataset.orientation = orientation;
+    if (width && height) elements.playerStage.style.setProperty('--video-aspect-ratio', `${width} / ${height}`);
+  });
   elements.player.addEventListener('timeupdate', () => { elements.currentTime.textContent = duration(elements.player.currentTime); elements.timeline.value = String(elements.player.duration ? Math.round(elements.player.currentTime / elements.player.duration * 1000) : 0); });
   elements.timeline.addEventListener('input', () => { if (elements.player.duration) elements.player.currentTime = Number(elements.timeline.value) / 1000 * elements.player.duration; });
   elements.volume.addEventListener('input', () => { elements.player.volume = Number(elements.volume.value); elements.player.muted = false; });

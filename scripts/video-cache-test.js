@@ -28,7 +28,8 @@ function assert(condition, message) {
       let status = 'succeeded';
       let error = '';
       if (tool.id === 'video-info') {
-        fs.writeFileSync(path.join(task.artifactDir, 'info.json'), JSON.stringify({ bvid: task.bvid, title: '缓存测试视频', owner: { name: '测试 UP', mid: 1 }, duration: 125, pubdate: 1767225600, tags: ['AI', '测试'] }));
+        fs.writeFileSync(path.join(task.artifactDir, 'cover.jpg'), 'local cover');
+        fs.writeFileSync(path.join(task.artifactDir, 'info.json'), JSON.stringify({ bvid: task.bvid, title: '缓存测试视频', owner: { name: '测试 UP', mid: 1 }, duration: 125, pubdate: 1767225600, tags: ['AI', '测试'], pic: 'http://i0.hdslb.com/test.jpg', coverFile: 'cover.jpg', dimension: { width: 1080, height: 1920, rotate: 0 } }));
       }
       if (tool.id === 'merged-video') {
         if (requireLogin && !collection.cookieFile) {
@@ -63,6 +64,7 @@ function assert(condition, message) {
   await waitForJob(store, first.jobs[0].id, 'completed');
   const firstRecord = manager.state().videos.find((item) => item.bvid === 'BV1234567890');
   assert(firstRecord?.fileExists && firstRecord.title === '缓存测试视频', 'cache video and metadata were not persisted');
+  assert(firstRecord.cover.startsWith('file:') && firstRecord.orientation === 'portrait' && firstRecord.width === 1080 && firstRecord.height === 1920, 'local cover or portrait metadata was not exposed to the video library');
   const cachedTask = store.getTask(firstRecord.taskId);
   assert(cachedTask?.enabled && cachedTask.cachedVideoId === firstRecord.id && cachedTask.reuseCachedMedia, 'cached video was not exposed as an enabled Agent task');
   const runsBeforeDuplicate = runCount;
@@ -86,6 +88,11 @@ function assert(condition, message) {
   assert(resumed.resumed === 1, 'waiting login job was not resumed');
   await waitForJob(store, waitingSubmit.jobs[0].id, 'completed');
   assert(store.getCollectionById(defaultCollection.id).cookieFile === cookieFile, 'cache collection did not retain the exported login cookie');
+
+  const waitingRecord = store.getVideoCache(`cache:${defaultCollection.id}:BV0987654321`);
+  fs.rmSync(waitingRecord.coverFile, { force: true });
+  store.upsertVideoCache({ ...waitingRecord, cover: '' });
+  assert(manager.state().videos.find((item) => item.id === waitingRecord.id)?.cover === 'https://i0.hdslb.com/test.jpg', 'existing cache record did not fall back to its task cover over HTTPS');
 
   fs.rmSync(firstRecord.videoFile, { force: true });
   assert(manager.state().videos.find((item) => item.id === firstRecord.id)?.fileExists === false, 'missing cache file was not detected');

@@ -92,6 +92,12 @@ function printHelp() {
 
 async function writeInfo(videoUrl, outDir, args) {
   const info = await getVideoInfo(videoUrl, args);
+  try {
+    const coverFile = await downloadCover(info.pic, outDir, args);
+    if (coverFile) info.coverFile = path.basename(coverFile);
+  } catch (error) {
+    info.coverDownloadError = String(error.message || error).slice(0, 500);
+  }
   const file = path.join(outDir, 'info.json');
   fs.writeFileSync(file, `${JSON.stringify(info, null, 2)}\n`, 'utf8');
   console.log(file);
@@ -346,6 +352,7 @@ async function getVideoInfo(videoUrl, args) {
     desc: data.desc,
     pic: data.pic,
     duration: data.duration,
+    dimension: data.dimension || null,
     pages: data.pages || [],
     stat: data.stat || {},
     tags: await getTags(data.bvid || bvid, args).catch(() => []),
@@ -383,15 +390,7 @@ async function fetchJson(url, args) {
 
 async function fetchPlainJson(url, args) {
   if (!url) throw new Error('Missing JSON resource URL.');
-  const headers = {
-    referer: 'https://www.bilibili.com/',
-    accept: 'application/json, text/plain, */*',
-    'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
-    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
-  };
-  const cookie = args.cookies ? readNetscapeCookies(path.resolve(args.cookies)) : '';
-  if (cookie) headers.cookie = cookie;
-  const response = await fetch(url, { headers });
+  const response = await fetch(url, { headers: requestHeaders(args), signal: AbortSignal.timeout(30000) });
   const text = await response.text();
   let json;
   try {
@@ -401,6 +400,58 @@ async function fetchPlainJson(url, args) {
   }
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 180)}`);
   return json;
+}
+
+function requestHeaders(args, accept = 'application/json, text/plain, */*') {
+  const headers = {
+    referer: 'https://www.bilibili.com/',
+    accept,
+    'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+  };
+  const cookie = args.cookies ? readNetscapeCookies(path.resolve(args.cookies)) : '';
+  if (cookie) headers.cookie = cookie;
+  return headers;
+}
+
+async function downloadCover(source, outDir, args) {
+  if (!source) return '';
+  let url = assertBilibiliImageUrl(source);
+  let response;
+  for (let redirects = 0; redirects <= 4; redirects += 1) {
+    response = await fetch(url.toString(), {
+      headers: requestHeaders(args, 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'),
+      redirect: 'manual',
+      signal: AbortSignal.timeout(30000)
+    });
+    if (![301, 302, 303, 307, 308].includes(response.status)) break;
+    const location = response.headers.get('location');
+    if (!location || redirects === 4) throw new Error('Bilibili cover redirected too many times.');
+    url = assertBilibiliImageUrl(new URL(location, url).toString());
+  }
+  if (!response?.ok) throw new Error(`Bilibili cover HTTP ${response?.status || 0}.`);
+  const declaredLength = Number(response.headers.get('content-length') || 0);
+  const maximumBytes = 12 * 1024 * 1024;
+  if (declaredLength > maximumBytes) throw new Error('Bilibili cover exceeds 12 MiB.');
+  const type = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (type && !type.startsWith('image/')) throw new Error(`Unexpected Bilibili cover type: ${type}.`);
+  const content = Buffer.from(await response.arrayBuffer());
+  if (!content.length || content.length > maximumBytes) throw new Error('Bilibili cover is empty or too large.');
+  const extension = ({ 'image/png': '.png', 'image/webp': '.webp', 'image/avif': '.avif' })[type] || '.jpg';
+  const file = path.join(outDir, `cover${extension}`);
+  fs.writeFileSync(file, content);
+  return file;
+}
+
+function assertBilibiliImageUrl(value) {
+  const normalized = String(value || '').replace(/^http:\/\//i, 'https://');
+  const url = new URL(normalized);
+  const host = url.hostname.toLowerCase().replace(/\.$/, '');
+  const allowed = ['hdslb.com', 'biliimg.com', 'bilibili.com'];
+  if (url.protocol !== 'https:' || !allowed.some((domain) => host === domain || host.endsWith(`.${domain}`))) {
+    throw new Error(`Unsupported Bilibili cover host: ${host || '-'}.`);
+  }
+  return url;
 }
 
 function writeSubtitleSrt(file, body) {

@@ -158,11 +158,16 @@ class VideoCacheManager {
       ...collection,
       videoCount: this.store.listVideoCaches({ collectionId: collection.id }).length
     }));
-    const videos = this.store.listVideoCaches().map((record) => ({
-      ...record,
-      fileExists: Boolean(record.videoFile && fs.existsSync(record.videoFile)),
-      playbackUrl: record.videoFile && fs.existsSync(record.videoFile) ? pathToFileURL(record.videoFile).href : ''
-    }));
+    const videos = this.store.listVideoCaches().map((record) => {
+      const task = record.taskId ? this.store.getTask(record.taskId) : null;
+      const videoExists = Boolean(record.videoFile && fs.existsSync(record.videoFile));
+      return {
+        ...record,
+        cover: resolveCoverUrl(record, task),
+        fileExists: videoExists,
+        playbackUrl: videoExists ? pathToFileURL(record.videoFile).href : ''
+      };
+    });
     const jobs = this.store.listVideoCacheJobs().slice(0, 300).map((job) => {
       const run = job.currentRunId ? this.store.getToolRun(job.currentRunId) : null;
       const download = run?.downloadProgress || null;
@@ -250,7 +255,7 @@ class VideoCacheManager {
       job = this.updateJob(job, { currentRunId: infoRun.id, phase: '读取视频元数据', progress: 0.1 });
       await this.waitForRun(infoRun.id);
       const info = readJson(path.join(baseDir, 'info.json'));
-      const metadata = normalizeInfo(info, job.bvid);
+      const metadata = normalizeInfo(info, job.bvid, baseDir);
       Object.assign(task, metadata, { updatedAt: new Date().toISOString() });
       this.store.upsertTask(task);
       this.store.commit();
@@ -272,6 +277,11 @@ class VideoCacheManager {
         owner: task.owner,
         duration: task.duration,
         tags: task.tags,
+        cover: task.cover,
+        coverFile: task.coverFile || '',
+        width: task.width || 0,
+        height: task.height || 0,
+        orientation: task.orientation || '',
         publishedAt: task.publishedAt || '',
         downloadedAt,
         artifactDir: baseDir,
@@ -404,9 +414,11 @@ async function resolveBvid(value, fetchImpl = global.fetch) {
   throw new Error(`链接中没有找到 BV 号：${value}`);
 }
 
-function normalizeInfo(info, bvid) {
+function normalizeInfo(info, bvid, artifactDir = '') {
   const owner = typeof info.owner === 'string' ? info.owner : (info.owner?.name || '');
   const published = Number(info.pubdate || info.timestamp || 0);
+  const dimensions = normalizeDimensions(info.dimension);
+  const coverFile = resolveLocalCover(artifactDir, info.coverFile);
   return {
     bvid: info.bvid || bvid,
     title: info.title || bvid,
@@ -414,10 +426,40 @@ function normalizeInfo(info, bvid) {
     ownerMid: info.owner?.mid || '',
     duration: Number(info.duration || 0),
     tags: normalizeTags(info.tags),
-    cover: info.pic || info.thumbnail || '',
+    cover: normalizeRemoteCover(info.pic || info.thumbnail || ''),
+    coverFile,
+    ...dimensions,
     publishedAt: published ? new Date(published * 1000).toISOString() : '',
     pages: info.pages || []
   };
+}
+
+function normalizeDimensions(value) {
+  let width = Math.max(0, Number(value?.width || 0));
+  let height = Math.max(0, Number(value?.height || 0));
+  if (Math.abs(Number(value?.rotate || 0)) % 180 === 90) [width, height] = [height, width];
+  return { width, height, orientation: width && height ? (height > width ? 'portrait' : 'landscape') : '' };
+}
+
+function resolveLocalCover(artifactDir, value) {
+  if (!artifactDir || !value) return '';
+  try {
+    const candidate = assertInside(artifactDir, path.resolve(artifactDir, String(value)));
+    const stat = fs.lstatSync(candidate);
+    return stat.isFile() && !stat.isSymbolicLink() ? candidate : '';
+  } catch { return ''; }
+}
+
+function resolveCoverUrl(record, task) {
+  const local = resolveLocalCover(record.artifactDir || path.dirname(record.videoFile || ''), record.coverFile || task?.coverFile);
+  if (local) return pathToFileURL(local).href;
+  return normalizeRemoteCover(record.cover || task?.cover || '');
+}
+
+function normalizeRemoteCover(value) {
+  const source = String(value || '').trim();
+  if (!source) return '';
+  return source.replace(/^http:\/\//i, 'https://');
 }
 
 function findMerged(directory) {
@@ -447,6 +489,7 @@ module.exports = {
   DEFAULT_CACHE_COLLECTION_ID,
   DEFAULT_CACHE_COLLECTION_NAME,
   VideoCacheManager,
+  normalizeInfo,
   resolveBvid,
   splitInputs
 };
