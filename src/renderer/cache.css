@@ -98,6 +98,9 @@
 .video-library-copy strong { font-size: 12px; line-height: 1.3; }
 .video-library-copy span { margin-top: 4px; color: var(--muted); font-size: 10px; }
 .video-library-copy small { margin-top: 3px; color: var(--muted-2); font-size: 10px; }
+.video-bvid-link { color: var(--accent); text-decoration: none; text-underline-offset: 2px; }
+.video-bvid-link:hover { text-decoration: underline; }
+.video-bvid-link:focus-visible { border-radius: 2px; outline: 2px solid var(--accent-soft); outline-offset: 2px; }
 .video-file-state { padding: 3px 6px; border-radius: 4px; color: var(--green); background: color-mix(in srgb, var(--green) 10%, transparent); font-size: 10px; font-style: normal; white-space: nowrap; }
 .video-file-state.missing { color: var(--red); background: color-mix(in srgb, var(--red) 10%, transparent); }
 
