@@ -87,11 +87,11 @@ class VideoCacheManager {
     });
   }
 
-  async submit({ inputs, collectionId, outputDir = '' } = {}) {
+  async submit({ inputs, collectionId } = {}) {
     const collection = this.requireCacheCollection(collectionId);
     const rawItems = splitInputs(inputs);
     if (!rawItems.length) throw new Error('请至少输入一个 BV 号或 Bilibili 视频链接。');
-    const targetRoot = outputDir ? ensureDir(path.resolve(outputDir)) : ensureDir(collection.cacheRoot);
+    const targetRoot = ensureDir(collection.cacheRoot);
     const jobs = [];
     const seen = new Set();
     for (const rawInput of rawItems) {
@@ -110,7 +110,7 @@ class VideoCacheManager {
         phase: existingFile ? '缓存已存在' : '等待下载',
         progress: existingFile ? 1 : 0,
         outputRoot: targetRoot,
-        customOutputRoot: Boolean(outputDir),
+        customOutputRoot: false,
         cacheId: existingFile ? existing.id : '',
         publicAttempt: true,
         currentRunId: '',

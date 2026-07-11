@@ -60,7 +60,6 @@ contextBridge.exposeInMainWorld('orchestrator', {
   videoCacheCreateCollection: (name) => ipcRenderer.invoke('video-cache:collection-create', name),
   videoCacheSubmit: (payload) => ipcRenderer.invoke('video-cache:submit', payload),
   videoCacheResumeLogin: () => ipcRenderer.invoke('video-cache:resume-login'),
-  videoCacheChooseOutput: () => ipcRenderer.invoke('video-cache:choose-output'),
   videoCacheOpen: (id) => ipcRenderer.invoke('video-cache:open', id),
   videoCacheDeleteVideos: (ids) => ipcRenderer.invoke('video-cache:delete-videos', ids),
   videoCacheDeleteCollection: (id) => ipcRenderer.invoke('video-cache:delete-collection', id),

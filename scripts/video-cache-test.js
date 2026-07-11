@@ -51,7 +51,9 @@ function assert(condition, message) {
   const defaultCollection = store.getCollectionById(DEFAULT_CACHE_COLLECTION_ID);
   assert(defaultCollection?.protected && defaultCollection.collectionKind === 'video-cache', 'protected default cache collection was not created');
 
-  const first = await manager.submit({ inputs: 'BV1234567890', collectionId: defaultCollection.id });
+  const ignoredExternalRoot = path.join(root, 'external-output');
+  const first = await manager.submit({ inputs: 'BV1234567890', collectionId: defaultCollection.id, outputDir: ignoredExternalRoot });
+  assert(first.jobs[0].outputRoot === defaultCollection.cacheRoot && !first.jobs[0].customOutputRoot && !fs.existsSync(ignoredExternalRoot), 'cache submission escaped the managed collection directory');
   await waitForJob(store, first.jobs[0].id, 'completed');
   const firstRecord = manager.state().videos.find((item) => item.bvid === 'BV1234567890');
   assert(firstRecord?.fileExists && firstRecord.title === '缓存测试视频', 'cache video and metadata were not persisted');

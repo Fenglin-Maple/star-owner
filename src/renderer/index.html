@@ -310,11 +310,7 @@
                   <label><span>内置缓存视频收藏夹</span><select id="cacheDownloadCollection"></select></label>
                   <label><span>新建收藏夹</span><div class="cache-inline-create"><input id="cacheNewCollectionName" placeholder="例如：待整理课程" /><button id="cacheCreateCollection" class="secondary-button compact-button" type="button">创建</button></div></label>
                 </div>
-                <div class="cache-destination-choice" role="group" aria-label="缓存输出位置">
-                  <label><input class="app-radio" type="radio" name="cacheDestination" value="managed" checked /><span><strong>应用预置目录</strong><small>由星藏家管理，删除与任务复用更稳定</small></span></label>
-                  <label><input class="app-radio" type="radio" name="cacheDestination" value="custom" /><span><strong>自定义目录</strong><small>仍会登记到视频库并进行安全路径校验</small></span></label>
-                </div>
-                <div id="cacheCustomPathRow" class="path-picker cache-custom-path" hidden><input id="cacheCustomOutput" readonly placeholder="选择自定义输出目录" /><button id="cacheChooseOutput" class="secondary-button" type="button">选择目录</button></div>
+                <div class="cache-managed-note"><strong>应用托管目录</strong><span>视频将保存到所选内置缓存收藏夹，由星藏家统一管理。</span></div>
                 <button id="cacheSubmitDownloads" class="primary-button cache-submit-button" type="button">加入下载队列</button>
               </section>
               <section class="section-block cache-queue-panel">

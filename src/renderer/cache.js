@@ -2,7 +2,7 @@
   const $ = (selector) => document.querySelector(selector);
   const elements = {
     downloadPage: $('#page-cache-download'), libraryPage: $('#page-video-library'),
-    inputs: $('#cacheDownloadInputs'), collection: $('#cacheDownloadCollection'), newCollection: $('#cacheNewCollectionName'), createCollection: $('#cacheCreateCollection'), customPathRow: $('#cacheCustomPathRow'), customOutput: $('#cacheCustomOutput'), chooseOutput: $('#cacheChooseOutput'), submit: $('#cacheSubmitDownloads'), refresh: $('#cacheRefreshQueue'), jobs: $('#cacheDownloadJobs'), headline: $('#cacheQueueHeadline'), queueSummary: $('#cacheQueueSummary'), metricQueued: $('#cacheMetricQueued'), metricRunning: $('#cacheMetricRunning'), metricDone: $('#cacheMetricDone'), metricFailed: $('#cacheMetricFailed'),
+    inputs: $('#cacheDownloadInputs'), collection: $('#cacheDownloadCollection'), newCollection: $('#cacheNewCollectionName'), createCollection: $('#cacheCreateCollection'), submit: $('#cacheSubmitDownloads'), refresh: $('#cacheRefreshQueue'), jobs: $('#cacheDownloadJobs'), headline: $('#cacheQueueHeadline'), queueSummary: $('#cacheQueueSummary'), metricQueued: $('#cacheMetricQueued'), metricRunning: $('#cacheMetricRunning'), metricDone: $('#cacheMetricDone'), metricFailed: $('#cacheMetricFailed'),
     libraryCollection: $('#videoLibraryCollection'), librarySearch: $('#videoLibrarySearch'), librarySort: $('#videoLibrarySort'), filterToggle: $('#videoLibraryFilterToggle'), advanced: $('#videoLibraryAdvanced'), durationMin: $('#videoLibraryDurationMin'), durationMax: $('#videoLibraryDurationMax'), durationLabel: $('#videoLibraryDurationLabel'), librarySummary: $('#videoLibrarySummary'), list: $('#videoLibraryList'), selectVisible: $('#videoSelectVisible'), invertVisible: $('#videoInvertVisible'), selectedCount: $('#videoSelectedCount'), deleteSelected: $('#videoDeleteSelected'), deleteCollection: $('#videoDeleteCollection'),
     playerEmpty: $('#videoPlayerEmpty'), playerShell: $('#videoPlayerShell'), player: $('#cacheVideoPlayer'), centerPlay: $('#videoCenterPlay'), playPause: $('#videoPlayPause'), currentTime: $('#videoCurrentTime'), totalTime: $('#videoTotalTime'), timeline: $('#videoTimeline'), mute: $('#videoMute'), volume: $('#videoVolume'), fullscreen: $('#videoFullscreen'), playerTitle: $('#videoPlayerTitle'), playerMeta: $('#videoPlayerMeta'), openExplorer: $('#videoOpenExplorer'),
     loginModal: $('#cacheLoginRequiredModal'), loginVideo: $('#cacheLoginRequiredVideo'), loginReason: $('#cacheLoginRequiredReason'), loginLater: $('#cacheLoginLater'), resumeLogin: $('#cacheResumeLogin'), goLogin: $('#cacheGoLogin'),
@@ -151,11 +151,9 @@
   }
 
   async function submitDownloads() {
-    const custom = document.querySelector('input[name="cacheDestination"]:checked')?.value === 'custom';
-    if (custom && !elements.customOutput.value) return toast('请选择自定义输出目录', '目录确认后才能加入下载队列。', 'info');
     elements.submit.disabled = true;
     try {
-      const result = await window.orchestrator.videoCacheSubmit({ inputs: elements.inputs.value, collectionId: elements.collection.value, outputDir: custom ? elements.customOutput.value : '' });
+      const result = await window.orchestrator.videoCacheSubmit({ inputs: elements.inputs.value, collectionId: elements.collection.value });
       state = result.state;
       elements.inputs.value = '';
       render();
@@ -204,8 +202,6 @@
     refreshTimer = setTimeout(() => { refreshTimer = null; nextState ? render() : refresh({ quiet: true }); }, 100);
   }
 
-  for (const radio of document.querySelectorAll('input[name="cacheDestination"]')) radio.addEventListener('change', () => { elements.customPathRow.hidden = radio.value !== 'custom' || !radio.checked; });
-  elements.chooseOutput.addEventListener('click', async () => { const result = await window.orchestrator.videoCacheChooseOutput(); if (!result.canceled) elements.customOutput.value = result.path; });
   elements.createCollection.addEventListener('click', createCollection);
   elements.submit.addEventListener('click', submitDownloads);
   elements.refresh.addEventListener('click', () => refresh());

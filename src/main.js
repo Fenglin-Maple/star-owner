@@ -360,12 +360,6 @@ ipcMain.handle('video-cache:resume-login', async () => {
   return videoCacheManager.resumeWaitingForLogin();
 });
 
-ipcMain.handle('video-cache:choose-output', async () => {
-  assertBackendReady();
-  const result = await dialog.showOpenDialog(mainWindow, { title: '选择视频缓存输出目录', properties: ['openDirectory', 'createDirectory'] });
-  return { canceled: result.canceled, path: result.filePaths[0] || '' };
-});
-
 ipcMain.handle('video-cache:open', async (_event, id) => {
   assertBackendReady();
   const record = store.getVideoCache(String(id || ''));
