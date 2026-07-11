@@ -3,7 +3,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { Store } = require('../src/core/store');
 const { ToolRunner } = require('../src/core/tool-runner');
-const { DEFAULT_CACHE_COLLECTION_ID, VideoCacheManager } = require('../src/core/video-cache-manager');
+const { DEFAULT_CACHE_COLLECTION_ID, VideoCacheManager, resolveBvid } = require('../src/core/video-cache-manager');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -51,9 +51,15 @@ function assert(condition, message) {
   const defaultCollection = store.getCollectionById(DEFAULT_CACHE_COLLECTION_ID);
   assert(defaultCollection?.protected && defaultCollection.collectionKind === 'video-cache', 'protected default cache collection was not created');
 
+  const activeFixture = store.upsertVideoCacheJob({ id: 'active-cache-job', collectionId: defaultCollection.id, input: 'BV1111111111', bvid: 'BV1111111111', status: 'running', outputRoot: defaultCollection.cacheRoot, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  const activeDuplicate = await manager.submit({ inputs: activeFixture.bvid, collectionId: defaultCollection.id });
+  assert(activeDuplicate.jobs[0].id === activeFixture.id, 'active cache download was duplicated');
+  store.delete('videoCacheJobs', activeFixture.id);
+  store.commit();
+
   const ignoredExternalRoot = path.join(root, 'external-output');
   const first = await manager.submit({ inputs: 'BV1234567890', collectionId: defaultCollection.id, outputDir: ignoredExternalRoot });
-  assert(first.jobs[0].outputRoot === defaultCollection.cacheRoot && !first.jobs[0].customOutputRoot && !fs.existsSync(ignoredExternalRoot), 'cache submission escaped the managed collection directory');
+  assert(first.jobs[0].outputRoot === defaultCollection.cacheRoot && !fs.existsSync(ignoredExternalRoot), 'cache submission escaped the managed collection directory');
   await waitForJob(store, first.jobs[0].id, 'completed');
   const firstRecord = manager.state().videos.find((item) => item.bvid === 'BV1234567890');
   assert(firstRecord?.fileExists && firstRecord.title === '缓存测试视频', 'cache video and metadata were not persisted');
@@ -89,6 +95,9 @@ function assert(condition, message) {
   let protectedRejected = false;
   try { manager.deleteCollection(defaultCollection.id); } catch { protectedRejected = true; }
   assert(protectedRejected, 'protected default cache collection was deletable');
+  let externalFetches = 0;
+  try { await resolveBvid('https://example.com/video?bilibili=1', async () => { externalFetches += 1; }); } catch { /* expected */ }
+  assert(externalFetches === 0, 'non-Bilibili URL reached the network layer');
   const temporary = manager.createCollection('可删除缓存');
   manager.deleteCollection(temporary.id);
   assert(!store.getCollectionById(temporary.id) && store.getCollectionById(DEFAULT_CACHE_COLLECTION_ID), 'cache collection lifecycle failed');

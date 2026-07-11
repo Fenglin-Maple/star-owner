@@ -63,7 +63,7 @@ New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 $projectItems = @(
   "assets", "src", "templates", "tools", "scripts", "packaging", "LICENSE", "README.md", "DESIGN.md",
-  "DEPLOYMENT.md", "AGENTS.md", "THIRD_PARTY_NOTICES.md", "SECURITY.md",
+  "DEPLOYMENT.md", "AGENTS.md", "CODE_REVIEW.md", "THIRD_PARTY_NOTICES.md", "SECURITY.md",
   "package.json", "package-lock.json", "runtime-requirements.txt"
 )
 foreach ($relative in $projectItems) {

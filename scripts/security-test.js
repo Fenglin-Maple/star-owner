@@ -1,0 +1,56 @@
+const fs = require('fs');
+const path = require('path');
+const { ApiServer, MAX_JSON_BODY_BYTES } = require('../src/core/api-server');
+const { isAllowedBilibiliNavigation } = require('../src/core/desktop-security');
+const { assertBilibiliUrl, isAllowedApiOrigin, isPrivateNetworkHost } = require('../src/core/network-policy');
+const { MAX_MARKDOWN_BYTES, validateSubmission } = require('../src/core/validation');
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+(async () => {
+  assert(isAllowedBilibiliNavigation('https://passport.bilibili.com/login'), 'Bilibili login navigation was rejected');
+  assert(isAllowedBilibiliNavigation('https://b23.tv/abc'), 'Bilibili short link was rejected');
+  assert(!isAllowedBilibiliNavigation('https://example.com/?bilibili=1'), 'non-Bilibili navigation was accepted');
+  assert(assertBilibiliUrl('https://www.bilibili.com/video/BV1234567890').hostname === 'www.bilibili.com', 'official Bilibili URL was not parsed');
+  assert(isPrivateNetworkHost('127.0.0.1') && isPrivateNetworkHost('192.168.1.2') && isPrivateNetworkHost('::1'), 'private network detection missed a local address');
+  assert(isPrivateNetworkHost('::ffff:7f00:1'), 'IPv4-mapped private IPv6 address was not blocked');
+  assert(!isPrivateNetworkHost('8.8.8.8'), 'public IPv4 address was classified as private');
+  assert(isAllowedApiOrigin('', 'http://127.0.0.1:17391'), 'origin-less Agent request was rejected');
+  assert(!isAllowedApiOrigin('https://example.com', 'http://127.0.0.1:17391'), 'cross-origin browser request was accepted');
+
+  const api = new ApiServer({ store: {}, toolRunner: {}, getToolHealth: () => [] });
+  await api.start(0);
+  try {
+    const health = await fetch(`${api.url()}/api/health`);
+    assert(health.ok, 'origin-less API health request failed');
+    assert(health.headers.get('access-control-allow-origin') === null, 'wildcard CORS header is still present');
+    const crossOrigin = await fetch(`${api.url()}/api/health`, { headers: { origin: 'https://example.com' } });
+    assert(crossOrigin.status === 403, `cross-origin request returned ${crossOrigin.status}`);
+    const oversized = await fetch(`${api.url()}/api/workers/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tool: 'test', model: 'test', metadata: { payload: 'x'.repeat(MAX_JSON_BODY_BYTES) } })
+    });
+    assert(oversized.status === 413, `oversized JSON request returned ${oversized.status}`);
+  } finally {
+    api.stop();
+  }
+
+  const validationRoot = path.join(__dirname, '..', '.cache', 'security-validation-test');
+  fs.rmSync(validationRoot, { recursive: true, force: true });
+  fs.mkdirSync(validationRoot, { recursive: true });
+  const largeMarkdown = path.join(validationRoot, 'large.md');
+  const metadata = path.join(validationRoot, 'info.json');
+  fs.writeFileSync(largeMarkdown, 'x');
+  fs.truncateSync(largeMarkdown, MAX_MARKDOWN_BYTES + 1);
+  fs.writeFileSync(metadata, '{}');
+  const validation = validateSubmission({ allowedRoot: validationRoot }, { artifactDir: validationRoot, markdownFile: largeMarkdown, metadataFile: metadata });
+  assert(validation.errors.some((error) => error.includes('Markdown file exceeds')), 'oversized Markdown artifact was accepted');
+  fs.rmSync(validationRoot, { recursive: true, force: true });
+  console.log('security policy integration test passed');
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const initSqlJs = require('sql.js');
+const { recoverAtomicFile, restoreAtomicBackup, writeFileRecoverable } = require('./atomic-file');
 const { DEFAULT_FILENAME_METADATA, WORKSPACE_ROOT, ensureDir, normalizeFilenameMetadata, normalizeTags } = require('./workspace');
 
 const DB_FILE = path.join(WORKSPACE_ROOT, 'orchestrator.sqlite');
@@ -11,7 +12,13 @@ class Store {
     this.SQL = SQL;
     this.file = file;
     ensureDir(path.dirname(file));
-    this.db = fs.existsSync(file) ? new SQL.Database(fs.readFileSync(file)) : new SQL.Database();
+    recoverAtomicFile(file);
+    try {
+      this.db = fs.existsSync(file) ? new SQL.Database(fs.readFileSync(file)) : new SQL.Database();
+    } catch (error) {
+      if (!restoreAtomicBackup(file)) throw error;
+      this.db = new SQL.Database(fs.readFileSync(file));
+    }
     this.initSchema();
     this.initDefaultWorkspace();
     this.initDefaultTools();
@@ -42,7 +49,7 @@ class Store {
   }
 
   save() {
-    fs.writeFileSync(this.file, Buffer.from(this.db.export()));
+    writeFileRecoverable(this.file, Buffer.from(this.db.export()));
   }
 
   set(scope, id, value) {

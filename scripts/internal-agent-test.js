@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const { Store } = require('../src/core/store');
-const { InternalAgentManager, isLoginRequiredMessage } = require('../src/core/internal-agent-manager');
+const { InternalAgentManager } = require('../src/core/internal-agent-manager');
+const { isLoginRequiredMessage } = require('../src/core/media-errors');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);

@@ -27,6 +27,8 @@ The canonical Markdown contract is `templates/video-summary-template.md` and is 
 - Keep ordinary user releases dependency-free by changing `scripts/build-portable-release.ps1` when a new runtime dependency is added.
 - Update `THIRD_PARTY_NOTICES.md`, `runtime-requirements.txt`, and release documentation whenever dependency versions or licenses change.
 - Preserve the API-first boundary: Agents do not directly mutate SQLite or application indexes.
+- Treat `network-policy.js`, `desktop-security.js`, and the API origin/body limits as security boundaries; extend their tests when changing them.
+- Keep desktop-owned collection synchronization out of the public Agent API. Reuse `CollectionSyncService` and `submission-artifacts` instead of importing `ApiServer` into other managers.
 - Use `apply_patch` for scoped source edits and keep unrelated refactors out of focused changes.
 - Run `npm run verify:release` before publishing or opening a release pull request.
 
@@ -59,6 +61,9 @@ npm run test:scheduler
 npm run test:rag
 npm run test:internal-agent
 npm run test:video-cache
+npm run test:security
+npm run test:persistence
+npm run test:collection-sync
 npm run test:asr-service
 npm audit --audit-level=high
 ```

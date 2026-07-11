@@ -66,6 +66,12 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Internal agent test failed." }
   & npm run test:video-cache
   if ($LASTEXITCODE -ne 0) { throw "Video cache test failed." }
+  & npm run test:security
+  if ($LASTEXITCODE -ne 0) { throw "Security policy test failed." }
+  & npm run test:persistence
+  if ($LASTEXITCODE -ne 0) { throw "SQLite persistence test failed." }
+  & npm run test:collection-sync
+  if ($LASTEXITCODE -ne 0) { throw "Collection sync test failed." }
   & npm audit --audit-level=high
   if ($LASTEXITCODE -ne 0) { throw "npm audit reported a high-severity issue." }
 } finally {

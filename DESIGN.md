@@ -48,7 +48,12 @@ Runtime modules:
 
 - `src/main.js`: window, IPC, startup, encrypted credentials, workspace configuration.
 - `src/core/store.js`: SQLite-backed records and migrations.
-- `src/core/api-server.js`: Agent API, task lifecycle, validation entry points.
+- `src/core/api-server.js`: Agent-only HTTP API and task lifecycle.
+- `src/core/collection-sync-service.js`: desktop-owned Bilibili collection synchronization and indexing.
+- `src/core/submission-artifacts.js`: shared final naming, relocation, and cached-video record updates.
+- `src/core/network-policy.js`: Bilibili URL, local API origin, and private-network policies.
+- `src/core/desktop-security.js`: main-window and Bilibili WebView navigation hardening.
+- `src/core/atomic-file.js`: recoverable whole-file SQLite persistence.
 - `src/core/tool-runner.js`: controlled child processes, timeouts, logs, cancellation.
 - `src/core/analytics.js`: collection, agent, and tool usage statistics.
 - `src/core/workspace.js`: path safety and workspace layout.
@@ -216,16 +221,13 @@ GET  /api/workers
 GET  /api/workers/:workerId
 GET  /api/collections
 GET  /api/active-collection
-POST /api/collections/sync
 GET  /api/tasks?collectionId=<id>
 POST /api/tasks/claim
-POST /api/tasks/batch
 GET  /api/tasks/:id
 POST /api/tasks/:id/heartbeat
 POST /api/tasks/:id/submit
 POST /api/tasks/:id/fail
 GET  /api/tools
-PATCH /api/tools/:id
 POST /api/tasks/:taskId/tools/:toolId/run
 GET  /api/tool-runs
 GET  /api/tool-runs/:runId?log=1
@@ -236,6 +238,8 @@ GET  /api/templates/video-summary
 ```
 
 `GET /api` and `GET /api/manifest` are the discovery entry points. They return protocol version, current desktop-selected collection, every Agent-facing endpoint with method/parameters, enabled tool contracts, the template URL, and the standard pause message.
+
+The API accepts origin-less local process requests and same-origin requests only. Browser pages from unrelated origins receive HTTP `403`; wildcard CORS is not enabled. JSON request bodies are capped at 1 MiB and all asynchronous handlers terminate through one response/error boundary. Collection synchronization, task inventory switches, and tool enable state are desktop IPC responsibilities and are intentionally absent from the public Agent API.
 
 Every fresh Agent session first registers its actual caller tool and model:
 
@@ -442,7 +446,7 @@ Provider contract:
 
 - `openai` and `newapi` currently share the OpenAI-compatible `GET /models` and `POST /chat/completions` wire format;
 - the configured Base URL is the API root immediately before `/models` and `/chat/completions`;
-- API keys are encrypted with Electron `safeStorage` when the platform exposes it and are never returned to the renderer;
+- API keys and saved account passwords require Electron `safeStorage`; saving is rejected rather than falling back to plaintext when platform encryption is unavailable;
 - arbitrary extra request headers support self-hosted gateways without hard-coding vendor rules;
 - streaming accepts SSE and providers that return ordinary JSON despite `stream: true`;
 - reasoning is displayed only from explicit provider fields such as `reasoning_content`, `reasoning`, or `thinking`.
@@ -478,7 +482,7 @@ The current retrieval engine is deterministic lexical RAG rather than an embeddi
 
 The internal Agent manager persists sessions in SQLite and registers each one through the same Worker store as external callers. Queue sessions claim only from their selected collection, so multiple internal sessions can work concurrently without changing the desktop collection activated for external agents. Claim ownership is synchronous, leases are renewed while app-managed tools are queued or running, and interrupted app sessions recover in a paused state after restart.
 
-For each task the manager runs the material bundle, refreshes task metadata from `info.json`, sends the template, subtitles, ASR transcript, comments, manifest, metadata, and optionally up to four keyframes to the selected model, streams explicit reasoning/content fields to the renderer, and validates the draft. One repair attempt includes concrete validator errors. Accepted work runs cache cleanup and the same `finalizeSubmissionArtifacts` path as the public API. Usage is recorded in both the session and shared per-model accounting.
+For each task the manager runs the material bundle, refreshes task metadata from `info.json`, sends the template, subtitles, ASR transcript, comments, manifest, metadata, and optionally up to four keyframes to the selected model, streams explicit reasoning/content fields to the renderer, and validates the draft. One repair attempt includes concrete validator errors. Accepted work runs cache cleanup and the same `submission-artifacts` service as the public API. Usage is recorded in both the session and shared per-model accounting.
 
 Single-task mode creates a normal enabled task under the reserved `内置用户` identity and a user-selected internal collection. It requires an external output directory. The first material run deliberately omits cookies even when the WebView is logged in. Only explicit registered-user, sign-in, private-video, or cookie-required errors move the session into `waiting-login`; ordinary network and model failures remain normal errors. The renderer then offers a direct Bilibili Login navigation action. A manual resume after successful login exports the current account cookie and retries the same pending task. On acceptance, the canonical artifact remains in the default Workspace and a collision-safe full directory copy is created under the requested destination.
 
@@ -513,6 +517,12 @@ Downloaded videos are first-class SQLite resources. `VideoCacheManager` owns pro
 
 The manager submits metadata and merged-video work through ToolRunner rather than invoking yt-dlp directly. Media concurrency is three lanes, while Bilibili metadata remains under the throttled API pool. yt-dlp progress is parsed into SQLite run state and exposed in the renderer. Short links and ordinary Bilibili URLs resolve to a canonical BV before a task is created. Public access is always attempted first; only explicit login, cookie, registered-user, or private-video signals move a job to `waiting-login`.
 
-Every completed cache record owns a normal enabled task with `cachedVideoId`, `cachedVideoFile`, and `reuseCachedMedia`. Both public and internal Agent claim paths preserve the registered artifact directory. Legacy records created in external roots remain readable, but new cache jobs are confined to application-managed collection roots. `video-tool` reuses an existing root `merged.*`; `clean-cache` automatically receives `--preserve-video` for cache tasks. Submission finalization relocates the cache record when the artifact directory is renamed, so the video library remains valid after Markdown acceptance.
+Every completed cache record owns a normal enabled task with `cachedVideoId`, `cachedVideoFile`, and `reuseCachedMedia`. Both public and internal Agent claim paths preserve the registered artifact directory. Cache jobs and records contain no external-root compatibility mode and are confined to application-managed collection roots. Active jobs are unique per collection/BV pair, preventing concurrent duplicate downloads into the same artifact directory. `video-tool` reuses an existing root `merged.*`; `clean-cache` automatically receives `--preserve-video` for cache tasks. Submission finalization relocates the cache record when the artifact directory is renamed, so the video library remains valid after Markdown acceptance.
+
+## 21. Security and Reliability Boundaries
+
+The renderer uses a restrictive Content Security Policy. The main BrowserWindow is sandboxed, cannot navigate away from the packaged renderer, and cannot create popup windows. The persistent login WebView has no Node/preload access, accepts navigation only to `bilibili.com` and `b23.tv` domains, and cannot create popup windows. Download-link resolution applies the same Bilibili allowlist to every redirect.
+
+Submission validation accepts only regular, non-symlink Markdown and metadata files inside the assigned artifact directory. Markdown is limited to 16 MiB and metadata JSON to 4 MiB before content parsing. The SQLite/sql.js database is persisted through a temporary file and crash-recovery backup instead of overwriting the live database directly.
 
 The video library computes `fileExists` on every state read and never hides stale records. Filters cover cache collection, title/BV/UP/tag text, duration, and download order. Playback uses a themed custom control surface without native browser controls. Video and collection deletion require renderer confirmation. The backend resolves every artifact against its registered allowed root, refuses deletion of the root itself, protects the default collection, and keeps at least one cache collection.

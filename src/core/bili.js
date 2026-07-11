@@ -21,6 +21,7 @@ class BiliClient {
   async fetchJson(endpoint) {
     const cookie = await this.cookieHeader('https://www.bilibili.com');
     const response = await fetch(endpoint, {
+      signal: AbortSignal.timeout(30000),
       headers: {
         cookie,
         referer: 'https://www.bilibili.com/',

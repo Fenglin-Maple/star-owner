@@ -2,7 +2,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
-const { isLoginRequiredMessage } = require('./internal-agent-manager');
+const { isLoginRequiredMessage } = require('./media-errors');
+const { assertBilibiliUrl } = require('./network-policy');
 const { assertInside, collectionDirs, ensureDir, normalizeTags, safeName } = require('./workspace');
 
 const CACHE_USER_ID = 'builtin-agent-user';
@@ -10,6 +11,7 @@ const CACHE_USER_NAME = '内置用户';
 const DEFAULT_CACHE_COLLECTION_ID = 'builtin-video-cache:default';
 const DEFAULT_CACHE_COLLECTION_NAME = '内置视频缓存';
 const TERMINAL_RUNS = new Set(['succeeded', 'failed', 'cancelled', 'timeout']);
+const ACTIVE_CACHE_JOBS = new Set(['queued', 'running', 'waiting-login']);
 
 class VideoCacheManager {
   constructor({ store, toolRunner, bili, getCurrentUser, emit, fetchImpl, maxConcurrent = 3, pollMs = 250 }) {
@@ -98,6 +100,11 @@ class VideoCacheManager {
       const bvid = await resolveBvid(rawInput, this.fetch);
       if (seen.has(bvid)) continue;
       seen.add(bvid);
+      const activeJob = this.store.listVideoCacheJobs().find((item) => item.collectionId === collection.id && item.bvid === bvid && ACTIVE_CACHE_JOBS.has(item.status));
+      if (activeJob) {
+        jobs.push(activeJob);
+        continue;
+      }
       const existing = this.store.listVideoCaches({ collectionId: collection.id }).find((item) => item.bvid === bvid);
       const existingFile = existing?.videoFile && fs.existsSync(existing.videoFile);
       const now = new Date().toISOString();
@@ -110,7 +117,6 @@ class VideoCacheManager {
         phase: existingFile ? '缓存已存在' : '等待下载',
         progress: existingFile ? 1 : 0,
         outputRoot: targetRoot,
-        customOutputRoot: false,
         cacheId: existingFile ? existing.id : '',
         publicAttempt: true,
         currentRunId: '',
@@ -272,7 +278,6 @@ class VideoCacheManager {
         videoFile,
         metadataFile: path.join(baseDir, 'info.json'),
         allowedRoot: job.outputRoot,
-        customOutputRoot: Boolean(job.customOutputRoot),
         status: 'ready',
         createdAt: this.store.getVideoCache(cacheId)?.createdAt || downloadedAt,
         updatedAt: downloadedAt
@@ -370,14 +375,27 @@ class VideoCacheManager {
 
 function splitInputs(value) {
   const source = Array.isArray(value) ? value : String(value || '').split(/[\r\n,，;；\s]+/);
-  return source.map((item) => String(item || '').trim()).filter(Boolean).filter((item) => /bilibili|b23\.tv|BV[0-9A-Za-z]{10}/i.test(item));
+  return source.map((item) => String(item || '').trim()).filter(Boolean).filter((item) => {
+    if (/BV[0-9A-Za-z]{10}/i.test(item)) return true;
+    try { assertBilibiliUrl(item); return true; } catch { return false; }
+  });
 }
 
 async function resolveBvid(value, fetchImpl = global.fetch) {
   const direct = String(value || '').match(/BV[0-9A-Za-z]{10}/i)?.[0];
   if (direct) return direct;
-  if (!/^https?:\/\//i.test(String(value || ''))) throw new Error(`无法识别视频输入：${value}`);
-  const response = await fetchImpl(String(value), { redirect: 'follow', headers: { 'user-agent': 'Mozilla/5.0 StarOwner/0.7' } });
+  let url = assertBilibiliUrl(value);
+  let response;
+  for (let redirects = 0; redirects <= 5; redirects += 1) {
+    response = await fetchImpl(url.toString(), { redirect: 'manual', headers: { 'user-agent': 'Mozilla/5.0 StarOwner/0.8' } });
+    if (![301, 302, 303, 307, 308].includes(Number(response.status || 0))) break;
+    const location = response.headers?.get?.('location');
+    if (!location) throw new Error('Bilibili 短链接返回了无目标的重定向。');
+    url = assertBilibiliUrl(new URL(location, url).toString());
+    if (redirects === 5) throw new Error('Bilibili 链接重定向次数过多。');
+  }
+  if (!response) throw new Error(`无法读取视频链接：${value}`);
+  if (response.ok === false) throw new Error(`Bilibili 链接请求失败：HTTP ${response.status}`);
   const fromUrl = String(response.url || '').match(/BV[0-9A-Za-z]{10}/i)?.[0];
   if (fromUrl) return fromUrl;
   const body = await response.text();

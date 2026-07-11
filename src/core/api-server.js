@@ -3,18 +3,19 @@ const fs = require('fs');
 const path = require('path');
 const { validateSubmission } = require('./validation');
 const { buildAnalytics } = require('./analytics');
-const { PROJECT_ROOT, collectionDirs, ensureDir, normalizeTags, videoArtifactDir, videoArtifactName, timestampForFile } = require('./workspace');
+const { isAllowedApiOrigin } = require('./network-policy');
+const { finalizeSubmissionArtifacts, relocateCachedVideo } = require('./submission-artifacts');
+const { PROJECT_ROOT, collectionDirs, ensureDir, normalizeTags, videoArtifactDir } = require('./workspace');
 
 const DEFAULT_LEASE_MS = 15 * 60 * 1000;
+const MAX_JSON_BODY_BYTES = 1024 * 1024;
 const PAUSED_MESSAGE = '来自用户的信息，你需要暂停工作';
 const TEMPLATE_FILE = path.join(PROJECT_ROOT, 'templates', 'video-summary-template.md');
 
 class ApiServer {
-  constructor({ store, bili, toolRunner, getCurrentUser, getToolHealth, onEvent }) {
+  constructor({ store, toolRunner, getToolHealth, onEvent }) {
     this.store = store;
-    this.bili = bili;
     this.toolRunner = toolRunner;
-    this.getCurrentUser = getCurrentUser;
     this.getToolHealth = getToolHealth || (() => []);
     this.onEvent = onEvent || (() => {});
     this.server = null;
@@ -22,7 +23,13 @@ class ApiServer {
   }
 
   async start(preferredPort = 17391) {
-    this.server = http.createServer((req, res) => this.route(req, res));
+    this.server = http.createServer((req, res) => {
+      Promise.resolve(this.route(req, res)).catch((error) => this.handleRouteError(res, error));
+    });
+    this.server.requestTimeout = 30000;
+    this.server.headersTimeout = 15000;
+    this.server.keepAliveTimeout = 5000;
+    this.server.maxHeadersCount = 100;
     await new Promise((resolve, reject) => {
       const listenRandom = () => {
         this.server.removeAllListeners('error');
@@ -47,9 +54,20 @@ class ApiServer {
     return `http://127.0.0.1:${this.port}`;
   }
 
+  handleRouteError(res, error) {
+    if (res.headersSent || res.destroyed) {
+      if (!res.destroyed) res.destroy();
+      return;
+    }
+    this.json(res, { error: error.message || String(error) }, Number(error.statusCode || 500));
+  }
+
   async route(req, res) {
     try {
       const url = new URL(req.url, this.url());
+      if (!isAllowedApiOrigin(req.headers.origin, this.url())) {
+        return this.json(res, { error: 'Browser cross-origin access to the local Agent API is forbidden.' }, 403);
+      }
       if (req.method === 'OPTIONS') return this.json(res, { ok: true });
       if (req.method === 'GET' && (url.pathname === '/api' || url.pathname === '/api/manifest')) return this.apiManifest(res, url);
       if (req.method === 'GET' && url.pathname === '/api/health') return this.json(res, { ok: true, url: this.url() });
@@ -63,23 +81,14 @@ class ApiServer {
       if (req.method === 'GET' && url.pathname === '/api/stats') return this.listStats(res, url);
       if (req.method === 'GET' && url.pathname === '/api/workspaces') return this.json(res, { workspaces: this.store.listWorkspaces() });
       if (req.method === 'GET' && url.pathname === '/api/tools') return this.listTools(res, url);
-      if (req.method === 'GET' && url.pathname === '/api/tasks') {
-        return this.json(res, { tasks: this.store.listTasks({ collectionId: url.searchParams.get('collectionId') || '' }) });
-      }
+      if (req.method === 'GET' && url.pathname === '/api/tasks') return this.listTasks(res, url);
       if (req.method === 'GET' && url.pathname === '/api/tool-runs') return this.listToolRuns(res, url);
-      if (req.method === 'POST' && url.pathname === '/api/collections/sync') return this.syncCollection(req, res);
       if (req.method === 'POST' && url.pathname === '/api/tasks/claim') return this.claimTask(req, res);
-      if (req.method === 'POST' && url.pathname === '/api/tasks/batch') return this.updateTasks(req, res);
 
       const workerMatch = url.pathname.match(/^\/api\/workers\/([^/]+)$/);
       if (workerMatch) {
         const workerId = decodeURIComponent(workerMatch[1]);
         if (req.method === 'GET') return this.getWorker(res, workerId);
-      }
-
-      const toolMatch = url.pathname.match(/^\/api\/tools\/([^/]+)$/);
-      if (toolMatch && (req.method === 'PATCH' || req.method === 'POST')) {
-        return this.updateTool(req, res, decodeURIComponent(toolMatch[1]));
       }
 
       const taskToolMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/tools\/([^/]+)\/run$/);
@@ -112,7 +121,7 @@ class ApiServer {
 
       this.json(res, { error: 'Not found' }, 404);
     } catch (error) {
-      this.json(res, { error: error.message || String(error) }, 500);
+      this.json(res, { error: error.message || String(error) }, Number(error.statusCode || 500));
     }
   }
 
@@ -129,6 +138,13 @@ class ApiServer {
     this.json(res, { collectionId, stats: analytics.collections[collectionId] || null });
   }
 
+  listTasks(res, url) {
+    const collectionId = url.searchParams.get('collectionId') || '';
+    const all = this.store.listTasks({ collectionId });
+    const limit = boundedLimit(url.searchParams.get('limit'));
+    this.json(res, { tasks: all.slice(0, limit), total: all.length, limit });
+  }
+
   apiManifest(res, url) {
     const workerId = url.searchParams.get('workerId') || '';
     const worker = workerId ? this.store.getWorker(workerId) : null;
@@ -139,7 +155,7 @@ class ApiServer {
     const base = this.url();
     return {
       product: '星藏家',
-      protocolVersion: '2.1',
+      protocolVersion: '2.2',
       baseUrl: base,
       worker: worker ? this.publicWorker(worker) : null,
       activeCollection: this.store.getActiveCollection(),
@@ -204,7 +220,9 @@ class ApiServer {
   }
 
   listToolRuns(res, url) {
-    this.json(res, { runs: this.store.listToolRuns({ taskId: url.searchParams.get('taskId') || '' }) });
+    const all = this.store.listToolRuns({ taskId: url.searchParams.get('taskId') || '' });
+    const limit = boundedLimit(url.searchParams.get('limit'));
+    this.json(res, { runs: all.slice(0, limit), total: all.length, limit });
   }
 
   getToolRun(res, runId, url) {
@@ -222,94 +240,6 @@ class ApiServer {
     if ((existing.workerId || existing.agentName) !== worker.id) throw new Error('This worker does not own the tool run.');
     const run = this.toolRunner.cancel(runId);
     this.json(res, { run });
-  }
-
-  async syncCollection(req, res) {
-    const body = await readBody(req);
-    const currentUser = this.getCurrentUser();
-    if (!currentUser?.isLogin) throw new Error('Not logged in to Bilibili in the desktop app.');
-    const folders = await this.bili.listFolders(currentUser.mid);
-    const wanted = folders.find((folder) => folder.name === body.collectionName || folder.id === String(body.collectionName));
-    if (!wanted) throw new Error(`Collection not found: ${body.collectionName}`);
-    const label = body.label || 'bili';
-    const workspace = this.store.getDefaultWorkspace();
-    if (!workspace) throw new Error('No default workspace is configured.');
-    const dirs = collectionDirs(workspace.root, currentUser.name, wanted.name);
-    const cookieFile = await this.bili.exportCookies(currentUser.name);
-    const syncId = `sync-${currentUser.mid}-${wanted.id}-${Date.now()}`;
-    const expectedTotal = Number(wanted.mediaCount || 0);
-    this.onEvent({ type: 'collection-sync-progress', syncId, collectionName: wanted.name, stage: 'fetching', loaded: 0, total: expectedTotal, progress: 0 });
-    const videos = await this.bili.listVideos(wanted.id, (progress) => {
-      const total = progress.total || expectedTotal || null;
-      this.onEvent({
-        type: 'collection-sync-progress',
-        syncId,
-        collectionName: wanted.name,
-        stage: progress.done ? 'indexing' : 'fetching',
-        loaded: progress.loaded,
-        total,
-        page: progress.page,
-        progress: total ? Math.min(0.92, progress.loaded / total * 0.92) : Math.min(0.9, progress.page / Math.max(progress.page + 1, 2))
-      });
-    });
-    const now = new Date().toISOString();
-    const latestFavoriteAt = videos.reduce((latest, video) => {
-      const candidate = String(video.favoriteAddedAt || '');
-      return candidate > latest ? candidate : latest;
-    }, String(wanted.updatedAt || ''));
-    const collectionId = `${currentUser.mid}:${wanted.id}`;
-    const collection = this.store.upsertCollection({
-      id: collectionId,
-      mediaId: wanted.id,
-      userId: String(currentUser.mid),
-      userName: currentUser.name,
-      name: wanted.name,
-      label,
-      workspaceId: workspace.id,
-      workspaceRoot: workspace.root,
-      collectionRoot: dirs.root,
-      videosDir: dirs.videos,
-      exportDir: dirs.exports,
-      cookieFile,
-      lastSyncedAt: now,
-      videoCount: videos.length,
-      latestFavoriteAt
-    });
-
-    for (const video of videos) {
-      const key = `${collectionId}:${video.bvid}`;
-      this.store.upsertVideo({ key, collectionId, ...video, syncedAt: now });
-      const existing = this.store.getTask(key);
-      this.store.upsertTask({
-        id: key,
-        collectionId,
-        bvid: video.bvid,
-        title: video.title,
-        owner: video.owner,
-        duration: video.duration,
-        cover: video.cover,
-        url: video.url,
-        favoriteAddedAt: video.favoriteAddedAt,
-        publishedAt: video.publishedAt,
-        enabled: existing?.enabled !== false,
-        status: existing?.status || 'pending',
-        claimedBy: existing?.claimedBy || '',
-        claimedAt: existing?.claimedAt || '',
-        leaseExpiresAt: existing?.leaseExpiresAt || '',
-        attempts: existing?.attempts || 0,
-        allowedRoot: dirs.videos,
-        artifactDir: existing?.artifactDir || '',
-        outputMarkdown: existing?.outputMarkdown || '',
-        validatorErrors: existing?.validatorErrors || [],
-        createdAt: existing?.createdAt || now,
-        updatedAt: now
-      });
-    }
-    this.store.commit();
-    this.writeCollectionExport(collection, videos);
-    this.onEvent({ type: 'collection-sync-progress', syncId, collectionName: wanted.name, stage: 'done', loaded: videos.length, total: videos.length, progress: 1 });
-    this.onEvent({ type: 'collection-synced', collection, count: videos.length });
-    this.json(res, { collection, count: videos.length });
   }
 
   async claimTask(req, res) {
@@ -368,15 +298,6 @@ class ApiServer {
     });
     this.onEvent({ type: 'task-claimed', taskId: task.id, collectionId: collection.id, workerId: worker.id, agentName: worker.id });
     this.json(res, { worker: this.publicWorker(worker), task: this.taskContext(task, collection, worker) });
-  }
-
-  async updateTasks(req, res) {
-    const body = await readBody(req);
-    if (!Array.isArray(body.taskIds) || !body.taskIds.length) throw new Error('taskIds must be a non-empty array.');
-    if (!Object.prototype.hasOwnProperty.call(body, 'enabled')) throw new Error('enabled is required.');
-    const tasks = this.store.updateTasksEnabled(body.taskIds, Boolean(body.enabled));
-    this.onEvent({ type: 'tasks-enabled-changed', taskIds: tasks.map((task) => task.id), enabled: Boolean(body.enabled) });
-    this.json(res, { updated: tasks.length, enabled: Boolean(body.enabled), tasks });
   }
 
   async runTaskTool(req, res, taskId, toolId) {
@@ -500,15 +421,6 @@ class ApiServer {
     this.json(res, { task });
   }
 
-  async updateTool(req, res, toolId) {
-    const body = await readBody(req);
-    const patch = {};
-    if (Object.prototype.hasOwnProperty.call(body, 'enabled')) patch.enabled = Boolean(body.enabled);
-    const tool = this.store.updateTool(toolId, patch);
-    this.onEvent({ type: 'tool-updated', tool });
-    this.json(res, { tool: this.publicTool(tool) });
-  }
-
   requireWorker(body = {}) {
     const workerId = String(body.workerId || '').trim();
     if (!workerId) throw new Error('workerId is required. Register this fresh agent session with POST /api/workers/register.');
@@ -595,18 +507,11 @@ class ApiServer {
     };
   }
 
-  writeCollectionExport(collection, videos) {
-    const exportDir = ensureDir(collection.exportDir || path.join(collection.workspaceRoot, '.star-note', 'exports'));
-    const file = path.join(exportDir, `sync-${timestampForFile()}.json`);
-    fs.writeFileSync(file, `${JSON.stringify({ collection, videos, exportedAt: new Date().toISOString() }, null, 2)}\n`, 'utf8');
-  }
-
   json(res, data, status = 200) {
     res.writeHead(status, {
       'content-type': 'application/json; charset=utf-8',
-      'access-control-allow-origin': '*',
-      'access-control-allow-methods': 'GET,POST,PATCH,OPTIONS',
-      'access-control-allow-headers': 'content-type'
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff'
     });
     res.end(JSON.stringify(data, null, 2));
   }
@@ -652,61 +557,22 @@ function readMetadataFile(file) {
   }
 }
 
-function finalizeSubmissionArtifacts({ task, collection, validation, filenameMetadata }) {
-  const currentDir = path.resolve(validation.artifactDir);
-  const root = path.resolve(task.allowedRoot || path.dirname(currentDir));
-  const baseName = videoArtifactName(task, collection, filenameMetadata);
-  let finalDir = path.join(root, baseName);
-  if (!samePath(currentDir, finalDir) && fs.existsSync(finalDir)) {
-    finalDir = videoArtifactDir(root, task, collection, filenameMetadata);
-  }
-
-  const markdownRelative = path.relative(currentDir, validation.markdownFile);
-  const metadataRelative = path.relative(currentDir, validation.metadataFile);
-  if (!samePath(currentDir, finalDir)) fs.renameSync(currentDir, finalDir);
-
-  const sourceMarkdown = path.join(finalDir, markdownRelative);
-  const finalMarkdown = path.join(finalDir, `${path.basename(finalDir)}.md`);
-  if (!samePath(sourceMarkdown, finalMarkdown)) {
-    if (fs.existsSync(finalMarkdown)) fs.rmSync(finalMarkdown, { force: true });
-    fs.renameSync(sourceMarkdown, finalMarkdown);
-  }
-  return {
-    artifactDir: finalDir,
-    markdownFile: finalMarkdown,
-    metadataFile: path.join(finalDir, metadataRelative)
-  };
-}
-
-function samePath(left, right) {
-  const a = path.resolve(left);
-  const b = path.resolve(right);
-  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
-}
-
-function relocateCachedVideo(store, task, finalized) {
-  if (!task.cachedVideoId) return;
-  const record = store.getVideoCache(task.cachedVideoId);
-  if (!record) return;
-  const videoName = record.videoFile ? path.basename(record.videoFile) : 'merged.mp4';
-  const videoFile = path.join(finalized.artifactDir, videoName);
-  task.cachedVideoFile = videoFile;
-  store.upsertVideoCache({
-    ...record,
-    artifactDir: finalized.artifactDir,
-    videoFile,
-    metadataFile: finalized.metadataFile,
-    updatedAt: new Date().toISOString()
-  });
-  try {
-    fs.writeFileSync(path.join(finalized.artifactDir, 'cache-record.json'), `${JSON.stringify(store.getVideoCache(task.cachedVideoId), null, 2)}\n`, 'utf8');
-  } catch {}
-}
-
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let text = '';
-    req.on('data', (chunk) => { text += chunk.toString(); });
+    let bytes = 0;
+    const contentLength = Number(req.headers['content-length'] || 0);
+    if (contentLength > MAX_JSON_BODY_BYTES) return reject(httpError(413, 'JSON request body exceeds 1 MiB.'));
+    req.on('data', (chunk) => {
+      bytes += chunk.length;
+      if (bytes > MAX_JSON_BODY_BYTES) {
+        reject(httpError(413, 'JSON request body exceeds 1 MiB.'));
+        req.removeAllListeners('data');
+        req.resume();
+        return;
+      }
+      text += chunk.toString();
+    });
     req.on('end', () => {
       if (!text) return resolve({});
       try {
@@ -717,6 +583,16 @@ function readBody(req) {
     });
     req.on('error', reject);
   });
+}
+
+function httpError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+function boundedLimit(value, fallback = 300) {
+  return Math.max(1, Math.min(1000, Math.floor(Number(value) || fallback)));
 }
 
 function secondsBetween(start, end) {
@@ -736,4 +612,4 @@ function readTail(file, maxBytes = 12000) {
   return buffer.toString('utf8');
 }
 
-module.exports = { ApiServer, finalizeSubmissionArtifacts };
+module.exports = { ApiServer, MAX_JSON_BODY_BYTES };

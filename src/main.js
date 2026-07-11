@@ -6,9 +6,12 @@ const MarkdownIt = require('markdown-it');
 const { buildAnalytics } = require('./core/analytics');
 const { ApiServer } = require('./core/api-server');
 const { BiliClient } = require('./core/bili');
+const { CollectionSyncService } = require('./core/collection-sync-service');
 const { DependencyManager } = require('./core/dependency-manager');
+const { secureMainWindow } = require('./core/desktop-security');
 const { InternalAgentManager } = require('./core/internal-agent-manager');
 const { promoteMindMap } = require('./core/markdown');
+const { isPrivateNetworkHost } = require('./core/network-policy');
 const { RagAssistant } = require('./core/rag-assistant');
 const { Store } = require('./core/store');
 const { ToolRunner } = require('./core/tool-runner');
@@ -20,6 +23,7 @@ const PRODUCT_NAME = '星藏家';
 const PACKAGE_VERSION = require('../package.json').version;
 const DEFAULT_WINDOW = { width: 1350, height: 836 };
 const README_FILE = path.join(__dirname, '..', 'README.md');
+const RENDERER_FILE = path.join(__dirname, 'renderer', 'index.html');
 const markdownRenderer = new MarkdownIt({ html: false, linkify: true, typographer: false });
 
 app.setName(PRODUCT_NAME);
@@ -33,6 +37,7 @@ let ragAssistant = null;
 let internalAgentManager = null;
 let dependencyManager = null;
 let videoCacheManager = null;
+let collectionSyncService = null;
 let currentUser = null;
 let backendReady = false;
 let toolHealth = [];
@@ -57,9 +62,11 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       webviewTag: true
     }
   });
+  secureMainWindow(mainWindow, RENDERER_FILE);
   mainWindow.once('ready-to-show', () => {
     if (!mainWindow) return;
     if (mainWindow.isMaximized()) mainWindow.unmaximize();
@@ -67,7 +74,7 @@ function createWindow() {
     mainWindow.center();
     mainWindow.show();
   });
-  mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  mainWindow.loadFile(RENDERER_FILE);
   mainWindow.webContents.once('did-finish-load', () => {
     sendBootstrap();
     sendRuntime();
@@ -101,6 +108,12 @@ async function bootstrap() {
   });
   emitBootstrap('Preparing Bilibili session...', 0.52);
   bili = new BiliClient(biliSession);
+  collectionSyncService = new CollectionSyncService({
+    store,
+    bili,
+    getCurrentUser: () => currentUser,
+    onEvent: publishEvent
+  });
   emitBootstrap('Registering tool runner...', 0.66);
   toolRunner = new ToolRunner({
     store,
@@ -162,9 +175,7 @@ async function bootstrap() {
   emitBootstrap('Starting resource pools and local Agent API...', 0.92);
   apiServer = new ApiServer({
     store,
-    bili,
     toolRunner,
-    getCurrentUser: () => currentUser,
     getToolHealth: () => toolHealth,
     onEvent: publishEvent
   });
@@ -499,14 +510,7 @@ ipcMain.handle('credentials:delete', async (_event, id) => {
 
 ipcMain.handle('api:sync-collection', async (_event, payload) => {
   assertBackendReady();
-  const response = await fetch(`${apiServer.url()}/api/collections/sync`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload || {})
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'sync failed');
-  return data;
+  return collectionSyncService.sync(payload || {});
 });
 
 ipcMain.handle('tools:list', async () => store ? store.listTools() : []);
@@ -694,10 +698,8 @@ ipcMain.handle('window:maximize-toggle', async () => {
 ipcMain.handle('window:close', async () => mainWindow?.close());
 
 function encryptSecret(value) {
-  if (safeStorage.isEncryptionAvailable()) {
-    return { mode: 'safeStorage', value: safeStorage.encryptString(value).toString('base64') };
-  }
-  return { mode: 'plain', value };
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('系统安全存储当前不可用，已拒绝以明文保存密码。');
+  return { mode: 'safeStorage', value: safeStorage.encryptString(value).toString('base64') };
 }
 
 function decryptSecret(secret) {
@@ -759,15 +761,6 @@ async function browseHidden(value, options = {}) {
   } finally {
     if (!browser.isDestroyed()) browser.destroy();
   }
-}
-
-function isPrivateNetworkHost(host) {
-  const value = String(host || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
-  return value === 'localhost' || value.endsWith('.localhost') || value === '::' || value === '::1'
-    || /^0\./.test(value) || /^127\./.test(value) || /^10\./.test(value) || /^192\.168\./.test(value)
-    || /^169\.254\./.test(value) || /^172\.(1[6-9]|2\d|3[01])\./.test(value)
-    || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(value)
-    || /^(fc|fd|fe8|fe9|fea|feb)/.test(value);
 }
 
 function assertBackendReady() {

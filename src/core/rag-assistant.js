@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { execFile } = require('child_process');
 const pdf = require('pdf-parse');
 const mammoth = require('mammoth');
+const { isPrivateNetworkHost, parseHttpUrl } = require('./network-policy');
 
 const TEXT_EXTENSIONS = new Set([
   '.txt', '.md', '.markdown', '.json', '.jsonl', '.csv', '.tsv', '.xml', '.yaml', '.yml',
@@ -439,7 +440,7 @@ class RagAssistant {
     if (call.name === 'web_search') return this.browseHidden(`https://www.bing.com/search?q=${encodeURIComponent(String(args.query || ''))}`);
     if (call.name === 'browse_url') return this.browseUrl(session, args.url);
     if (call.name === 'open_browser') {
-      const url = validHttpUrl(args.url);
+      const url = parseHttpUrl(args.url).toString();
       if (session.permissionMode !== 'full') await this.approve(session, { action: 'open default browser', target: url, detail: 'The model wants to open a page in your default browser.' });
       await this.openExternal(url);
       return `Opened ${url}`;
@@ -498,9 +499,9 @@ class RagAssistant {
   }
 
   async browseUrl(session, value) {
-    const url = validHttpUrl(value);
+    const url = parseHttpUrl(value).toString();
     const host = new URL(url).hostname;
-    const privateAddress = isPrivateHost(host);
+    const privateAddress = isPrivateNetworkHost(host);
     if (session.permissionMode !== 'full' && privateAddress) await this.approve(session, { action: 'browse private or local address', target: url, detail: 'This address may access a local service or private network.' });
     return this.browseHidden(url, { allowPrivate: privateAddress });
   }
@@ -856,21 +857,6 @@ async function extractText(file) {
 function audioFormat(file) {
   const extension = path.extname(file).toLowerCase().slice(1);
   return extension === 'm4a' ? 'mp3' : (extension || 'wav');
-}
-
-function validHttpUrl(value) {
-  const url = new URL(String(value || ''));
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Only HTTP(S) URLs are supported.');
-  return url.toString();
-}
-
-function isPrivateHost(host) {
-  const value = String(host || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
-  return value === 'localhost' || value.endsWith('.localhost') || value === '::' || value === '::1'
-    || /^0\./.test(value) || /^127\./.test(value) || /^10\./.test(value) || /^192\.168\./.test(value)
-    || /^169\.254\./.test(value) || /^172\.(1[6-9]|2\d|3[01])\./.test(value)
-    || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(value)
-    || /^(fc|fd|fe8|fe9|fea|feb)/.test(value);
 }
 
 function abortError() {

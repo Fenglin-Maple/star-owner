@@ -3,6 +3,8 @@ const path = require('path');
 const { assertInside } = require('./workspace');
 
 const REQUIRED_SECTIONS = ['小结', '目录', '思维导图', '字幕', '处理记录'];
+const MAX_MARKDOWN_BYTES = 16 * 1024 * 1024;
+const MAX_METADATA_BYTES = 4 * 1024 * 1024;
 
 function validateSubmission(task, submission) {
   const errors = [];
@@ -21,16 +23,16 @@ function validateSubmission(task, submission) {
     return { ok: false, errors };
   }
 
-  if (!fs.existsSync(markdownFile)) errors.push(`Markdown file does not exist: ${markdownFile}`);
-  const metadataFile = submission.metadataFile || path.join(artifactDir, 'info.json');
+  validateRegularFile(markdownFile, artifactDir, 'Markdown', MAX_MARKDOWN_BYTES, errors);
+  let metadataFile = submission.metadataFile || path.join(artifactDir, 'info.json');
   try {
-    assertInside(artifactDir, metadataFile);
-    if (!fs.existsSync(metadataFile)) errors.push(`Metadata file does not exist: ${metadataFile}`);
+    metadataFile = assertInside(artifactDir, metadataFile);
+    validateRegularFile(metadataFile, artifactDir, 'Metadata', MAX_METADATA_BYTES, errors);
   } catch (error) {
     errors.push(error.message);
   }
 
-  if (fs.existsSync(markdownFile)) {
+  if (!errors.some((error) => error.startsWith('Markdown ')) && fs.existsSync(markdownFile)) {
     const markdown = fs.readFileSync(markdownFile, 'utf8');
     for (const section of REQUIRED_SECTIONS) {
       if (!markdown.includes(section)) errors.push(`Markdown is missing section keyword: ${section}`);
@@ -66,4 +68,21 @@ function validateSubmission(task, submission) {
   return { ok: errors.length === 0, errors, artifactDir, markdownFile, metadataFile };
 }
 
-module.exports = { validateSubmission };
+function validateRegularFile(file, root, label, maxBytes, errors) {
+  if (!fs.existsSync(file)) {
+    errors.push(`${label} file does not exist: ${file}`);
+    return;
+  }
+  const stat = fs.lstatSync(file);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    errors.push(`${label} path must be a regular file inside the artifact directory.`);
+    return;
+  }
+  const realRoot = fs.realpathSync(root);
+  const realFile = fs.realpathSync(file);
+  try { assertInside(realRoot, realFile); }
+  catch (error) { errors.push(error.message); return; }
+  if (stat.size > maxBytes) errors.push(`${label} file exceeds ${Math.floor(maxBytes / 1024 / 1024)} MiB.`);
+}
+
+module.exports = { MAX_MARKDOWN_BYTES, MAX_METADATA_BYTES, validateSubmission };

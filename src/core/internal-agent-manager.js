@@ -1,7 +1,8 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { finalizeSubmissionArtifacts } = require('./api-server');
+const { finalizeSubmissionArtifacts, relocateCachedVideo } = require('./submission-artifacts');
+const { isLoginRequiredMessage, loginRequiredError } = require('./media-errors');
 const { validateSubmission } = require('./validation');
 const {
   WORKSPACE_ROOT,
@@ -660,19 +661,6 @@ function copyArtifact(source, outputRoot) {
   return target;
 }
 
-function relocateCachedVideo(store, task, finalized) {
-  if (!task.cachedVideoId) return;
-  const record = store.getVideoCache(task.cachedVideoId);
-  if (!record) return;
-  const videoName = record.videoFile ? path.basename(record.videoFile) : 'merged.mp4';
-  const videoFile = path.join(finalized.artifactDir, videoName);
-  task.cachedVideoFile = videoFile;
-  store.upsertVideoCache({ ...record, artifactDir: finalized.artifactDir, videoFile, metadataFile: finalized.metadataFile, updatedAt: new Date().toISOString() });
-  try {
-    fs.writeFileSync(path.join(finalized.artifactDir, 'cache-record.json'), `${JSON.stringify(store.getVideoCache(task.cachedVideoId), null, 2)}\n`, 'utf8');
-  } catch {}
-}
-
 function listFiles(directory, extension) {
   if (!fs.existsSync(directory)) return [];
   return fs.readdirSync(directory).map((name) => path.join(directory, name)).filter((file) => fs.statSync(file).isFile() && (!extension || path.extname(file).toLowerCase() === extension)).sort();
@@ -721,30 +709,4 @@ function abortError() {
   return error;
 }
 
-function isLoginRequiredMessage(value) {
-  const message = String(value || '').toLowerCase();
-  return [
-    'login required',
-    'login is required',
-    'sign in to confirm',
-    'sign in to view',
-    'only available for registered users',
-    'cookies are required',
-    'use --cookies',
-    'private video',
-    'this video is private',
-    '\u9700\u8981\u767b\u5f55',
-    '\u8bf7\u5148\u767b\u5f55',
-    '\u767b\u5f55\u540e\u624d\u80fd',
-    '\u4ec5\u9650\u767b\u5f55',
-    '\u4ec5\u9650\u6ce8\u518c\u7528\u6237'
-  ].some((pattern) => message.includes(pattern));
-}
-
-function loginRequiredError(detail) {
-  const error = new Error(`公开访问失败，Bilibili 要求登录：${String(detail || '').slice(0, 600)}`);
-  error.code = 'BILIBILI_LOGIN_REQUIRED';
-  return error;
-}
-
-module.exports = { InternalAgentManager, INTERNAL_USER_ID, INTERNAL_USER_NAME, extractBvid, isLoginRequiredMessage };
+module.exports = { InternalAgentManager, INTERNAL_USER_ID, INTERNAL_USER_NAME, extractBvid };

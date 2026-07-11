@@ -25,7 +25,9 @@ The application displays only reasoning text explicitly returned by a provider. 
 
 ## API Exposure
 
-The Agent API binds to `127.0.0.1` by default. Do not expose it to a LAN or the public internet without adding authentication, authorization, transport security, and a threat review. A Worker ID coordinates local work; it is not an internet-grade authentication credential.
+The Agent API binds to `127.0.0.1` by default. It rejects unrelated browser origins, does not publish wildcard CORS headers, and caps JSON bodies at 1 MiB. These controls reduce drive-by browser and memory-exhaustion attacks but do not authenticate other local processes. Do not expose it to a LAN or the public internet without adding authentication, authorization, transport security, and a threat review. A Worker ID coordinates local work; it is not an internet-grade authentication credential.
+
+The Bilibili WebView is sandboxed, has no Node/preload bridge, blocks popups, and may navigate only within Bilibili-owned domains. Saved account passwords and model-provider API keys require Electron `safeStorage`; the application refuses new plaintext persistence when system encryption is unavailable. Exported Netscape Cookie files remain plaintext by toolchain necessity and must be treated as account credentials.
 
 ## Responsible Disclosure
 

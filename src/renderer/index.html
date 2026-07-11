@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file: https:; media-src 'self' blob: file:; connect-src 'self' https:; child-src https://bilibili.com https://*.bilibili.com https://b23.tv https://*.b23.tv" />
     <title>星藏家</title>
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./rag.css" />
@@ -164,7 +165,7 @@
               <p data-i18n="loginHint"></p>
             </div>
             <div class="browser-panel">
-              <webview id="biliView" partition="persist:bili-orchestrator" src="https://www.bilibili.com" allowpopups></webview>
+              <webview id="biliView" partition="persist:bili-orchestrator" src="https://www.bilibili.com"></webview>
             </div>
             <aside class="side-sheet">
               <h2 data-i18n="loginStatus"></h2>
