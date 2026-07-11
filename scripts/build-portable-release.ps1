@@ -44,7 +44,7 @@ function Write-ReleaseArchive([string]$archive, [string]$sourceRoot, [string]$it
 function Write-RuntimeArchive([string]$archive) {
   Assert-InsideDist $archive
   if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
-  & tar.exe -a -c -f $archive -C $root "runtime\python" "runtime\faster-whisper"
+  & tar.exe -a -c -f $archive -C $stage "runtime\python" "runtime\faster-whisper"
   if ($LASTEXITCODE -ne 0) { throw "Could not create runtime dependency ZIP." }
   $size = (Get-Item -LiteralPath $archive).Length
   $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
@@ -54,7 +54,37 @@ function Write-RuntimeArchive([string]$archive) {
   Write-Host "Runtime dependency SHA256: $hash"
 }
 
+function Remove-GeneratedProjectCaches {
+  foreach ($relative in @("tools\__pycache__", "scripts\__pycache__", "src\__pycache__")) {
+    $candidate = Join-Path $root $relative
+    if (Test-Path -LiteralPath $candidate) {
+      Remove-Item -LiteralPath $candidate -Recurse -Force
+    }
+  }
+}
+
+function Set-PortableVenvHome([string]$stageRoot) {
+  $config = Join-Path $stageRoot "runtime\faster-whisper\pyvenv.cfg"
+  $python = Get-ChildItem -LiteralPath (Join-Path $stageRoot "runtime\python") -Recurse -Filter python.exe |
+    Where-Object { $_.FullName -notlike "*\Lib\venv\*" } |
+    Select-Object -First 1
+  if (-not $python -or -not (Test-Path -LiteralPath $config)) {
+    throw "Portable Python or pyvenv.cfg is missing from the staged runtime."
+  }
+  $resolvedStage = [System.IO.Path]::GetFullPath($stageRoot).TrimEnd('\')
+  $resolvedHome = [System.IO.Path]::GetFullPath($python.Directory.FullName)
+  if (-not $resolvedHome.StartsWith("$resolvedStage\", [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Portable Python home is outside the staged release directory."
+  }
+  $relativeHome = $resolvedHome.Substring($resolvedStage.Length + 1)
+  $content = Get-Content -LiteralPath $config -Raw -Encoding UTF8
+  $content = [regex]::Replace($content, '(?m)^home\s*=.*$', "home = $relativeHome")
+  Set-Content -LiteralPath $config -Value $content -Encoding UTF8 -NoNewline
+}
+
+Remove-GeneratedProjectCaches
 & (Join-Path $PSScriptRoot "verify-release.ps1")
+Remove-GeneratedProjectCaches
 
 New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
 Assert-InsideDist $stage
@@ -76,6 +106,7 @@ $runtimeTarget = Join-Path $stage "runtime"
 New-Item -ItemType Directory -Path (Join-Path $runtimeTarget "models") -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $root "runtime\python") -Destination (Join-Path $runtimeTarget "python") -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $root "runtime\faster-whisper") -Destination (Join-Path $runtimeTarget "faster-whisper") -Recurse -Force
+Set-PortableVenvHome $stage
 if (-not $SeparateModelAsset -and $ModelBundle -in @("small", "all")) {
   Copy-Item -LiteralPath (Join-Path $root "runtime\models\small") -Destination (Join-Path $runtimeTarget "models\small") -Recurse -Force
 }

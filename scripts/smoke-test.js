@@ -12,6 +12,7 @@ const { assessSubtitle } = require('../tools/video-tool');
 const { validateSubmission } = require('../src/core/validation');
 const { promoteMindMap } = require('../src/core/markdown');
 const { DependencyManager } = require('../src/core/dependency-manager');
+const { repairPortablePythonHome } = require('../src/core/portable-runtime');
 
 (async () => {
   if (assessSubtitle([], 120).reason !== 'SUBTITLE_EMPTY') throw new Error('empty subtitle validation failed');
@@ -33,6 +34,17 @@ const { DependencyManager } = require('../src/core/dependency-manager');
   const dependencyRoot = path.join(WORKSPACE_ROOT, 'smoke-dependency-root');
   fs.rmSync(dependencyRoot, { recursive: true, force: true });
   fs.mkdirSync(dependencyRoot, { recursive: true });
+  const portableFixture = path.join(dependencyRoot, 'portable-runtime');
+  const portablePythonHome = path.join(portableFixture, 'runtime', 'python', 'cpython-test');
+  const portableConfig = path.join(portableFixture, 'runtime', 'faster-whisper', 'pyvenv.cfg');
+  const portablePython = path.join(portablePythonHome, process.platform === 'win32' ? 'python.exe' : 'bin/python');
+  fs.mkdirSync(path.dirname(portablePython), { recursive: true });
+  fs.mkdirSync(path.dirname(portableConfig), { recursive: true });
+  fs.writeFileSync(portablePython, 'fixture');
+  fs.writeFileSync(portableConfig, 'home = D:\\old-machine\\python\nversion_info = 3.12.13\n');
+  const portableRepair = repairPortablePythonHome(portableFixture);
+  if (!portableRepair.changed || !fs.readFileSync(portableConfig, 'utf8').includes(`home = ${portablePythonHome}`)) throw new Error('portable Python home repair failed');
+  if (repairPortablePythonHome(portableFixture).changed) throw new Error('portable Python home repair was not idempotent');
   const dependencyManager = new DependencyManager({ store, projectRoot: dependencyRoot, version: '9.9.9' });
   const missingDependencies = dependencyManager.state();
   if (missingDependencies.ready || !missingDependencies.needsPrompt || !missingDependencies.missingRequired.includes('runtime-base') || !missingDependencies.missingRequired.includes('model-small') || !missingDependencies.missingRequired.includes('model-medium')) throw new Error('dependency availability detection failed');

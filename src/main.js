@@ -12,6 +12,7 @@ const { secureMainWindow } = require('./core/desktop-security');
 const { InternalAgentManager } = require('./core/internal-agent-manager');
 const { promoteMindMap } = require('./core/markdown');
 const { isPrivateNetworkHost } = require('./core/network-policy');
+const { repairPortablePythonHome } = require('./core/portable-runtime');
 const { RagAssistant } = require('./core/rag-assistant');
 const { Store } = require('./core/store');
 const { ToolRunner } = require('./core/tool-runner');
@@ -25,6 +26,12 @@ const DEFAULT_WINDOW = { width: 1350, height: 836 };
 const README_FILE = path.join(__dirname, '..', 'README.md');
 const RENDERER_FILE = path.join(__dirname, 'renderer', 'index.html');
 const markdownRenderer = new MarkdownIt({ html: false, linkify: true, typographer: false });
+
+try {
+  repairPortablePythonHome(path.join(__dirname, '..'));
+} catch (error) {
+  console.warn(`[portable-runtime] ${error.message || String(error)}`);
+}
 
 app.setName(PRODUCT_NAME);
 

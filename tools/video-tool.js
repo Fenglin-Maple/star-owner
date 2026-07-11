@@ -2,8 +2,14 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { repairPortablePythonHome } = require('../src/core/portable-runtime');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
+try {
+  repairPortablePythonHome(PROJECT_ROOT);
+} catch (error) {
+  console.warn(`[video-tool] portable Python repair failed: ${error.message || String(error)}`);
+}
 const WHISPER_PYTHON = path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'Scripts', 'python.exe');
 const WHISPER_CLI = path.join(PROJECT_ROOT, 'tools', 'faster-whisper-cli.py');
 const IMAGEIO_BINARIES = path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'Lib', 'site-packages', 'imageio_ffmpeg', 'binaries');

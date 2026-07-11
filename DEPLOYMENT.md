@@ -29,6 +29,8 @@ The AI features do not require another local model runtime. Open `AI -> AI æ¨¡åž
 
 The application creates `workspace/` beside itself and uses only project-relative runtime paths. Moving the extracted directory is supported. Cached videos stay below the selected Workspace under the reserved internal user and selected managed cache collection. User cookies, SQLite data, cached videos, task artifacts, and generated Markdown are never included in a public release archive.
 
+The bundled faster-whisper environment is relocated automatically. Release archives contain only a relative `pyvenv.cfg` marker; both the Electron main process and `tools/video-tool.js` rewrite its Python `home` to the current extracted directory before invoking the environment. This repair runs after the folder is moved as well as on first launch.
+
 ### Hardware
 
 - Windows 10/11 x64.
