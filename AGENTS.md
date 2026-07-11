@@ -15,7 +15,7 @@ Star Owner (星藏家) turns a user's Bilibili favorite folders into a managed q
 7. Always run ASR, compare it with usable station subtitles, and use frames/multimodal reasoning when needed.
 8. Write the opening sections in this exact order: `小结`, `思维导图`, `目录`. The mind map must be a valid Mermaid fenced code block.
 9. Include comprehensive body content, Bilibili timestamp links, selected keyframes, subtitle comparison, up to three hot-comment analyses, limitations, and processing provenance.
-10. Clean temporary video/audio through the application tool API before submission.
+10. Clean temporary video/audio through the application tool API before submission. For a task with `cachedVideoId`/`reuseCachedMedia`, still call cleanup; the application preserves the registered merged video automatically.
 11. Submit through `/api/tasks/<taskId>/submit`; the application validates and finalizes the directory and Markdown filename.
 
 The canonical Markdown contract is `templates/video-summary-template.md` and is also returned by `GET /api/templates/video-summary`.
@@ -35,6 +35,7 @@ The canonical Markdown contract is `templates/video-summary-template.md` and is 
 - Treat the RAG assistant as an analysis client for accepted Markdown, not as a replacement for the external Worker submission protocol.
 - Application-managed video Agents are a separate feature from RAG. They use the same Worker store, ToolRunner, leases, validation, cleanup, artifact finalization, and analytics as external Workers, but their orchestration is owned by `src/core/internal-agent-manager.js`.
 - Single-task mode creates an ordinary task under `内置用户` and a selected internal collection, then archives the accepted artifact in the default Workspace and copies it to the explicitly selected external destination.
+- A single task may request `keepVideoCache`; cache-collection tasks always preserve their registered merged video. Neither mode lets an Agent bypass application cleanup or edit the cache index directly.
 - RAG, collection Agents, and single-task Agents share provider/model records and per-model usage accounting. Never expose decrypted API keys to the renderer or logs.
 
 ## Dependency Asset Contract
@@ -56,6 +57,8 @@ The canonical Markdown contract is `templates/video-summary-template.md` and is 
 npm run smoke
 npm run test:scheduler
 npm run test:rag
+npm run test:internal-agent
+npm run test:video-cache
 npm run test:asr-service
 npm audit --audit-level=high
 ```

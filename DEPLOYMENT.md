@@ -27,7 +27,7 @@ Usage:
 
 The AI features do not require another local model runtime. Open `AI -> AI 模型配置`, add an OpenAI-compatible or NewAPI-compatible provider, enter the API root (commonly ending in `/v1`), save it, pull the remote model list, and enable one or more models. This shared configuration powers `AI -> RAG 知识库助手`, `Agent 视频总结工作流`, and `视频总结（单个）`. Multiple providers and enabled models can be saved. API keys remain in the local application database in Electron `safeStorage` form where supported and are never included in release archives.
 
-The application creates `workspace/` beside itself and uses only project-relative runtime paths. Moving the extracted directory is supported. User cookies, SQLite data, task artifacts, and generated Markdown are never included in a public release archive.
+The application creates `workspace/` beside itself and uses only project-relative runtime paths. Moving the extracted directory is supported. Cached videos default to the selected Workspace under the reserved internal user; optional custom cache roots are recorded locally and are never baked into source or releases. User cookies, SQLite data, cached videos, task artifacts, and generated Markdown are never included in a public release archive.
 
 ### Hardware
 
@@ -103,6 +103,8 @@ An Agent should:
 5. `POST /api/tasks/claim`
 6. invoke tools only through the returned application API
 7. submit validated artifacts and let the application finalize paths
+
+When the activated collection is an internal video-cache collection, the returned task includes `cachedVideoId`, `cachedVideoFile`, and `reuseCachedMedia`. Run the same material and cleanup APIs: the application reuses the merged video and preserves it during cleanup. Do not move or delete that cached file directly.
 
 See `AGENTS.md` for the complete worker and contributor contract.
 

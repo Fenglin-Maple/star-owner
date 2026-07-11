@@ -175,6 +175,61 @@ class Store {
     return this.list('collections').sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-Hans-CN'));
   }
 
+  listVideoCacheCollections() {
+    return this.listCollections().filter((collection) => collection.collectionKind === 'video-cache');
+  }
+
+  upsertVideoCache(record) {
+    const current = this.get('videoCaches', record.id) || {};
+    const next = { ...current, ...record, id: String(record.id) };
+    this.set('videoCaches', next.id, next);
+    this.save();
+    return next;
+  }
+
+  getVideoCache(id) {
+    return this.get('videoCaches', id);
+  }
+
+  listVideoCaches(filter = {}) {
+    return this.list('videoCaches')
+      .filter((item) => !filter.collectionId || item.collectionId === filter.collectionId)
+      .sort((a, b) => String(b.downloadedAt || b.createdAt || '').localeCompare(String(a.downloadedAt || a.createdAt || '')));
+  }
+
+  deleteVideoCache(id) {
+    const current = this.getVideoCache(id);
+    if (!current) return null;
+    this.delete('videoCaches', id);
+    this.save();
+    return current;
+  }
+
+  upsertVideoCacheJob(job) {
+    const current = this.get('videoCacheJobs', job.id) || {};
+    const next = { ...current, ...job, id: String(job.id) };
+    this.set('videoCacheJobs', next.id, next);
+    this.save();
+    return next;
+  }
+
+  getVideoCacheJob(id) {
+    return this.get('videoCacheJobs', id);
+  }
+
+  listVideoCacheJobs() {
+    return this.list('videoCacheJobs').sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  }
+
+  deleteVideoCacheCollection(id) {
+    const collection = this.getCollectionById(id);
+    if (!collection) return null;
+    if (collection.protected) throw new Error('默认内置视频缓存收藏夹不能删除。');
+    this.delete('collections', id);
+    this.save();
+    return collection;
+  }
+
   listTasks(filter = {}) {
     return this.list('tasks')
       .filter((task) => !filter.collectionId || task.collectionId === filter.collectionId)

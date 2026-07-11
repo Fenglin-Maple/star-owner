@@ -63,6 +63,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "RAG assistant test failed." }
   & npm run test:internal-agent
   if ($LASTEXITCODE -ne 0) { throw "Internal agent test failed." }
+  & npm run test:video-cache
+  if ($LASTEXITCODE -ne 0) { throw "Video cache test failed." }
   & npm audit --audit-level=high
   if ($LASTEXITCODE -ne 0) { throw "npm audit reported a high-severity issue." }
 } finally {

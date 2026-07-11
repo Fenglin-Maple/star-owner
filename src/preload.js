@@ -56,6 +56,14 @@ contextBridge.exposeInMainWorld('orchestrator', {
   internalAgentStop: (sessionId) => ipcRenderer.invoke('internal-agent:stop', sessionId),
   internalAgentDelete: (sessionId) => ipcRenderer.invoke('internal-agent:delete', sessionId),
   internalAgentChooseOutput: () => ipcRenderer.invoke('internal-agent:choose-output'),
+  videoCacheState: () => ipcRenderer.invoke('video-cache:state'),
+  videoCacheCreateCollection: (name) => ipcRenderer.invoke('video-cache:collection-create', name),
+  videoCacheSubmit: (payload) => ipcRenderer.invoke('video-cache:submit', payload),
+  videoCacheResumeLogin: () => ipcRenderer.invoke('video-cache:resume-login'),
+  videoCacheChooseOutput: () => ipcRenderer.invoke('video-cache:choose-output'),
+  videoCacheOpen: (id) => ipcRenderer.invoke('video-cache:open', id),
+  videoCacheDeleteVideos: (ids) => ipcRenderer.invoke('video-cache:delete-videos', ids),
+  videoCacheDeleteCollection: (id) => ipcRenderer.invoke('video-cache:delete-collection', id),
   dependencyState: () => ipcRenderer.invoke('dependencies:state'),
   dependencyAcknowledge: (payload) => ipcRenderer.invoke('dependencies:acknowledge', payload),
   dependencyDownload: (packageId) => ipcRenderer.invoke('dependencies:download', packageId),
@@ -91,5 +99,12 @@ contextBridge.exposeInMainWorld('orchestrator', {
     const listener = (_event, data) => callback(data);
     ipcRenderer.on('dependency:event', listener);
     return () => ipcRenderer.removeListener('dependency:event', listener);
+  },
+  onVideoCacheEvent: (callback) => {
+    const listener = (_event, data) => {
+      if (String(data?.type || '').startsWith('video-cache-')) callback(data);
+    };
+    ipcRenderer.on('app:event', listener);
+    return () => ipcRenderer.removeListener('app:event', listener);
   }
 });

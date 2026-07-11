@@ -57,7 +57,7 @@ class InternalAgentManager {
   }
 
   listInternalCollections() {
-    return this.store.listCollections().filter((collection) => collection.userId === INTERNAL_USER_ID || collection.internal === true);
+    return this.store.listCollections().filter((collection) => (collection.userId === INTERNAL_USER_ID || collection.internal === true) && collection.collectionKind !== 'video-cache');
   }
 
   createInternalCollection(name) {
@@ -168,6 +168,7 @@ class InternalAgentManager {
       singleTask: true,
       publicAttempt: true,
       cookieFile: '',
+      keepVideoCache: Boolean(input.keepVideoCache),
       createdAt: now,
       updatedAt: now
     });
@@ -330,7 +331,7 @@ class InternalAgentManager {
     if (!task) return null;
     const workspace = this.requireWorkspace();
     const dirs = collectionDirs(workspace.root, collection.userName, collection.name);
-    const canReuse = task.artifactDir && task.workspaceId === workspace.id;
+    const canReuse = task.artifactDir && (task.cachedVideoId ? fs.existsSync(task.artifactDir) : task.workspaceId === workspace.id);
     const artifactDir = canReuse ? task.artifactDir : videoArtifactDir(dirs.videos, task, collection, this.store.getFilenameMetadata());
     ensureDir(artifactDir);
     const now = new Date();
@@ -342,7 +343,7 @@ class InternalAgentManager {
       attempts: Number(task.attempts || 0) + 1,
       workspaceId: workspace.id,
       workspaceRoot: workspace.root,
-      allowedRoot: dirs.root,
+      allowedRoot: task.cachedVideoId ? task.allowedRoot : dirs.root,
       artifactDir,
       validatorErrors: [],
       updatedAt: now.toISOString()
@@ -373,8 +374,8 @@ class InternalAgentManager {
     const generated = await this.generateMarkdown(session, task, collection, signal);
     const markdownFile = path.join(task.artifactDir, 'summary-draft.md');
     fs.writeFileSync(markdownFile, `${generated.trim()}\n`, 'utf8');
-    this.setProgress(session, '清理临时音视频缓存', 0.88);
-    const cleanup = this.startTool(session, task, toolCollection, 'clean-cache', { timeoutMs: 30 * 60 * 1000 });
+    this.setProgress(session, task.keepVideoCache || task.cachedVideoId ? '清理过渡缓存并保留视频' : '清理临时音视频缓存', 0.88);
+    const cleanup = this.startTool(session, task, toolCollection, 'clean-cache', { timeoutMs: 30 * 60 * 1000, preserveVideo: Boolean(task.keepVideoCache || task.cachedVideoId) });
     await this.waitForRun(session, task, cleanup.id, signal, 0.89, 0.94);
     this.setProgress(session, '校验并归档产物', 0.95);
     const finalized = this.submitTask(session, task, markdownFile);
@@ -492,6 +493,7 @@ class InternalAgentManager {
     task.tags = normalizeTags(metadata.tags || task.tags);
     const finalized = finalizeSubmissionArtifacts({ task, collection, validation, filenameMetadata: this.store.getFilenameMetadata() });
     Object.assign(task, { status: 'done', completedAt: now, outputMarkdown: finalized.markdownFile, artifactDir: finalized.artifactDir, metadataFile: finalized.metadataFile, validatorErrors: [], updatedAt: now });
+    relocateCachedVideo(this.store, task, finalized);
     this.store.upsertTask(task);
     this.store.commit();
     this.store.recordTaskEvent(task.id, 'completed', { collectionId: task.collectionId, workerId: session.workerId, agentName: session.workerId, processingSeconds: secondsBetween(task.claimedAt, now), videoDuration: Number(task.duration || 0), internalAgent: true });
@@ -656,6 +658,19 @@ function copyArtifact(source, outputRoot) {
   for (let index = 2; fs.existsSync(target); index += 1) target = path.join(root, safeName(`${path.basename(source)} (${index})`, 'video-summary', 180));
   fs.cpSync(source, target, { recursive: true, errorOnExist: true });
   return target;
+}
+
+function relocateCachedVideo(store, task, finalized) {
+  if (!task.cachedVideoId) return;
+  const record = store.getVideoCache(task.cachedVideoId);
+  if (!record) return;
+  const videoName = record.videoFile ? path.basename(record.videoFile) : 'merged.mp4';
+  const videoFile = path.join(finalized.artifactDir, videoName);
+  task.cachedVideoFile = videoFile;
+  store.upsertVideoCache({ ...record, artifactDir: finalized.artifactDir, videoFile, metadataFile: finalized.metadataFile, updatedAt: new Date().toISOString() });
+  try {
+    fs.writeFileSync(path.join(finalized.artifactDir, 'cache-record.json'), `${JSON.stringify(store.getVideoCache(task.cachedVideoId), null, 2)}\n`, 'utf8');
+  } catch {}
 }
 
 function listFiles(directory, extension) {

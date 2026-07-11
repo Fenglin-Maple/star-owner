@@ -15,7 +15,7 @@ const DEFAULT_CONFIG = Object.freeze({
   asrModel: 'small',
   apiConcurrency: 2,
   apiStartIntervalMs: 850,
-  mediaConcurrency: 2,
+  mediaConcurrency: 3,
   diskConcurrency: 2,
   gpuReserveMiB: 1024,
   gpuStartupReserveMiB: 3072
@@ -113,7 +113,10 @@ class ToolRunner {
 
   loadConfig() {
     const saved = this.store.get('settings', 'toolScheduler') || {};
-    this.config = normalizeConfig({ ...DEFAULT_CONFIG, ...saved });
+    const migrated = Number(saved.resourcePolicyVersion || 0) >= 2
+      ? saved
+      : { ...saved, mediaConcurrency: Math.max(3, Number(saved.mediaConcurrency || 0)), resourcePolicyVersion: 2 };
+    this.config = normalizeConfig({ ...DEFAULT_CONFIG, ...migrated });
     this.store.set('settings', 'toolScheduler', { id: 'toolScheduler', ...this.config, updatedAt: new Date().toISOString() });
     this.store.commit();
   }
@@ -428,7 +431,12 @@ class ToolRunner {
         if (this.processes.get(state.runId) === child) this.processes.delete(state.runId);
         error ? reject(error) : resolve(result);
       };
-      child.stdout.on('data', (chunk) => this.appendLog(state.runId, String(chunk)));
+      child.stdout.on('data', (chunk) => {
+        const text = String(chunk);
+        this.appendLog(state.runId, text);
+        const progress = parseDownloadProgress(text);
+        if (progress) this.updateRun(state.runId, { downloadProgress: progress });
+      });
       child.stderr.on('data', (chunk) => this.appendLog(state.runId, String(chunk)));
       child.on('error', (error) => finish(error));
       child.on('close', (code, signal) => {
@@ -761,6 +769,8 @@ class ToolRunner {
     if (action !== 'clean-cache') {
       args.push('--out', artifactDir);
       if (collection?.cookieFile && fs.existsSync(collection.cookieFile)) args.push('--cookies', collection.cookieFile);
+    } else if (options.preserveVideo || task.keepVideoCache || task.cachedVideoId) {
+      args.push('--preserve-video');
     }
     if (action === 'bundle') {
       args.push('--frames', String(clampNumber(options.frames, 1, 60, 12)));
@@ -835,6 +845,22 @@ function createLanes(prefix, count, label) {
   return Array.from({ length: count }, (_, index) => ({ id: `${prefix}-${index + 1}`, label: `${label} ${index + 1}`, type: prefix }));
 }
 
+function parseDownloadProgress(value) {
+  const matches = [...String(value || '').matchAll(/download:\s*([0-9.]+)%\|([^|\r\n]*)\|([^|\r\n]*)\|([^|\r\n]*)\|([^|\r\n]*)/g)];
+  if (!matches.length) return null;
+  const match = matches.at(-1);
+  const percent = Math.max(0, Math.min(100, Number(match[1]) || 0));
+  return {
+    progress: percent / 100,
+    percent,
+    downloadedBytes: Number(match[2]) || 0,
+    totalBytes: Number(match[3]) || 0,
+    speed: String(match[4] || '').trim(),
+    eta: String(match[5] || '').trim(),
+    updatedAt: new Date().toISOString()
+  };
+}
+
 function initialPoolForAction(action) {
   if (['info', 'subtitles', 'comments'].includes(action)) return 'api';
   if (action === 'clean-cache') return 'disk';
@@ -849,6 +875,7 @@ function initialStageForAction(action) {
 
 function normalizeConfig(value) {
   return {
+    resourcePolicyVersion: 2,
     cpuAsrEnabled: Boolean(value.cpuAsrEnabled),
     asrModel: ['small', 'large-v3-turbo'].includes(String(value.asrModel)) ? String(value.asrModel) : DEFAULT_CONFIG.asrModel,
     apiConcurrency: clampNumber(value.apiConcurrency, 1, 4, DEFAULT_CONFIG.apiConcurrency),

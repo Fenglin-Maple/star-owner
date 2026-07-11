@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./rag.css" />
     <link rel="stylesheet" href="./ai.css" />
+    <link rel="stylesheet" href="./cache.css" />
   </head>
   <body class="theme-night">
     <div class="window">
@@ -47,6 +48,10 @@
               <svg viewBox="0 0 24 24"><path d="M5 3h14v18H5zM8 8h8M8 12h5M8 16h7"/></svg>
               <span>视频总结（单个）</span>
             </button>
+            <button class="nav-item nav-root" data-page="cache-download" title="批量下载视频缓存">
+              <svg viewBox="0 0 24 24"><path d="M12 3v11M7 10l5 5 5-5M4 20h16M5 4h4M15 4h4"/></svg>
+              <span>批量下载视频缓存</span>
+            </button>
             <div class="nav-group" data-nav-group="prepare">
               <button class="nav-group-toggle" type="button" aria-expanded="false" title="工作准备">
                 <svg viewBox="0 0 24 24"><path d="M4 7h16v13H4zM8 7V4h8v3M4 11h16M10 15h4"/></svg>
@@ -85,12 +90,13 @@
               </div>
             </div>
             <div class="nav-group" data-nav-group="documents">
-              <button class="nav-group-toggle" type="button" aria-expanded="false" title="文档浏览">
+              <button class="nav-group-toggle" type="button" aria-expanded="false" title="文件浏览">
                 <svg viewBox="0 0 24 24"><path d="M4 5h6a4 4 0 0 1 4 4v11a4 4 0 0 0-4-4H4zM20 5h-6v15a4 4 0 0 1 4-4h2z"/></svg>
-                <span>文档浏览</span>
+                <span>文件浏览</span>
                 <svg class="nav-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
               </button>
               <div class="nav-submenu">
+                <button class="nav-item nav-subitem" data-page="video-library" title="视频库"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM10 9l5 3-5 3z"/></svg><span>视频库</span></button>
                 <button class="nav-item nav-subitem" data-page="documents" title="文档库"><svg viewBox="0 0 24 24"><path d="M6 3h9l3 3v15H6zM15 3v4h4M9 11h6M9 15h6"/></svg><span data-i18n="navDocuments"></span></button>
                 <button class="nav-item nav-subitem" data-page="export" title="导出"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg><span data-i18n="navExport"></span></button>
               </div>
@@ -291,6 +297,64 @@
             </section>
           </section>
 
+          <section class="page cache-download-page" id="page-cache-download">
+            <div class="page-head cache-page-head">
+              <div><h1>批量下载视频缓存</h1><p>提交 BV 号或任意 Bilibili 视频链接，公开访问优先，队列会并行下载并合轨。</p></div>
+              <div class="cache-live-badge"><span></span><strong id="cacheQueueHeadline">队列空闲</strong></div>
+            </div>
+            <div class="cache-download-layout">
+              <section class="section-block cache-submit-panel">
+                <div class="section-title"><div><h2>新建缓存任务</h2><p>每行一个链接或 BV 号，也支持逗号、空格分隔。</p></div></div>
+                <label><span>视频列表</span><textarea id="cacheDownloadInputs" rows="7" placeholder="BV1...&#10;https://www.bilibili.com/video/BV1...&#10;https://b23.tv/..."></textarea></label>
+                <div class="cache-form-grid">
+                  <label><span>内置缓存视频收藏夹</span><select id="cacheDownloadCollection"></select></label>
+                  <label><span>新建收藏夹</span><div class="cache-inline-create"><input id="cacheNewCollectionName" placeholder="例如：待整理课程" /><button id="cacheCreateCollection" class="secondary-button compact-button" type="button">创建</button></div></label>
+                </div>
+                <div class="cache-destination-choice" role="group" aria-label="缓存输出位置">
+                  <label><input class="app-radio" type="radio" name="cacheDestination" value="managed" checked /><span><strong>应用预置目录</strong><small>由星藏家管理，删除与任务复用更稳定</small></span></label>
+                  <label><input class="app-radio" type="radio" name="cacheDestination" value="custom" /><span><strong>自定义目录</strong><small>仍会登记到视频库并进行安全路径校验</small></span></label>
+                </div>
+                <div id="cacheCustomPathRow" class="path-picker cache-custom-path" hidden><input id="cacheCustomOutput" readonly placeholder="选择自定义输出目录" /><button id="cacheChooseOutput" class="secondary-button" type="button">选择目录</button></div>
+                <button id="cacheSubmitDownloads" class="primary-button cache-submit-button" type="button">加入下载队列</button>
+              </section>
+              <section class="section-block cache-queue-panel">
+                <div class="cache-metric-strip"><div><span>等待</span><strong id="cacheMetricQueued">0</strong></div><div><span>下载中</span><strong id="cacheMetricRunning">0</strong></div><div><span>已完成</span><strong id="cacheMetricDone">0</strong></div><div><span>异常</span><strong id="cacheMetricFailed">0</strong></div></div>
+                <div class="section-title cache-queue-title"><div><h2>下载队列</h2><p id="cacheQueueSummary">暂无任务</p></div><button id="cacheRefreshQueue" class="icon-action" type="button" title="刷新"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v6h-6"/></svg></button></div>
+                <div id="cacheDownloadJobs" class="cache-job-list"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="page video-library-page" id="page-video-library">
+            <div class="page-head cache-page-head">
+              <div><h1>视频库</h1><p>筛选、播放和管理已下载的合轨视频缓存。</p></div>
+              <span id="videoLibrarySummary" class="muted-count">0 个视频</span>
+            </div>
+            <section class="section-block video-library-toolbar">
+              <div class="video-filter-primary">
+                <label><span>缓存收藏夹</span><select id="videoLibraryCollection"></select></label>
+                <label class="video-search"><span>标题 / BV / UP / 标签</span><input id="videoLibrarySearch" type="search" placeholder="搜索缓存视频" /></label>
+                <label><span>下载日期</span><select id="videoLibrarySort"><option value="desc">最新下载优先</option><option value="asc">最早下载优先</option></select></label>
+                <button id="videoLibraryFilterToggle" class="secondary-button compact-button filter-toggle" type="button" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 5h16l-6 7v5l-4 2v-7z"/></svg><span>高级筛选</span></button>
+              </div>
+              <div id="videoLibraryAdvanced" class="video-filter-advanced" hidden>
+                <div class="duration-filter"><div><span>视频时长</span><strong id="videoLibraryDurationLabel">0:00 - 0:00</strong></div><div class="dual-range"><input id="videoLibraryDurationMin" type="range" min="0" max="1" value="0" /><input id="videoLibraryDurationMax" type="range" min="0" max="1" value="1" /></div></div>
+              </div>
+              <div class="video-library-actions"><button id="videoSelectVisible" class="secondary-button compact-button" type="button">全选当前</button><button id="videoInvertVisible" class="secondary-button compact-button" type="button">反选当前</button><span id="videoSelectedCount">已选 0</span><span class="toolbar-divider"></span><button id="videoDeleteSelected" class="secondary-button compact-button danger-button" type="button" disabled>删除所选视频</button><button id="videoDeleteCollection" class="secondary-button compact-button danger-button" type="button">删除当前收藏夹</button></div>
+            </section>
+            <div class="video-library-layout">
+              <section class="section-block video-index-panel"><div id="videoLibraryList" class="video-library-list"></div></section>
+              <section class="section-block video-player-panel">
+                <div id="videoPlayerEmpty" class="video-player-empty"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM10 9l5 3-5 3z"/></svg><strong>选择一个缓存视频</strong><span>缺失文件会在列表中直接标记，不会尝试播放。</span></div>
+                <div id="videoPlayerShell" class="themed-video-player" hidden>
+                  <div class="video-stage"><video id="cacheVideoPlayer" preload="metadata"></video><button id="videoCenterPlay" class="video-center-play" type="button" aria-label="播放"><svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></svg></button></div>
+                  <div class="video-controls"><button id="videoPlayPause" class="video-icon-button" type="button" aria-label="播放或暂停"><svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></svg></button><span id="videoCurrentTime">0:00</span><input id="videoTimeline" class="video-timeline" type="range" min="0" max="1000" value="0" /><span id="videoTotalTime">0:00</span><button id="videoMute" class="video-icon-button" type="button" aria-label="静音"><svg viewBox="0 0 24 24"><path d="M5 10v4h4l5 4V6L9 10zM17 9a4 4 0 0 1 0 6"/></svg></button><input id="videoVolume" class="video-volume" type="range" min="0" max="1" step="0.05" value="1" /><button id="videoFullscreen" class="video-icon-button" type="button" aria-label="全屏"><svg viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg></button></div>
+                  <div class="video-player-info"><div><strong id="videoPlayerTitle"></strong><span id="videoPlayerMeta"></span></div><button id="videoOpenExplorer" class="secondary-button compact-button" type="button"><svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v10H4z"/></svg><span>在资源管理器中打开</span></button></div>
+                </div>
+              </section>
+            </div>
+          </section>
+
           <section class="page document-library-page" id="page-documents">
             <div class="page-head document-library-head">
               <div><h1 data-i18n="documentsTitle"></h1><p data-i18n="documentsHint"></p></div>
@@ -436,7 +500,8 @@
                 </div>
                 <label><span>指定输出目录</span><div class="path-picker"><input id="singleOutputDir" readonly placeholder="必须选择一个目录" /><button id="singleChooseOutput" class="secondary-button" type="button">选择目录</button></div></label>
                 <label><span>任务要求微调</span><textarea id="singleRequirements" rows="5" placeholder="例如：重点解释代码实现、保留所有关键参数、面向有前端经验的读者……"></textarea></label>
-                <button id="singleStart" class="primary-button single-start-button" type="button">创建并开始处理</button>
+                <label class="single-keep-cache"><input id="singleKeepVideoCache" class="app-checkbox" type="checkbox" /><span>处理完成后保留缓存视频到视频文件夹</span><small>默认关闭；开启后只清理音频等过渡缓存。</small></label>
+                <button id="singleStart" class="primary-button single-start-button" type="button" disabled title="请先在 AI 模型配置中启用至少一个模型">创建并开始处理</button>
               </section>
               <section class="section-block single-agent-monitor">
                 <div class="section-title"><div><h2>实时工作区</h2><p>显示思考流、正文生成和工具进度。</p></div><select id="singleSessionSelect"><option value="">选择单任务会话</option></select></div>
@@ -637,6 +702,19 @@
         <footer><button id="singleLoginLater" class="secondary-button" type="button">稍后处理</button><span></span><span></span><button id="singleGoLogin" class="primary-button" type="button">前往 B站登录</button></footer>
       </section>
     </div>
+    <div id="cacheLoginRequiredModal" class="rag-modal" hidden>
+      <section class="rag-modal-dialog compact single-login-dialog" role="alertdialog" aria-modal="true" aria-labelledby="cacheLoginRequiredTitle">
+        <header><div><h2 id="cacheLoginRequiredTitle">缓存下载需要登录</h2><p>公开下载已被 Bilibili 拒绝，登录后可继续等待中的任务。</p></div></header>
+        <div class="single-login-body"><div class="single-login-icon"><svg viewBox="0 0 24 24"><path d="M7 10V7a5 5 0 0 1 10 0v3M5 10h14v11H5zM12 14v3"/></svg></div><div><strong id="cacheLoginRequiredVideo">当前缓存任务</strong><p id="cacheLoginRequiredReason">登录完成后返回这里继续队列。</p></div></div>
+        <footer><button id="cacheLoginLater" class="secondary-button" type="button">稍后处理</button><span></span><button id="cacheResumeLogin" class="secondary-button" type="button">已登录，继续队列</button><button id="cacheGoLogin" class="primary-button" type="button">前往 B站登录</button></footer>
+      </section>
+    </div>
+    <div id="cacheConfirmModal" class="rag-modal" hidden>
+      <section class="rag-modal-dialog compact cache-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="cacheConfirmTitle">
+        <header><div><h2 id="cacheConfirmTitle">确认删除</h2><p id="cacheConfirmMessage"></p></div></header>
+        <footer><button id="cacheConfirmCancel" class="secondary-button" type="button">取消</button><span></span><span></span><button id="cacheConfirmAccept" class="primary-button danger-confirm" type="button">确认删除</button></footer>
+      </section>
+    </div>
     <div id="dependencyPromptModal" class="rag-modal dependency-prompt-modal" hidden>
       <section class="rag-modal-dialog compact" role="dialog" aria-modal="true" aria-labelledby="dependencyPromptTitle">
         <header><div><h2 id="dependencyPromptTitle">需要补全项目依赖</h2><p>首次启动检查发现运行时或默认 ASR 模型缺失。</p></div></header>
@@ -715,5 +793,6 @@
     <script src="./app.js"></script>
     <script src="./rag.js"></script>
     <script src="./ai.js"></script>
+    <script src="./cache.js"></script>
   </body>
 </html>

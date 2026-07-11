@@ -26,7 +26,7 @@ async function main() {
   const [command, target, ...rest] = process.argv.slice(2);
   if (!command || command === 'help' || command === '--help' || command === '-h') return printHelp();
   if (command === 'health') return printHealth(target);
-  if (command === 'clean-cache') return cleanCache(target);
+  if (command === 'clean-cache') return cleanCache(target, parseArgs(rest));
   if (!target) throw new Error('缺少视频链接或 BV 号。运行 node tools/video-tool.js help 查看用法。');
 
   const args = parseArgs(rest);
@@ -179,10 +179,22 @@ async function writeSubtitles(videoUrl, outDir, args) {
 async function downloadMerged(videoUrl, outDir, args) {
   requireCommand('yt-dlp');
   requireCommand('ffmpeg');
+  const existing = findFirst(outDir, /^merged\.(mp4|mkv|webm)$/i);
+  if (existing && fs.statSync(existing).size > 0) {
+    console.log(`[video-tool] reuse cached merged video: ${existing}`);
+    console.log(existing);
+    return existing;
+  }
   const height = Number(args.height || 720);
   const output = path.join(outDir, 'merged.%(ext)s');
   const format = `bv*[height<=${height}]+ba/b[height<=${height}]/best`;
-  const cliArgs = ['-f', format, '--merge-output-format', 'mp4', '-o', output];
+  const cliArgs = [
+    '-f', format,
+    '--merge-output-format', 'mp4',
+    '--newline',
+    '--progress-template', 'download:%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s',
+    '-o', output
+  ];
   const ffmpeg = resolveCommand('ffmpeg');
   if (ffmpeg) cliArgs.push('--ffmpeg-location', ffmpeg);
   if (args.cookies) cliArgs.push('--cookies', path.resolve(args.cookies));
@@ -191,6 +203,7 @@ async function downloadMerged(videoUrl, outDir, args) {
   const merged = findFirst(outDir, /^merged\.(mp4|mkv|webm)$/i);
   if (!merged) throw new Error('yt-dlp 已结束，但未找到 merged.mp4/mkv/webm。');
   console.log(merged);
+  return merged;
 }
 
 async function runAsr(videoUrl, outDir, args) {
@@ -298,18 +311,24 @@ function extractFrames(outDir, count) {
   run('ffmpeg', ['-y', '-i', merged, '-vf', 'fps=1/30', '-frames:v', String(count), path.join(framesDir, 'frame-%03d.jpg')]);
 }
 
-function cleanCache(target) {
+function cleanCache(target, args = {}) {
   if (!target) throw new Error('缺少视频工作目录。');
   const root = path.resolve(target);
   if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) throw new Error(`目录不存在：${root}`);
   const removed = [];
+  const preserved = [];
+  const preserveVideo = Boolean(args['preserve-video']);
   for (const file of walk(root)) {
     if (MEDIA_CACHE_EXTENSIONS.has(path.extname(file).toLowerCase())) {
+      if (preserveVideo && path.dirname(file) === root && /^merged\.(mp4|mkv|webm)$/i.test(path.basename(file))) {
+        preserved.push(file);
+        continue;
+      }
       fs.rmSync(file, { force: true });
       removed.push(file);
     }
   }
-  console.log(JSON.stringify({ root, removed }, null, 2));
+  console.log(JSON.stringify({ root, preserveVideo, preserved, removed }, null, 2));
 }
 
 async function getVideoInfo(videoUrl, args) {
@@ -325,6 +344,7 @@ async function getVideoInfo(videoUrl, args) {
     pubdate: data.pubdate,
     ctime: data.ctime,
     desc: data.desc,
+    pic: data.pic,
     duration: data.duration,
     pages: data.pages || [],
     stat: data.stat || {},

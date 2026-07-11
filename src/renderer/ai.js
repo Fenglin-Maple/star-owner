@@ -7,7 +7,7 @@
     createModal: $('#aiAgentCreateModal'), closeCreate: $('#aiCloseAgentCreate'), cancelCreate: $('#aiCancelAgentCreate'), createOnly: $('#aiCreateAgentOnly'), createStart: $('#aiCreateAgentStart'),
     agentTitle: $('#aiAgentTitle'), agentProvider: $('#aiAgentProvider'), agentModel: $('#aiAgentModel'), agentCollection: $('#aiAgentCollection'), agentRequirements: $('#aiAgentRequirements'),
     collectionModal: $('#aiCollectionModal'), collectionName: $('#aiCollectionName'), closeCollection: $('#aiCloseCollection'), cancelCollection: $('#aiCancelCollection'), saveCollection: $('#aiSaveCollection'),
-    singleVideo: $('#singleVideoInput'), singleCollection: $('#singleCollectionSelect'), singleCreateCollection: $('#singleCreateCollection'), singleProvider: $('#singleProviderSelect'), singleModel: $('#singleModelSelect'), singleFrames: $('#singleFrames'), singleComments: $('#singleComments'), singleOutput: $('#singleOutputDir'), singleChooseOutput: $('#singleChooseOutput'), singleRequirements: $('#singleRequirements'), singleStart: $('#singleStart'), singleSession: $('#singleSessionSelect'), singleDetail: $('#singleAgentDetail'),
+    singleVideo: $('#singleVideoInput'), singleCollection: $('#singleCollectionSelect'), singleCreateCollection: $('#singleCreateCollection'), singleProvider: $('#singleProviderSelect'), singleModel: $('#singleModelSelect'), singleFrames: $('#singleFrames'), singleComments: $('#singleComments'), singleOutput: $('#singleOutputDir'), singleChooseOutput: $('#singleChooseOutput'), singleRequirements: $('#singleRequirements'), singleKeepVideoCache: $('#singleKeepVideoCache'), singleStart: $('#singleStart'), singleSession: $('#singleSessionSelect'), singleDetail: $('#singleAgentDetail'),
     modelNew: $('#aiModelNewProvider'), modelProviderList: $('#aiModelProviderList'), modelProviderId: $('#aiModelProviderId'), modelProviderName: $('#aiModelProviderName'), modelProviderType: $('#aiModelProviderType'), modelProviderBaseUrl: $('#aiModelProviderBaseUrl'), modelProviderApiKey: $('#aiModelProviderApiKey'), modelProviderTemperature: $('#aiModelProviderTemperature'), modelProviderMaxTokens: $('#aiModelProviderMaxTokens'), modelProviderHeaders: $('#aiModelProviderHeaders'), modelDelete: $('#aiModelDeleteProvider'), modelSave: $('#aiModelSaveProvider'), modelFetch: $('#aiModelFetchModels'), modelCount: $('#aiModelRemoteCount'), modelRemote: $('#aiModelRemoteModels'),
     dependencyList: $('#dependencyList'), dependencyRefresh: $('#dependencyRefresh'), dependencyModal: $('#dependencyPromptModal'), dependencyMissing: $('#dependencyPromptMissing'), dependencyLater: $('#dependencyPromptLater'), dependencyDownload: $('#dependencyPromptDownload'),
     loginRequiredModal: $('#singleLoginRequiredModal'), loginRequiredVideo: $('#singleLoginRequiredVideo'), loginRequiredReason: $('#singleLoginRequiredReason'), loginLater: $('#singleLoginLater'), goLogin: $('#singleGoLogin')
@@ -75,6 +75,13 @@
     elements.singleSession.innerHTML = '<option value="">选择单任务会话</option>' + singles.map((item) => `<option value="${esc(item.id)}">${html(item.title)} · ${statusLabel(item.status)}</option>`).join('');
     elements.singleSession.value = activeSingleId;
     renderSessionDetail(elements.singleDetail, singles.find((item) => item.id === activeSingleId), { compact: true });
+    updateSingleStartState();
+  }
+
+  function updateSingleStartState() {
+    const hasModel = Boolean(elements.singleProvider.value && elements.singleModel.value && state.providers.some((provider) => provider.id === elements.singleProvider.value && provider.enabledModels?.some((model) => model.id === elements.singleModel.value)));
+    elements.singleStart.disabled = !hasModel;
+    elements.singleStart.title = hasModel ? '' : '请先在 AI 模型配置中启用至少一个模型';
   }
 
   function renderSessionDetail(container, session, { compact = false } = {}) {
@@ -187,7 +194,8 @@
         outputDir: elements.singleOutput.value,
         title: `单视频总结 · ${elements.singleVideo.value.trim().slice(0, 24)}`,
         taskRequirements: elements.singleRequirements.value,
-        taskOptions: { frames: Number(elements.singleFrames.value), commentLimit: Number(elements.singleComments.value) }
+        taskOptions: { frames: Number(elements.singleFrames.value), commentLimit: Number(elements.singleComments.value) },
+        keepVideoCache: Boolean(elements.singleKeepVideoCache.checked)
       });
       activeSingleId = session.id;
       persistActiveIds();
@@ -195,7 +203,7 @@
       await refreshAll({ quiet: true });
       notify('单任务已开始', '可以切换到其它页面，后台会继续处理。', 'success');
     } catch (error) { notify('无法开始单任务', error.message || String(error), 'error'); }
-    finally { elements.singleStart.disabled = false; }
+    finally { updateSingleStartState(); }
   }
 
   function renderModelPage() {
@@ -357,7 +365,8 @@
   elements.createOnly.addEventListener('click', () => createAgent(false));
   elements.createStart.addEventListener('click', () => createAgent(true));
   elements.agentProvider.addEventListener('change', () => syncModelForProvider(elements.agentProvider, elements.agentModel));
-  elements.singleProvider.addEventListener('change', () => syncModelForProvider(elements.singleProvider, elements.singleModel));
+  elements.singleProvider.addEventListener('change', () => { syncModelForProvider(elements.singleProvider, elements.singleModel); updateSingleStartState(); });
+  elements.singleModel.addEventListener('change', updateSingleStartState);
   elements.singleCreateCollection.addEventListener('click', () => openCollectionModal('single'));
   elements.closeCollection.addEventListener('click', closeCollectionModal);
   elements.cancelCollection.addEventListener('click', closeCollectionModal);

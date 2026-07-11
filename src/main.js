@@ -12,6 +12,7 @@ const { promoteMindMap } = require('./core/markdown');
 const { RagAssistant } = require('./core/rag-assistant');
 const { Store } = require('./core/store');
 const { ToolRunner } = require('./core/tool-runner');
+const { VideoCacheManager } = require('./core/video-cache-manager');
 const { initWorkspace, timestampForFile, videoArtifactName, WORKSPACE_ROOT } = require('./core/workspace');
 
 const BILI_SESSION = 'persist:bili-orchestrator';
@@ -31,6 +32,7 @@ let toolRunner = null;
 let ragAssistant = null;
 let internalAgentManager = null;
 let dependencyManager = null;
+let videoCacheManager = null;
 let currentUser = null;
 let backendReady = false;
 let toolHealth = [];
@@ -113,6 +115,13 @@ async function bootstrap() {
     getCurrentUser: () => currentUser,
     emit: publishInternalAgentEvent
   });
+  videoCacheManager = new VideoCacheManager({
+    store,
+    toolRunner,
+    bili,
+    getCurrentUser: () => currentUser,
+    emit: publishEvent
+  });
   dependencyManager = new DependencyManager({
     store,
     projectRoot: path.resolve(__dirname, '..'),
@@ -149,6 +158,7 @@ async function bootstrap() {
   });
   emitBootstrap('Loading persistent GPU ASR service...', 0.84);
   await toolRunner.initialize();
+  videoCacheManager.initialize();
   emitBootstrap('Starting resource pools and local Agent API...', 0.92);
   apiServer = new ApiServer({
     store,
@@ -182,6 +192,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   apiServer?.stop();
   internalAgentManager?.shutdown();
+  videoCacheManager?.shutdown();
   toolRunner?.shutdown();
   for (const pending of pendingRagApprovals.values()) pending.resolve({ approved: false });
   pendingRagApprovals.clear();
@@ -196,6 +207,7 @@ ipcMain.handle('app:get-runtime', async () => ({
   scheduler: toolRunner?.getState() || null,
   filenameMetadata: store?.getFilenameMetadata() || null,
   dependencies: dependencyManager?.state() || null,
+  videoCache: videoCacheManager?.state() || null,
   backendReady,
   bootstrap: bootstrapState
 }));
@@ -295,7 +307,7 @@ ipcMain.handle('bili:list-folders', async () => {
 });
 
 ipcMain.handle('store:snapshot', async () => {
-  if (!store) return { users: [], collections: [], tasks: [], tools: [], toolRuns: [], workspaces: [], analytics: { collections: {}, tools: [] }, activities: [] };
+  if (!store) return { users: [], collections: [], tasks: [], tools: [], toolRuns: [], workspaces: [], videoCache: { collections: [], videos: [], jobs: [] }, analytics: { collections: {}, tools: [] }, activities: [] };
   return {
     users: store.list('users'),
     collections: store.listCollections(),
@@ -306,6 +318,7 @@ ipcMain.handle('store:snapshot', async () => {
     workers: store.listWorkers(),
     internalAgentSessions: internalAgentManager?.state().sessions || [],
     activeCollection: store.getActiveCollection(),
+    videoCache: videoCacheManager?.state() || { collections: [], videos: [], jobs: [] },
     analytics: buildAnalytics(store),
     scheduler: toolRunner?.getState() || null,
     settings: { filenameMetadata: store.getFilenameMetadata() },
@@ -326,6 +339,49 @@ ipcMain.handle('tasks:set-enabled', async (_event, payload) => {
   const tasks = store.updateTasksEnabled(payload?.taskIds || [], Boolean(payload?.enabled));
   publishEvent({ type: 'tasks-enabled-changed', taskIds: tasks.map((task) => task.id), enabled: Boolean(payload?.enabled) });
   return { updated: tasks.length, tasks };
+});
+
+ipcMain.handle('video-cache:state', async () => videoCacheManager?.state() || { collections: [], videos: [], jobs: [] });
+
+ipcMain.handle('video-cache:collection-create', async (_event, name) => {
+  assertBackendReady();
+  const collection = videoCacheManager.createCollection(name);
+  publishEvent({ type: 'video-cache-collection-created', collectionId: collection.id, collectionName: collection.name });
+  return collection;
+});
+
+ipcMain.handle('video-cache:submit', async (_event, payload = {}) => {
+  assertBackendReady();
+  return videoCacheManager.submit(payload);
+});
+
+ipcMain.handle('video-cache:resume-login', async () => {
+  assertBackendReady();
+  return videoCacheManager.resumeWaitingForLogin();
+});
+
+ipcMain.handle('video-cache:choose-output', async () => {
+  assertBackendReady();
+  const result = await dialog.showOpenDialog(mainWindow, { title: '选择视频缓存输出目录', properties: ['openDirectory', 'createDirectory'] });
+  return { canceled: result.canceled, path: result.filePaths[0] || '' };
+});
+
+ipcMain.handle('video-cache:open', async (_event, id) => {
+  assertBackendReady();
+  const record = store.getVideoCache(String(id || ''));
+  if (!record?.videoFile || !fs.existsSync(record.videoFile)) throw new Error('缓存视频文件不存在。');
+  shell.showItemInFolder(record.videoFile);
+  return { path: record.videoFile };
+});
+
+ipcMain.handle('video-cache:delete-videos', async (_event, ids) => {
+  assertBackendReady();
+  return videoCacheManager.deleteVideos(Array.isArray(ids) ? ids : []);
+});
+
+ipcMain.handle('video-cache:delete-collection', async (_event, id) => {
+  assertBackendReady();
+  return videoCacheManager.deleteCollection(String(id || ''));
 });
 
 ipcMain.handle('settings:filename-metadata', async (_event, value) => {
@@ -745,6 +801,7 @@ function sendRuntime() {
     scheduler: toolRunner?.getState() || null,
     filenameMetadata: store?.getFilenameMetadata() || null,
     dependencies: dependencyManager?.state() || null,
+    videoCache: videoCacheManager?.state() || null,
     backendReady,
     bootstrap: bootstrapState
   });

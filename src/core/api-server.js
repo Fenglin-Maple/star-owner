@@ -339,7 +339,7 @@ class ApiServer {
     const workspace = this.store.getDefaultWorkspace();
     if (!workspace) throw new Error('No default workspace is configured.');
     const dirs = collectionDirs(workspace.root, collection.userName, collection.name);
-    const canReuseArtifact = task.artifactDir && task.workspaceId === workspace.id;
+    const canReuseArtifact = task.artifactDir && (task.cachedVideoId ? fs.existsSync(task.artifactDir) : task.workspaceId === workspace.id);
     const artifactDir = canReuseArtifact
       ? task.artifactDir
       : videoArtifactDir(dirs.videos, task, collection, this.store.getFilenameMetadata());
@@ -352,7 +352,7 @@ class ApiServer {
       attempts: Number(task.attempts || 0) + 1,
       workspaceId: workspace.id,
       workspaceRoot: workspace.root,
-      allowedRoot: dirs.root,
+      allowedRoot: task.cachedVideoId ? task.allowedRoot : dirs.root,
       artifactDir,
       validatorErrors: [],
       updatedAt: now.toISOString()
@@ -463,6 +463,7 @@ class ApiServer {
       validatorErrors: [],
       updatedAt: now
     });
+    relocateCachedVideo(this.store, task, finalized);
     this.store.upsertTask(task);
     this.store.commit();
     this.store.recordTaskEvent(task.id, 'completed', {
@@ -555,6 +556,9 @@ class ApiServer {
       outputMarkdown: task.outputMarkdown || '',
       completedAt: task.completedAt || '',
       validatorErrors: task.validatorErrors || [],
+      cachedVideoId: task.cachedVideoId || '',
+      cachedVideoFile: task.cachedVideoFile || '',
+      reuseCachedMedia: Boolean(task.cachedVideoId || task.reuseCachedMedia),
       worker: worker ? this.publicWorker(worker) : null,
       apiManifestUrl: `${this.url()}/api/manifest${worker ? `?workerId=${encodeURIComponent(worker.id)}` : ''}`,
       markdownTemplateUrl: `${this.url()}/api/templates/video-summary`,
@@ -562,7 +566,9 @@ class ApiServer {
         output: ['Markdown 总结', 'info.json', '精选关键帧', '字幕比对结果', '可获取时的热评前三条'],
         requiredSections: ['小结', '目录', '思维导图', '字幕比对', '评论分析', '处理记录'],
         requiredOpeningOrder: ['小结', '思维导图', '目录'],
-        cleanup: '最终产物保存后，通过 clean-cache 工具运行 API 删除临时视频和音频缓存。'
+        cleanup: task.cachedVideoId
+          ? '最终产物保存后仍调用 clean-cache；应用会保留缓存库中的合轨视频，只删除音频等过渡缓存。'
+          : '最终产物保存后，通过 clean-cache 工具运行 API 删除临时视频和音频缓存。'
       },
       toolPolicy: 'Agent 不直接运行本地工具脚本。必须通过 /api/tasks/<taskId>/tools/<toolId>/run 请求桌面应用代为执行。',
       tools: this.store.listTools({ enabled: true }).map((tool) => this.publicTool(tool, task.id))
@@ -676,6 +682,25 @@ function samePath(left, right) {
   const a = path.resolve(left);
   const b = path.resolve(right);
   return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+function relocateCachedVideo(store, task, finalized) {
+  if (!task.cachedVideoId) return;
+  const record = store.getVideoCache(task.cachedVideoId);
+  if (!record) return;
+  const videoName = record.videoFile ? path.basename(record.videoFile) : 'merged.mp4';
+  const videoFile = path.join(finalized.artifactDir, videoName);
+  task.cachedVideoFile = videoFile;
+  store.upsertVideoCache({
+    ...record,
+    artifactDir: finalized.artifactDir,
+    videoFile,
+    metadataFile: finalized.metadataFile,
+    updatedAt: new Date().toISOString()
+  });
+  try {
+    fs.writeFileSync(path.join(finalized.artifactDir, 'cache-record.json'), `${JSON.stringify(store.getVideoCache(task.cachedVideoId), null, 2)}\n`, 'utf8');
+  } catch {}
 }
 
 function readBody(req) {
