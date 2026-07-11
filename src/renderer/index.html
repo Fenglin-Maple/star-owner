@@ -48,9 +48,9 @@
               <svg viewBox="0 0 24 24"><path d="M5 3h14v18H5zM8 8h8M8 12h5M8 16h7"/></svg>
               <span>视频总结（单个）</span>
             </button>
-            <button class="nav-item nav-root" data-page="cache-download" title="批量下载视频缓存">
+            <button class="nav-item nav-root" data-page="cache-download" title="下载视频">
               <svg viewBox="0 0 24 24"><path d="M12 3v11M7 10l5 5 5-5M4 20h16M5 4h4M15 4h4"/></svg>
-              <span>批量下载视频缓存</span>
+              <span>下载视频</span>
             </button>
             <div class="nav-group" data-nav-group="prepare">
               <button class="nav-group-toggle" type="button" aria-expanded="false" title="工作准备">
@@ -299,7 +299,7 @@
 
           <section class="page cache-download-page" id="page-cache-download">
             <div class="page-head cache-page-head">
-              <div><h1>批量下载视频缓存</h1><p>提交 BV 号或任意 Bilibili 视频链接，公开访问优先，队列会并行下载并合轨。</p></div>
+              <div><h1>下载视频</h1><p>批量提交 BV 号或任意 Bilibili 视频链接，公开访问优先，队列会并行下载并合轨。</p></div>
               <div class="cache-live-badge"><span></span><strong id="cacheQueueHeadline">队列空闲</strong></div>
             </div>
             <div class="cache-download-layout">
@@ -636,6 +636,13 @@
                     <input id="cpuAsrToggle" type="checkbox" />
                     <span></span>
                   </label>
+                </div>
+                <div class="scheduler-model-row">
+                  <div>
+                    <strong>faster-whisper 常驻模型</strong>
+                    <span id="asrModelHint">默认使用中等模型；切换前需要等待 ASR 队列空闲。</span>
+                  </div>
+                  <label><span>识别模型</span><select id="asrModelSelect"><option value="medium">中等模型（默认）</option><option value="small">小模型（更快）</option></select></label>
                 </div>
                 <div class="gpu-memory-row">
                   <div><span id="gpuMemoryLabel">GPU 显存</span><strong id="gpuMemoryValue">检测中</strong></div>

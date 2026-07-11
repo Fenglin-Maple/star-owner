@@ -31,7 +31,7 @@ const { DependencyManager } = require('../src/core/dependency-manager');
   fs.mkdirSync(dependencyRoot, { recursive: true });
   const dependencyManager = new DependencyManager({ store, projectRoot: dependencyRoot, version: '9.9.9' });
   const missingDependencies = dependencyManager.state();
-  if (missingDependencies.ready || !missingDependencies.needsPrompt || !missingDependencies.missingRequired.includes('runtime-base') || !missingDependencies.missingRequired.includes('model-small')) throw new Error('dependency availability detection failed');
+  if (missingDependencies.ready || !missingDependencies.needsPrompt || !missingDependencies.missingRequired.includes('runtime-base') || !missingDependencies.missingRequired.includes('model-small') || !missingDependencies.missingRequired.includes('model-medium')) throw new Error('dependency availability detection failed');
   dependencyManager.acknowledgePrompt(false);
   if (dependencyManager.state().needsPrompt) throw new Error('dependency first-run acknowledgement failed');
   const runtimeDefinition = dependencyManager.definitions().find((item) => item.id === 'runtime-base');
@@ -85,6 +85,7 @@ const { DependencyManager } = require('../src/core/dependency-manager');
   store.setActiveCollection('c2');
   if (store.getActiveCollection()?.id !== 'c2') throw new Error('active collection persistence failed');
   const healthRunner = new ToolRunner({ store });
+  if (healthRunner.config.asrModel !== 'medium') throw new Error('medium ASR model must be the default');
   const canonicalArgs = healthRunner.buildArgs({
     task: { bvid: 'BVTEST', url: 'bilibili://video/123' },
     action: 'info',

@@ -30,6 +30,7 @@ $required = @(
   "runtime\faster-whisper\Lib\site-packages\imageio_ffmpeg\binaries",
   "runtime\faster-whisper\Lib\site-packages\yt_dlp",
   "runtime\models\small\model.bin"
+  "runtime\models\medium\model.bin"
 )
 $required | ForEach-Object { Require-Path $_ }
 $ffmpegBinary = Get-ChildItem -LiteralPath (Join-Path $root "runtime\faster-whisper\Lib\site-packages\imageio_ffmpeg\binaries") -File -Filter "ffmpeg-*" -ErrorAction SilentlyContinue | Select-Object -First 1

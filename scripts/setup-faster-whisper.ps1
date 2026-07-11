@@ -25,6 +25,6 @@ if (!(Test-Path (Join-Path $venv "Scripts\python.exe"))) {
 }
 & $uv pip install --link-mode copy --python (Join-Path $venv "Scripts\python.exe") --requirements (Join-Path $root "runtime-requirements.txt")
 & (Join-Path $venv "Scripts\python.exe") (Join-Path $root "tools\faster-whisper-cli.py") --download-model --model small
-& (Join-Path $venv "Scripts\python.exe") (Join-Path $root "tools\faster-whisper-cli.py") --download-model --model large-v3-turbo
+& (Join-Path $venv "Scripts\python.exe") (Join-Path $root "tools\faster-whisper-cli.py") --download-model --model medium
 & (Join-Path $venv "Scripts\python.exe") (Join-Path $root "tools\faster-whisper-cli.py") --health --model small
-& (Join-Path $venv "Scripts\python.exe") (Join-Path $root "tools\faster-whisper-cli.py") --health --model large-v3-turbo
+& (Join-Path $venv "Scripts\python.exe") (Join-Path $root "tools\faster-whisper-cli.py") --health --model medium

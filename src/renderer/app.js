@@ -72,6 +72,8 @@ const readmePath = document.querySelector('#readmePath');
 const schedulerStatus = document.querySelector('#schedulerStatus');
 const cpuAsrToggle = document.querySelector('#cpuAsrToggle');
 const cpuAsrHint = document.querySelector('#cpuAsrHint');
+const asrModelSelect = document.querySelector('#asrModelSelect');
+const asrModelHint = document.querySelector('#asrModelHint');
 const gpuMemoryLabel = document.querySelector('#gpuMemoryLabel');
 const gpuMemoryValue = document.querySelector('#gpuMemoryValue');
 const gpuMemoryBar = document.querySelector('#gpuMemoryBar');
@@ -1103,10 +1105,11 @@ function renderSettingsSummary() {
 }
 
 function renderScheduler(state = runtime.scheduler) {
-  if (!schedulerStatus || !cpuAsrToggle || !schedulerPoolGrid) return;
+  if (!schedulerStatus || !cpuAsrToggle || !asrModelSelect || !schedulerPoolGrid) return;
   if (!state) {
     schedulerStatus.textContent = '\u542f\u52a8\u4e2d';
     cpuAsrToggle.disabled = true;
+    asrModelSelect.disabled = true;
     schedulerPoolGrid.innerHTML = '';
     return;
   }
@@ -1115,6 +1118,20 @@ function renderScheduler(state = runtime.scheduler) {
   schedulerStatus.textContent = `${running} \u8fd0\u884c / ${queued} \u6392\u961f`;
   cpuAsrToggle.checked = Boolean(state.config?.cpuAsrEnabled);
   cpuAsrToggle.disabled = schedulerUpdateInFlight || !runtime.backendReady;
+  const modelPackages = new Map((runtime.dependencies?.packages || []).map((item) => [item.id, item]));
+  for (const option of asrModelSelect.options) {
+    const dependency = modelPackages.get(`model-${option.value}`);
+    option.disabled = Boolean(dependency && !dependency.available);
+  }
+  asrModelSelect.value = state.config?.asrModel || 'medium';
+  const asrPool = state.pools?.asr;
+  const asrBusy = Number(asrPool?.queued || 0) > 0 || (asrPool?.lanes || []).some((lane) => lane.busy || lane.checking);
+  asrModelSelect.disabled = schedulerUpdateInFlight || !runtime.backendReady || asrBusy;
+  const modelLabel = asrModelSelect.value === 'small' ? '小模型' : '中等模型';
+  const gpuModelState = state.services?.gpu?.state || 'stopped';
+  asrModelHint.textContent = asrBusy
+    ? `${modelLabel}正在服务，等待 ASR 队列空闲后可切换。`
+    : `当前 ${modelLabel}，GPU 服务 ${gpuModelState}${state.services?.gpu?.pid ? ` / PID ${state.services.gpu.pid}` : ''}。`;
   const cpuState = state.services?.cpu?.state || 'stopped';
   cpuAsrHint.textContent = state.config?.cpuAsrEnabled
     ? `\u5df2\u5f00\u542f\uff0c\u670d\u52a1 ${cpuState}${state.services?.cpu?.pid ? ` / PID ${state.services.cpu.pid}` : ''}`
@@ -2117,6 +2134,25 @@ cpuAsrToggle?.addEventListener('change', async (event) => {
     showToast(TEXT.toastSuccess, enabled ? 'CPU ASR \u670d\u52a1\u5df2\u5f00\u542f' : 'CPU ASR \u670d\u52a1\u5df2\u5173\u95ed', 'success');
   } catch (error) {
     event.target.checked = !enabled;
+    showToast(TEXT.toastError, error.message || String(error), 'error');
+  } finally {
+    schedulerUpdateInFlight = false;
+    renderScheduler(runtime.scheduler);
+  }
+});
+asrModelSelect?.addEventListener('change', async (event) => {
+  const requested = event.target.value;
+  const previous = runtime.scheduler?.config?.asrModel || 'medium';
+  schedulerUpdateInFlight = true;
+  renderScheduler(runtime.scheduler);
+  try {
+    const state = await window.orchestrator.updateScheduler({ asrModel: requested });
+    runtime.scheduler = state;
+    renderScheduler(state);
+    renderSettingsSummary();
+    showToast(TEXT.toastSuccess, `ASR 已切换为${requested === 'small' ? '小模型' : '中等模型'}`, 'success');
+  } catch (error) {
+    event.target.value = previous;
     showToast(TEXT.toastError, error.message || String(error), 'error');
   } finally {
     schedulerUpdateInFlight = false;

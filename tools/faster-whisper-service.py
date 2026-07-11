@@ -24,7 +24,7 @@ def main():
     parser = argparse.ArgumentParser(description="Persistent Star Owner faster-whisper service")
     parser.add_argument("--device", choices=["cuda", "cpu"], required=True)
     parser.add_argument("--compute-type", required=True)
-    parser.add_argument("--model", default="large-v3-turbo")
+    parser.add_argument("--model", default="medium")
     args = parser.parse_args()
 
     cli = load_cli_module()

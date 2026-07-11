@@ -36,20 +36,20 @@ class DependencyManager {
       {
         id: 'model-small',
         name: 'faster-whisper small 模型',
-        description: '默认多语言 ASR 模型，适合 8GB 笔记本 GPU。',
+        description: '内置轻量多语言 ASR 模型，速度更快、显存占用更低。',
         required: true,
         assetName: `Star-Owner-v${this.version}-model-small.zip`,
         assetPattern: /Star-Owner-v[\d.]+-model-small\.zip$/i,
         probes: ['runtime/models/small/model.bin']
       },
       {
-        id: 'model-large-v3-turbo',
-        name: 'large-v3-turbo 高质量模型',
-        description: '可选高质量 ASR 模型，占用更多磁盘与显存。',
-        required: false,
-        assetName: `Star-Owner-v${this.version}-model-large-v3-turbo.zip`,
-        assetPattern: /Star-Owner-v[\d.]+-model-large-v3-turbo\.zip$/i,
-        probes: ['runtime/models/large-v3-turbo/model.bin']
+        id: 'model-medium',
+        name: 'faster-whisper medium 模型',
+        description: '默认内置多语言 ASR 模型，在准确率、速度和 8GB 显存之间更均衡。',
+        required: true,
+        assetName: `Star-Owner-v${this.version}-model-medium.zip`,
+        assetPattern: /Star-Owner-v[\d.]+-model-medium\.zip$/i,
+        probes: ['runtime/models/medium/model.bin']
       }
     ];
   }

@@ -12,7 +12,7 @@ const ACTIVE_STATUSES = new Set(['queued', 'running']);
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'timeout']);
 const DEFAULT_CONFIG = Object.freeze({
   cpuAsrEnabled: false,
-  asrModel: 'small',
+  asrModel: 'medium',
   apiConcurrency: 2,
   apiStartIntervalMs: 850,
   mediaConcurrency: 3,
@@ -113,9 +113,12 @@ class ToolRunner {
 
   loadConfig() {
     const saved = this.store.get('settings', 'toolScheduler') || {};
-    const migrated = Number(saved.resourcePolicyVersion || 0) >= 2
+    let migrated = Number(saved.resourcePolicyVersion || 0) >= 2
       ? saved
       : { ...saved, mediaConcurrency: Math.max(3, Number(saved.mediaConcurrency || 0)), resourcePolicyVersion: 2 };
+    if (Number(migrated.asrModelPolicyVersion || 0) < 1) {
+      migrated = { ...migrated, asrModel: 'medium', asrModelPolicyVersion: 1 };
+    }
     this.config = normalizeConfig({ ...DEFAULT_CONFIG, ...migrated });
     this.store.set('settings', 'toolScheduler', { id: 'toolScheduler', ...this.config, updatedAt: new Date().toISOString() });
     this.store.commit();
@@ -648,22 +651,62 @@ class ToolRunner {
 
   async updateConfig(patch = {}) {
     const next = normalizeConfig({ ...this.config, ...patch });
+    const modelChanged = next.asrModel !== this.config.asrModel;
     const enablingCpu = !this.config.cpuAsrEnabled && next.cpuAsrEnabled;
+    let cpuStartError = null;
+
+    if (modelChanged) {
+      const asrPool = this.scheduler.snapshot().pools?.asr;
+      const busy = Number(asrPool?.queued || 0) > 0 || (asrPool?.lanes || []).some((lane) => lane.busy || lane.checking);
+      if (busy || this.gpuAsr.currentRequestId || this.cpuAsr.currentRequestId) {
+        throw new Error('ASR 正在转写或已有任务排队，请等待队列空闲后再切换模型。');
+      }
+      const modelRoot = path.join(PROJECT_ROOT, 'runtime', 'models', next.asrModel);
+      if (!fs.existsSync(path.join(modelRoot, 'model.bin')) || !fs.existsSync(path.join(modelRoot, 'config.json'))) {
+        throw new Error(`${next.asrModel} 模型尚未安装，请先在“项目依赖包”中下载。`);
+      }
+      this.scheduler.setLaneEnabled('asr', 'gpu', false);
+      this.scheduler.setLaneEnabled('asr', 'cpu', false);
+      this.gpuAsr.stop();
+      this.cpuAsr.stop();
+      try {
+        await waitForServicesStopped([this.gpuAsr, this.cpuAsr]);
+      } catch (error) {
+        this.scheduler.setLaneEnabled('asr', 'gpu', true);
+        this.scheduler.setLaneEnabled('asr', 'cpu', this.config.cpuAsrEnabled);
+        this.notifyState(true);
+        throw error;
+      }
+    }
+
     this.config = next;
-    if (enablingCpu) {
+    this.gpuAsr.model = next.asrModel;
+    this.cpuAsr.model = next.asrModel;
+    if (modelChanged) {
+      await this.refreshGpuState();
+      if (this.gpu.available && this.gpu.freeMiB >= this.config.gpuStartupReserveMiB) {
+        try { await this.gpuAsr.start(); }
+        catch (error) {
+          this.gpuAsr.lastError = error.message;
+          this.publish({ type: 'asr-gpu-start-failed', error: error.message, model: next.asrModel });
+        }
+      }
+    }
+    if (enablingCpu || (modelChanged && next.cpuAsrEnabled)) {
       try {
         await this.cpuAsr.start();
       } catch (error) {
         this.config.cpuAsrEnabled = false;
-        this.persistConfig();
-        throw error;
+        cpuStartError = error;
       }
     }
+    this.scheduler.setLaneEnabled('asr', 'gpu', true);
     this.scheduler.setLaneEnabled('asr', 'cpu', this.config.cpuAsrEnabled);
     this.persistConfig();
     if (!this.config.cpuAsrEnabled) this.stopCpuWhenIdle();
-    this.publish({ type: 'scheduler-config-updated', cpuAsrEnabled: this.config.cpuAsrEnabled, gpuReserveMiB: this.config.gpuReserveMiB });
+    this.publish({ type: 'scheduler-config-updated', cpuAsrEnabled: this.config.cpuAsrEnabled, asrModel: this.config.asrModel, gpuReserveMiB: this.config.gpuReserveMiB });
     this.notifyState(true);
+    if (cpuStartError) throw cpuStartError;
     return this.getState();
   }
 
@@ -876,8 +919,9 @@ function initialStageForAction(action) {
 function normalizeConfig(value) {
   return {
     resourcePolicyVersion: 2,
+    asrModelPolicyVersion: 1,
     cpuAsrEnabled: Boolean(value.cpuAsrEnabled),
-    asrModel: ['small', 'large-v3-turbo'].includes(String(value.asrModel)) ? String(value.asrModel) : DEFAULT_CONFIG.asrModel,
+    asrModel: ['small', 'medium'].includes(String(value.asrModel)) ? String(value.asrModel) : DEFAULT_CONFIG.asrModel,
     apiConcurrency: clampNumber(value.apiConcurrency, 1, 4, DEFAULT_CONFIG.apiConcurrency),
     apiStartIntervalMs: clampNumber(value.apiStartIntervalMs, 250, 5000, DEFAULT_CONFIG.apiStartIntervalMs),
     mediaConcurrency: clampNumber(value.mediaConcurrency, 1, 4, DEFAULT_CONFIG.mediaConcurrency),
@@ -885,6 +929,14 @@ function normalizeConfig(value) {
     gpuReserveMiB: clampNumber(value.gpuReserveMiB, 256, 4096, DEFAULT_CONFIG.gpuReserveMiB),
     gpuStartupReserveMiB: clampNumber(value.gpuStartupReserveMiB, 1536, 6144, DEFAULT_CONFIG.gpuStartupReserveMiB)
   };
+}
+
+async function waitForServicesStopped(services, timeoutMs = 5000) {
+  const started = Date.now();
+  while (services.some((service) => service.child)) {
+    if (Date.now() - started > timeoutMs) throw new Error('ASR 服务切换模型时未能及时停止，请稍后重试。');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  }
 }
 
 function sanitizeOptions(options) {

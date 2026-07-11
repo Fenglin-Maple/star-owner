@@ -128,7 +128,7 @@ async function bootstrap() {
     version: PACKAGE_VERSION,
     emit: publishDependencyEvent,
     onInstalled: async (packageId) => {
-      if (packageId === 'model-small' || packageId === 'runtime-base') {
+      if (packageId === 'model-small' || packageId === 'model-medium' || packageId === 'runtime-base') {
         try { await toolRunner.ensureGpuAsr(); } catch (error) { publishEvent({ type: 'asr-reload-required', error: error.message }); }
       }
       sendRuntime();

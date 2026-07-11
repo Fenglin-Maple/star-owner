@@ -151,13 +151,13 @@
 .rag-attachment-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rag-attachment-chip button { width: 16px; height: 16px; border: 0; color: var(--muted); background: transparent; }
 
-.rag-composer { margin: 10px clamp(14px, 3vw, 34px) 14px; min-height: 88px; display: grid; grid-template-columns: 30px minmax(0, 1fr); grid-template-rows: minmax(34px, auto) 30px; gap: 5px 8px; align-items: end; padding: 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--row); box-shadow: 0 8px 22px var(--shadow); }
+.rag-composer { margin: 10px clamp(14px, 3vw, 34px) 14px; min-height: 92px; display: grid; grid-template-columns: 30px minmax(0, 1fr); grid-template-rows: minmax(38px, auto) minmax(30px, auto); gap: 5px 8px; align-items: end; padding: 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--row); box-shadow: 0 8px 22px var(--shadow); }
 .rag-composer:focus-within { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); box-shadow: 0 0 0 3px var(--accent-soft); }
 .rag-composer > #ragAttach { grid-column: 1; grid-row: 1; align-self: start; }
 .rag-composer textarea { grid-column: 2; grid-row: 1; min-height: 34px; max-height: 130px; resize: none; padding: 7px 2px; border: 0; outline: 0; color: var(--text); background: transparent; font: 13px/1.5 var(--font-ui); }
 .rag-composer-controls { grid-column: 1 / -1; grid-row: 2; min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 .rag-composer-controls label { width: auto; display: grid; grid-template-columns: auto minmax(80px, 1fr); align-items: center; gap: 5px; margin: 0; }
-.rag-composer-controls label span { color: var(--muted-2); font-size: 9px; }
+.rag-composer-controls label span { color: var(--muted-2); font-size: 10px; }
 .rag-composer-controls label:first-child select { width: 126px; }
 .rag-composer-controls label:nth-child(2) select { width: 174px; }
 .rag-composer-controls select { height: 28px; padding: 0 25px 0 8px; border-color: color-mix(in srgb, var(--line) 72%, transparent); font-size: 10px; background-position: right 6px center; }
@@ -174,14 +174,14 @@
 .rag-setting-group label:last-child { margin-bottom: 0; }
 .text-button { border: 0; color: var(--accent); background: transparent; font-size: 10px; }
 .rag-capability-list { display: flex; flex-wrap: wrap; gap: 4px; }
-.rag-capability-list span { padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 9px; }
+.rag-capability-list span { padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 10px; }
 .rag-capability-list span.on { color: var(--green); border-color: color-mix(in srgb, var(--green) 35%, var(--line)); }
 
 .rag-knowledge-picker { position: relative; }
 .rag-knowledge-picker > button { width: 100%; }
 .rag-knowledge-menu { position: absolute; z-index: 30; top: calc(100% + 5px); right: 0; left: 0; max-height: 280px; display: none; overflow: auto; padding: 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--chrome); box-shadow: 0 15px 34px rgba(0,0,0,.28); }
 .rag-knowledge-menu.open { display: block; }
-.rag-knowledge-user { margin: 7px 7px 4px; color: var(--muted); font-size: 9px; text-transform: uppercase; }
+.rag-knowledge-user { margin: 7px 7px 4px; color: var(--muted); font-size: 10px; text-transform: uppercase; }
 .rag-knowledge-option { min-height: 34px; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 5px 7px; border-radius: 5px; cursor: pointer; }
 .rag-knowledge-option:hover { background: var(--row-hover); }
 .rag-knowledge-option input { appearance: none; width: 15px; height: 15px; display: grid; place-items: center; margin: 0; padding: 0; border: 1px solid var(--muted-2); border-radius: 4px; background: color-mix(in srgb, var(--row) 80%, var(--bg)); }
@@ -190,23 +190,23 @@
 .rag-knowledge-option input:checked::after { transform: translateY(-1px) rotate(-45deg) scale(1); }
 .rag-knowledge-option input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .rag-knowledge-option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 10px; }
-.rag-knowledge-option small { color: var(--muted); font-size: 9px; }
+.rag-knowledge-option small { color: var(--muted); font-size: 10px; }
 .rag-selected-knowledge { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
-.rag-knowledge-chip { max-width: 100%; display: flex; align-items: center; gap: 5px; padding: 4px 6px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); border-radius: 5px; color: var(--text); background: var(--accent-soft); font-size: 9px; }
+.rag-knowledge-chip { max-width: 100%; display: flex; align-items: center; gap: 5px; padding: 4px 6px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); border-radius: 5px; color: var(--text); background: var(--accent-soft); font-size: 10px; }
 .rag-knowledge-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rag-knowledge-chip button { width: 14px; height: 14px; border: 0; color: var(--muted); background: transparent; }
 
-#ragSandboxPath { display: block; max-height: 56px; overflow: auto; padding: 7px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: color-mix(in srgb, var(--bg) 62%, transparent); font: 9px/1.45 var(--font-mono); overflow-wrap: anywhere; }
+#ragSandboxPath { display: block; max-height: 62px; overflow: auto; padding: 7px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: color-mix(in srgb, var(--bg) 62%, transparent); font: 10px/1.45 var(--font-mono); overflow-wrap: anywhere; }
 .rag-inline-actions { display: flex; gap: 6px; margin-top: 8px; }
 .rag-inline-actions button { flex: 1 1 0; min-width: 0; }
 .rag-permission-segment { display: grid; grid-template-columns: 1fr 1fr; margin-top: 10px; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: color-mix(in srgb, var(--bg) 52%, transparent); }
 .rag-permission-segment button { height: 28px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; font-size: 10px; }
 .rag-permission-segment button.active { color: var(--text); background: var(--row); }
 .rag-permission-segment button[data-rag-permission="full"].active { color: var(--red); }
-.rag-security-note { margin: 8px 0 0; color: var(--muted-2); font-size: 9px; line-height: 1.5; }
+.rag-security-note { margin: 8px 0 0; color: var(--muted-2); font-size: 10px; line-height: 1.5; }
 .rag-token-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
 .rag-token-grid div { min-width: 0; padding: 7px; border: 1px solid var(--line); border-radius: 5px; background: color-mix(in srgb, var(--row) 52%, transparent); }
-.rag-token-grid span { display: block; color: var(--muted); font-size: 9px; }
+.rag-token-grid span { display: block; color: var(--muted); font-size: 10px; }
 .rag-token-grid strong { display: block; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
 
 .rag-modal { position: fixed; z-index: 160; inset: 0; display: grid; place-items: center; padding: 28px; background: rgba(0,0,0,.58); backdrop-filter: blur(5px); }
@@ -232,7 +232,7 @@
 .rag-provider-item:hover { background: var(--row-hover); }
 .rag-provider-item.active { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: var(--accent-soft); }
 .rag-provider-item strong { font-size: 11px; }
-.rag-provider-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 9px; }
+.rag-provider-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; }
 .rag-provider-editor { min-height: 0; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); padding: 14px; }
 .rag-provider-form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .rag-provider-form .wide { grid-column: 1 / -1; }
@@ -243,13 +243,13 @@
 .rag-model-select-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; border-top: 1px solid var(--line); }
 .rag-model-select-head > div { display: grid; gap: 2px; }
 .rag-model-select-head strong { font-size: 12px; }
-.rag-model-select-head span { color: var(--muted); font-size: 9px; }
+.rag-model-select-head span { color: var(--muted); font-size: 10px; }
 .rag-remote-models { min-height: 0; overflow: auto; display: grid; align-content: start; gap: 5px; }
-.rag-remote-model { display: grid; grid-template-columns: 18px minmax(130px, 1fr) 88px repeat(7, 25px); gap: 7px; align-items: center; min-height: 38px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 5px; background: color-mix(in srgb, var(--row) 55%, transparent); }
+.rag-remote-model { display: grid; grid-template-columns: 18px minmax(130px, 1fr) 92px repeat(7, 27px); gap: 7px; align-items: center; min-height: 42px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 5px; background: color-mix(in srgb, var(--row) 55%, transparent); }
 .rag-remote-model > input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent); }
 .rag-remote-model strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
-.rag-remote-model input[type="number"] { height: 27px; padding: 0 6px; font-size: 9px; }
-.rag-model-cap-toggle { width: 25px; height: 25px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: transparent; font-size: 8px; }
+.rag-remote-model input[type="number"] { height: 29px; padding: 0 6px; font-size: 10px; }
+.rag-model-cap-toggle { width: 27px; height: 27px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: transparent; font-size: 10px; }
 .rag-model-cap-toggle.active { color: var(--green); border-color: color-mix(in srgb, var(--green) 42%, var(--line)); background: color-mix(in srgb, var(--green) 10%, transparent); }
 
 .rag-modal-dialog.compact { width: min(590px, 92vw); height: auto; }

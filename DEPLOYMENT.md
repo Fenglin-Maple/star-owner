@@ -10,7 +10,7 @@ Recommended GitHub release assets:
 Star-Owner-v<version>-win-x64-core.zip
 Star-Owner-v<version>-runtime-win-x64.zip
 Star-Owner-v<version>-model-small.zip
-Star-Owner-v<version>-model-large-v3-turbo.zip   (optional)
+Star-Owner-v<version>-model-medium.zip
 ```
 
 The core archive contains Electron, all npm dependencies, Mermaid, and may include the base media/ASR runtime for immediate startup. The runtime repair asset contains `runtime/python` and `runtime/faster-whisper`; model assets preserve `runtime/models/<model>` paths. Assets remain separate because complete Windows distributions can exceed GitHub's 2GB per-file limit. Users do not install Node.js, Python, FFmpeg, yt-dlp, CUDA Toolkit, packages, or a model downloader.
@@ -33,7 +33,7 @@ The application creates `workspace/` beside itself and uses only project-relativ
 
 - Windows 10/11 x64.
 - An NVIDIA driver capable of the bundled CUDA 12 runtime is recommended for GPU ASR.
-- The default `small` model is intended for 8GB laptop GPUs.
+- The default `medium` model balances recognition quality and throughput on an 8GB laptop GPU; `small` remains available as the faster, lower-memory option.
 - CPU ASR can be enabled manually in Settings, but it is slower and disabled by default.
 
 ## 2. Source Setup for Developers
@@ -68,21 +68,22 @@ npm run verify:release
 npm run package:portable
 ```
 
-The output is written below `dist/`, which is excluded from Git. The default command creates the GitHub-safe portable core, runtime repair archive, and `small` model ZIP plus a SHA-256 file for each.
+The output is written below `dist/`, which is excluded from Git. The default command creates the GitHub-safe portable core, runtime repair archive, and separate `small` and `medium` model ZIPs plus a SHA-256 file for each.
 
 Available model modes:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle none
 powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle small
+powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle medium
 powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle all
-powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle small -SeparateModelAsset
+powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle all -SeparateModelAsset
 ```
 
-- `small -SeparateModelAsset`: recommended GitHub release; produces a core ZIP, runtime repair ZIP, and ready-to-overlay `small` model ZIP.
-- `small`: produces an immediately usable all-in-one archive for channels that permit files larger than 2GB.
+- `all -SeparateModelAsset`: recommended GitHub release; produces a core ZIP, runtime repair ZIP, and ready-to-overlay `small` and `medium` model ZIPs.
+- `small` or `medium`: produces an immediately usable single-model archive for channels that permit larger files.
 - `none`: core runtime for a separately published model archive.
-- `all`: includes both models and is too large for GitHub as one file; add `-SeparateModelAsset` to emit the core, `small`, and `large-v3-turbo` assets separately.
+- `all`: includes both models and is too large for GitHub as one file; add `-SeparateModelAsset` to emit the core, `small`, and `medium` assets separately.
 
 The builder copies only application/runtime inputs. It creates a fresh empty `workspace/`; it never copies the maintainer's SQLite database, cookies, downloaded videos, generated documents, logs, or shortcuts.
 
@@ -131,9 +132,11 @@ Star-Owner-v<version>-runtime-win-x64.zip
 Star-Owner-v<version>-runtime-win-x64.zip.sha256
 Star-Owner-v<version>-model-small.zip
 Star-Owner-v<version>-model-small.zip.sha256
+Star-Owner-v<version>-model-medium.zip
+Star-Owner-v<version>-model-medium.zip.sha256
 ```
 
-The runtime archive must contain both `runtime/python/cpython-3.12.13-windows-x86_64-none/python.exe` and `runtime/faster-whisper/Lib/site-packages/faster_whisper`. The default model archive must contain `runtime/models/small/model.bin`. Without these probes, extraction succeeds but installation is reported as incomplete.
+The runtime archive must contain both `runtime/python/cpython-3.12.13-windows-x86_64-none/python.exe` and `runtime/faster-whisper/Lib/site-packages/faster_whisper`. The model archives must contain `runtime/models/small/model.bin` and `runtime/models/medium/model.bin`. Without these probes, extraction succeeds but installation is reported as incomplete.
 
 ## 6. Troubleshooting
 

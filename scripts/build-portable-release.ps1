@@ -1,6 +1,6 @@
 param(
-  [ValidateSet("none", "small", "all")]
-  [string]$ModelBundle = "small",
+  [ValidateSet("none", "small", "medium", "all")]
+  [string]$ModelBundle = "all",
   [switch]$SeparateModelAsset,
   [switch]$NoArchive
 )
@@ -12,7 +12,7 @@ $package = Get-Content -LiteralPath (Join-Path $root "package.json") -Raw -Encod
 $splitModels = @()
 if ($SeparateModelAsset) {
   if ($ModelBundle -in @("small", "all")) { $splitModels += "small" }
-  if ($ModelBundle -eq "all") { $splitModels += "large-v3-turbo" }
+  if ($ModelBundle -in @("medium", "all")) { $splitModels += "medium" }
 }
 $folderSuffix = if ($splitModels.Count -gt 0) { "core" } else { $ModelBundle }
 $folderName = "Star-Owner-v$($package.version)-win-x64-$folderSuffix"
@@ -79,8 +79,8 @@ Copy-Item -LiteralPath (Join-Path $root "runtime\faster-whisper") -Destination (
 if (-not $SeparateModelAsset -and $ModelBundle -in @("small", "all")) {
   Copy-Item -LiteralPath (Join-Path $root "runtime\models\small") -Destination (Join-Path $runtimeTarget "models\small") -Recurse -Force
 }
-if (-not $SeparateModelAsset -and $ModelBundle -eq "all") {
-  Copy-Item -LiteralPath (Join-Path $root "runtime\models\large-v3-turbo") -Destination (Join-Path $runtimeTarget "models\large-v3-turbo") -Recurse -Force
+if (-not $SeparateModelAsset -and $ModelBundle -in @("medium", "all")) {
+  Copy-Item -LiteralPath (Join-Path $root "runtime\models\medium") -Destination (Join-Path $runtimeTarget "models\medium") -Recurse -Force
 }
 
 New-Item -ItemType Directory -Path (Join-Path $stage "workspace\users") -Force | Out-Null

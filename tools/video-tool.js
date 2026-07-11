@@ -211,7 +211,7 @@ async function runAsr(videoUrl, outDir, args) {
   const audioFile = await prepareAudio(videoUrl, outDir, args);
   const asrDir = path.join(outDir, 'asr');
   fs.mkdirSync(asrDir, { recursive: true });
-  run('faster-whisper', [audioFile, '--model', 'large-v3-turbo', '--language', 'zh', '--output_dir', asrDir, '--output_format', 'all']);
+  run('faster-whisper', [audioFile, '--model', 'medium', '--language', 'zh', '--output_dir', asrDir, '--output_format', 'all']);
   console.log(asrDir);
 }
 
@@ -503,7 +503,7 @@ function dependencyStatus(command) {
   if (command !== 'faster-whisper' || executable !== WHISPER_PYTHON || !fs.existsSync(WHISPER_CLI)) {
     return { command, available: true, source: executable };
   }
-  const probe = spawnSync(executable, [WHISPER_CLI, '--health', '--model', 'small'], {
+  const probe = spawnSync(executable, [WHISPER_CLI, '--health', '--model', 'medium'], {
     encoding: 'utf8',
     windowsHide: true,
     timeout: 15000
@@ -518,7 +518,7 @@ function dependencyStatus(command) {
       model: payload.model || '',
       modelReady: Boolean(payload.modelReady),
       cudaDevices: Number(payload.cudaDevices || 0),
-      message: payload.ok ? 'faster-whisper 与模型可用' : (payload.error || 'small 模型尚未就绪')
+      message: payload.ok ? 'faster-whisper 与默认 medium 模型可用' : (payload.error || 'medium 模型尚未就绪')
     };
   } catch (error) {
     return { command, available: false, source: executable, message: String(probe.stderr || '').trim() || error.message };

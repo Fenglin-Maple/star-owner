@@ -298,7 +298,7 @@ Scheduling is fair across Worker IDs: after a lane completes, the scheduler pref
 
 At every application startup, the main process launches `node tools/video-tool.js health <action>` for every registered tool. A tool is online only when the script returns the expected `pong` payload and all required local commands are resolvable. A responsive module with missing dependencies is marked degraded; missing scripts, invalid responses, and timeouts are marked offline. The latest results are exposed through `GET /api/tool-health` and the Startup page.
 
-FFmpeg and yt-dlp are project-local npm dependencies and are resolved before PATH. faster-whisper is deployed under `runtime/faster-whisper` on a project-local CPython 3.12 runtime. Multilingual `small` is the fast default and `large-v3-turbo` remains an installed quality option under `runtime/models`; project-local CUDA 12 cuBLAS/cuDNN DLL directories are registered before CTranslate2 loads. `FASTER_WHISPER_BIN` remains an optional explicit override.
+FFmpeg and yt-dlp are project-local dependencies and are resolved before PATH. faster-whisper is deployed under `runtime/faster-whisper` on a project-local CPython 3.12 runtime. Multilingual `medium` is the default balanced model and `small` is the lower-latency/lower-memory alternative under `runtime/models`; project-local CUDA 12 cuBLAS/cuDNN DLL directories are registered before CTranslate2 loads. Settings may switch models only while the ASR pool is idle. The application disables ASR lanes, stops both persistent services, changes the model, and safely reloads enabled services before accepting new work. `FASTER_WHISPER_BIN` remains an optional explicit override.
 
 `tools/faster-whisper-cli.py` remains the setup, health, and standalone diagnostic contract. `tools/faster-whisper-service.py` is the production NDJSON service contract: it loads one model, accepts sequential transcription requests, and writes SRT, plain text, and structured JSON. `src/core/asr-service.js` owns its lifetime.
 
@@ -400,7 +400,7 @@ Pages:
 - Export: completed Markdown selection across users/collections, a persistent export queue, seven filename metadata controls, and destination-folder export.
 - Tool modules: module enable state, usage, prompts, outputs, and open-source attribution.
 - Agent Tool Status: first-level per-tool status summaries and second-level individual queued/running history with stage, pool/lane, queue reason, estimated wait, commands, logs, terminal result, compact usage bars, expandable analytics, and API reference.
-- Settings: themes, seven artifact filename fields, multiple workspace libraries, default selection, live GPU/resource-pool state, manual CPU ASR enablement, runtime state, and dependency download/repair controls.
+- Settings: themes, seven artifact filename fields, multiple workspace libraries, default selection, live GPU/resource-pool state, small/medium ASR model switching, manual CPU ASR enablement, runtime state, and dependency download/repair controls.
 - README: a rendered, user-facing summary of this design, Agent onboarding, tools, artifact rules, and RAG export. The page reads the root `README.md` directly so the application and repository share one source.
 
 ## 14. Startup Strategy
@@ -486,13 +486,13 @@ Internal users and collections are always present in the Markdown Library and Ex
 
 ## 18. Managed Dependencies
 
-The dependency manager probes only project-relative paths. Required packages are the Windows media/ASR runtime and the default multilingual `small` model; `large-v3-turbo` is optional. A missing required package triggers one consent prompt per application version. Downloads are serialized, stream progress to the renderer, resolve exact current-version assets first and compatible recent Release assets second, verify a sibling `.sha256` when provided, reject unsafe archive entries, and extract into the application root. For older Releases without a dedicated runtime asset, the manager can safely extract only `runtime/python` and `runtime/faster-whisper` from the portable core archive.
+The dependency manager probes only project-relative paths. Required packages are the Windows media/ASR runtime and both built-in multilingual `small` and `medium` models. A missing required package triggers one consent prompt per application version. Downloads are serialized, stream progress to the renderer, resolve exact current-version assets first and compatible recent Release assets second, verify a sibling `.sha256` when provided, reject unsafe archive entries, and extract into the application root. For older Releases without a dedicated runtime asset, the manager can safely extract only `runtime/python` and `runtime/faster-whisper` from the portable core archive.
 
 Release asset contracts:
 
 - `Star-Owner-v<version>-runtime-win-x64.zip` contains `runtime/python` and `runtime/faster-whisper`;
 - `Star-Owner-v<version>-model-small.zip` contains `runtime/models/small`;
-- `Star-Owner-v<version>-model-large-v3-turbo.zip` contains `runtime/models/large-v3-turbo`;
+- `Star-Owner-v<version>-model-medium.zip` contains `runtime/models/medium`;
 - each asset should have a same-name `.sha256` text asset.
 
 Core portable archives may bundle the base runtime for immediate startup. The separate runtime asset remains the repair/source-clone installation path. Model assets stay separate to respect GitHub per-file limits. After an ASR package is installed, ToolRunner re-probes and starts the persistent GPU service when possible; CPU ASR remains opt-in.
