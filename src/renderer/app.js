@@ -698,6 +698,8 @@ function showToast(title, message = '', type = 'info') {
   setTimeout(close, type === 'error' ? 5200 : 3200);
 }
 
+window.notify = showToast;
+
 function renderBootstrap(state = {}) {
   if (!bootstrapPanel) return;
   const overview = document.querySelector('#page-overview');

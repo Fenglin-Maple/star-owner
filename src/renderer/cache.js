@@ -116,6 +116,17 @@
         event.stopPropagation();
         window.orchestrator.openExternal(event.currentTarget.href).catch((error) => toast('无法打开原视频', error.message || String(error), 'error'));
       });
+      item.querySelector('[data-video-source-link]')?.addEventListener('contextmenu', async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const bvid = event.currentTarget.dataset.bvid || '';
+        try {
+          await window.orchestrator.copyText(bvid);
+          toast('BV 号已复制', bvid, 'success');
+        } catch (error) {
+          toast('复制失败', error.message || String(error), 'error');
+        }
+      });
     }
     if (activeVideoId && !state.videos.some((item) => item.id === activeVideoId)) clearPlayer();
   }
@@ -125,7 +136,7 @@
     const collection = state.collections.find((item) => item.id === video.collectionId);
     const orientation = video.orientation === 'portrait' || Number(video.height || 0) > Number(video.width || 0) ? 'portrait' : '';
     const sourceUrl = `https://www.bilibili.com/video/${encodeURIComponent(video.bvid)}`;
-    return `<div class="video-library-item ${video.id === activeVideoId ? 'active' : ''} ${video.fileExists ? '' : 'missing'}" data-cache-video="${attr(video.id)}" role="button" tabindex="0"><input class="app-checkbox" type="checkbox" ${selected.has(video.id) ? 'checked' : ''} aria-label="选择 ${attr(video.title || video.bvid)}" /><div class="video-library-thumb ${orientation}">${thumb}</div><div class="video-library-copy"><strong title="${attr(video.title || video.bvid)}">${html(video.title || video.bvid)}</strong><span><a class="video-bvid-link" href="${attr(sourceUrl)}" data-video-source-link title="在默认浏览器中打开原视频">${html(video.bvid)}</a> · ${html(video.owner || '未知 UP')} · ${duration(video.duration)}</span><small>${html(collection?.name || '')} · ${html(formatDate(video.downloadedAt))}${video.tags?.length ? ` · ${html(video.tags.slice(0, 4).join(' / '))}` : ''}</small></div><em class="video-file-state ${video.fileExists ? '' : 'missing'}">${video.fileExists ? '可播放' : '文件缺失'}</em></div>`;
+    return `<div class="video-library-item ${video.id === activeVideoId ? 'active' : ''} ${video.fileExists ? '' : 'missing'}" data-cache-video="${attr(video.id)}" role="button" tabindex="0"><input class="app-checkbox" type="checkbox" ${selected.has(video.id) ? 'checked' : ''} aria-label="选择 ${attr(video.title || video.bvid)}" /><div class="video-library-thumb ${orientation}">${thumb}</div><div class="video-library-copy"><strong title="${attr(video.title || video.bvid)}">${html(video.title || video.bvid)}</strong><span><a class="video-bvid-link" href="${attr(sourceUrl)}" data-video-source-link data-bvid="${attr(video.bvid)}" title="左键打开原视频，右键复制 BV 号">${html(video.bvid)}</a> · ${html(video.owner || '未知 UP')} · ${duration(video.duration)}</span><small>${html(collection?.name || '')} · ${html(formatDate(video.downloadedAt))}${video.tags?.length ? ` · ${html(video.tags.slice(0, 4).join(' / '))}` : ''}</small></div><em class="video-file-state ${video.fileExists ? '' : 'missing'}">${video.fileExists ? '可播放' : '文件缺失'}</em></div>`;
   }
 
   function selectVideo(id) {
