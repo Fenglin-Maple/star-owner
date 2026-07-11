@@ -9,7 +9,8 @@
     collectionModal: $('#aiCollectionModal'), collectionName: $('#aiCollectionName'), closeCollection: $('#aiCloseCollection'), cancelCollection: $('#aiCancelCollection'), saveCollection: $('#aiSaveCollection'),
     singleVideo: $('#singleVideoInput'), singleCollection: $('#singleCollectionSelect'), singleCreateCollection: $('#singleCreateCollection'), singleProvider: $('#singleProviderSelect'), singleModel: $('#singleModelSelect'), singleFrames: $('#singleFrames'), singleComments: $('#singleComments'), singleOutput: $('#singleOutputDir'), singleChooseOutput: $('#singleChooseOutput'), singleRequirements: $('#singleRequirements'), singleStart: $('#singleStart'), singleSession: $('#singleSessionSelect'), singleDetail: $('#singleAgentDetail'),
     modelNew: $('#aiModelNewProvider'), modelProviderList: $('#aiModelProviderList'), modelProviderId: $('#aiModelProviderId'), modelProviderName: $('#aiModelProviderName'), modelProviderType: $('#aiModelProviderType'), modelProviderBaseUrl: $('#aiModelProviderBaseUrl'), modelProviderApiKey: $('#aiModelProviderApiKey'), modelProviderTemperature: $('#aiModelProviderTemperature'), modelProviderMaxTokens: $('#aiModelProviderMaxTokens'), modelProviderHeaders: $('#aiModelProviderHeaders'), modelDelete: $('#aiModelDeleteProvider'), modelSave: $('#aiModelSaveProvider'), modelFetch: $('#aiModelFetchModels'), modelCount: $('#aiModelRemoteCount'), modelRemote: $('#aiModelRemoteModels'),
-    dependencyList: $('#dependencyList'), dependencyRefresh: $('#dependencyRefresh'), dependencyModal: $('#dependencyPromptModal'), dependencyMissing: $('#dependencyPromptMissing'), dependencyLater: $('#dependencyPromptLater'), dependencyDownload: $('#dependencyPromptDownload')
+    dependencyList: $('#dependencyList'), dependencyRefresh: $('#dependencyRefresh'), dependencyModal: $('#dependencyPromptModal'), dependencyMissing: $('#dependencyPromptMissing'), dependencyLater: $('#dependencyPromptLater'), dependencyDownload: $('#dependencyPromptDownload'),
+    loginRequiredModal: $('#singleLoginRequiredModal'), loginRequiredVideo: $('#singleLoginRequiredVideo'), loginRequiredReason: $('#singleLoginRequiredReason'), loginLater: $('#singleLoginLater'), goLogin: $('#singleGoLogin')
   };
 
   let state = { providers: [], sessions: [], collections: [], internalCollections: [] };
@@ -184,7 +185,7 @@
         providerId: elements.singleProvider.value,
         modelId: elements.singleModel.value,
         outputDir: elements.singleOutput.value,
-        title: `单任务 · ${elements.singleVideo.value.trim().slice(0, 24)}`,
+        title: `单视频总结 · ${elements.singleVideo.value.trim().slice(0, 24)}`,
         taskRequirements: elements.singleRequirements.value,
         taskOptions: { frames: Number(elements.singleFrames.value), commentLimit: Number(elements.singleComments.value) }
       });
@@ -273,7 +274,7 @@
       const provider = await saveProviderForm();
       await window.orchestrator.ragFetchModels(provider.id);
       await refreshAll({ quiet: true });
-      notify('模型列表已更新', '请选择允许 RAG 和工作 Agent 使用的模型。', 'success');
+      notify('模型列表已更新', '请选择允许 RAG 知识库助手和视频总结 Agent 使用的模型。', 'success');
     } catch (error) { notify('模型拉取失败', error.message || String(error), 'error'); }
     finally { elements.modelFetch.disabled = false; }
   }
@@ -324,6 +325,11 @@
       const session = state.sessions.find((item) => item.id === event.sessionId);
       if (session) session.logs = [...(session.logs || []), event.entry].slice(-200);
     }
+    if (event.type === 'login-required') {
+      elements.loginRequiredVideo.textContent = [event.bvid, event.title].filter(Boolean).join(' · ') || '当前单视频任务';
+      elements.loginRequiredReason.textContent = event.reason || '登录完成后回到“视频总结（单个）”，点击“开始/继续”即可重试。';
+      elements.loginRequiredModal.hidden = false;
+    }
     scheduleStreamRender();
   }
 
@@ -362,6 +368,8 @@
     if (!result.canceled) elements.singleOutput.value = result.path;
   });
   elements.singleStart.addEventListener('click', startSingleTask);
+  elements.loginLater.addEventListener('click', () => { elements.loginRequiredModal.hidden = true; });
+  elements.goLogin.addEventListener('click', () => { elements.loginRequiredModal.hidden = true; window.dispatchEvent(new CustomEvent('star:navigate', { detail: { page: 'login' } })); });
   elements.singleSession.addEventListener('change', () => { activeSingleId = elements.singleSession.value; persistActiveIds(); renderSinglePage(); });
   elements.modelNew.addEventListener('click', () => { editingProviderId = '__new__'; renderModelPage(); elements.modelProviderName.focus(); });
   elements.modelSave.addEventListener('click', async () => { try { await saveProviderForm(); notify('供应商已保存', '配置已供 RAG 和应用内 Agent 共用。', 'success'); } catch (error) { notify('保存失败', error.message || String(error), 'error'); } });
@@ -384,7 +392,7 @@
   });
 
   function providerName(id) { return state.providers.find((item) => item.id === id)?.name || '未配置供应商'; }
-  function statusLabel(status) { return ({ idle: '等待任务', running: '工作中', draining: '即将暂停', paused: '已暂停', stopping: '停止中', stopped: '已停止', completed: '已完成', error: '失败' })[status] || status || '未知'; }
+  function statusLabel(status) { return ({ idle: '等待任务', running: '工作中', draining: '即将暂停', paused: '已暂停', 'waiting-login': '等待登录', stopping: '停止中', stopped: '已停止', completed: '已完成', error: '失败' })[status] || status || '未知'; }
   function dependencyStatus(item) { return item.available ? '可用' : ({ resolving: '查询中', downloading: `${Math.round(item.progress * 100)}%`, verifying: '校验中', installing: '安装中', failed: '失败', missing: item.required ? '必需缺失' : '可选未装' })[item.status] || item.status; }
   function formatTokens(value) { return new Intl.NumberFormat('zh-CN', { notation: Number(value) > 999999 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(Number(value || 0)); }
   function time(value) { try { return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(value)); } catch { return ''; } }

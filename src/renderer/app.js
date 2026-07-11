@@ -124,12 +124,12 @@ let backendSnapshotLoaded = false;
 const TEXT = {
   navOverview: '\u542f\u52a8\u9875',
   navLogin: 'B\u7ad9\u767b\u5f55',
-  navCollections: '\u6536\u85cf\u5939',
-  navTasks: '\u4efb\u52a1',
+  navCollections: '\u6536\u85cf\u5939\u540c\u6b65',
+  navTasks: '\u4efb\u52a1\u6fc0\u6d3b',
   navDocuments: '\u6587\u6863\u5e93',
-  navWorkers: '\u5de5\u4f5c Agent',
+  navWorkers: 'Agent \u5de5\u4f5c\u5217\u8868',
   navExport: '\u5bfc\u51fa',
-  navTools: '\u5de5\u5177\u6a21\u5757',
+  navTools: 'Agent \u5de5\u5177\u6a21\u5757',
   navRuns: '\u8fd0\u884c\u65e5\u5fd7',
   navSettings: '\u8bbe\u7f6e',
   navReadme: 'README',
@@ -174,7 +174,7 @@ const TEXT = {
   sendSms: '\u53d1\u9001\u9a8c\u8bc1\u7801',
   smsCode: '\u624b\u673a\u9a8c\u8bc1\u7801',
   confirmSms: '\u786e\u5b9a\u9a8c\u8bc1',
-  collectionsTitle: '\u6536\u85cf\u5939',
+  collectionsTitle: '\u6536\u85cf\u5939\u540c\u6b65',
   collectionsHint: '\u540c\u6b65\u6536\u85cf\u5939\u540e\uff0c\u5e94\u7528\u4f1a\u521b\u5efa\u4efb\u52a1\u5e93\u5b58\u548c\u9879\u76ee\u5185\u5de5\u4f5c\u533a\u3002',
   syncSettings: '\u540c\u6b65\u8bbe\u7f6e',
   loadFolders: '\u8bfb\u53d6\u6536\u85cf\u5939',
@@ -183,7 +183,7 @@ const TEXT = {
   syncTasks: '\u540c\u6b65\u4efb\u52a1',
   readFoldersFirst: '\u8bf7\u5148\u8bfb\u53d6\u6536\u85cf\u5939',
   syncPreparing: '\u6b63\u5728\u51c6\u5907\u540c\u6b65...',
-  tasksTitle: '\u4efb\u52a1',
+  tasksTitle: '\u4efb\u52a1\u6fc0\u6d3b',
   tasksHint: '\u67e5\u770b\u4efb\u52a1\u9886\u53d6\u3001\u5b8c\u6210\u548c\u6253\u56de\u72b6\u6001\u3002',
   taskInventory: '\u4efb\u52a1\u5e93\u5b58',
   currentInventory: '\u5f53\u524d\u5e93\u5b58',
@@ -211,7 +211,7 @@ const TEXT = {
   failedTasks: '\u5931\u8d25 / \u6253\u56de',
   disabledTasks: '\u5df2\u5173\u95ed',
   agentPerformance: 'Agent \u7ee9\u6548',
-  workersTitle: '\u5de5\u4f5c Agent \u7ba1\u7406',
+  workersTitle: 'Agent \u5de5\u4f5c\u5217\u8868',
   workersHint: '\u6bcf\u4e2a\u65b0 Agent \u4f1a\u8bdd\u7531\u5e94\u7528\u5206\u914d\u72ec\u7acb Worker ID\uff0c\u7ee9\u6548\u3001\u5de5\u5177\u548c\u4efb\u52a1\u8bb0\u5f55\u5206\u5f00\u7edf\u8ba1\u3002',
   workerTotal: '\u5de5\u4f5c\u8005',
   workerActive: '\u53ef\u63a5\u5355',
@@ -252,7 +252,7 @@ const TEXT = {
   chooseFolderExport: '\u9009\u62e9\u6587\u4ef6\u5939\u5e76\u5bfc\u51fa',
   clear: '\u6e05\u7a7a',
   refresh: '\u5237\u65b0',
-  toolsTitle: '\u5de5\u5177\u6a21\u5757',
+  toolsTitle: 'Agent \u5de5\u5177\u6a21\u5757',
   toolsHint: 'agent \u5fc5\u987b\u901a\u8fc7 API \u8bf7\u6c42\u5e94\u7528\u6267\u884c\u5de5\u5177\uff1b\u8fd9\u91cc\u7ba1\u7406\u53ef\u7528\u6a21\u5757\u548c\u63d0\u793a\u8bcd\u3002',
   execTools: '\u6267\u884c\u5de5\u5177',
   runsTitle: '\u8fd0\u884c\u65e5\u5fd7',
@@ -982,9 +982,10 @@ async function transitionTheme(theme, origin, displayName = theme) {
   }
 }
 
-function setPage(name) {
-  navItems.forEach((item) => item.classList.toggle('active', item.dataset.page === name));
-  const activeItem = [...navItems].find((item) => item.dataset.page === name);
+function setPage(name, sourceItem = null) {
+  const candidates = [...navItems].filter((item) => item.dataset.page === name);
+  const activeItem = sourceItem && candidates.includes(sourceItem) ? sourceItem : candidates[0];
+  navItems.forEach((item) => item.classList.toggle('active', item === activeItem));
   navGroups.forEach((group) => group.classList.toggle('contains-active', Boolean(group.contains(activeItem))));
   const activeGroup = activeItem?.closest('.nav-group');
   if (activeGroup) setNavGroupOpen(activeGroup, true);
@@ -1688,10 +1689,16 @@ function completedDocuments() {
     .filter((item) => item.collection);
 }
 
+function isInternalCollection(collection) {
+  return Boolean(collection && (collection.internal === true || collection.userId === 'builtin-agent-user' || collection.userName === '\u5185\u7f6e\u7528\u6237'));
+}
+
 function syncDocumentSelectors() {
   if (!documentUserSelect || !documentCollectionSelect) return;
   const documents = completedDocuments();
-  const users = new Map(documents.map(({ collection }) => [String(collection.userId || collection.userName), collection.userName || collection.userId || '-']));
+  const completedIds = new Set(documents.map(({ collection }) => collection.id));
+  const collections = (lastSnapshot.collections || []).filter((collection) => completedIds.has(collection.id) || isInternalCollection(collection));
+  const users = new Map(collections.map((collection) => [String(collection.userId || collection.userName), collection.userName || collection.userId || '-']));
   const previousUser = documentUserSelect.value;
   documentUserSelect.innerHTML = [...users.entries()].map(([id, name]) => `<option value="${escapeHtml(id)}">${escapeHtml(name)}</option>`).join('');
   if (users.has(previousUser)) documentUserSelect.value = previousUser;
@@ -1700,11 +1707,9 @@ function syncDocumentSelectors() {
     if (users.has(currentUserId)) documentUserSelect.value = currentUserId;
   }
   const userId = documentUserSelect.value;
-  const available = [...new Map(documents
-    .filter(({ collection }) => String(collection.userId || collection.userName) === userId)
-    .map(({ collection }) => [collection.id, collection])).values()];
+  const available = collections.filter((collection) => String(collection.userId || collection.userName) === userId);
   const previousCollection = documentCollectionSelect.value;
-  documentCollectionSelect.innerHTML = `<option value="">${TEXT.allCollections}</option>${available.map((collection) => `<option value="${escapeHtml(collection.id)}">${escapeHtml(collection.name)}</option>`).join('')}`;
+  documentCollectionSelect.innerHTML = `<option value="">${TEXT.allCollections}</option>${available.map((collection) => `<option value="${escapeHtml(collection.id)}">${escapeHtml(collection.name)} (${documents.filter((item) => item.collection.id === collection.id).length} \u7bc7)</option>`).join('')}`;
   if (available.some((collection) => collection.id === previousCollection)) documentCollectionSelect.value = previousCollection;
 }
 
@@ -1893,7 +1898,7 @@ function syncExportSelectors() {
   const collectionSelect = document.querySelector('#exportCollectionSelect');
   if (!userSelect || !collectionSelect) return;
   const completedCollectionIds = new Set((lastSnapshot.tasks || []).filter((task) => task.status === 'done' && task.outputMarkdown).map((task) => task.collectionId));
-  const collections = (lastSnapshot.collections || []).filter((collection) => completedCollectionIds.has(collection.id));
+  const collections = (lastSnapshot.collections || []).filter((collection) => completedCollectionIds.has(collection.id) || isInternalCollection(collection));
   const users = new Map(collections.map((collection) => [String(collection.userId || collection.userName), collection.userName || collection.userId || '-']));
   const previousUser = userSelect.value;
   userSelect.innerHTML = [...users.entries()].map(([id, name]) => `<option value="${escapeHtml(id)}">${escapeHtml(name)}</option>`).join('');
@@ -1901,7 +1906,7 @@ function syncExportSelectors() {
   const userId = userSelect.value;
   const previousCollection = collectionSelect.value;
   const available = collections.filter((collection) => String(collection.userId || collection.userName) === userId);
-  collectionSelect.innerHTML = `<option value="">\u5168\u90e8\u6536\u85cf\u5939</option>${available.map((collection) => `<option value="${escapeHtml(collection.id)}">${escapeHtml(collection.name)}</option>`).join('')}`;
+  collectionSelect.innerHTML = `<option value="">\u5168\u90e8\u6536\u85cf\u5939</option>${available.map((collection) => `<option value="${escapeHtml(collection.id)}">${escapeHtml(collection.name)} (${(lastSnapshot.tasks || []).filter((task) => task.collectionId === collection.id && task.status === 'done' && task.outputMarkdown).length} \u7bc7)</option>`).join('')}`;
   if (available.some((collection) => collection.id === previousCollection)) collectionSelect.value = previousCollection;
 }
 
@@ -2075,7 +2080,9 @@ function iconTool() { return '<svg viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 
 function iconRun() { return '<svg viewBox="0 0 24 24"><path d="M5 4l14 8-14 8z"/></svg>'; }
 function iconWorker() { return '<svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M18 8h4M20 6v4"/></svg>'; }
 
-navItems.forEach((item) => item.addEventListener('click', () => setPage(item.dataset.page)));
+navItems.forEach((item) => item.addEventListener('click', () => setPage(item.dataset.page, item)));
+for (const button of document.querySelectorAll('[data-navigate-page]')) button.addEventListener('click', () => setPage(button.dataset.navigatePage));
+window.addEventListener('star:navigate', (event) => setPage(event.detail?.page || 'overview'));
 navGroups.forEach((group) => group.querySelector('.nav-group-toggle')?.addEventListener('click', () => {
   const shouldOpen = !group.classList.contains('open') || document.body.classList.contains('sidebar-collapsed');
   if (document.body.classList.contains('sidebar-collapsed')) setSidebarCollapsed(false);

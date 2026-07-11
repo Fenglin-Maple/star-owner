@@ -122,6 +122,11 @@
 .dependency-prompt-body strong { font-size: 13px; }
 .dependency-prompt-body p { margin: 6px 0 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
 .dependency-prompt-body .chip-row { grid-column: 1 / -1; }
+.single-login-body { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 13px; align-items: center; padding: 18px; }
+.single-login-body strong { display: block; margin-bottom: 5px; color: var(--text); }
+.single-login-body p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.single-login-icon { width: 44px; height: 44px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--warning) 38%, var(--line)); border-radius: 7px; color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, transparent); }
+.single-login-icon svg { width: 23px; height: 23px; fill: none; stroke: currentColor; stroke-width: 1.7; }
 
 @media (max-width: 1080px) {
   .single-agent-layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(420px, 1fr); overflow: auto; }

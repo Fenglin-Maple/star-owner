@@ -1,7 +1,7 @@
 {
   "name": "star-owner",
   "productName": "星藏家",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "license": "GPL-3.0-or-later",
   "description": "星藏家：Bilibili 收藏视频 Markdown 多 Agent 本地编排工作台。",

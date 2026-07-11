@@ -67,6 +67,8 @@
 .rag-session-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .rag-session-search svg { width: 15px; height: 15px; color: var(--muted); }
 .rag-session-search input { height: 30px; padding: 0; border: 0; background: transparent; box-shadow: none; }
+.rag-new-session-button { width: calc(100% - 20px); height: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; margin: 0 10px 8px; }
+.rag-new-session-button svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; }
 
 .rag-session-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0 8px 10px; }
 .rag-list-empty { padding: 18px 10px; color: var(--muted); font-size: 10px; line-height: 1.6; text-align: center; }

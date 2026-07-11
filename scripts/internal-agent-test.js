@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { Store } = require('../src/core/store');
-const { InternalAgentManager } = require('../src/core/internal-agent-manager');
+const { InternalAgentManager, isLoginRequiredMessage } = require('../src/core/internal-agent-manager');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -33,18 +33,22 @@ function assert(condition, message) {
     recordModelUsage: () => ({})
   };
 
+  let forceLoginFailure = false;
   const toolRunner = {
-    start: ({ task, tool, workerId }) => {
+    start: ({ task, tool, workerId, collection: runCollection }) => {
       const id = `run-${tool.id}-${Date.now()}`;
-      if (tool.id === 'material-bundle') writeMaterials(task.artifactDir);
-      store.createToolRun({ id, taskId: task.id, collectionId: task.collectionId, toolId: tool.id, toolName: tool.name, workerId, status: 'succeeded', stage: 'complete', createdAt: new Date().toISOString(), finishedAt: new Date().toISOString() });
+      const loginBlocked = forceLoginFailure && tool.id === 'material-bundle' && !runCollection?.cookieFile;
+      if (tool.id === 'material-bundle' && !loginBlocked) writeMaterials(task.artifactDir);
+      store.createToolRun({ id, taskId: task.id, collectionId: task.collectionId, toolId: tool.id, toolName: tool.name, workerId, status: loginBlocked ? 'failed' : 'succeeded', stage: loginBlocked ? 'error' : 'complete', error: loginBlocked ? 'This video is only available for registered users. Use --cookies.' : '', createdAt: new Date().toISOString(), finishedAt: new Date().toISOString() });
       return store.getToolRun(id);
     },
     cancel: () => ({ status: 'cancelled' })
   };
 
   const events = [];
-  const manager = new InternalAgentManager({ store, toolRunner, ragAssistant: rag, bili: { exportCookies: async () => '' }, getCurrentUser: () => null, emit: (event) => events.push(event) });
+  let currentUser = null;
+  const cookieFixture = path.join(root, 'login-cookies.txt');
+  const manager = new InternalAgentManager({ store, toolRunner, ragAssistant: rag, bili: { exportCookies: async () => { fs.writeFileSync(cookieFixture, 'cookie'); return cookieFixture; } }, getCurrentUser: () => currentUser, emit: (event) => events.push(event) });
   const collection = manager.listInternalCollections()[0];
   const outputDir = path.join(root, 'external-output');
   const session = await manager.createSingleTask({
@@ -56,6 +60,7 @@ function assert(condition, message) {
     taskRequirements: '保留测试参数。',
     taskOptions: { frames: 8, commentLimit: 3 }
   });
+  assert(store.getTask(session.singleTaskId)?.publicAttempt === true && !store.getTask(session.singleTaskId)?.cookieFile, 'single task must try public access first');
   manager.start(session.id);
   const finished = await waitForSession(manager, session.id);
   assert(finished.status === 'completed', `single session did not complete: ${finished.lastError || finished.status}`);
@@ -66,6 +71,20 @@ function assert(condition, message) {
   assert(task.outputMarkdown.includes('内置用户') || task.artifactDir.includes('内置用户'), 'internal collection artifact path is incorrect');
   assert(store.getWorker(finished.workerId)?.tool === 'star-owner-internal', 'internal worker identity was not registered');
   assert(events.some((event) => event.type === 'stream') && events.some((event) => event.type === 'session-updated'), 'internal agent events were not emitted');
+  assert(isLoginRequiredMessage('This video is only available for registered users. Use --cookies.'), 'login-required classifier missed yt-dlp guidance');
+  assert(!isLoginRequiredMessage('network timeout while downloading'), 'ordinary network failure was misclassified as login-required');
+
+  forceLoginFailure = true;
+  const loginSession = await manager.createSingleTask({ video: 'BV0987654321', outputDir: path.join(root, 'login-output'), collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  await manager.start(loginSession.id);
+  const waiting = await waitForStatus(manager, loginSession.id, 'waiting-login');
+  assert(waiting.lastError.includes('Bilibili'), 'single task did not preserve login-required reason');
+  assert(events.some((event) => event.type === 'login-required' && event.sessionId === loginSession.id), 'login-required UI event was not emitted');
+  currentUser = { isLogin: true, name: '测试登录用户', mid: '100' };
+  await manager.start(loginSession.id);
+  const retried = await waitForSession(manager, loginSession.id);
+  assert(retried.status === 'completed', `logged-in retry did not complete: ${retried.lastError || retried.status}`);
+  assert(store.getTask(loginSession.singleTaskId)?.publicAttempt === false, 'logged-in retry did not switch from public access');
   manager.shutdown();
   fs.rmSync(root, { recursive: true, force: true });
   console.log('internal agent integration test passed');
@@ -142,6 +161,22 @@ function waitForSession(manager, id) {
       } else if (Date.now() - started > 10000) {
         clearInterval(timer);
         reject(new Error('Timed out waiting for internal agent session.'));
+      }
+    }, 60);
+  });
+}
+
+function waitForStatus(manager, id, status) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const timer = setInterval(() => {
+      const session = manager.listSessions().find((item) => item.id === id);
+      if (session?.status === status) {
+        clearInterval(timer);
+        resolve(session);
+      } else if (Date.now() - started > 10000) {
+        clearInterval(timer);
+        reject(new Error(`Timed out waiting for internal agent status: ${status}`));
       }
     }, 60);
   });

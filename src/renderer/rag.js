@@ -1,7 +1,7 @@
 (() => {
   const $ = (selector) => document.querySelector(selector);
   const elements = {
-    page: $('#page-rag'), sessionList: $('#ragSessionList'), sessionSearch: $('#ragSessionSearch'), newSession: $('#ragNewSession'), usageSummary: $('#ragUsageSummary'),
+    page: $('#page-rag'), sessionList: $('#ragSessionList'), sessionSearch: $('#ragSessionSearch'), newSession: $('#ragNewSession'), openModelCenter: $('#ragOpenModelCenter'), usageSummary: $('#ragUsageSummary'),
     chatTitle: $('#ragChatTitle'), chatMeta: $('#ragChatMeta'), contextPercent: $('#ragContextPercent'), contextBar: $('#ragContextBar'), compact: $('#ragCompact'), deleteSession: $('#ragDeleteSession'), openSessionSettings: $('#ragOpenSessionSettings'),
     messages: $('#ragMessages'), runStatus: $('#ragRunStatus'), pendingAttachments: $('#ragPendingAttachments'), composer: $('#ragComposer'), input: $('#ragInput'), attach: $('#ragAttach'), send: $('#ragSend'), stop: $('#ragStop'),
     providerSelect: $('#ragProviderSelect'), modelSelect: $('#ragModelSelect'), composerProviderSelect: $('#ragComposerProviderSelect'), composerModelSelect: $('#ragComposerModelSelect'), capabilities: $('#ragModelCapabilities'), refreshState: $('#ragRefreshState'), openProviders: $('#ragOpenProviders'),
@@ -37,7 +37,7 @@
       renderAll();
       initialized = true;
     } catch (error) {
-      if (!quiet) notify('RAG 助手尚未就绪', error.message || String(error), 'error');
+      if (!quiet) notify('RAG 知识库助手尚未就绪', error.message || String(error), 'error');
       if (!initialized) setTimeout(() => refresh(activeSessionId, { quiet: true }), 1200);
     }
   }
@@ -312,8 +312,8 @@
   async function createSession() {
     const provider = state.providers.find((item) => item.enabledModels?.length) || state.providers[0];
     if (!provider) {
-      openProviderModal();
-      notify('先配置模型供应商', '保存 Base URL 与 API Key，再拉取并选择模型。', 'info');
+      openAiModelCenter();
+      notify('先配置模型供应商', '已为你打开 AI 模型配置，保存供应商并启用至少一个模型。', 'info');
       return;
     }
     const session = await window.orchestrator.ragCreateSession({ providerId: provider.id, modelId: provider.enabledModels?.[0]?.id || '' });
@@ -321,6 +321,12 @@
     pendingAttachments = [];
     await refresh(session.id, { quiet: true });
     elements.input.focus();
+  }
+
+  function openAiModelCenter() {
+    closeSessionSettingsModal();
+    closeProviderModal();
+    window.dispatchEvent(new CustomEvent('star:navigate', { detail: { page: 'ai-models' } }));
   }
 
   async function sendMessage(event) {
@@ -659,7 +665,8 @@
     }
     await deleteActiveSession();
   });
-  elements.openProviders.addEventListener('click', openProviderModal);
+  elements.openProviders.addEventListener('click', openAiModelCenter);
+  elements.openModelCenter.addEventListener('click', openAiModelCenter);
   elements.closeProviders.addEventListener('click', closeProviderModal);
   elements.providerModal.addEventListener('click', (event) => { if (event.target === elements.providerModal) closeProviderModal(); });
   elements.newProvider.addEventListener('click', newProviderForm);

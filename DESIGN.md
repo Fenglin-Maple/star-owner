@@ -386,21 +386,20 @@ Pages:
 - Startup: themed backend progress, per-tool interface health, global totals, a collapsed quick-start section, a comprehensive copyable agent collaboration prompt, and all recent processing activities.
 - Bilibili login: persistent WebView, encrypted account vault, one-click login, SMS bridge.
 - Collections: folder discovery and full collection sync.
-- Tasks: explicit Agent target activation, a compact progress band, primary search, collapsible advanced filters, batch state, and agent performance.
-- Work Preparation group: Bilibili login, Collections, and Tasks.
-- AI group: RAG assistant, internal collection Agent sessions, single-task Agent, and shared AI model configuration.
-- Status Query group: Work Agent, Tool modules, Run logs, and Agent API.
+- Task Activation: explicit external-Agent target activation, a compact progress band, primary search, collapsible advanced filters, batch state, and agent performance.
+- Work Preparation group: Bilibili Login, Collection Sync, and Task Activation.
+- AI group: RAG Knowledge Assistant, Agent Video Summary Workflow, Single Video Summary, and shared AI Model Configuration. Single Video Summary also has a standalone root navigation shortcut immediately below Startup.
+- Status Query group: Agent Work List, Agent Tool Modules, and Agent Tool Status. Agent Tool Status combines run inventory, tool-call analytics, and API reference in one page.
 - Document Browse group: Markdown library and Export.
-- Internal Agent: concurrent persistent sessions, each bound to an app-owned Worker ID, provider/model, collection, progress stream, token usage, and pause/stop controls.
-- Single-task Agent: direct BV/URL input, adjustable material requirements, mandatory external destination, internal collection creation, live generation, Workspace archive, and a second complete artifact copy.
+- Agent Video Summary Workflow: concurrent persistent sessions, each bound to an app-owned Worker ID, provider/model, collection, progress stream, token usage, and pause/stop controls.
+- Single Video Summary: direct BV/URL input, adjustable material requirements, mandatory external destination, internal collection creation, live generation, Workspace archive, and a second complete artifact copy.
 - AI Model Configuration: the shared multi-provider/multi-model source for RAG, collection Agents, and single-task Agents.
-- RAG assistant: persistent session list and streaming conversation surface; session settings are hidden by default and open in a focused modal. Provider/model selectors also remain available at the lower-right of the composer, and a session context menu opens editing or guarded deletion.
+- RAG Knowledge Assistant: persistent session list and streaming conversation surface; session settings are hidden by default and open in a focused modal. Its upper-left pencil and session model-management button navigate to the shared AI Model Configuration page instead of opening a duplicate provider editor. New conversation creation has a separate labeled control.
 - Markdown library: accepted-document index by user and collection, BV/owner/title search, favorite/publish date filters, duration range, four time sort modes, and on-demand in-app Markdown preview with local frames.
 - Work Agent: independent Worker sessions, current assignments, performance, pause, and reactivation.
 - Export: completed Markdown selection across users/collections, a persistent export queue, seven filename metadata controls, and destination-folder export.
 - Tool modules: module enable state, usage, prompts, outputs, and open-source attribution.
-- Run logs: first-level per-tool status summaries and second-level individual queued/running history with stage, pool/lane, queue reason, estimated wait, commands, logs, and terminal result.
-- Agent API: compact tool usage bars, expandable analytics, and API reference.
+- Agent Tool Status: first-level per-tool status summaries and second-level individual queued/running history with stage, pool/lane, queue reason, estimated wait, commands, logs, terminal result, compact usage bars, expandable analytics, and API reference.
 - Settings: themes, seven artifact filename fields, multiple workspace libraries, default selection, live GPU/resource-pool state, manual CPU ASR enablement, runtime state, and dependency download/repair controls.
 - README: a rendered, user-facing summary of this design, Agent onboarding, tools, artifact rules, and RAG export. The page reads the root `README.md` directly so the application and repository share one source.
 
@@ -481,7 +480,9 @@ The internal Agent manager persists sessions in SQLite and registers each one th
 
 For each task the manager runs the material bundle, refreshes task metadata from `info.json`, sends the template, subtitles, ASR transcript, comments, manifest, metadata, and optionally up to four keyframes to the selected model, streams explicit reasoning/content fields to the renderer, and validates the draft. One repair attempt includes concrete validator errors. Accepted work runs cache cleanup and the same `finalizeSubmissionArtifacts` path as the public API. Usage is recorded in both the session and shared per-model accounting.
 
-Single-task mode creates a normal enabled task under the reserved `内置用户` identity and a user-selected internal collection. It requires an external output directory. On acceptance, the canonical artifact remains in the default Workspace and a collision-safe full directory copy is created under the requested destination. Internal collections are ordinary catalog sources after completion, so no special-case RAG, library, or export index is required.
+Single-task mode creates a normal enabled task under the reserved `内置用户` identity and a user-selected internal collection. It requires an external output directory. The first material run deliberately omits cookies even when the WebView is logged in. Only explicit registered-user, sign-in, private-video, or cookie-required errors move the session into `waiting-login`; ordinary network and model failures remain normal errors. The renderer then offers a direct Bilibili Login navigation action. A manual resume after successful login exports the current account cookie and retries the same pending task. On acceptance, the canonical artifact remains in the default Workspace and a collision-safe full directory copy is created under the requested destination.
+
+Internal users and collections are always present in the Markdown Library and Export selectors, including before they contain accepted documents; option labels include the current accepted-document count. The RAG knowledge catalog remains intentionally limited to collections with retrievable accepted Markdown.
 
 ## 18. Managed Dependencies
 

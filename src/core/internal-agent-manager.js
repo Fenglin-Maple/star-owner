@@ -144,12 +144,6 @@ class InternalAgentManager {
     if (!collection || !(collection.userId === INTERNAL_USER_ID || collection.internal === true)) throw new Error('请选择内置用户下的内置收藏夹。');
     const workspace = this.requireWorkspace();
     const dirs = collectionDirs(workspace.root, INTERNAL_USER_NAME, collection.name);
-    let cookieFile = collection.cookieFile || '';
-    const currentUser = this.getCurrentUser();
-    if (currentUser?.isLogin) {
-      try { cookieFile = await this.bili.exportCookies(currentUser.name || String(currentUser.mid)); } catch { /* public download remains available */ }
-    }
-    if (cookieFile !== collection.cookieFile) this.store.upsertCollection({ ...collection, cookieFile, updatedAt: new Date().toISOString() });
     const now = new Date().toISOString();
     const taskId = `${collection.id}:${bvid}:single-${Date.now()}`;
     this.store.upsertTask({
@@ -172,6 +166,8 @@ class InternalAgentManager {
       validatorErrors: [],
       internal: true,
       singleTask: true,
+      publicAttempt: true,
+      cookieFile: '',
       createdAt: now,
       updatedAt: now
     });
@@ -182,9 +178,24 @@ class InternalAgentManager {
     return this.createSession({ ...input, mode: 'single', singleTaskId: taskId, singleOutputDir: outputDir, collectionId: collection.id, acceptNewTasks: false });
   }
 
-  start(sessionId) {
+  async start(sessionId) {
     const session = this.requireSession(sessionId);
     if (this.running.has(session.id)) return this.publicSession(session);
+    if (session.status === 'waiting-login') {
+      const user = this.getCurrentUser();
+      if (!user?.isLogin) {
+        this.emit({ type: 'login-required', sessionId: session.id, bvid: this.store.getTask(session.singleTaskId)?.bvid || '', reason: '请先前往 B站登录。登录完成后回到视频总结页面，点击“开始/继续”。' });
+        throw new Error('这个视频需要 Bilibili 登录后才能继续，请先完成登录。');
+      }
+      const task = this.store.getTask(session.singleTaskId);
+      if (!task) throw new Error('等待登录的单视频任务已不存在。');
+      task.cookieFile = await this.bili.exportCookies(user.name || String(user.mid));
+      task.publicAttempt = false;
+      task.updatedAt = new Date().toISOString();
+      this.store.upsertTask(task);
+      this.store.commit();
+      this.log(session, `已同步 ${user.name || user.mid} 的登录状态，准备重试。`);
+    }
     const worker = this.store.getWorker(session.workerId);
     if (worker?.status === 'paused') this.store.updateWorker(worker.id, { status: 'active' });
     session.acceptNewTasks = session.mode === 'single' ? false : true;
@@ -271,6 +282,19 @@ class InternalAgentManager {
           this.finishSession(latest, 'stopped', '已停止');
           return;
         }
+        if (latest.mode === 'single' && error.code === 'BILIBILI_LOGIN_REQUIRED') {
+          this.releaseTask(task.id, latest.workerId);
+          latest.status = 'waiting-login';
+          latest.phase = '需要登录后继续';
+          latest.lastError = error.message || String(error);
+          latest.currentTaskId = '';
+          latest.currentRunId = '';
+          latest.progress = Math.max(0.08, Number(latest.progress || 0));
+          this.saveSession(latest);
+          this.log(latest, `公开获取受限：${latest.lastError}`);
+          this.emit({ type: 'login-required', sessionId: latest.id, bvid: task.bvid, title: task.title, reason: '已先尝试公开获取，但该视频要求登录。登录完成后回到“视频总结（单个）”，点击“开始/继续”重试。' });
+          return;
+        }
         excluded.add(task.id);
         latest.failed = Number(latest.failed || 0) + 1;
         latest.status = 'error';
@@ -340,8 +364,9 @@ class InternalAgentManager {
 
   async processTask(session, task, signal) {
     const collection = this.store.getCollectionById(task.collectionId) || {};
+    const toolCollection = task.singleTask ? { ...collection, cookieFile: task.publicAttempt ? '' : (task.cookieFile || '') } : collection;
     this.setProgress(session, '准备视频素材', 0.09);
-    const bundle = this.startTool(session, task, collection, 'material-bundle', { frames: session.taskOptions?.frames || 12, commentLimit: session.taskOptions?.commentLimit ?? 3, timeoutMs: 7_200_000 });
+    const bundle = this.startTool(session, task, toolCollection, 'material-bundle', { frames: session.taskOptions?.frames || 12, commentLimit: session.taskOptions?.commentLimit ?? 3, timeoutMs: 7_200_000 });
     await this.waitForRun(session, task, bundle.id, signal, 0.1, 0.52);
     this.refreshTaskMetadata(task);
     this.setProgress(session, '模型正在整理完整 Markdown', 0.56);
@@ -349,7 +374,7 @@ class InternalAgentManager {
     const markdownFile = path.join(task.artifactDir, 'summary-draft.md');
     fs.writeFileSync(markdownFile, `${generated.trim()}\n`, 'utf8');
     this.setProgress(session, '清理临时音视频缓存', 0.88);
-    const cleanup = this.startTool(session, task, collection, 'clean-cache', { timeoutMs: 30 * 60 * 1000 });
+    const cleanup = this.startTool(session, task, toolCollection, 'clean-cache', { timeoutMs: 30 * 60 * 1000 });
     await this.waitForRun(session, task, cleanup.id, signal, 0.89, 0.94);
     this.setProgress(session, '校验并归档产物', 0.95);
     const finalized = this.submitTask(session, task, markdownFile);
@@ -395,7 +420,11 @@ class InternalAgentManager {
       this.store.upsertTask(task);
       this.store.commit();
       if (TERMINAL_RUNS.has(run.status)) {
-        if (run.status !== 'succeeded') throw new Error(`${run.toolName || run.toolId} ${run.status}：${run.error || '请查看运行日志'}`);
+        if (run.status !== 'succeeded') {
+          const message = `${run.toolName || run.toolId} ${run.status}：${run.error || '请查看运行日志'}`;
+          if (session.mode === 'single' && task.publicAttempt && isLoginRequiredMessage(message)) throw loginRequiredError(message);
+          throw new Error(message);
+        }
         return run;
       }
       await delay(650, signal);
@@ -677,4 +706,30 @@ function abortError() {
   return error;
 }
 
-module.exports = { InternalAgentManager, INTERNAL_USER_ID, INTERNAL_USER_NAME, extractBvid };
+function isLoginRequiredMessage(value) {
+  const message = String(value || '').toLowerCase();
+  return [
+    'login required',
+    'login is required',
+    'sign in to confirm',
+    'sign in to view',
+    'only available for registered users',
+    'cookies are required',
+    'use --cookies',
+    'private video',
+    'this video is private',
+    '\u9700\u8981\u767b\u5f55',
+    '\u8bf7\u5148\u767b\u5f55',
+    '\u767b\u5f55\u540e\u624d\u80fd',
+    '\u4ec5\u9650\u767b\u5f55',
+    '\u4ec5\u9650\u6ce8\u518c\u7528\u6237'
+  ].some((pattern) => message.includes(pattern));
+}
+
+function loginRequiredError(detail) {
+  const error = new Error(`公开访问失败，Bilibili 要求登录：${String(detail || '').slice(0, 600)}`);
+  error.code = 'BILIBILI_LOGIN_REQUIRED';
+  return error;
+}
+
+module.exports = { InternalAgentManager, INTERNAL_USER_ID, INTERNAL_USER_NAME, extractBvid, isLoginRequiredMessage };
