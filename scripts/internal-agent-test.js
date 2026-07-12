@@ -89,13 +89,15 @@ function assert(condition, message) {
   const stoppedSession = await manager.createSingleTask({ video: 'BVMANUAL0001', outputDir: path.join(root, 'stopped-output'), collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
   await manager.start(stoppedSession.id);
   const working = await waitForCurrentTask(manager, stoppedSession.id);
-  const interruptedArtifactDir = store.getTask(working.currentTaskId).artifactDir;
+  const workingTask = store.getTask(working.currentTaskId);
+  const interruptedArtifactDir = workingTask.artifactDir;
+  assert(workingTask.workId?.startsWith('work-'), 'internal Agent claim did not create a workId');
   assert(fs.existsSync(path.join(interruptedArtifactDir, 'manifest.json')), 'manual stop fixture did not create partial artifacts');
   manager.stop(stoppedSession.id);
   const stopped = await waitForSession(manager, stoppedSession.id);
   assert(stopped.status === 'stopped' && stopped.phase.includes('缓存已清理'), 'manual stop did not report attempt cleanup');
   const stoppedTask = store.getTask(stoppedSession.singleTaskId);
-  assert(stoppedTask.status === 'pending' && !stoppedTask.claimedBy && !stoppedTask.artifactDir, 'manual stop did not reset the task claim');
+  assert(stoppedTask.status === 'pending' && !stoppedTask.workId && !stoppedTask.claimedBy && !stoppedTask.artifactDir, 'manual stop did not reset the workId or task claim');
   assert(!fs.existsSync(interruptedArtifactDir), 'manual stop left partial task files behind');
   holdToolRuns = false;
 

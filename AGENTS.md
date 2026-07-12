@@ -8,7 +8,7 @@ Star Owner (星藏家) turns a user's Bilibili favorite folders into a managed q
 
 1. Discover the current protocol with `GET http://127.0.0.1:17391/api/manifest`.
 2. Every fresh Agent session registers its real caller and model with `POST /api/workers/register`.
-3. Use the returned `workerId` for every state-changing request. Do not invent or reuse an identity from another session.
+3. Keep the returned `workerId` as this Agent session's identity. Every claim also returns a one-time `workId`; include both IDs in heartbeat, tool-run/cancel, submit, and abort requests. Never invent or reuse an ended `workId`.
 4. Work only on the collection activated by the desktop user and claim one task at a time.
 5. Create files only inside the returned `artifactDir`.
 6. Invoke media, metadata, subtitle, ASR, comment, and cleanup tools through the application API. Do not run internal scripts directly.
@@ -17,7 +17,8 @@ Star Owner (星藏家) turns a user's Bilibili favorite folders into a managed q
 9. Include comprehensive body content, Bilibili timestamp links, selected keyframes, subtitle comparison, up to three hot-comment analyses, limitations, and processing provenance.
 10. Clean temporary video/audio through the application tool API before submission. For a task with `cachedVideoId`/`reuseCachedMedia`, still call cleanup; the application preserves the registered merged video automatically.
 11. Submit through `/api/tasks/<taskId>/submit`; the application validates and finalizes the directory and Markdown filename.
-12. If an error, user instruction, or other condition prevents completion, call `/api/tasks/<taskId>/abort` with `workerId` and a concrete `reason`. Do not leave files as a checkpoint. The application cancels tools, removes this attempt, and returns the task to `pending` so the next worker starts from scratch. `/fail` is a legacy alias with the same behavior.
+12. If an error, user instruction, or other condition prevents completion, call `/api/tasks/<taskId>/abort` with `workerId`, `workId`, and a concrete `reason`. Do not leave files as a checkpoint. The application cancels tools, removes this attempt, invalidates `workId`, and returns the task to `pending`.
+13. On `WORK_ATTEMPT_ENDED`, stop using the old `workId` immediately. Keep the same `workerId` and call `/api/tasks/claim`; the next claim starts from scratch with a new `workId`.
 
 The canonical Markdown contract is `templates/video-summary-template.md` and is also returned by `GET /api/templates/video-summary`.
 

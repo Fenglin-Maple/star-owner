@@ -19,14 +19,14 @@ function assert(condition, message) {
   fs.mkdirSync(path.join(regularArtifact, 'frames'), { recursive: true });
   fs.writeFileSync(path.join(regularArtifact, 'frames', 'frame.jpg'), 'partial');
   fs.writeFileSync(path.join(regularArtifact, 'summary-draft.md'), '# partial');
-  store.upsertTask({ id: 'task-regular', collectionId: 'collection-regular', bvid: 'BVREGULAR001', status: 'claimed', claimedBy: 'worker-regular', claimedAt: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), allowedRoot: regularRoot, workspaceRoot: regularRoot, workspaceId: 'workspace-1', artifactDir: regularArtifact, outputMarkdown: path.join(regularArtifact, 'summary-draft.md'), metadataFile: path.join(regularArtifact, 'info.json'), coverFile: path.join(regularArtifact, 'cover.jpg'), cachedVideoFile: path.join(regularArtifact, 'merged.mp4'), completedAt: 'unexpected' });
+  store.upsertTask({ id: 'task-regular', collectionId: 'collection-regular', bvid: 'BVREGULAR001', status: 'claimed', workId: 'work-regular', claimedBy: 'worker-regular', claimedAt: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), allowedRoot: regularRoot, workspaceRoot: regularRoot, workspaceId: 'workspace-1', artifactDir: regularArtifact, outputMarkdown: path.join(regularArtifact, 'summary-draft.md'), metadataFile: path.join(regularArtifact, 'info.json'), coverFile: path.join(regularArtifact, 'cover.jpg'), cachedVideoFile: path.join(regularArtifact, 'merged.mp4'), completedAt: 'unexpected' });
   store.createToolRun({ id: 'run-regular', taskId: 'task-regular', workerId: 'worker-regular', status: 'queued', createdAt: new Date().toISOString() });
   store.createToolRun({ id: 'run-regular-legacy-owner', taskId: 'task-regular', workerId: 'stale-worker', status: 'running', createdAt: new Date().toISOString() });
   const fakeRunner = {
     cancel: (runId) => store.updateToolRun(runId, { status: 'cancelled', stage: 'cancelled', finishedAt: new Date().toISOString() })
   };
   const regular = abortTaskAttempt({ store, toolRunner: fakeRunner, taskId: 'task-regular', workerId: 'worker-regular', reason: 'manual test stop', source: 'test' });
-  assert(regular.task.status === 'pending' && !regular.task.claimedBy && !regular.task.artifactDir && !regular.task.allowedRoot && !regular.task.outputMarkdown && !regular.task.metadataFile && !regular.task.coverFile && !regular.task.cachedVideoFile, 'regular task state or deleted-file references were not reset');
+  assert(regular.endedWorkId === 'work-regular' && regular.task.status === 'pending' && !regular.task.workId && !regular.task.claimedBy && !regular.task.artifactDir && !regular.task.allowedRoot && !regular.task.outputMarkdown && !regular.task.metadataFile && !regular.task.coverFile && !regular.task.cachedVideoFile, 'regular task state, workId, or deleted-file references were not reset');
   assert(!fs.existsSync(regularArtifact) && store.getToolRun('run-regular').status === 'cancelled' && store.getToolRun('run-regular-legacy-owner').status === 'cancelled', 'regular attempt files or an associated run survived abort');
 
   const cacheRoot = path.join(root, 'cache-root');

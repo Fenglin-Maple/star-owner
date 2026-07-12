@@ -5,7 +5,7 @@ const { validateSubmission } = require('./validation');
 const { buildAnalytics } = require('./analytics');
 const { isAllowedApiOrigin } = require('./network-policy');
 const { finalizeSubmissionArtifacts, relocateCachedVideo } = require('./submission-artifacts');
-const { abortTaskAttempt } = require('./task-attempt');
+const { abortTaskAttempt, createWorkId } = require('./task-attempt');
 const { PROJECT_ROOT, collectionDirs, ensureDir, normalizeTags, videoArtifactDir } = require('./workspace');
 
 const DEFAULT_LEASE_MS = 15 * 60 * 1000;
@@ -60,7 +60,7 @@ class ApiServer {
       if (!res.destroyed) res.destroy();
       return;
     }
-    this.json(res, { error: error.message || String(error) }, Number(error.statusCode || 500));
+    this.json(res, apiErrorPayload(error), Number(error.statusCode || 500));
   }
 
   async route(req, res) {
@@ -123,7 +123,7 @@ class ApiServer {
 
       this.json(res, { error: 'Not found' }, 404);
     } catch (error) {
-      this.json(res, { error: error.message || String(error) }, Number(error.statusCode || 500));
+      this.json(res, apiErrorPayload(error), Number(error.statusCode || 500));
     }
   }
 
@@ -157,17 +157,17 @@ class ApiServer {
     const base = this.url();
     return {
       product: '星藏家',
-      protocolVersion: '2.3',
+      protocolVersion: '2.4',
       baseUrl: base,
       worker: worker ? this.publicWorker(worker) : null,
       activeCollection: this.store.getActiveCollection(),
       requiredFlow: [
         'A new agent session registers once and receives an app-generated workerId.',
-        'Every state-changing agent request includes workerId.',
+        'Every state-changing task request includes workerId and the one-time workId returned by claim.',
         'Read the desktop-selected active collection, then claim one task.',
         'Use app-managed tool endpoints. Tool calls return HTTP 202 and may remain queued; poll the run until it reaches a terminal status.',
         'The app protects the task lease while one of its tool runs is queued or running. Clean cache and submit final artifacts after tools finish.',
-        'If the attempt cannot continue, call the task abort endpoint with workerId and a concrete reason. The app removes the attempt and the next claim starts from scratch.'
+        'If the attempt cannot continue, call the task abort endpoint with workerId, workId, and a concrete reason. The app removes the attempt and the next claim starts from scratch.'
       ],
       endpoints: [
         { method: 'GET', path: '/api/manifest?workerId=<workerId>', purpose: 'Return this complete interface manifest and current context.', params: { workerId: 'Optional after registration.' } },
@@ -175,16 +175,16 @@ class ApiServer {
         { method: 'GET', path: '/api/tool-health', purpose: 'Return startup probe results for every app-managed tool interface.' },
         { method: 'GET', path: '/api/scheduler', purpose: 'Return resource pools, queue depth, GPU memory, ASR service state, and CPU ASR policy.' },
         { method: 'GET', path: '/api/active-collection', purpose: 'Read the collection activated by the desktop user.' },
-        { method: 'POST', path: '/api/tasks/claim', purpose: 'Claim one enabled task from the active collection.', body: { workerId: 'Required app-generated worker id.' } },
+        { method: 'POST', path: '/api/tasks/claim', purpose: 'Claim one enabled task and create a unique workId for this attempt.', body: { workerId: 'Required app-generated Worker identity.' } },
         { method: 'GET', path: '/api/tasks/<taskId>', purpose: 'Read task context and enabled tools.' },
-        { method: 'POST', path: '/api/tasks/<taskId>/heartbeat', purpose: 'Extend the 15-minute lease.', body: { workerId: 'Required.' } },
-        { method: 'POST', path: '/api/tasks/<taskId>/tools/<toolId>/run', purpose: 'Queue a tool run. Returns HTTP 202 with queue position, reason, pool, and stage.', body: { workerId: 'Required.', options: 'Tool-specific options object.' } },
+        { method: 'POST', path: '/api/tasks/<taskId>/heartbeat', purpose: 'Extend the 15-minute lease.', body: { workerId: 'Required.', workId: 'Required one-time claim id.' } },
+        { method: 'POST', path: '/api/tasks/<taskId>/tools/<toolId>/run', purpose: 'Queue a tool run. Returns HTTP 202 with queue position, reason, pool, and stage.', body: { workerId: 'Required.', workId: 'Required one-time claim id.', options: 'Tool-specific options object.' } },
         { method: 'GET', path: '/api/tool-runs/<runId>?log=1', purpose: 'Poll queued/running/terminal status, stage, queue metadata, and optional log tail.' },
-        { method: 'POST', path: '/api/tool-runs/<runId>/cancel', purpose: 'Cancel a tool run owned by this worker.', body: { workerId: 'Required.' } },
+        { method: 'POST', path: '/api/tool-runs/<runId>/cancel', purpose: 'Cancel a tool run owned by the current work attempt.', body: { workerId: 'Required.', workId: 'Required one-time claim id.' } },
         { method: 'GET', path: '/api/templates/video-summary', purpose: 'Return the reference Markdown template.' },
-        { method: 'POST', path: '/api/tasks/<taskId>/submit', purpose: 'Validate and submit final artifacts.', body: { workerId: 'Required.', artifactDir: 'Assigned artifact directory.', markdownFile: 'Final Markdown path.', metadataFile: 'info.json path.' } },
-        { method: 'POST', path: '/api/tasks/<taskId>/abort', purpose: 'Stop the current attempt, cancel app-managed tools, delete attempt files, and return the task to pending.', body: { workerId: 'Required.', reason: 'Required explanation of why work cannot continue.' } },
-        { method: 'POST', path: '/api/tasks/<taskId>/fail', purpose: 'Compatibility alias for abort. Failed attempts are cleaned and returned to pending.', body: { workerId: 'Required.', reason: 'Required failure explanation.' } }
+        { method: 'POST', path: '/api/tasks/<taskId>/submit', purpose: 'Validate and submit final artifacts.', body: { workerId: 'Required.', workId: 'Required one-time claim id.', artifactDir: 'Assigned artifact directory.', markdownFile: 'Final Markdown path.', metadataFile: 'info.json path.' } },
+        { method: 'POST', path: '/api/tasks/<taskId>/abort', purpose: 'Stop the current attempt, cancel app-managed tools, delete attempt files, invalidate workId, and return the task to pending.', body: { workerId: 'Required.', workId: 'Required one-time claim id.', reason: 'Required explanation of why work cannot continue.' } },
+        { method: 'POST', path: '/api/tasks/<taskId>/fail', purpose: 'Compatibility alias for abort. Failed attempts are cleaned and returned to pending.', body: { workerId: 'Required.', workId: 'Required one-time claim id.', reason: 'Required failure explanation.' } }
       ],
       tools: this.store.listTools({ enabled: true }).map((tool) => this.publicTool(tool)),
       markdownTemplateUrl: `${base}/api/templates/video-summary`,
@@ -199,7 +199,7 @@ class ApiServer {
     this.json(res, {
       workerId: worker.id,
       worker: this.publicWorker(worker),
-      message: 'Store this workerId for the lifetime of this agent session and include it in every state-changing request.',
+      message: 'Store this workerId for the lifetime of this agent session. Each claim also returns a one-time workId required by every state-changing request for that task.',
       manifest: this.buildApiManifest(worker)
     }, 201);
   }
@@ -233,7 +233,16 @@ class ApiServer {
     const run = this.store.getToolRun(runId);
     if (!run) return this.json(res, { run: null }, 404);
     const withLog = url.searchParams.get('log') === '1' || url.searchParams.get('log') === 'true';
-    this.json(res, { run: withLog ? { ...run, logTail: readTail(run.logFile) } : run });
+    const task = run.workId ? this.store.getTask(run.taskId) : null;
+    const active = Boolean(run.workId && task?.workId === run.workId && ['claimed', 'rejected'].includes(task.status));
+    this.json(res, {
+      run: withLog ? { ...run, logTail: readTail(run.logFile) } : run,
+      ...(run.workId ? {
+        workAttempt: active
+          ? { active: true, workId: run.workId }
+          : { active: false, code: 'WORK_ATTEMPT_ENDED', workId: run.workId, directive: claimNewTaskDirective() }
+      } : {})
+    });
   }
 
   async cancelToolRun(req, res, runId) {
@@ -241,6 +250,10 @@ class ApiServer {
     const worker = this.requireWorker(body);
     const existing = this.store.getToolRun(runId);
     if (!existing) throw new Error(`Tool run not found: ${runId}`);
+    const task = this.store.getTask(existing.taskId);
+    if (!task) throw new Error(`Task not found: ${existing.taskId}`);
+    this.assertTaskWorker(task, worker, body.workId);
+    if (existing.workId && existing.workId !== String(body.workId || '')) throw workAttemptEndedError(task, String(body.workId || ''));
     if ((existing.workerId || existing.agentName) !== worker.id) throw new Error('This worker does not own the tool run.');
     const run = this.toolRunner.cancel(runId);
     this.json(res, { run });
@@ -268,7 +281,7 @@ class ApiServer {
     }
     reclaimExpired(this.store, collection.id, this.toolRunner);
     const task = this.store.listTasks({ collectionId: collection.id })
-      .find((item) => item.enabled !== false && (item.status === 'pending' || item.status === 'rejected' || item.status === 'failed'));
+      .find((item) => item.enabled !== false && (item.status === 'pending' || item.status === 'failed' || (item.status === 'rejected' && !item.workId && !item.claimedBy)));
     if (!task) return this.json(res, { task: null, message: 'NO_TASK' });
     const now = new Date();
     const workspace = this.store.getDefaultWorkspace();
@@ -281,6 +294,7 @@ class ApiServer {
     ensureDir(artifactDir);
     Object.assign(task, {
       status: 'claimed',
+      workId: createWorkId(),
       claimedBy: worker.id,
       claimedAt: now.toISOString(),
       leaseExpiresAt: new Date(now.getTime() + DEFAULT_LEASE_MS).toISOString(),
@@ -304,6 +318,7 @@ class ApiServer {
       workerId: worker.id,
       agentName: worker.id,
       attempt: task.attempts,
+      workId: task.workId,
       workspaceId: workspace.id
     });
     this.onEvent({ type: 'task-claimed', taskId: task.id, collectionId: collection.id, workerId: worker.id, agentName: worker.id });
@@ -315,7 +330,7 @@ class ApiServer {
     const worker = this.requireWorker(body);
     const task = this.store.getTask(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
-    this.assertTaskWorker(task, worker);
+    this.assertTaskWorker(task, worker, body.workId);
     if (task.enabled === false) throw new Error('Task is disabled and cannot run tools.');
     const tool = this.store.get('tools', toolId);
     if (!tool) throw new Error(`Tool not found: ${toolId}`);
@@ -335,7 +350,7 @@ class ApiServer {
     const worker = this.requireWorker(body);
     const task = this.store.getTask(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
-    this.assertTaskWorker(task, worker);
+    this.assertTaskWorker(task, worker, body.workId);
     task.leaseExpiresAt = new Date(Date.now() + DEFAULT_LEASE_MS).toISOString();
     task.updatedAt = new Date().toISOString();
     this.store.upsertTask(task);
@@ -348,7 +363,7 @@ class ApiServer {
     const worker = this.requireWorker(body);
     const task = this.store.getTask(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
-    this.assertTaskWorker(task, worker);
+    this.assertTaskWorker(task, worker, body.workId);
     const validation = validateSubmission(task, body);
     const now = new Date().toISOString();
     this.store.recordSubmission(taskId, {
@@ -385,8 +400,10 @@ class ApiServer {
       validation,
       filenameMetadata: this.store.getFilenameMetadata()
     });
+    const completedWorkId = task.workId;
     Object.assign(task, {
       status: 'done',
+      workId: '',
       completedAt: now,
       outputMarkdown: finalized.markdownFile,
       artifactDir: finalized.artifactDir,
@@ -401,11 +418,12 @@ class ApiServer {
       collectionId: task.collectionId,
       workerId: worker.id,
       agentName: worker.id,
+      workId: completedWorkId,
       processingSeconds: secondsBetween(task.claimedAt, now),
       videoDuration: Number(task.duration || 0)
     });
     this.onEvent({ type: 'task-completed', taskId: task.id, collectionId: task.collectionId, workerId: worker.id, agentName: worker.id });
-    this.json(res, { accepted: true, task });
+    this.json(res, { accepted: true, completedWorkId, task });
   }
 
   async failTask(req, res, taskId) {
@@ -417,12 +435,12 @@ class ApiServer {
     const worker = this.requireWorker(body);
     const task = this.store.getTask(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
-    this.assertTaskWorker(task, worker);
+    this.assertTaskWorker(task, worker, body.workId);
     const reason = String(body.reason || '').trim();
     if (!reason) throw new Error('reason is required so the application can record why this attempt stopped.');
     const result = abortTaskAttempt({ store: this.store, toolRunner: this.toolRunner, taskId, workerId: worker.id, reason, source });
     this.onEvent({ type: 'task-attempt-aborted', taskId: task.id, collectionId: task.collectionId, workerId: worker.id, agentName: worker.id, reason, source, cleanup: result.cleanup });
-    this.json(res, { aborted: true, task: result.task, cancelledRuns: result.cancelledRuns, cleanup: result.cleanup });
+    this.json(res, { aborted: true, endedWorkId: result.endedWorkId, task: result.task, cancelledRuns: result.cancelledRuns, cleanup: result.cleanup });
   }
 
   requireWorker(body = {}) {
@@ -431,9 +449,18 @@ class ApiServer {
     return this.store.touchWorker(workerId);
   }
 
-  assertTaskWorker(task, worker) {
-    if (!task.claimedBy) throw new Error('Task has not been claimed.');
-    if (task.claimedBy !== worker.id) throw new Error(`Task is owned by another worker: ${task.claimedBy}`);
+  assertTaskWorker(task, worker, workId) {
+    const suppliedWorkId = String(workId || '').trim();
+    if (!suppliedWorkId) throw workIdRequiredError(task);
+    if (!task.workId || task.workId !== suppliedWorkId || !['claimed', 'rejected'].includes(task.status)) {
+      throw workAttemptEndedError(task, suppliedWorkId);
+    }
+    if (!task.claimedBy || task.claimedBy !== worker.id) throw httpError(409, 'This work attempt is owned by another worker.', {
+      code: 'WORK_ATTEMPT_OWNED_BY_ANOTHER',
+      taskId: task.id,
+      workId: suppliedWorkId,
+      directive: { action: 'stop', message: 'Do not continue or modify this task.' }
+    });
   }
 
   publicWorker(worker) {
@@ -455,6 +482,7 @@ class ApiServer {
     return {
       id: task.id,
       status: task.status,
+      workId: task.workId || '',
       bvid: task.bvid,
       title: task.title,
       owner: task.owner,
@@ -485,7 +513,8 @@ class ApiServer {
         cleanup: task.cachedVideoId
           ? '最终产物保存后仍调用 clean-cache；应用会保留缓存库中的合轨视频，只删除音频等过渡缓存。'
           : '最终产物保存后，通过 clean-cache 工具运行 API 删除临时视频和音频缓存。',
-        interruption: `如果当前任务因错误、用户要求或其它原因无法继续，必须立即 POST ${this.url()}/api/tasks/${encodeURIComponent(task.id)}/abort 并提交 workerId 与 reason。应用会取消工具、删除本次产物并将任务退回 pending；不要自行保留断点或直接修改文件状态。`
+        authorization: '本次领取的 workId 是一次性工作凭证。心跳、工具运行/取消、提交和中止都必须同时提交 workerId 与 workId。不要自行生成或复用旧 workId。',
+        interruption: `如果当前任务因错误、用户要求或其它原因无法继续，必须立即 POST ${this.url()}/api/tasks/${encodeURIComponent(task.id)}/abort 并提交 workerId、workId 与 reason。应用会取消工具、删除本次产物并将任务退回 pending；旧 workId 随即失效，不要自行保留断点或直接修改文件状态。`
       },
       abortUsage: `POST ${this.url()}/api/tasks/${encodeURIComponent(task.id)}/abort`,
       toolPolicy: 'Agent 不直接运行本地工具脚本。必须通过 /api/tasks/<taskId>/tools/<toolId>/run 请求桌面应用代为执行。',
@@ -509,7 +538,8 @@ class ApiServer {
       agentPrompt: tool.agentPrompt,
       outputs: tool.outputs,
       projects: tool.projects,
-      resourcePolicy: resourcePolicyForAction(tool.action)
+      resourcePolicy: resourcePolicyForAction(tool.action),
+      workIdRequired: true
     };
   }
 
@@ -529,7 +559,7 @@ function reclaimExpired(store, collectionId, toolRunner = null) {
     store.listToolRuns().filter((run) => ['queued', 'running'].includes(run.status)).map((run) => run.taskId)
   );
   for (const task of store.listTasks({ collectionId })) {
-    if (task.status === 'claimed' && task.leaseExpiresAt && new Date(task.leaseExpiresAt) <= now) {
+    if (['claimed', 'rejected'].includes(task.status) && task.leaseExpiresAt && new Date(task.leaseExpiresAt) <= now) {
       if (protectedTaskIds.has(task.id)) continue;
       abortTaskAttempt({ store, toolRunner, taskId: task.id, workerId: task.claimedBy, reason: 'Task lease expired before the Agent completed or aborted the attempt.', source: 'lease-expired' });
     }
@@ -585,10 +615,47 @@ function readBody(req) {
   });
 }
 
-function httpError(statusCode, message) {
+function httpError(statusCode, message, details = {}) {
   const error = new Error(message);
   error.statusCode = statusCode;
+  Object.assign(error, details);
   return error;
+}
+
+function workIdRequiredError(task) {
+  return httpError(400, 'workId is required. Use the one-time workId returned by the current task claim.', {
+    code: 'WORK_ID_REQUIRED',
+    taskId: task.id,
+    directive: { action: 'use-claimed-work-id', message: 'Read workId from the task claim response. Do not invent one.' }
+  });
+}
+
+function workAttemptEndedError(task, workId) {
+  return httpError(409, 'This work attempt no longer exists. It was completed, interrupted, expired, or replaced by a newer claim.', {
+    code: 'WORK_ATTEMPT_ENDED',
+    taskId: task.id,
+    workId,
+    taskStatus: task.status,
+    directive: claimNewTaskDirective()
+  });
+}
+
+function claimNewTaskDirective() {
+  return {
+    action: 'claim-new-task',
+    method: 'POST',
+    path: '/api/tasks/claim',
+    keepWorkerId: true,
+    message: 'Stop using this workId and request a new task with the same workerId.'
+  };
+}
+
+function apiErrorPayload(error) {
+  const payload = { error: error.message || String(error) };
+  for (const key of ['code', 'taskId', 'workId', 'taskStatus', 'directive']) {
+    if (error[key] !== undefined) payload[key] = error[key];
+  }
+  return payload;
 }
 
 function boundedLimit(value, fallback = 300) {

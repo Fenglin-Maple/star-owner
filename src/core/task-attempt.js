@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { assertInside } = require('./workspace');
@@ -32,9 +33,11 @@ function abortTaskAttempt({ store, toolRunner = null, taskId, workerId = '', rea
 
   const cleanup = cleanupAttemptFiles(store, task);
   const cache = task.cachedVideoId ? store.getVideoCache(task.cachedVideoId) : null;
+  const endedWorkId = task.workId || '';
   const now = new Date().toISOString();
   Object.assign(task, {
     status: 'pending',
+    workId: '',
     claimedBy: '',
     claimedAt: '',
     leaseExpiresAt: '',
@@ -62,10 +65,15 @@ function abortTaskAttempt({ store, toolRunner = null, taskId, workerId = '', rea
     workerId,
     reason: task.abortReason,
     source: task.abortSource,
+    workId: endedWorkId,
     cancelledRuns,
     cleanup
   });
-  return { task, cancelledRuns, cleanup, alreadyAborted: false };
+  return { task, endedWorkId, cancelledRuns, cleanup, alreadyAborted: false };
+}
+
+function createWorkId() {
+  return `work-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 12)}`;
 }
 
 function cleanupAttemptFiles(store, task) {
@@ -126,4 +134,4 @@ function removePath(target) {
   fs.rmSync(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
 }
 
-module.exports = { abortTaskAttempt, cleanupAttemptFiles };
+module.exports = { abortTaskAttempt, cleanupAttemptFiles, createWorkId };

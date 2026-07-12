@@ -172,6 +172,7 @@ class ToolRunner {
     const run = this.store.createToolRun({
       id: runId,
       taskId: task.id,
+      workId: task.workId || '',
       collectionId: collection?.id || task.collectionId || '',
       toolId: tool.id,
       toolName: tool.name,
@@ -543,7 +544,7 @@ class ToolRunner {
 
   restoreInterruptedRuns() {
     const rolledBackTaskIds = new Set();
-    for (const task of this.store.listTasks().filter((item) => item.status === 'claimed')) {
+    for (const task of this.store.listTasks().filter((item) => ['claimed', 'rejected'].includes(item.status))) {
       try {
         abortTaskAttempt({
           store: this.store,
@@ -602,7 +603,7 @@ class ToolRunner {
       const run = this.store.getToolRun(state.runId);
       if (!run || !ACTIVE_STATUSES.has(run.status)) continue;
       const task = this.store.getTask(run.taskId);
-      if (!task || task.status !== 'claimed' || task.claimedBy !== run.workerId) continue;
+      if (!task || !['claimed', 'rejected'].includes(task.status) || task.claimedBy !== run.workerId) continue;
       task.leaseExpiresAt = new Date(now.getTime() + 15 * 60 * 1000).toISOString();
       task.updatedAt = now.toISOString();
       this.store.upsertTask(task);
@@ -824,7 +825,7 @@ class ToolRunner {
 
   shutdown() {
     if (this.shuttingDown) return;
-    for (const task of this.store.listTasks().filter((item) => item.status === 'claimed')) {
+    for (const task of this.store.listTasks().filter((item) => ['claimed', 'rejected'].includes(item.status))) {
       try {
         abortTaskAttempt({
           store: this.store,

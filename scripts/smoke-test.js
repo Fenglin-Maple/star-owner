@@ -144,7 +144,16 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   });
   const claim = await claimResponse.json();
   if (!claimResponse.ok || claim.task?.bvid !== 'BVENABLED') throw new Error('disabled task was claimable');
+  if (!claim.task.workId?.startsWith('work-')) throw new Error('claim did not return a one-time workId');
   if (!claim.task.abortUsage || !claim.task.requirements?.interruption?.includes('/abort')) throw new Error('claim context omitted attempt-abort instructions');
+  const firstWorkId = claim.task.workId;
+  const missingWorkIdResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(claim.task.id)}/heartbeat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ workerId: registration.workerId })
+  });
+  const missingWorkId = await missingWorkIdResponse.json();
+  if (missingWorkIdResponse.status !== 400 || missingWorkId.code !== 'WORK_ID_REQUIRED') throw new Error('task API accepted a missing workId');
   const abortArtifactDir = claim.task.artifactDir;
   fs.writeFileSync(path.join(abortArtifactDir, 'partial.md'), '# interrupted');
   store.createToolRun({
@@ -154,6 +163,7 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
     toolId: 'material-bundle',
     toolName: '素材流水线',
     workerId: registration.workerId,
+    workId: firstWorkId,
     status: 'queued',
     artifactDir: abortArtifactDir,
     createdAt: new Date().toISOString()
@@ -161,11 +171,55 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   const abortResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(claim.task.id)}/abort`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ workerId: registration.workerId, reason: 'smoke interruption' })
+    body: JSON.stringify({ workerId: registration.workerId, workId: firstWorkId, reason: 'smoke interruption' })
   });
   const aborted = await abortResponse.json();
   if (!abortResponse.ok || !aborted.aborted || aborted.task?.status !== 'pending') throw new Error('task abort API failed');
+  if (aborted.endedWorkId !== firstWorkId || aborted.task?.workId) throw new Error('task abort did not invalidate workId');
   if (fs.existsSync(abortArtifactDir) || store.getToolRun('abort-run')?.status !== 'cancelled') throw new Error('task abort API left attempt files or active runs behind');
+  const staleHeartbeatResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(claim.task.id)}/heartbeat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ workerId: registration.workerId, workId: firstWorkId })
+  });
+  const staleHeartbeat = await staleHeartbeatResponse.json();
+  if (staleHeartbeatResponse.status !== 409 || staleHeartbeat.code !== 'WORK_ATTEMPT_ENDED' || staleHeartbeat.directive?.action !== 'claim-new-task' || staleHeartbeat.directive?.keepWorkerId !== true) throw new Error('stale workId did not receive claim-new-task guidance');
+  const endedRunResponse = await fetch(`${api.url()}/api/tool-runs/abort-run`);
+  const endedRun = await endedRunResponse.json();
+  if (endedRun.workAttempt?.active !== false || endedRun.workAttempt?.code !== 'WORK_ATTEMPT_ENDED') throw new Error('tool polling did not expose ended work attempt');
+  const reclaimResponse = await fetch(`${api.url()}/api/tasks/claim`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ workerId: registration.workerId })
+  });
+  const reclaimed = await reclaimResponse.json();
+  if (!reclaimResponse.ok || reclaimed.task?.id !== claim.task.id || !reclaimed.task.workId || reclaimed.task.workId === firstWorkId) throw new Error('reclaim did not issue a fresh workId');
+  const supersededResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(reclaimed.task.id)}/heartbeat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ workerId: registration.workerId, workId: firstWorkId })
+  });
+  const superseded = await supersededResponse.json();
+  if (supersededResponse.status !== 409 || superseded.code !== 'WORK_ATTEMPT_ENDED') throw new Error('old workId became valid after the same task was reclaimed');
+  const rejectedResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(reclaimed.task.id)}/submit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ workerId: registration.workerId, workId: reclaimed.task.workId, artifactDir: reclaimed.task.artifactDir, markdownFile: path.join(reclaimed.task.artifactDir, 'missing.md'), metadataFile: path.join(reclaimed.task.artifactDir, 'missing-info.json') })
+  });
+  if (rejectedResponse.status !== 422 || store.getTask(reclaimed.task.id)?.status !== 'rejected') throw new Error('invalid submission did not keep the active work attempt in rejected state');
+  const rejectedClaimResponse = await fetch(`${api.url()}/api/tasks/claim`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ workerId: registration.workerId })
+  });
+  const rejectedClaim = await rejectedClaimResponse.json();
+  if (!rejectedClaimResponse.ok || rejectedClaim.message !== 'NO_TASK') throw new Error('another claim stole a rejected active work attempt');
+  const secondAbortResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(reclaimed.task.id)}/abort`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ workerId: registration.workerId, workId: reclaimed.task.workId, reason: 'finish smoke cleanup' })
+  });
+  if (!secondAbortResponse.ok) throw new Error('second work attempt cleanup failed');
   const pausedWorker = store.updateWorker(registration.workerId, { status: 'paused', pauseReason: 'smoke pause' });
   if (pausedWorker.status !== 'paused') throw new Error('worker pause failed');
   const pausedClaimResponse = await fetch(`${api.url()}/api/tasks/claim`, {

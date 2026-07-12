@@ -91,7 +91,7 @@ Content-Type: application/json
 }
 ```
 
-保存返回的 `workerId`，后续领取、心跳、工具执行、取消、提交和中止上报都必须携带它。Worker ID 由应用生成，Agent 不应自行命名。
+保存返回的 `workerId`。它代表当前 Agent 会话，可连续领取多个任务，不会因为某一单中止而失效。Worker ID 由应用生成，Agent 不应自行命名。
 
 桌面端已激活收藏夹后领取任务：
 
@@ -106,7 +106,9 @@ Content-Type: application/json
 
 - 返回 `NO_TASK`：当前没有可领取任务，可以正常结束。
 - 返回 HTTP `423` 和 `WORKER_PAUSED`：用户已暂停该 Worker，停止继续申请新任务。
+- 领取响应中的 `workId` 是本次工作的唯一凭证。心跳、工具执行/取消、提交和中止必须同时携带 `workerId` 与 `workId`。
 - 已领取任务应在 15 分钟内发送心跳，并严格使用返回的 `artifactDir`。
+- `workId` 不得自行生成。任务完成、中止、租约回收或被重新领取后，旧 `workId` 永久失效。
 
 当前任务因错误、用户要求或其它原因无法继续时，Agent 必须说明原因并让应用中止本次尝试：
 
@@ -116,11 +118,12 @@ Content-Type: application/json
 
 {
   "workerId": "worker-...",
+  "workId": "work-...",
   "reason": "无法继续工作的具体问题、发生步骤和可排查原因"
 }
 ```
 
-应用会取消该任务仍在排队或运行的工具、删除本次尝试产生的文件、清空领取与完成字段，并把任务恢复为未领取的 `pending`。下次领取会从头创建素材，不使用断点。旧版 `/fail` 仍是兼容别名，但行为同样是完整回滚，不会保留 `failed` 半成品。
+应用会取消该任务仍在排队或运行的工具、删除本次尝试产生的文件、清空领取与完成字段，并把任务恢复为未领取的 `pending`。旧 `workId` 立即失效；旧 Agent 再发送心跳、工具、取消、提交或中止请求时会收到 HTTP `409`、`WORK_ATTEMPT_ENDED` 和 `claim-new-task` 指令。Agent 应停止旧工作，并使用原 `workerId` 重新调用 `/api/tasks/claim`。下次领取会得到新的 `workId` 并从头创建素材。旧版 `/fail` 仍是兼容别名，但行为同样是完整回滚。
 
 完整协作提示词可在应用“启动页”的“快速上手”中复制。
 

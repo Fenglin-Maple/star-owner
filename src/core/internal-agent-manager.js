@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { finalizeSubmissionArtifacts, relocateCachedVideo } = require('./submission-artifacts');
 const { isLoginRequiredMessage, loginRequiredError } = require('./media-errors');
-const { abortTaskAttempt } = require('./task-attempt');
+const { abortTaskAttempt, createWorkId } = require('./task-attempt');
 const { validateSubmission } = require('./validation');
 const {
   WORKSPACE_ROOT,
@@ -366,7 +366,7 @@ class InternalAgentManager {
     const task = this.store.listTasks({ collectionId: collection.id }).find((item) => {
       if (excluded.has(item.id) || item.enabled === false) return false;
       if (session.mode === 'single' && item.id !== session.singleTaskId) return false;
-      return ['pending', 'failed', 'rejected'].includes(item.status);
+      return item.status === 'pending' || item.status === 'failed' || (item.status === 'rejected' && !item.workId && !item.claimedBy);
     });
     if (!task) return null;
     const workspace = this.requireWorkspace();
@@ -377,6 +377,7 @@ class InternalAgentManager {
     const now = new Date();
     Object.assign(task, {
       status: 'claimed',
+      workId: createWorkId(),
       claimedBy: session.workerId,
       claimedAt: now.toISOString(),
       leaseExpiresAt: new Date(now.getTime() + LEASE_MS).toISOString(),
@@ -395,7 +396,7 @@ class InternalAgentManager {
     });
     this.store.upsertTask(task);
     this.store.commit();
-    this.store.recordTaskEvent(task.id, 'claimed', { collectionId: collection.id, workerId: session.workerId, agentName: session.workerId, attempt: task.attempts, workspaceId: workspace.id, internalAgent: true });
+    this.store.recordTaskEvent(task.id, 'claimed', { collectionId: collection.id, workerId: session.workerId, agentName: session.workerId, attempt: task.attempts, workId: task.workId, workspaceId: workspace.id, internalAgent: true });
     session.currentTaskId = task.id;
     session.status = 'running';
     session.phase = '已领取任务';
@@ -541,11 +542,12 @@ class InternalAgentManager {
     const metadata = readJson(metadataFile);
     task.tags = normalizeTags(metadata.tags || task.tags);
     const finalized = finalizeSubmissionArtifacts({ task, collection, validation, filenameMetadata: this.store.getFilenameMetadata() });
-    Object.assign(task, { status: 'done', completedAt: now, outputMarkdown: finalized.markdownFile, artifactDir: finalized.artifactDir, metadataFile: finalized.metadataFile, validatorErrors: [], updatedAt: now });
+    const completedWorkId = task.workId;
+    Object.assign(task, { status: 'done', workId: '', completedAt: now, outputMarkdown: finalized.markdownFile, artifactDir: finalized.artifactDir, metadataFile: finalized.metadataFile, validatorErrors: [], updatedAt: now });
     relocateCachedVideo(this.store, task, finalized);
     this.store.upsertTask(task);
     this.store.commit();
-    this.store.recordTaskEvent(task.id, 'completed', { collectionId: task.collectionId, workerId: session.workerId, agentName: session.workerId, processingSeconds: secondsBetween(task.claimedAt, now), videoDuration: Number(task.duration || 0), internalAgent: true });
+    this.store.recordTaskEvent(task.id, 'completed', { collectionId: task.collectionId, workerId: session.workerId, agentName: session.workerId, workId: completedWorkId, processingSeconds: secondsBetween(task.claimedAt, now), videoDuration: Number(task.duration || 0), internalAgent: true });
     this.emitEvent({ type: 'task-completed', taskId: task.id, collectionId: task.collectionId, workerId: session.workerId, agentName: session.workerId, internalAgent: true });
     return finalized;
   }
@@ -559,7 +561,7 @@ class InternalAgentManager {
   reclaimExpired(collectionId) {
     const active = new Set(this.store.listToolRuns().filter((run) => ['queued', 'running'].includes(run.status)).map((run) => run.taskId));
     for (const task of this.store.listTasks({ collectionId })) {
-      if (task.status !== 'claimed' || !task.leaseExpiresAt || Date.parse(task.leaseExpiresAt) > Date.now() || active.has(task.id)) continue;
+      if (!['claimed', 'rejected'].includes(task.status) || !task.leaseExpiresAt || Date.parse(task.leaseExpiresAt) > Date.now() || active.has(task.id)) continue;
       this.abortAttempt(task.id, task.claimedBy, '任务租约已超时，内置 Agent 未完成或未正常中止本次工作。', 'lease-expired');
     }
   }

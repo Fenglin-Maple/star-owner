@@ -252,7 +252,7 @@ Every fresh Agent session first registers its actual caller tool and model:
 }
 ```
 
-`POST /api/workers/register` creates and returns an app-owned ID such as `worker-...`. Agents must not invent or reuse a name as identity. The same `workerId` is included in claim, heartbeat, tool-run, cancellation, submission, and abort bodies for the lifetime of that Agent session.
+`POST /api/workers/register` creates and returns an app-owned identity such as `worker-...`. A Worker can claim multiple tasks over its session lifetime. Every successful claim also creates a one-time `workId` such as `work-...`; heartbeat, tool-run/cancellation, submission, and abort bodies require both IDs. Agents must never invent a `workId`.
 
 The user first selects and activates a collection in the desktop task page. `GET /api/active-collection` exposes that target. The claim endpoint always uses it; an agent request cannot override the active target with a different collection id or name.
 
@@ -264,9 +264,11 @@ Recommended claim body:
 }
 ```
 
-The claim response includes Worker identity, user, collection, video, lease, cookie, workspace, assigned artifact path, document requirements, API-manifest URL, Markdown-template URL, and every enabled app tool.
+The claim response includes Worker identity, one-time Work identity, user, collection, video, lease, cookie, workspace, assigned artifact path, document requirements, API-manifest URL, Markdown-template URL, and every enabled app tool.
 
-`POST /api/tasks/:id/abort` is the canonical interruption path. It requires an actionable `reason`, cancels queued/running app tools owned by the attempt, removes attempt files, clears claim/completion/output fields, records an `attempt-aborted` event, and returns the task to `pending`. `/fail` is retained only as a compatibility alias with identical rollback behavior. The operation is idempotent so simultaneous stop signals from the tool layer and Agent manager cannot duplicate destructive work.
+`POST /api/tasks/:id/abort` is the canonical interruption path. It requires the current `workerId`, `workId`, and an actionable `reason`; it cancels queued/running app tools, removes attempt files, invalidates `workId`, clears claim/completion/output fields, records an `attempt-aborted` event, and returns the task to `pending`. `/fail` is retained only as a compatibility alias with identical rollback behavior. The operation is idempotent so simultaneous stop signals from the tool layer and Agent manager cannot duplicate destructive work.
+
+An old caller cannot resume through a stable video `taskId`: every task-changing endpoint validates the current `workId`. Missing work IDs return `WORK_ID_REQUIRED`; invalidated, expired, completed, or superseded IDs return HTTP `409`, `WORK_ATTEMPT_ENDED`, and a `claim-new-task` directive with `keepWorkerId: true`. Tool-run polling also exposes the ended-attempt directive. Reclaiming the same video creates a different `workId`.
 
 Normal artifacts are removed as a whole. A cache-collection task preserves only its registered merged video, local cover, `info.json`, and `cache-record.json`; generated audio, ASR, subtitles, frames, comments, drafts, manifests, and tool logs are removed. Application shutdown, crash recovery on the next launch, lease expiry without an active tool, internal Agent stop, login-required restart, and fatal infrastructure errors all use the same service. No interrupted summary tool run is resumed after restart.
 
