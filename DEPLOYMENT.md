@@ -111,6 +111,10 @@ An Agent should:
 
 A continuously running Agent retains one `workerId` across many tasks. Every successful claim creates a new `workId`; after completion, interruption, expiry, or replacement, the old value is invalid and must never be reused. `WORK_ATTEMPT_ENDED` instructs the Agent to keep its `workerId` and claim again.
 
+The Task Activation page selects the collection only for external HTTP API Agents. Application-managed sessions under `AI -> Agent 视频总结工作流` remain bound to the collection selected when each session was created, regardless of the external active target.
+
+Ordinary interruption uses `/api/tasks/<taskId>/abort`: the application cancels tools, removes that attempt, invalidates its `workId`, and returns the task to `pending`. A confirmed deleted/down/unavailable Bilibili video is different. Tool polling or a later task request may return HTTP `410` with `BILIBILI_VIDEO_UNAVAILABLE`; the Agent must stop retrying that video and claim again with the same `workerId`. The app permanently removes the inventory record, stores an `unavailableTasks` tombstone, and suppresses recreation during future collection synchronization.
+
 When the activated collection is an internal video-cache collection, the returned task includes `cachedVideoId`, `cachedVideoFile`, and `reuseCachedMedia`. Run the same material and cleanup APIs: the application reuses the merged video and preserves it during cleanup. Do not move or delete that cached file directly.
 
 See `AGENTS.md` for the complete worker and contributor contract.
@@ -152,6 +156,9 @@ The runtime archive must contain `runtime/python/cpython-3.12.13-windows-x86_64-
 - If a portable build says Electron is missing, the archive was assembled incorrectly; do not ask the user to run `npm install` inside it.
 - If the GPU service cannot start, update the NVIDIA driver or enable CPU ASR after reviewing the performance tradeoff.
 - If Mermaid cannot render a diagram, the document preview shows a local error and the source block; correct the Mermaid syntax rather than loading a CDN.
+- If an internal Agent repeatedly appears to ignore clicks, jumps to the top, or remains in “stopping”, confirm the build includes the stable incremental renderer introduced after `v0.9.4`; current builds preserve session DOM nodes, expanded status rows, and scroll positions during live updates.
+- If a completed Markdown row has no cover, verify that its artifact directory still contains `info.json`, a `cover.*`/`thumbnail.*` file, or at least one frame. The library resolves those local sources in that order before falling back to the remote HTTPS cover.
+- If a removed video still appears after upgrading an older Workspace, restart once. Startup migration converts pending entries titled `已失效视频` into tombstones and reclassifies their historical internal-Agent/tool failures as skipped.
 - If model pulling returns 404, the Base URL is usually one path level too high or low. It must resolve `<baseUrl>/models` and `<baseUrl>/chat/completions`.
 - If `npm ci` times out while Electron itself is downloaded from GitHub, retry from a network that can reach GitHub Releases. In mainland China, a one-session mirror override is `$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'; npm ci`; do not commit personal registry or proxy settings.
 - If a model returns no reasoning panel, confirm the provider exposes an explicit compatible reasoning field; the application does not reveal or synthesize hidden chain-of-thought.

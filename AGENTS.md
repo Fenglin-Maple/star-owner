@@ -9,7 +9,7 @@ Star Owner (星藏家) turns a user's Bilibili favorite folders into a managed q
 1. Discover the current protocol with `GET http://127.0.0.1:17391/api/manifest`.
 2. Every fresh Agent session registers its real caller and model with `POST /api/workers/register`.
 3. Keep the returned `workerId` as this Agent session's identity across consecutive tasks. Every successful claim returns a brand-new one-time `workId`, including the next claim made by the same Worker; include both IDs in heartbeat, tool-run/cancel, submit, and abort requests. Never invent or reuse an ended `workId`.
-4. Work only on the collection activated by the desktop user and claim one task at a time.
+4. External HTTP API Agents work only on the collection activated in the desktop Task Activation page and claim one task at a time. Internal application-managed Agent sessions instead use the collection selected when that session was created; the external active target does not redirect them.
 5. Create files only inside the returned `artifactDir`.
 6. Invoke media, metadata, subtitle, ASR, comment, and cleanup tools through the application API. Do not run internal scripts directly.
 7. Always run ASR, compare it with usable station subtitles, and use frames/multimodal reasoning when needed.
@@ -19,6 +19,7 @@ Star Owner (星藏家) turns a user's Bilibili favorite folders into a managed q
 11. Submit through `/api/tasks/<taskId>/submit`; the application validates and finalizes the directory and Markdown filename.
 12. If an error, user instruction, or other condition prevents completion, call `/api/tasks/<taskId>/abort` with `workerId`, `workId`, and a concrete `reason`. Do not leave files as a checkpoint. The application cancels tools, removes this attempt, invalidates `workId`, and returns the task to `pending`.
 13. On `WORK_ATTEMPT_ENDED`, stop using the old `workId` immediately. Keep the same `workerId` and call `/api/tasks/claim`; the next claim starts from scratch with a new `workId`.
+14. `BILIBILI_VIDEO_UNAVAILABLE` is terminal, unlike an ordinary abort. Stop the current work, do not retry or recreate its files, keep the same `workerId`, and claim another task. The application removes the task/video inventory entry, cleans the attempt, records an `unavailableTasks` tombstone, and prevents collection sync from recreating it.
 
 The canonical Markdown contract is `templates/video-summary-template.md` and is also returned by `GET /api/templates/video-summary`.
 
@@ -38,6 +39,7 @@ The canonical Markdown contract is `templates/video-summary-template.md` and is 
 
 - Treat the RAG assistant as an analysis client for accepted Markdown, not as a replacement for the external Worker submission protocol.
 - Application-managed video Agents are a separate feature from RAG. They use the same Worker store, ToolRunner, leases, validation, cleanup, artifact finalization, and analytics as external Workers, but their orchestration is owned by `src/core/internal-agent-manager.js`.
+- Internal Agent stop is an immediate, idempotent rollback: one stop request aborts the provider/tool work, removes attempt files, invalidates the current `workId`, returns an ordinary task to `pending`, and leaves the persistent Worker paused until the user starts it again.
 - Single-task mode creates an ordinary task under `内置用户` and a selected internal collection, then archives the accepted artifact in the default Workspace and copies it to the explicitly selected external destination.
 - A single task may request `keepVideoCache`; cache-collection tasks always preserve their registered merged video. Neither mode lets an Agent bypass application cleanup or edit the cache index directly.
 - RAG, collection Agents, and single-task Agents share provider/model records and per-model usage accounting. Never expose decrypted API keys to the renderer or logs.
