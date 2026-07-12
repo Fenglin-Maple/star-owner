@@ -191,7 +191,7 @@ class InternalAgentManager {
     if (session.status === 'waiting-login') {
       const user = this.getCurrentUser();
       if (!user?.isLogin) {
-        this.emit({ type: 'login-required', sessionId: session.id, bvid: this.store.getTask(session.singleTaskId)?.bvid || '', reason: '请先前往 B站登录。登录完成后回到视频总结页面，点击“开始/继续”。' });
+        this.emit({ type: 'login-required', sessionId: session.id, bvid: this.store.getTask(session.singleTaskId)?.bvid || '', reason: '请先前往 B站登录。登录完成后回到视频总结页面，点击“登录后重试”。' });
         throw new Error('这个视频需要 Bilibili 登录后才能继续，请先完成登录。');
       }
       const task = this.store.getTask(session.singleTaskId);
@@ -370,7 +370,7 @@ class InternalAgentManager {
           latest.progress = Math.max(0.08, Number(latest.progress || 0));
           this.saveSession(latest);
           this.log(latest, `公开获取受限：${latest.lastError}`);
-          this.emit({ type: 'login-required', sessionId: latest.id, bvid: task.bvid, title: task.title, reason: '已先尝试公开获取，但该视频要求登录。登录完成后回到“视频总结（单个）”，点击“开始/继续”重试。' });
+          this.emit({ type: 'login-required', sessionId: latest.id, bvid: task.bvid, title: task.title, reason: '已先尝试公开获取，但该视频要求登录。登录完成后回到“视频总结（单个）”，点击“登录后重试”并从头处理。' });
           return;
         }
         excluded.add(task.id);
