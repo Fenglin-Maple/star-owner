@@ -6,6 +6,7 @@
     messages: $('#ragMessages'), runStatus: $('#ragRunStatus'), pendingAttachments: $('#ragPendingAttachments'), composer: $('#ragComposer'), input: $('#ragInput'), attach: $('#ragAttach'), send: $('#ragSend'), stop: $('#ragStop'),
     providerSelect: $('#ragProviderSelect'), modelSelect: $('#ragModelSelect'), composerProviderSelect: $('#ragComposerProviderSelect'), composerModelSelect: $('#ragComposerModelSelect'), capabilities: $('#ragModelCapabilities'), refreshState: $('#ragRefreshState'), openProviders: $('#ragOpenProviders'),
     knowledgeToggle: $('#ragKnowledgeToggle'), knowledgeMenu: $('#ragKnowledgeMenu'), knowledgeCount: $('#ragKnowledgeCount'), selectedKnowledge: $('#ragSelectedKnowledge'),
+    headKnowledgeToggle: $('#ragHeadKnowledgeToggle'), headKnowledgeMenu: $('#ragHeadKnowledgeMenu'), headKnowledgeCount: $('#ragHeadKnowledgeCount'), headKnowledgeLabel: $('#ragHeadKnowledgeLabel'),
     sandboxPath: $('#ragSandboxPath'), chooseSandbox: $('#ragChooseSandbox'), createSandbox: $('#ragCreateSandbox'), permissionBadge: $('#ragPermissionBadge'),
     inputTokens: $('#ragInputTokens'), outputTokens: $('#ragOutputTokens'), totalTokens: $('#ragTotalTokens'), sessionRequests: $('#ragSessionRequests'),
     sessionSettingsModal: $('#ragSessionSettingsModal'), closeSessionSettings: $('#ragCloseSessionSettings'), sessionTitleInput: $('#ragSessionTitleInput'),
@@ -74,6 +75,7 @@
   }
 
   async function selectSession(id) {
+    closeKnowledgeMenus();
     activeSessionId = id;
     pendingAttachments = [];
     localStorage.setItem('ragActiveSessionId', id);
@@ -142,8 +144,7 @@
 
   function closeSessionSettingsModal() {
     elements.sessionSettingsModal.hidden = true;
-    elements.knowledgeMenu.classList.remove('open');
-    elements.knowledgeToggle.setAttribute('aria-expanded', 'false');
+    closeKnowledgeMenus();
   }
 
   async function openSessionContextMenu(event, sessionId) {
@@ -189,32 +190,61 @@
 
   function renderKnowledge(session) {
     const selected = new Set(session?.knowledgeCollectionIds || []);
+    renderKnowledgeMenu(elements.knowledgeMenu, selected, session);
+    renderKnowledgeMenu(elements.headKnowledgeMenu, selected, session);
+    const selectedItems = state.knowledgeCatalog.filter((item) => selected.has(item.id));
+    elements.knowledgeCount.textContent = `${selectedItems.length} 个`;
+    elements.headKnowledgeCount.textContent = String(selectedItems.length);
+    elements.headKnowledgeLabel.textContent = selectedItems.length
+      ? (selectedItems.length === 1 ? selectedItems[0].name : `已选 ${selectedItems.length} 个知识库`)
+      : '选择知识库';
+    elements.headKnowledgeToggle.title = selectedItems.length
+      ? selectedItems.map((item) => `${item.userName} / ${item.name}`).join('\n')
+      : '选择当前会话使用的知识库';
+    elements.headKnowledgeToggle.disabled = !session || Boolean(streaming);
+    elements.knowledgeToggle.disabled = !session || Boolean(streaming);
+    elements.selectedKnowledge.innerHTML = selectedItems.map((item) => `<div class="rag-knowledge-chip"><span title="${escapeAttr(`${item.userName} / ${item.name}`)}">${escapeHtml(item.name)}</span><button type="button" data-remove-knowledge="${escapeAttr(item.id)}" aria-label="移除" ${streaming ? 'disabled' : ''}>×</button></div>`).join('');
+    for (const button of elements.selectedKnowledge.querySelectorAll('[data-remove-knowledge]')) button.addEventListener('click', () => removeKnowledge(button.dataset.removeKnowledge));
+  }
+
+  function renderKnowledgeMenu(menu, selected, session) {
     const groups = groupBy(state.knowledgeCatalog, (item) => item.userName);
-    elements.knowledgeMenu.innerHTML = '';
+    menu.innerHTML = '';
     for (const [user, collections] of groups) {
       const heading = document.createElement('div');
       heading.className = 'rag-knowledge-user';
       heading.textContent = user;
-      elements.knowledgeMenu.appendChild(heading);
+      menu.appendChild(heading);
       for (const collection of collections) {
         const label = document.createElement('label');
         label.className = 'rag-knowledge-option';
-        label.innerHTML = `<input type="checkbox" value="${escapeAttr(collection.id)}" ${selected.has(collection.id) ? 'checked' : ''}><span>${escapeHtml(collection.name)}</span><small>${collection.documentCount} 篇</small>`;
-        label.querySelector('input').addEventListener('change', updateKnowledgeSelection);
-        elements.knowledgeMenu.appendChild(label);
+        label.innerHTML = `<input type="checkbox" value="${escapeAttr(collection.id)}" ${selected.has(collection.id) ? 'checked' : ''} ${!session || streaming ? 'disabled' : ''}><span>${escapeHtml(collection.name)}</span><small>${collection.documentCount} 篇</small>`;
+        label.querySelector('input').addEventListener('change', () => updateKnowledgeSelection(menu));
+        menu.appendChild(label);
       }
     }
-    if (!state.knowledgeCatalog.length) elements.knowledgeMenu.innerHTML = '<div class="rag-list-empty">暂无已完成 Markdown</div>';
-    const selectedItems = state.knowledgeCatalog.filter((item) => selected.has(item.id));
-    elements.knowledgeCount.textContent = `${selectedItems.length} 个`;
-    elements.selectedKnowledge.innerHTML = selectedItems.map((item) => `<div class="rag-knowledge-chip"><span title="${escapeAttr(`${item.userName} / ${item.name}`)}">${escapeHtml(item.name)}</span><button type="button" data-remove-knowledge="${escapeAttr(item.id)}" aria-label="移除">×</button></div>`).join('');
-    for (const button of elements.selectedKnowledge.querySelectorAll('[data-remove-knowledge]')) button.addEventListener('click', () => removeKnowledge(button.dataset.removeKnowledge));
+    if (!state.knowledgeCatalog.length) menu.innerHTML = '<div class="rag-list-empty">暂无已完成 Markdown</div>';
   }
 
-  async function updateKnowledgeSelection() {
+  async function updateKnowledgeSelection(sourceMenu) {
     if (!activeSessionId) return;
-    const ids = [...elements.knowledgeMenu.querySelectorAll('input:checked')].map((input) => input.value);
+    const ids = [...sourceMenu.querySelectorAll('input:checked')].map((input) => input.value);
     await updateSession({ knowledgeCollectionIds: ids });
+  }
+
+  function toggleKnowledgeMenu(menu, toggle) {
+    const open = !menu.classList.contains('open');
+    closeKnowledgeMenus();
+    if (!open || toggle.disabled) return;
+    menu.classList.add('open');
+    toggle.setAttribute('aria-expanded', 'true');
+  }
+
+  function closeKnowledgeMenus() {
+    for (const [menu, toggle] of [[elements.knowledgeMenu, elements.knowledgeToggle], [elements.headKnowledgeMenu, elements.headKnowledgeToggle]]) {
+      menu.classList.remove('open');
+      toggle.setAttribute('aria-expanded', 'false');
+    }
   }
 
   async function removeKnowledge(id) {
@@ -397,6 +427,10 @@
     elements.modelSelect.disabled = active || !state.activeSession;
     elements.composerProviderSelect.disabled = active || !state.activeSession;
     elements.composerModelSelect.disabled = active || !state.activeSession;
+    elements.headKnowledgeToggle.disabled = active || !state.activeSession;
+    elements.knowledgeToggle.disabled = active || !state.activeSession;
+    for (const input of document.querySelectorAll('.rag-knowledge-menu input')) input.disabled = active || !state.activeSession;
+    if (active) closeKnowledgeMenus();
     elements.compact.disabled = active || !state.activeSession || !state.activeSession?.modelCapabilities?.supportsCompression || (state.activeSession?.messages?.length || 0) < 4;
   }
 
@@ -654,20 +688,17 @@
     await deleteActiveSession();
   });
   elements.refreshState.addEventListener('click', () => refresh(activeSessionId));
-  elements.knowledgeToggle.addEventListener('click', () => {
-    const open = !elements.knowledgeMenu.classList.contains('open');
-    elements.knowledgeMenu.classList.toggle('open', open);
-    elements.knowledgeToggle.setAttribute('aria-expanded', String(open));
-  });
+  elements.knowledgeToggle.addEventListener('click', () => toggleKnowledgeMenu(elements.knowledgeMenu, elements.knowledgeToggle));
+  elements.headKnowledgeToggle.addEventListener('click', () => toggleKnowledgeMenu(elements.headKnowledgeMenu, elements.headKnowledgeToggle));
   document.addEventListener('click', (event) => {
-    if (!event.target.closest('.rag-knowledge-picker')) elements.knowledgeMenu.classList.remove('open');
+    if (!event.target.closest('.rag-knowledge-picker')) closeKnowledgeMenus();
     if (!event.target.closest('.rag-context-menu')) hideSessionContextMenu();
   });
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
     if (!elements.providerModal.hidden) closeProviderModal();
     else if (!elements.sessionSettingsModal.hidden) closeSessionSettingsModal();
-    else hideSessionContextMenu();
+    else { closeKnowledgeMenus(); hideSessionContextMenu(); }
   });
   window.addEventListener('resize', hideSessionContextMenu);
   document.addEventListener('click', (event) => {

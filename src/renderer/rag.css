@@ -94,6 +94,20 @@
 
 .rag-chat-head { padding: 8px 12px; }
 .rag-chat-identity { flex: 1 1 auto; }
+.rag-head-knowledge-picker { flex: 0 1 260px; width: clamp(190px, 22vw, 260px); min-width: 170px; z-index: 65; }
+.rag-head-knowledge-toggle {
+  width: 100%; height: 34px; min-width: 0; display: grid; grid-template-columns: 17px minmax(0, 1fr) auto 14px; gap: 7px; align-items: center;
+  padding: 0 9px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: color-mix(in srgb, var(--row) 78%, transparent); cursor: pointer;
+  transition: border-color .16s ease, background .16s ease, box-shadow .16s ease;
+}
+.rag-head-knowledge-toggle:hover:not(:disabled), .rag-head-knowledge-toggle[aria-expanded="true"] { border-color: color-mix(in srgb, var(--accent) 58%, var(--line)); background: var(--row-hover); box-shadow: 0 0 0 3px var(--accent-soft); }
+.rag-head-knowledge-toggle:disabled { opacity: .45; cursor: default; }
+.rag-head-knowledge-toggle > svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+.rag-head-knowledge-toggle > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; font-size: 10px; font-weight: 600; }
+.rag-head-knowledge-toggle > em { min-width: 20px; height: 19px; display: grid; place-items: center; padding: 0 5px; border-radius: 10px; color: var(--accent); background: var(--accent-soft); font: 600 9px var(--font-mono); font-style: normal; }
+.rag-head-knowledge-toggle .rag-picker-chevron { width: 13px; height: 13px; color: var(--muted); transition: transform .16s ease; }
+.rag-head-knowledge-toggle[aria-expanded="true"] .rag-picker-chevron { transform: rotate(180deg); }
+.rag-head-knowledge-menu { right: 0; left: auto; width: min(330px, 72vw); max-height: min(360px, 62vh); }
 .rag-context-meter { flex: 0 0 104px; display: grid; gap: 5px; }
 .rag-context-meter > div:first-child { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; }
 .rag-context-meter strong { color: var(--text); }
@@ -293,6 +307,9 @@
 }
 
 @media (max-width: 760px) {
+  .rag-head-knowledge-picker { min-width: 54px; width: 54px; flex-basis: 54px; }
+  .rag-head-knowledge-toggle { grid-template-columns: 17px auto 12px; }
+  .rag-head-knowledge-toggle > span { display: none; }
   .rag-session-settings-grid { grid-template-columns: minmax(0, 1fr); }
   .rag-model-settings,
   .rag-sandbox-settings,
