@@ -284,6 +284,35 @@ class InternalAgentManager {
           this.finishSession(latest, 'stopped', '已停止');
           return;
         }
+        if (error.code === 'ASR_INFRASTRUCTURE_FAILURE' || error.failureKind === 'infrastructure') {
+          const possibleCauses = Array.isArray(error.possibleCauses) ? error.possibleCauses : [];
+          const report = [
+            '## Agent 因基础设施故障停止',
+            '',
+            `**中断步骤**：${latest.phase || '准备视频素材'}`,
+            '',
+            `**遇到的问题**：${error.message || String(error)}`,
+            '',
+            '**可能原因**：',
+            ...(possibleCauses.length ? possibleCauses.map((item) => `- ${item}`) : ['- 应用工具、模型或本地运行时当前不可用']),
+            '',
+            '**处理建议**：检查“Agent 工具状态”和设置中的依赖状态，修复或重新下载对应依赖后，再手动恢复此 Agent。当前视频任务已退回待领取，不会继续领取其它视频。'
+          ].join('\n');
+          latest.acceptNewTasks = false;
+          latest.status = 'blocked';
+          latest.phase = '基础设施故障，工作已停止';
+          latest.lastError = error.message || String(error);
+          latest.reasoning = '';
+          latest.content = report;
+          latest.currentTaskId = '';
+          latest.currentRunId = '';
+          this.releaseTask(task.id, latest.workerId);
+          this.store.updateWorker(latest.workerId, { status: 'paused', pauseReason: report, pausedAt: new Date().toISOString() });
+          this.saveSession(latest);
+          this.log(latest, `基础设施故障，Agent 已停止：${latest.lastError}`);
+          this.emit({ type: 'infrastructure-stopped', sessionId: latest.id, taskId: task.id, report, possibleCauses });
+          return;
+        }
         if (latest.mode === 'single' && error.code === 'BILIBILI_LOGIN_REQUIRED') {
           this.releaseTask(task.id, latest.workerId);
           latest.status = 'waiting-login';
@@ -417,18 +446,22 @@ class InternalAgentManager {
       const progress = progressStart + (progressEnd - progressStart) * Math.max(0, Math.min(1, fraction));
       const detail = run.status === 'queued' ? `排队 ${run.queuePosition || '-'} · ${run.stage || run.toolName}` : `${run.toolName} · ${run.stage || run.status}`;
       this.setProgress(session, detail, progress, false);
-      task.leaseExpiresAt = new Date(Date.now() + LEASE_MS).toISOString();
-      task.updatedAt = new Date().toISOString();
-      this.store.upsertTask(task);
-      this.store.commit();
       if (TERMINAL_RUNS.has(run.status)) {
         if (run.status !== 'succeeded') {
           const message = `${run.toolName || run.toolId} ${run.status}：${run.error || '请查看运行日志'}`;
           if (session.mode === 'single' && task.publicAttempt && isLoginRequiredMessage(message)) throw loginRequiredError(message);
-          throw new Error(message);
+          const error = new Error(message);
+          error.code = run.errorCode || '';
+          error.failureKind = run.failureKind || '';
+          error.possibleCauses = Array.isArray(run.possibleCauses) ? run.possibleCauses : [];
+          throw error;
         }
         return run;
       }
+      task.leaseExpiresAt = new Date(Date.now() + LEASE_MS).toISOString();
+      task.updatedAt = new Date().toISOString();
+      this.store.upsertTask(task);
+      this.store.commit();
       await delay(650, signal);
     }
   }

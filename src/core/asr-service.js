@@ -24,6 +24,7 @@ class AsrService {
     this.consecutiveFailures = 0;
     this.restartNotBefore = 0;
     this.intentionalStop = false;
+    this.lastExitCode = null;
   }
 
   async start() {
@@ -75,6 +76,8 @@ class AsrService {
           this.loadMs = Number(message.loadMs || 0);
           this.consecutiveFailures = 0;
           this.restartNotBefore = 0;
+          this.lastExitCode = null;
+          this.lastError = '';
           this.onEvent({ type: 'asr-service-ready', serviceId: this.id, device: this.device, loadMs: this.loadMs });
           if (!settled) {
             settled = true;
@@ -104,7 +107,11 @@ class AsrService {
         this.currentRequestId = '';
         message.ok ? pending.resolve(message) : pending.reject(new Error(message.error || 'ASR request failed.'));
       });
-      child.stderr.on('data', (chunk) => this.onLog(this.id, String(chunk)));
+      child.stderr.on('data', (chunk) => {
+        const message = String(chunk).trim();
+        if (message && !this.ready) this.lastError = message.slice(-2000);
+        this.onLog(this.id, String(chunk));
+      });
       child.on('error', (error) => {
         this.lastError = error.message;
         if (!settled) {
@@ -119,6 +126,7 @@ class AsrService {
         this.child = null;
         const intentionallyStopped = this.intentionalStop;
         this.intentionalStop = false;
+        this.lastExitCode = code;
         const error = new Error(this.lastError || `ASR service exited: code=${code} signal=${signal || ''}`);
         if (!intentionallyStopped && code !== 0) {
           this.lastError = error.message;
@@ -193,7 +201,8 @@ class AsrService {
       loadMs: this.loadMs,
       lastError: this.lastError,
       consecutiveFailures: this.consecutiveFailures,
-      restartAfter: this.restartNotBefore ? new Date(this.restartNotBefore).toISOString() : ''
+      restartAfter: this.restartNotBefore ? new Date(this.restartNotBefore).toISOString() : '',
+      lastExitCode: this.lastExitCode
     };
   }
 }

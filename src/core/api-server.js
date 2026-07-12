@@ -249,7 +249,8 @@ class ApiServer {
       return this.json(res, {
         task: null,
         message: 'WORKER_PAUSED',
-        userMessage: PAUSED_MESSAGE,
+        userMessage: [PAUSED_MESSAGE, worker.pauseReason ? `原因：${worker.pauseReason}` : ''].filter(Boolean).join('\n'),
+        directive: worker.pauseReason ? { action: 'stop-and-report', reason: worker.pauseReason } : { action: 'pause' },
         worker: this.publicWorker(worker)
       }, 423);
     }

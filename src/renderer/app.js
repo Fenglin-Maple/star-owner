@@ -1225,6 +1225,7 @@ function humanizeEvent(type) {
     'asr-service-log': 'ASR \u670d\u52a1\u65e5\u5fd7',
     'asr-gpu-start-failed': 'GPU ASR \u542f\u52a8\u5931\u8d25',
     'asr-cpu-start-failed': 'CPU ASR \u542f\u52a8\u5931\u8d25',
+    'agent-infrastructure-stopped': 'Agent \u56e0\u57fa\u7840\u8bbe\u65bd\u6545\u969c\u5df2\u505c\u6b62',
     'workspace-added': 'Workspace \u5e93\u5df2\u6dfb\u52a0',
     'workspace-default-changed': '\u9ed8\u8ba4 Workspace \u5df2\u5207\u6362',
     'workspace-removed': 'Workspace \u5e93\u5df2\u79fb\u9664'

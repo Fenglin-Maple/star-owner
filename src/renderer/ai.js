@@ -402,7 +402,7 @@
   });
 
   function providerName(id) { return state.providers.find((item) => item.id === id)?.name || '未配置供应商'; }
-  function statusLabel(status) { return ({ idle: '等待任务', running: '工作中', draining: '即将暂停', paused: '已暂停', 'waiting-login': '等待登录', stopping: '停止中', stopped: '已停止', completed: '已完成', error: '失败' })[status] || status || '未知'; }
+  function statusLabel(status) { return ({ idle: '等待任务', running: '工作中', draining: '即将暂停', paused: '已暂停', blocked: '故障停止', 'waiting-login': '等待登录', stopping: '停止中', stopped: '已停止', completed: '已完成', error: '失败' })[status] || status || '未知'; }
   function dependencyStatus(item) { return item.available ? '可用' : ({ resolving: '查询中', downloading: `${Math.round(item.progress * 100)}%`, verifying: '校验中', installing: '安装中', failed: '失败', missing: item.required ? '必需缺失' : '可选未装' })[item.status] || item.status; }
   function formatTokens(value) { return new Intl.NumberFormat('zh-CN', { notation: Number(value) > 999999 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(Number(value || 0)); }
   function time(value) { try { return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(value)); } catch { return ''; } }

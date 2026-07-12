@@ -38,7 +38,8 @@
 .ai-status.draining { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 42%, var(--line)); }
 .ai-status.completed,
 .ai-status.idle { color: var(--green); border-color: color-mix(in srgb, var(--green) 42%, var(--line)); }
-.ai-status.error { color: var(--red); border-color: color-mix(in srgb, var(--red) 42%, var(--line)); }
+.ai-status.error,
+.ai-status.blocked { color: var(--red); border-color: color-mix(in srgb, var(--red) 42%, var(--line)); }
 
 .ai-agent-detail { min-width: 0; min-height: 0; overflow: hidden; }
 .ai-empty { min-height: 100%; display: grid; place-content: center; justify-items: center; gap: 8px; padding: 24px; color: var(--muted); text-align: center; }

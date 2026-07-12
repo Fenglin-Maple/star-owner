@@ -35,12 +35,14 @@ function assert(condition, message) {
   };
 
   let forceLoginFailure = false;
+  let forceInfrastructureFailure = false;
   const toolRunner = {
     start: ({ task, tool, workerId, collection: runCollection }) => {
       const id = `run-${tool.id}-${Date.now()}`;
       const loginBlocked = forceLoginFailure && tool.id === 'material-bundle' && !runCollection?.cookieFile;
-      if (tool.id === 'material-bundle' && !loginBlocked) writeMaterials(task.artifactDir);
-      store.createToolRun({ id, taskId: task.id, collectionId: task.collectionId, toolId: tool.id, toolName: tool.name, workerId, status: loginBlocked ? 'failed' : 'succeeded', stage: loginBlocked ? 'error' : 'complete', error: loginBlocked ? 'This video is only available for registered users. Use --cookies.' : '', createdAt: new Date().toISOString(), finishedAt: new Date().toISOString() });
+      const infrastructureBlocked = forceInfrastructureFailure && tool.id === 'material-bundle';
+      if (tool.id === 'material-bundle' && !loginBlocked && !infrastructureBlocked) writeMaterials(task.artifactDir);
+      store.createToolRun({ id, taskId: task.id, collectionId: task.collectionId, toolId: tool.id, toolName: tool.name, workerId, status: loginBlocked || infrastructureBlocked ? 'failed' : 'succeeded', stage: loginBlocked || infrastructureBlocked ? 'error' : 'complete', error: loginBlocked ? 'This video is only available for registered users. Use --cookies.' : (infrastructureBlocked ? 'GPU ASR 常驻服务连续 3 次启动失败，应用已停止相关 Agent。' : ''), errorCode: infrastructureBlocked ? 'ASR_INFRASTRUCTURE_FAILURE' : '', failureKind: infrastructureBlocked ? 'infrastructure' : '', possibleCauses: infrastructureBlocked ? ['CTranslate2 原生运行库访问冲突', '项目依赖损坏'] : [], createdAt: new Date().toISOString(), finishedAt: new Date().toISOString() });
       return store.getToolRun(id);
     },
     cancel: () => ({ status: 'cancelled' })
@@ -86,6 +88,16 @@ function assert(condition, message) {
   const retried = await waitForSession(manager, loginSession.id);
   assert(retried.status === 'completed', `logged-in retry did not complete: ${retried.lastError || retried.status}`);
   assert(store.getTask(loginSession.singleTaskId)?.publicAttempt === false, 'logged-in retry did not switch from public access');
+
+  forceLoginFailure = false;
+  forceInfrastructureFailure = true;
+  const blockedSession = await manager.createSingleTask({ video: 'BVINFRA00001', outputDir: path.join(root, 'blocked-output'), collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  await manager.start(blockedSession.id);
+  const blocked = await waitForStatus(manager, blockedSession.id, 'blocked');
+  assert(blocked.content.includes('Agent 因基础设施故障停止') && blocked.content.includes('可能原因'), 'blocked Agent did not report the infrastructure problem and likely causes');
+  assert(blocked.acceptNewTasks === false && store.getWorker(blocked.workerId)?.status === 'paused', 'blocked Agent continued accepting work');
+  assert(store.getTask(blocked.singleTaskId)?.status === 'pending', 'infrastructure failure did not return the video task to pending');
+  assert(events.some((event) => event.type === 'infrastructure-stopped' && event.sessionId === blocked.id), 'infrastructure stop event was not emitted');
   manager.shutdown();
   fs.rmSync(root, { recursive: true, force: true });
   console.log('internal agent integration test passed');

@@ -108,6 +108,10 @@ class ResourceScheduler {
         if (!gate.ready) {
           pool.waitReason = gate.reason || 'RESOURCE_WAIT';
           for (const item of pool.queue) item.waitReason = pool.waitReason;
+          if (gate.fatal) {
+            this.rejectQueued(pool, gate);
+            continue;
+          }
           this.scheduleRetry(pool, Number(gate.retryAfterMs || 2000));
           continue;
         }
@@ -181,6 +185,16 @@ class ResourceScheduler {
     }, Math.max(200, delayMs));
   }
 
+  rejectQueued(pool, gate) {
+    const queued = pool.queue.splice(0);
+    for (const entry of queued) {
+      entry.state = 'failed';
+      this.jobs.delete(entry.id);
+      entry.reject(resourceFailureError(gate));
+    }
+    this.refreshQueue(pool);
+  }
+
   snapshot() {
     const pools = {};
     for (const [name, pool] of this.pools.entries()) {
@@ -227,6 +241,15 @@ class ResourceScheduler {
 function cancelledError(jobId) {
   const error = new Error(`Scheduler job cancelled: ${jobId}`);
   error.code = 'SCHEDULER_CANCELLED';
+  return error;
+}
+
+function resourceFailureError(gate = {}) {
+  const error = new Error(gate.message || 'A required application resource is unavailable.');
+  error.code = gate.code || 'RESOURCE_FATAL';
+  error.failureKind = gate.failureKind || 'infrastructure';
+  error.possibleCauses = Array.isArray(gate.possibleCauses) ? gate.possibleCauses : [];
+  error.resourceReason = gate.reason || 'RESOURCE_FATAL';
   return error;
 }
 

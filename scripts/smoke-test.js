@@ -153,7 +153,7 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   });
   const pausedClaim = await pausedClaimResponse.json();
   api.stop();
-  if (pausedClaimResponse.status !== 423 || pausedClaim.userMessage !== '来自用户的信息，你需要暂停工作') throw new Error('paused worker allocation guard failed');
+  if (pausedClaimResponse.status !== 423 || !pausedClaim.userMessage.startsWith('来自用户的信息，你需要暂停工作') || pausedClaim.directive?.action !== 'stop-and-report' || pausedClaim.directive?.reason !== 'smoke pause') throw new Error('paused worker allocation guard failed');
 
   store.setDefaultWorkspace(defaultWorkspace.id);
   store.removeWorkspace(extraWorkspace.id);

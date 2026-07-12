@@ -264,11 +264,16 @@ class ToolRunner {
         return this.finishRun(state, 'cancelled', { signal: 'CANCELLED', error: 'Cancelled by caller.' });
       }
       const status = error.code === 'TOOL_TIMEOUT' ? 'timeout' : 'failed';
-      return this.finishRun(state, status, {
+      const finished = this.finishRun(state, status, {
         signal: status === 'timeout' ? 'TIMEOUT' : '',
         error: error.message || String(error),
+        errorCode: error.code || '',
+        failureKind: error.failureKind || '',
+        possibleCauses: Array.isArray(error.possibleCauses) ? error.possibleCauses : [],
         stage: 'error'
       });
+      if (error.code === 'ASR_INFRASTRUCTURE_FAILURE') this.stopWorkerForInfrastructure(run, task, error);
+      return finished;
     }
   }
 
@@ -598,7 +603,8 @@ class ToolRunner {
         await this.gpuAsr.start();
         await this.refreshGpuState();
       } catch (error) {
-        return { ready: false, reason: 'GPU_SERVICE_UNAVAILABLE', message: error.message, retryAfterMs: Number(error.retryAfterMs || 5000) };
+        const failure = this.asrInfrastructureGate(this.gpuAsr, 'GPU');
+        return failure || { ready: false, reason: 'GPU_SERVICE_UNAVAILABLE', message: error.message, retryAfterMs: Number(error.retryAfterMs || 5000) };
       }
     }
     if (this.gpu.freeMiB < this.config.gpuReserveMiB) {
@@ -619,8 +625,46 @@ class ToolRunner {
       await this.cpuAsr.start();
       return { ready: true };
     } catch (error) {
-      return { ready: false, reason: 'CPU_SERVICE_UNAVAILABLE', message: error.message, retryAfterMs: Number(error.retryAfterMs || 5000) };
+      const failure = this.asrInfrastructureGate(this.cpuAsr, 'CPU');
+      return failure || { ready: false, reason: 'CPU_SERVICE_UNAVAILABLE', message: error.message, retryAfterMs: Number(error.retryAfterMs || 5000) };
     }
+  }
+
+  asrInfrastructureGate(service, label) {
+    if (Number(service.consecutiveFailures || 0) < 3) return null;
+    if (label === 'GPU' && this.config.cpuAsrEnabled) return null;
+    const possibleCauses = diagnoseAsrFailure(service, label);
+    const exit = service.lastExitCode === null || service.lastExitCode === undefined ? '' : `，退出码 ${service.lastExitCode}`;
+    return {
+      ready: false,
+      fatal: true,
+      reason: 'ASR_INFRASTRUCTURE_FAILURE',
+      code: 'ASR_INFRASTRUCTURE_FAILURE',
+      failureKind: 'infrastructure',
+      message: `${label} ASR 常驻服务连续 ${service.consecutiveFailures} 次启动失败${exit}，应用已停止相关 Agent，避免继续领取视频。`,
+      possibleCauses
+    };
+  }
+
+  stopWorkerForInfrastructure(run, task, error) {
+    const possibleCauses = Array.isArray(error.possibleCauses) ? error.possibleCauses : [];
+    const reason = [error.message || String(error), possibleCauses.length ? `可能原因：${possibleCauses.join('；')}` : ''].filter(Boolean).join('\n');
+    const worker = this.store.getWorker(run.workerId);
+    if (worker) this.store.updateWorker(worker.id, { status: 'paused', pauseReason: reason, pausedAt: new Date().toISOString() });
+    if (task?.status === 'claimed' && task.claimedBy === run.workerId) {
+      Object.assign(task, {
+        status: 'pending',
+        claimedBy: '',
+        claimedAt: '',
+        leaseExpiresAt: '',
+        infrastructureError: reason,
+        updatedAt: new Date().toISOString()
+      });
+      this.store.upsertTask(task);
+      this.store.recordTaskEvent(task.id, 'infrastructure-stopped', { collectionId: task.collectionId, workerId: run.workerId, reason, possibleCauses });
+    }
+    this.store.commit();
+    this.publish({ type: 'agent-infrastructure-stopped', workerId: run.workerId, taskId: task?.id || run.taskId, error: error.message || String(error), possibleCauses });
   }
 
   async refreshGpuState() {
@@ -946,6 +990,25 @@ function sanitizeOptions(options) {
 
 function emptyGpuState() {
   return { available: false, index: 0, name: '', totalMiB: 0, usedMiB: 0, freeMiB: 0, error: '', checkedAt: '' };
+}
+
+function diagnoseAsrFailure(service, label) {
+  const code = Number(service.lastExitCode);
+  const message = String(service.lastError || '').toLowerCase();
+  if ([3221225477, -1073741819].includes(code)) {
+    return [
+      '本地 CTranslate2、Microsoft Visual C++ 或 CUDA 原生 DLL 发生访问冲突',
+      '项目运行库损坏、被安全软件拦截，或系统加载了不兼容的同名 DLL',
+      '显卡驱动与当前 CUDA 运行库组合异常'
+    ];
+  }
+  if (message.includes('out of memory') || message.includes('cuda') && message.includes('memory')) {
+    return ['GPU 显存不足或被其它程序占用', 'CUDA 上下文未能为模型分配连续显存'];
+  }
+  if (message.includes('model') && (message.includes('missing') || message.includes('not installed') || message.includes('does not exist'))) {
+    return ['所选 ASR 模型未完整安装或文件损坏', '依赖包解压未完成'];
+  }
+  return [`${label} ASR 运行时或模型无法加载`, '项目依赖损坏、权限拦截或原生运行库不兼容', '可在设置中重新下载 ASR 依赖后再恢复 Agent'];
 }
 
 function clampNumber(value, min, max, fallback) {

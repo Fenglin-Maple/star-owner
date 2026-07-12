@@ -5,6 +5,7 @@ const { ResourceScheduler } = require('../src/core/resource-scheduler');
   await testConcurrencyAndFairness();
   await testDisabledLaneAndCapacityWait();
   await testQueuedCancellation();
+  await testFatalGateRejectsQueue();
   console.log('resource scheduler ok');
 })().catch((error) => {
   console.error(error);
@@ -82,6 +83,16 @@ async function testQueuedCancellation() {
   assert.strictEqual(scheduler.cancel('cancel-me'), true);
   await assert.rejects(queued.promise, (error) => error.code === 'SCHEDULER_CANCELLED');
   await blocker.promise;
+}
+
+async function testFatalGateRejectsQueue() {
+  const scheduler = new ResourceScheduler();
+  scheduler.registerPool('asr', { lanes: [{ id: 'gpu', gate: async () => ({ ready: false, fatal: true, reason: 'ASR_INFRASTRUCTURE_FAILURE', code: 'ASR_INFRASTRUCTURE_FAILURE', message: 'ASR native runtime crashed.', possibleCauses: ['broken runtime'] }) }] });
+  const first = scheduler.enqueue('asr', { id: 'fatal-1', workerId: 'worker-a', execute: async () => {} });
+  const second = scheduler.enqueue('asr', { id: 'fatal-2', workerId: 'worker-b', execute: async () => {} });
+  await assert.rejects(first.promise, (error) => error.code === 'ASR_INFRASTRUCTURE_FAILURE' && error.possibleCauses.includes('broken runtime'));
+  await assert.rejects(second.promise, (error) => error.code === 'ASR_INFRASTRUCTURE_FAILURE');
+  assert.strictEqual(scheduler.snapshot().pools.asr.queued, 0, 'fatal resource failure left queued jobs behind');
 }
 
 function delay(ms) {
