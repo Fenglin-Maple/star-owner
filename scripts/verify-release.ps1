@@ -40,7 +40,11 @@ $scanRoots = @("src", "scripts", "tools", "templates", "packaging")
 $scanFiles = foreach ($relative in $scanRoots) {
   Get-ChildItem -LiteralPath (Join-Path $root $relative) -Recurse -File
 }
-$scanFiles = $scanFiles | Where-Object { $_.Name -ne "verify-release.ps1" }
+$scanFiles = $scanFiles | Where-Object {
+  $_.Name -ne "verify-release.ps1" -and
+  $_.Extension -ne ".pyc" -and
+  $_.FullName -notmatch "[\\/]__pycache__[\\/]"
+}
 $scanFiles += Get-Item (Join-Path $root "README.md"), (Join-Path $root "DESIGN.md"), (Join-Path $root "DEPLOYMENT.md"), (Join-Path $root "AGENTS.md")
 $forbidden = $scanFiles | Select-String -Pattern "[A-Za-z]:\\(Users|AIcode)\\|C:/Users/|D:/AIcode/|AppData\\Local\\Temp" -ErrorAction SilentlyContinue
 if ($forbidden) {

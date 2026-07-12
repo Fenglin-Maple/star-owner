@@ -22,6 +22,7 @@
   let editingProviderId = '';
   let remoteModelSaveTimer = null;
   let streamRenderTimer = null;
+  let messageRenderQueue = Promise.resolve();
   let initialized = false;
 
   async function refresh(sessionId = activeSessionId, { quiet = false } = {}) {
@@ -45,7 +46,7 @@
   function renderAll() {
     renderSessions();
     renderInspector();
-    renderMessages();
+    queueMessageRender();
     renderUsageSummary();
     if (!elements.providerModal.hidden) renderProviderManager();
   }
@@ -234,15 +235,26 @@
 
   async function renderMessages() {
     const session = state.activeSession;
+    const sessionId = session?.id || '';
     if (!session?.messages?.length && !streaming) {
       elements.messages.innerHTML = '<div class="rag-empty-state"><svg viewBox="0 0 24 24"><path d="M4 5h16v12H8l-4 4zM8 9h8M8 13h5"/></svg><strong>让知识库真正参与对话</strong><span>配置供应商、选择模型和收藏夹知识库后，可进行跨文档查阅、整理与分析。</span></div>';
       return;
     }
     const messages = [...(session?.messages || [])];
     if (streaming && !streaming.pending && streaming.sessionId === session?.id && !messages.some((item) => item.id === streaming.id)) messages.push(streaming);
-    elements.messages.innerHTML = '';
-    for (const message of messages) elements.messages.appendChild(await createMessageElement(message));
+    const fragment = document.createDocumentFragment();
+    for (const message of messages) fragment.appendChild(await createMessageElement(message));
+    if ((state.activeSession?.id || '') !== sessionId) return;
+    elements.messages.replaceChildren(fragment);
     elements.messages.scrollTop = elements.messages.scrollHeight;
+  }
+
+  function queueMessageRender() {
+    messageRenderQueue = messageRenderQueue
+      .catch(() => {})
+      .then(() => renderMessages())
+      .catch((error) => console.error('RAG message render failed:', error));
+    return messageRenderQueue;
   }
 
   async function createMessageElement(message) {
@@ -307,6 +319,7 @@
     if (streamRenderTimer) return;
     streamRenderTimer = setTimeout(async () => {
       streamRenderTimer = null;
+      await messageRenderQueue;
       if (!streaming) return;
       let article = elements.messages.querySelector(`[data-message-id="${cssEscape(streaming.id)}"]`);
       if (!article) {
@@ -542,7 +555,7 @@
     }
     if (event.type === 'message') {
       if (state.activeSession && !state.activeSession.messages.some((item) => item.id === event.message.id)) state.activeSession.messages.push(event.message);
-      renderMessages();
+      queueMessageRender();
     } else if (event.type === 'assistant-start') {
       const previousId = streaming?.id;
       if (previousId && previousId !== event.messageId) elements.messages.querySelector(`[data-message-id="${cssEscape(previousId)}"]`)?.remove();
