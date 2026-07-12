@@ -225,7 +225,7 @@
     elements.modelProviderApiKey.value = '';
     elements.modelProviderApiKey.placeholder = provider?.hasApiKey ? '已安全保存，留空保持不变' : '本地免密接口可留空';
     elements.modelProviderTemperature.value = provider?.temperature ?? 0.2;
-    elements.modelProviderMaxTokens.value = provider?.maxOutputTokens || 8192;
+    elements.modelProviderMaxTokens.value = provider?.maxOutputTokens || 128000;
     elements.modelProviderHeaders.value = Object.keys(provider?.extraHeaders || {}).length ? JSON.stringify(provider.extraHeaders, null, 2) : '';
     elements.modelDelete.disabled = !provider;
   }
@@ -242,9 +242,10 @@
       const row = document.createElement('div');
       row.className = 'rag-remote-model';
       row.dataset.modelId = model.id;
-      row.innerHTML = `<input class="rag-model-enabled app-checkbox" type="checkbox" ${enabled.has(model.id) ? 'checked' : ''} aria-label="启用 ${esc(model.id)}"><strong title="${esc(model.id)}">${html(model.name || model.id)}</strong><input class="rag-model-context" type="number" min="1024" step="1024" value="${Number(value.contextWindow || 128000)}" title="上下文窗口"><button type="button" class="rag-model-cap-toggle ${value.supportsTools ? 'active' : ''}" data-cap="supportsTools" title="工具调用">T</button><button type="button" class="rag-model-cap-toggle ${value.supportsReasoning ? 'active' : ''}" data-cap="supportsReasoning" title="推理流">R</button><button type="button" class="rag-model-cap-toggle ${value.supportsVision ? 'active' : ''}" data-cap="supportsVision" title="视觉">V</button><button type="button" class="rag-model-cap-toggle ${value.supportsAudio ? 'active' : ''}" data-cap="supportsAudio" title="音频">A</button><button type="button" class="rag-model-cap-toggle ${value.supportsImages ? 'active' : ''}" data-cap="supportsImages" title="图片返回">I</button><button type="button" class="rag-model-cap-toggle ${value.supportsCompression ? 'active' : ''}" data-cap="supportsCompression" title="压缩">C</button><button type="button" class="rag-model-cap-toggle ${value.supportsSubagents ? 'active' : ''}" data-cap="supportsSubagents" title="子 Agent">S</button>`;
+      row.innerHTML = `<input class="rag-model-enabled app-checkbox" type="checkbox" ${enabled.has(model.id) ? 'checked' : ''} aria-label="启用 ${esc(model.id)}"><strong title="${esc(model.id)}">${html(model.name || model.id)}</strong><label class="rag-model-limit"><span>上下文</span><input class="rag-model-context" type="number" min="1024" max="4000000" step="1024" value="${Number(value.contextWindow || 1000000)}"></label><label class="rag-model-limit"><span>输出</span><input class="rag-model-output" type="number" min="256" max="1000000" step="1024" value="${Number(value.maxOutputTokens || 128000)}"></label><button type="button" class="rag-model-cap-toggle ${value.supportsTools ? 'active' : ''}" data-cap="supportsTools" title="工具调用">T</button><button type="button" class="rag-model-cap-toggle ${value.supportsReasoning ? 'active' : ''}" data-cap="supportsReasoning" title="推理流">R</button><button type="button" class="rag-model-cap-toggle ${value.supportsVision ? 'active' : ''}" data-cap="supportsVision" title="视觉">V</button><button type="button" class="rag-model-cap-toggle ${value.supportsAudio ? 'active' : ''}" data-cap="supportsAudio" title="音频">A</button><button type="button" class="rag-model-cap-toggle ${value.supportsImages ? 'active' : ''}" data-cap="supportsImages" title="图片返回">I</button><button type="button" class="rag-model-cap-toggle ${value.supportsCompression ? 'active' : ''}" data-cap="supportsCompression" title="压缩">C</button><button type="button" class="rag-model-cap-toggle ${value.supportsSubagents ? 'active' : ''}" data-cap="supportsSubagents" title="子 Agent">S</button>`;
       row.querySelector('.rag-model-enabled').addEventListener('change', scheduleModelSave);
       row.querySelector('.rag-model-context').addEventListener('change', scheduleModelSave);
+      row.querySelector('.rag-model-output').addEventListener('change', scheduleModelSave);
       for (const toggle of row.querySelectorAll('[data-cap]')) toggle.addEventListener('click', () => { toggle.classList.toggle('active'); scheduleModelSave(); });
       elements.modelRemote.appendChild(row);
     }
@@ -270,7 +271,7 @@
     const models = [...elements.modelRemote.querySelectorAll('.rag-remote-model')].filter((row) => row.querySelector('.rag-model-enabled').checked).map((row) => {
       const caps = {};
       for (const toggle of row.querySelectorAll('[data-cap]')) caps[toggle.dataset.cap] = toggle.classList.contains('active');
-      return { ...(source.get(row.dataset.modelId) || { id: row.dataset.modelId, name: row.dataset.modelId }), ...caps, contextWindow: Number(row.querySelector('.rag-model-context').value) || 128000 };
+      return { ...(source.get(row.dataset.modelId) || { id: row.dataset.modelId, name: row.dataset.modelId }), ...caps, contextWindow: Number(row.querySelector('.rag-model-context').value) || 1000000, maxOutputTokens: Number(row.querySelector('.rag-model-output').value) || 128000 };
     });
     await window.orchestrator.ragUpdateModels({ providerId: editingProviderId, models });
     await refreshAll({ quiet: true });

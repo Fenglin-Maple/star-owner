@@ -20,6 +20,10 @@ const MIME_TYPES = {
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.md': 'text/markdown'
 };
 
+const TOKEN_CONFIG_VERSION = 2;
+const DEFAULT_CONTEXT_WINDOW = 1000000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 128000;
+
 class RagAssistant {
   constructor({ store, workspaceRoot, encryptSecret, decryptSecret, emit, requestApproval, browseHidden, openExternal }) {
     this.store = store;
@@ -33,6 +37,7 @@ class RagAssistant {
     this.controllers = new Map();
     this.documentCache = new Map();
     this.sandboxRoot = ensureDir(path.join(workspaceRoot, '.star-note', 'rag-sandboxes'));
+    this.migrateTokenConfiguration();
   }
 
   state(sessionId = '') {
@@ -55,7 +60,7 @@ class RagAssistant {
     const id = String(input.id || `provider-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`);
     const current = this.store.get('ragProviders', id) || {};
     const baseUrl = normalizeBaseUrl(input.baseUrl || current.baseUrl);
-    if (!baseUrl) throw new Error('Base URL is required. Use the API root that contains /models and /chat/completions.');
+    if (!baseUrl) throw new Error('Base URL is required. Use the service root or the API root that contains /models and /chat/completions.');
     const extraHeaders = normalizeHeaders(input.extraHeaders === undefined ? current.extraHeaders : input.extraHeaders);
     const next = {
       ...current,
@@ -65,7 +70,9 @@ class RagAssistant {
       baseUrl,
       extraHeaders,
       temperature: finiteNumber(input.temperature, current.temperature, 0.2),
-      maxOutputTokens: positiveInteger(input.maxOutputTokens, current.maxOutputTokens, 8192),
+      maxOutputTokens: positiveInteger(input.maxOutputTokens, current.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS),
+      tokenConfigVersion: TOKEN_CONFIG_VERSION,
+      resolvedBaseUrl: baseUrl === current.baseUrl ? (current.resolvedBaseUrl || '') : '',
       enabledModels: Array.isArray(input.enabledModels) ? input.enabledModels.map(normalizeModel) : (current.enabledModels || []),
       remoteModels: current.remoteModels || [],
       updatedAt: new Date().toISOString(),
@@ -90,11 +97,24 @@ class RagAssistant {
 
   async fetchModels(providerId) {
     const provider = this.rawProvider(providerId);
-    const response = await fetch(`${provider.baseUrl}/models`, { headers: this.providerHeaders(provider), signal: AbortSignal.timeout(30000) });
-    const text = await response.text();
-    if (!response.ok) throw new Error(`Model list failed (${response.status}): ${text.slice(0, 800)}`);
-    const payload = parseJson(text, 'Model list returned non-JSON data.');
-    const source = Array.isArray(payload.data) ? payload.data : (Array.isArray(payload.models) ? payload.models : []);
+    let source = null;
+    const errors = [];
+    for (const root of candidateApiRoots(provider)) {
+      try {
+        const response = await fetch(`${root}/models`, { headers: this.providerHeaders(provider), signal: AbortSignal.timeout(30000) });
+        const text = await response.text();
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 500)}`);
+        const payload = parseJson(text, 'non-JSON response');
+        const candidate = Array.isArray(payload.data) ? payload.data : (Array.isArray(payload.models) ? payload.models : null);
+        if (!candidate) throw new Error('response did not contain a model list');
+        source = candidate;
+        provider.resolvedBaseUrl = root;
+        break;
+      } catch (error) {
+        errors.push(`${root}/models: ${error.message || String(error)}`);
+      }
+    }
+    if (!source) throw new Error(`Model list failed. ${errors.join(' | ').slice(0, 1600)}`);
     const models = source.map((item) => normalizeModel(typeof item === 'string' ? { id: item } : item)).filter((item) => item.id);
     provider.remoteModels = models;
     provider.updatedAt = new Date().toISOString();
@@ -122,6 +142,32 @@ class RagAssistant {
     const headers = { accept: 'application/json', 'content-type': 'application/json', ...provider.extraHeaders };
     if (provider.encryptedApiKey) headers.authorization = `Bearer ${this.decryptSecret(provider.encryptedApiKey)}`;
     return headers;
+  }
+
+  providerEndpoint(provider, resource) {
+    return `${provider.resolvedBaseUrl || provider.baseUrl}/${String(resource || '').replace(/^\/+/, '')}`;
+  }
+
+  outputTokenLimit(provider, modelInput) {
+    const model = typeof modelInput === 'string'
+      ? normalizeModel(provider?.enabledModels?.find((item) => item.id === modelInput) || { id: modelInput })
+      : normalizeModel(modelInput || {});
+    return positiveInteger(model.maxOutputTokens, provider?.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS);
+  }
+
+  migrateTokenConfiguration() {
+    let changed = false;
+    for (const provider of this.store.list('ragProviders')) {
+      if (Number(provider.tokenConfigVersion || 0) >= TOKEN_CONFIG_VERSION) continue;
+      if (!provider.maxOutputTokens || Number(provider.maxOutputTokens) === 8192) provider.maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
+      provider.enabledModels = (provider.enabledModels || []).map(migrateLegacyModel);
+      provider.remoteModels = (provider.remoteModels || []).map(migrateLegacyModel);
+      provider.tokenConfigVersion = TOKEN_CONFIG_VERSION;
+      provider.updatedAt = new Date().toISOString();
+      this.store.set('ragProviders', provider.id, provider);
+      changed = true;
+    }
+    if (changed) this.store.save();
   }
 
   listSessions() {
@@ -333,7 +379,7 @@ class RagAssistant {
         tools: tools.length ? tools : undefined,
         tool_choice: tools.length ? 'auto' : undefined,
         temperature: provider.temperature,
-        max_tokens: provider.maxOutputTokens
+        max_tokens: this.outputTokenLimit(provider, model)
       }, signal, (delta) => {
         if (delta.content) content += delta.content;
         if (delta.reasoning) reasoning += delta.reasoning;
@@ -371,7 +417,6 @@ class RagAssistant {
 
   buildHistory(session, model, excludeMessageId = '') {
     const messages = this.store.list('ragMessages').filter((item) => item.sessionId === session.id && item.id !== excludeMessageId && ['user', 'assistant'].includes(item.role) && item.status === 'complete').sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
-    const recent = session.compressedSummary ? messages.slice(-8) : messages.slice(-40);
     const system = [
       'You are the built-in RAG assistant of 星藏家. Help the user inspect, compare, organize, and analyze their accepted Bilibili Markdown knowledge library.',
       'Use knowledge_search before making claims about selected local libraries. Cite the source title and collection in the answer. Never fabricate missing facts.',
@@ -381,6 +426,19 @@ class RagAssistant {
       session.systemPrompt,
       session.compressedSummary ? `Compressed earlier context:\n${session.compressedSummary}` : ''
     ].filter(Boolean).join('\n\n');
+    const contextWindow = positiveInteger(model.contextWindow, null, DEFAULT_CONTEXT_WINDOW);
+    const outputReserve = Math.min(this.outputTokenLimit(this.rawProvider(session.providerId), model), Math.floor(contextWindow * 0.5));
+    const protocolReserve = Math.min(16000, Math.max(512, Math.floor(contextWindow * 0.05)));
+    const historyBudget = Math.max(512, contextWindow - outputReserve - estimateTokens(system) - protocolReserve);
+    const recent = [];
+    let used = 0;
+    for (let index = messages.length - 1; index >= 0 && recent.length < 500; index -= 1) {
+      const message = messages[index];
+      const tokens = estimateTokens(message.content || '') + 8;
+      if (recent.length >= 4 && used + tokens > historyBudget) break;
+      recent.unshift(message);
+      used += tokens;
+    }
     return [{ role: 'system', content: system }, ...recent.map((message) => ({ role: message.role, content: message.content || '' }))];
   }
 
@@ -450,7 +508,7 @@ class RagAssistant {
       const provider = this.rawProvider(session.providerId);
       const prompt = `You are a focused subagent. Complete only this task and return a concise evidence-based report.\n\nTask: ${String(args.task || '')}`;
       const context = session.knowledgeCollectionIds.length ? await this.searchKnowledge(session, args.task, 6) : '';
-      const result = await this.complete(provider, { model: session.modelId, messages: [{ role: 'system', content: prompt }, { role: 'user', content: context || 'No local context was selected.' }], temperature: provider.temperature, max_tokens: Math.min(provider.maxOutputTokens, 6000) }, signal);
+      const result = await this.complete(provider, { model: session.modelId, messages: [{ role: 'system', content: prompt }, { role: 'user', content: context || 'No local context was selected.' }], temperature: provider.temperature, max_tokens: Math.min(this.outputTokenLimit(provider, model), 6000) }, signal);
       return result.content;
     }
     throw new Error(`Unsupported tool: ${call.name}`);
@@ -549,7 +607,7 @@ class RagAssistant {
     const messages = this.store.list('ragMessages').filter((item) => item.sessionId === sessionId && item.status === 'complete').sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
     if (messages.length < 4) throw new Error('There is not enough conversation history to compress.');
     const transcript = messages.map((item) => `${item.role.toUpperCase()}: ${item.content}`).join('\n\n').slice(-180000);
-    const result = await this.complete(provider, { model: session.modelId, messages: [{ role: 'system', content: 'Compress the conversation into a durable working-memory summary. Preserve user goals, decisions, facts, citations, file paths, unfinished work, and constraints. Do not add new facts.' }, { role: 'user', content: transcript }], temperature: 0, max_tokens: Math.min(6000, provider.maxOutputTokens) });
+    const result = await this.complete(provider, { model: session.modelId, messages: [{ role: 'system', content: 'Compress the conversation into a durable working-memory summary. Preserve user goals, decisions, facts, citations, file paths, unfinished work, and constraints. Do not add new facts.' }, { role: 'user', content: transcript }], temperature: 0, max_tokens: Math.min(6000, this.outputTokenLimit(provider, model)) });
     session.compressedSummary = result.content;
     session.compressedAt = new Date().toISOString();
     session.updatedAt = new Date().toISOString();
@@ -560,7 +618,7 @@ class RagAssistant {
   }
 
   async streamCompletion(provider, body, signal, onDelta) {
-    const url = `${provider.baseUrl}/chat/completions`;
+    const url = this.providerEndpoint(provider, 'chat/completions');
     const requestBody = { ...body, stream: true, stream_options: { include_usage: true } };
     let response = await fetch(url, { method: 'POST', headers: this.providerHeaders(provider), body: JSON.stringify(requestBody), signal });
     if (!response.ok) {
@@ -637,7 +695,7 @@ class RagAssistant {
   }
 
   async complete(provider, body, signal) {
-    const response = await fetch(`${provider.baseUrl}/chat/completions`, { method: 'POST', headers: this.providerHeaders(provider), body: JSON.stringify({ ...body, stream: false }), signal });
+    const response = await fetch(this.providerEndpoint(provider, 'chat/completions'), { method: 'POST', headers: this.providerHeaders(provider), body: JSON.stringify({ ...body, stream: false }), signal });
     const text = await response.text();
     if (!response.ok) throw new Error(`Model request failed (${response.status}): ${text.slice(0, 1600)}`);
     const payload = parseJson(text, 'Model provider returned non-JSON data.');
@@ -699,10 +757,12 @@ function publicAttachment(attachment) {
 function normalizeModel(item = {}) {
   const id = String(item.id || item.name || '');
   const lower = id.toLowerCase();
+  const defaults = inferModelTokenLimits(lower);
   return {
     id,
     name: String(item.name || item.id || ''),
-    contextWindow: positiveInteger(item.contextWindow || item.context_window, null, 128000),
+    contextWindow: positiveInteger(item.contextWindow || item.context_window || item.context_length || item.max_context_tokens || item.input_token_limit, null, defaults.contextWindow),
+    maxOutputTokens: positiveInteger(item.maxOutputTokens || item.max_output_tokens || item.output_token_limit || item.max_completion_tokens, null, defaults.maxOutputTokens),
     supportsTools: item.supportsTools === undefined ? true : Boolean(item.supportsTools),
     supportsReasoning: item.supportsReasoning === undefined ? /reason|thinking|o[1-9]|r1|deepseek/.test(lower) : Boolean(item.supportsReasoning),
     supportsVision: item.supportsVision === undefined ? /vision|gpt-4o|gpt-5|gemini|claude|vl/.test(lower) : Boolean(item.supportsVision),
@@ -711,6 +771,27 @@ function normalizeModel(item = {}) {
     supportsCompression: item.supportsCompression === undefined ? true : Boolean(item.supportsCompression),
     supportsSubagents: item.supportsSubagents === undefined ? true : Boolean(item.supportsSubagents)
   };
+}
+
+function inferModelTokenLimits(lowerId) {
+  if (/gpt-4o/.test(lowerId)) return { contextWindow: 128000, maxOutputTokens: 16384 };
+  if (/^gpt-5(?:[.\-]|$)|codex/.test(lowerId)) return { contextWindow: 400000, maxOutputTokens: 128000 };
+  return { contextWindow: DEFAULT_CONTEXT_WINDOW, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS };
+}
+
+function migrateLegacyModel(item = {}) {
+  const copy = { ...item };
+  if (Number(copy.contextWindow) === 128000 && /^gpt-5(?:[.\-]|$)/i.test(String(copy.id || copy.name || ''))) delete copy.contextWindow;
+  return normalizeModel(copy);
+}
+
+function candidateApiRoots(provider = {}) {
+  const roots = [];
+  const append = (value) => { const root = String(value || '').replace(/\/+$/, ''); if (root && !roots.includes(root)) roots.push(root); };
+  append(provider.resolvedBaseUrl);
+  append(provider.baseUrl);
+  if (provider.baseUrl && !/\/v1$/i.test(provider.baseUrl)) append(`${provider.baseUrl}/v1`);
+  return roots;
 }
 
 function normalizeBaseUrl(value) {
@@ -885,4 +966,4 @@ function truncate(value, limit) {
   return text.length > limit ? `${text.slice(0, limit)}\n...[truncated]` : text;
 }
 
-module.exports = { RagAssistant, normalizeModel };
+module.exports = { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, RagAssistant, normalizeModel };

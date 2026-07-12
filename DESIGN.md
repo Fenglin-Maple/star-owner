@@ -450,6 +450,9 @@ Provider contract:
 - arbitrary extra request headers support self-hosted gateways without hard-coding vendor rules;
 - streaming accepts SSE and providers that return ordinary JSON despite `stream: true`;
 - reasoning is displayed only from explicit provider fields such as `reasoning_content`, `reasoning`, or `thinking`.
+- provider discovery tries the configured API root and a `/v1` candidate, then persists the successful compatible root;
+- context windows and output limits are independent model-level values. Unknown modern models default to 1M/128K, while GPT-5/Codex defaults to 400K/128K; provider output limits are fallbacks only;
+- conversation history is selected backwards by the model's remaining context budget instead of a fixed message count.
 
 Model records are user-verifiable capability declarations. The app stores context window and switches for tools, reasoning, vision, audio, image output, compression, and subagents. A switch enables the corresponding request shape or UI; it does not emulate a capability absent from the upstream model.
 

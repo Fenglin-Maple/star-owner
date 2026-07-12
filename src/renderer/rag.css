@@ -245,10 +245,13 @@
 .rag-model-select-head strong { font-size: 12px; }
 .rag-model-select-head span { color: var(--muted); font-size: 10px; }
 .rag-remote-models { min-height: 0; overflow: auto; display: grid; align-content: start; gap: 5px; }
-.rag-remote-model { display: grid; grid-template-columns: 18px minmax(130px, 1fr) 92px repeat(7, 27px); gap: 7px; align-items: center; min-height: 42px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 5px; background: color-mix(in srgb, var(--row) 55%, transparent); }
+.rag-remote-model { display: grid; grid-template-columns: 18px minmax(120px, 1fr) 104px 94px repeat(7, 27px); gap: 7px; align-items: center; min-height: 46px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 5px; background: color-mix(in srgb, var(--row) 55%, transparent); }
 .rag-remote-model > input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent); }
 .rag-remote-model strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
 .rag-remote-model input[type="number"] { height: 29px; padding: 0 6px; font-size: 10px; }
+.rag-model-limit { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 4px; }
+.rag-model-limit > span { color: var(--muted); font-size: 9px; }
+.rag-model-limit > input { width: 100%; }
 .rag-model-cap-toggle { width: 27px; height: 27px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: transparent; font-size: 10px; }
 .rag-model-cap-toggle.active { color: var(--green); border-color: color-mix(in srgb, var(--green) 42%, var(--line)); background: color-mix(in srgb, var(--green) 10%, transparent); }
 

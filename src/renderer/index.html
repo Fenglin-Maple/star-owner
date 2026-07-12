@@ -525,7 +525,7 @@
                   <label class="wide"><span>Base URL</span><input id="aiModelProviderBaseUrl" placeholder="https://api.example.com/v1" /></label>
                   <label class="wide"><span>API Key</span><input id="aiModelProviderApiKey" type="password" autocomplete="off" placeholder="留空则保留已保存密钥" /></label>
                   <label><span>温度</span><input id="aiModelProviderTemperature" type="number" min="0" max="2" step="0.1" value="0.2" /></label>
-                  <label><span>最大输出 Token</span><input id="aiModelProviderMaxTokens" type="number" min="256" step="256" value="8192" /></label>
+                  <label><span>默认最大输出 Token</span><input id="aiModelProviderMaxTokens" type="number" min="256" max="1000000" step="1024" value="128000" title="模型没有单独配置时使用；与上下文窗口不同" /></label>
                   <label class="wide"><span>额外请求头 JSON</span><textarea id="aiModelProviderHeaders" rows="2" placeholder='{"X-Header":"value"}'></textarea></label>
                 </div>
                 <div class="ai-model-actions"><button id="aiModelDeleteProvider" class="secondary-button danger-button" type="button">删除</button><span></span><button id="aiModelSaveProvider" class="secondary-button" type="button">保存配置</button><button id="aiModelFetchModels" class="primary-button" type="button">拉取远程模型</button></div>
@@ -775,7 +775,7 @@
               <label class="wide"><span>Base URL</span><input id="ragProviderBaseUrl" placeholder="https://api.example.com/v1" /></label>
               <label class="wide"><span>API Key</span><input id="ragProviderApiKey" type="password" placeholder="留空则保留已保存密钥" autocomplete="off" /></label>
               <label><span>温度</span><input id="ragProviderTemperature" type="number" min="0" max="2" step="0.1" value="0.2" /></label>
-              <label><span>最大输出 Token</span><input id="ragProviderMaxTokens" type="number" min="256" step="256" value="8192" /></label>
+              <label><span>默认最大输出 Token</span><input id="ragProviderMaxTokens" type="number" min="256" max="1000000" step="1024" value="128000" title="模型没有单独配置时使用；与上下文窗口不同" /></label>
               <label class="wide"><span>额外请求头 JSON</span><textarea id="ragProviderHeaders" rows="2" placeholder='{"X-Header":"value"}'></textarea></label>
             </div>
             <div class="rag-provider-actions"><button id="ragDeleteProvider" class="secondary-button danger-button" type="button">删除</button><span></span><button id="ragSaveProvider" class="secondary-button" type="button">保存配置</button><button id="ragFetchModels" class="primary-button" type="button">拉取远程模型</button></div>

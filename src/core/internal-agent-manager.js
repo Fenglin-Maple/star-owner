@@ -456,7 +456,7 @@ class InternalAgentManager {
           { role: 'user', content: userContent }
         ],
         temperature: provider.temperature,
-        max_tokens: provider.maxOutputTokens
+        max_tokens: this.ragAssistant.outputTokenLimit?.(provider, model) || model.maxOutputTokens || provider.maxOutputTokens || 128000
       }, signal, (delta) => this.streamDelta(session.id, delta));
       this.addUsage(session, result.usage || {});
       previous = injectFrameGallery(stripMarkdownFence(result.content || ''), materials.frames);

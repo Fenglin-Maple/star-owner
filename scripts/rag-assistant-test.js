@@ -2,7 +2,7 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const { Store } = require('../src/core/store');
-const { RagAssistant } = require('../src/core/rag-assistant');
+const { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, RagAssistant, normalizeModel } = require('../src/core/rag-assistant');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -99,6 +99,7 @@ async function startFakeProvider() {
     store.upsertUser({ id: 'rag-user', mid: 'rag-user', name: '测试用户' });
     store.upsertCollection({ id: 'rag-collection', name: 'AI 收藏夹', userId: 'rag-user', userName: '测试用户' });
     store.upsertTask({ id: 'rag-task', collectionId: 'rag-collection', bvid: 'BVRAGTEST', title: '星藏家测试文档', owner: '测试 UP', status: 'done', outputMarkdown: markdown, completedAt: new Date().toISOString() });
+    store.set('ragProviders', 'legacy-provider', { id: 'legacy-provider', name: 'Legacy', type: 'openai', baseUrl: fake.url, maxOutputTokens: 8192, enabledModels: [{ id: 'gpt-5.4-mini', contextWindow: 128000 }], remoteModels: [] });
     store.commit();
 
     const events = [];
@@ -114,10 +115,17 @@ async function startFakeProvider() {
       openExternal: async () => {}
     });
 
-    const provider = assistant.saveProvider({ name: 'Fake NewAPI', type: 'newapi', baseUrl: fake.url, apiKey: 'secret' });
+    const migrated = assistant.rawProvider('legacy-provider');
+    assert(migrated.maxOutputTokens === DEFAULT_MAX_OUTPUT_TOKENS && migrated.enabledModels[0].contextWindow === 400000 && migrated.enabledModels[0].maxOutputTokens === 128000, 'legacy token defaults were not migrated');
+    assert(normalizeModel({ id: 'unknown-modern-model' }).contextWindow === DEFAULT_CONTEXT_WINDOW, 'modern default context window is incorrect');
+    store.delete('ragProviders', 'legacy-provider');
+    store.commit();
+
+    const provider = assistant.saveProvider({ name: 'Fake NewAPI', type: 'newapi', baseUrl: fake.url.replace(/\/v1$/, ''), apiKey: 'secret' });
     const remoteModels = await assistant.fetchModels(provider.id);
     assert(remoteModels.length === 2, 'remote model list was not fetched');
-    assistant.updateProviderModels(provider.id, [{ id: 'fake-agent', contextWindow: 4096, supportsTools: true, supportsReasoning: true, supportsCompression: true, supportsSubagents: true }]);
+    assert(assistant.rawProvider(provider.id).resolvedBaseUrl === fake.url, 'NewAPI /v1 endpoint was not discovered');
+    assistant.updateProviderModels(provider.id, [{ id: 'fake-agent', contextWindow: 4096, maxOutputTokens: 2048, supportsTools: true, supportsReasoning: true, supportsCompression: true, supportsSubagents: true }]);
     const session = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', knowledgeCollectionIds: ['rag-collection'] });
 
     const attachmentFile = path.join(root, 'attachment.md');
@@ -132,11 +140,19 @@ async function startFakeProvider() {
     assert(first.toolEvents[0].output.includes('星藏家测试文档'), 'knowledge retrieval did not return the selected document');
     const firstApiRequest = fake.requests.find((item) => item.stream === true);
     assert(firstApiRequest.messages.filter((item) => item.role === 'user').length === 1, 'current user message was duplicated in model history');
+    assert(firstApiRequest.max_tokens === 2048, 'model-specific output token limit was not used');
     const storedUser = store.list('ragMessages').find((item) => item.role === 'user');
     assert(!storedUser.attachments[0].extractedText && !storedUser.attachments[0].path, 'message storage duplicated private attachment content');
 
     const fallback = await assistant.send(session.id, { content: 'JSON_FALLBACK' });
     assert(fallback.content === '普通 JSON 兼容成功。' && fallback.reasoning === '普通 JSON 推理', 'non-SSE JSON fallback failed');
+
+    const historySession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: 'Long context test' });
+    for (let index = 0; index < 60; index += 1) {
+      store.set('ragMessages', `history-${index}`, { id: `history-${index}`, sessionId: historySession.id, role: index % 2 ? 'assistant' : 'user', content: `short history message ${index}`, status: 'complete', createdAt: new Date(Date.now() + index).toISOString() });
+    }
+    const longHistory = assistant.buildHistory(assistant.requireSession(historySession.id), normalizeModel({ id: 'unknown-modern-model' }));
+    assert(longHistory.length === 61, 'large-context history is still truncated to the legacy fixed message count');
 
     await assistant.send(session.id, { content: '再补一轮测试。' });
     const compacted = await assistant.compact(session.id);
