@@ -239,7 +239,7 @@
       return;
     }
     const messages = [...(session?.messages || [])];
-    if (streaming && streaming.sessionId === session?.id && !messages.some((item) => item.id === streaming.id)) messages.push(streaming);
+    if (streaming && !streaming.pending && streaming.sessionId === session?.id && !messages.some((item) => item.id === streaming.id)) messages.push(streaming);
     elements.messages.innerHTML = '';
     for (const message of messages) elements.messages.appendChild(await createMessageElement(message));
     elements.messages.scrollTop = elements.messages.scrollHeight;
@@ -257,30 +257,49 @@
 
   async function fillMessage(article, message) {
     const extras = article.querySelector('.rag-message-extras');
-    extras.innerHTML = '';
-    if (message.reasoning) {
-      const details = document.createElement('details');
-      details.className = 'rag-reasoning';
-      details.innerHTML = `<summary>模型推理流</summary><pre>${escapeHtml(message.reasoning)}</pre>`;
-      extras.appendChild(details);
-    }
-    if (message.toolEvents?.length) extras.appendChild(toolList(message.toolEvents));
-    if (message.attachments?.length) {
-      const attachments = document.createElement('div');
-      attachments.className = 'rag-pending-attachments';
-      attachments.innerHTML = message.attachments.map((item) => `<span class="rag-attachment-chip"><span>${escapeHtml(item.name)}</span></span>`).join('');
-      extras.appendChild(attachments);
+    const extrasSignature = JSON.stringify({ reasoning: message.reasoning || '', tools: message.toolEvents || [], attachments: message.attachments || [] });
+    if (article.ragExtrasSignature !== extrasSignature) {
+      article.ragExtrasSignature = extrasSignature;
+      extras.innerHTML = '';
+      if (message.reasoning) {
+        const details = document.createElement('details');
+        details.className = 'rag-reasoning';
+        details.innerHTML = `<summary>模型推理流</summary><pre>${escapeHtml(message.reasoning)}</pre>`;
+        extras.appendChild(details);
+      }
+      if (message.toolEvents?.length) extras.appendChild(await toolList(message.toolEvents, message.sessionId));
+      if (message.attachments?.length) {
+        const attachments = document.createElement('div');
+        attachments.className = 'rag-pending-attachments';
+        attachments.innerHTML = message.attachments.map((item) => `<span class="rag-attachment-chip"><span>${escapeHtml(item.name)}</span></span>`).join('');
+        extras.appendChild(attachments);
+      }
     }
     const content = article.querySelector('.rag-message-content');
     if (message.error) content.textContent = message.error;
-    else content.innerHTML = await window.orchestrator.ragRenderMarkdown(message.content || '');
+    else content.innerHTML = await window.orchestrator.ragRenderMarkdown(message.content || '', message.sessionId);
     if (message.status === 'streaming') content.insertAdjacentHTML('beforeend', '<span class="rag-stream-caret"></span>');
   }
 
-  function toolList(tools) {
+  async function toolList(tools, sessionId) {
     const list = document.createElement('div');
     list.className = 'rag-tool-list';
-    list.innerHTML = tools.map((item) => `<div class="rag-tool-event ${escapeAttr(item.status || 'running')}"><i></i><span>${escapeHtml(toolLabel(item.name))}</span><time>${escapeHtml(item.status || 'running')}</time></div>`).join('');
+    for (const item of tools) {
+      const event = document.createElement('div');
+      event.className = `rag-tool-event ${item.status || 'running'}`;
+      event.innerHTML = `<div class="rag-tool-event-head"><i></i><span>${escapeHtml(toolLabel(item.name))}</span><time>${escapeHtml(toolStatus(item.status))}</time></div>`;
+      if (item.images?.length) {
+        const gallery = document.createElement('div');
+        gallery.className = 'rag-tool-images';
+        for (const image of item.images) {
+          const figure = document.createElement('figure');
+          figure.innerHTML = `${await window.orchestrator.ragRenderMarkdown(`![${image.alt || image.name || '知识库原图'}](${image.uri})`, sessionId)}<figcaption>${escapeHtml(image.alt || image.name || `图片 ${image.index}`)}</figcaption>`;
+          gallery.appendChild(figure);
+        }
+        event.appendChild(gallery);
+      }
+      list.appendChild(event);
+    }
     return list;
   }
 
@@ -338,7 +357,7 @@
     elements.input.value = '';
     autoGrowInput();
     pendingAttachments = [];
-    streaming = { id: `stream-${Date.now()}`, sessionId: activeSessionId, role: 'assistant', content: '', reasoning: '', toolEvents: [], status: 'streaming', createdAt: new Date().toISOString() };
+    streaming = { id: `pending-${Date.now()}`, sessionId: activeSessionId, role: 'assistant', content: '', reasoning: '', toolEvents: [], status: 'streaming', pending: true, createdAt: new Date().toISOString() };
     setGenerating(true, '正在连接模型');
     renderPendingAttachments();
     try {
@@ -525,7 +544,9 @@
       if (state.activeSession && !state.activeSession.messages.some((item) => item.id === event.message.id)) state.activeSession.messages.push(event.message);
       renderMessages();
     } else if (event.type === 'assistant-start') {
-      streaming = { id: event.messageId, sessionId: event.sessionId, role: 'assistant', content: '', reasoning: '', toolEvents: [], status: 'streaming', createdAt: new Date().toISOString() };
+      const previousId = streaming?.id;
+      if (previousId && previousId !== event.messageId) elements.messages.querySelector(`[data-message-id="${cssEscape(previousId)}"]`)?.remove();
+      streaming = { id: event.messageId, sessionId: event.sessionId, role: 'assistant', content: '', reasoning: '', toolEvents: [], status: 'streaming', pending: false, createdAt: new Date().toISOString() };
       setGenerating(true, '模型正在思考');
       scheduleStreamRender();
     } else if (event.type === 'assistant-delta' && streaming) {
@@ -694,7 +715,8 @@
   function providerName(id) { return state.providers.find((item) => item.id === id)?.name || '未配置供应商'; }
   function groupBy(items, key) { const map = new Map(); for (const item of items || []) { const value = key(item); if (!map.has(value)) map.set(value, []); map.get(value).push(item); } return map; }
   function mergeModels(...lists) { const map = new Map(); for (const item of lists.flat()) map.set(item.id, { ...(map.get(item.id) || {}), ...item }); return [...map.values()].sort((a, b) => String(a.id).localeCompare(String(b.id))); }
-  function toolLabel(name) { return ({ knowledge_search: '检索知识库', list_files: '列出文件', read_file: '读取文件', write_file: '写入文件', run_command: '执行 CMD', web_search: '联网搜索', browse_url: '读取网页', open_browser: '打开浏览器', spawn_subagent: '调用子 Agent' })[name] || name || '工具'; }
+  function toolLabel(name) { return ({ knowledge_search: '检索知识库', knowledge_list_documents: '列出知识库原文', knowledge_read_document: '读取原始 Markdown', knowledge_view_images: '查看知识库原图', list_files: '列出文件', read_file: '读取文件', write_file: '写入文件', run_command: '执行 CMD', web_search: '联网搜索', browse_url: '读取网页', open_browser: '打开浏览器', spawn_subagent: '调用子 Agent' })[name] || name || '工具'; }
+  function toolStatus(status) { return ({ running: '进行中', succeeded: '已完成', failed: '失败' })[status] || status || '进行中'; }
   function formatNumber(value) { return new Intl.NumberFormat('zh-CN', { notation: Number(value) > 999999 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(Number(value || 0)); }
   function formatTime(value) { const date = new Date(value || Date.now()); return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(date); }
   function relativeTime(value) { const delta = Date.now() - new Date(value || 0).getTime(); if (!Number.isFinite(delta)) return ''; if (delta < 60000) return '刚刚'; if (delta < 3600000) return `${Math.floor(delta / 60000)} 分钟`; if (delta < 86400000) return `${Math.floor(delta / 3600000)} 小时`; return `${Math.floor(delta / 86400000)} 天`; }

@@ -46,7 +46,7 @@ contextBridge.exposeInMainWorld('orchestrator', {
   ragCreateSandbox: () => ipcRenderer.invoke('rag:create-sandbox'),
   ragImportAttachments: (sessionId) => ipcRenderer.invoke('rag:attachments-import', sessionId),
   ragResolveApproval: (payload) => ipcRenderer.invoke('rag:approval-resolve', payload),
-  ragRenderMarkdown: (markdown) => ipcRenderer.invoke('rag:render-markdown', markdown),
+  ragRenderMarkdown: (markdown, sessionId) => ipcRenderer.invoke('rag:render-markdown', { markdown, sessionId }),
   internalAgentState: () => ipcRenderer.invoke('internal-agent:state'),
   internalAgentCreateCollection: (name) => ipcRenderer.invoke('internal-agent:collection-create', name),
   internalAgentCreateSession: (payload) => ipcRenderer.invoke('internal-agent:session-create', payload),

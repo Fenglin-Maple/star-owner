@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
+const MarkdownIt = require('markdown-it');
 const pdf = require('pdf-parse');
 const mammoth = require('mammoth');
 const { isPrivateNetworkHost, parseHttpUrl } = require('./network-policy');
@@ -23,6 +24,7 @@ const MIME_TYPES = {
 const TOKEN_CONFIG_VERSION = 2;
 const DEFAULT_CONTEXT_WINDOW = 1000000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 128000;
+const knowledgeMarkdownParser = new MarkdownIt({ html: false, linkify: false, typographer: false });
 
 class RagAssistant {
   constructor({ store, workspaceRoot, encryptSecret, decryptSecret, emit, requestApproval, browseHidden, openExternal }) {
@@ -396,11 +398,18 @@ class RagAssistant {
         toolEvents.push(event);
         this.emit({ type: 'tool', sessionId: session.id, messageId: assistantId, tool: event });
         try {
-          const output = await this.executeTool(session, model, call, signal);
+          const outcome = normalizeToolResult(await this.executeTool(session, model, call, signal));
           event.status = 'succeeded';
-          event.output = truncate(output, 30000);
+          event.output = truncate(outcome.text, 30000);
+          if (outcome.images.length) event.images = outcome.images;
           event.finishedAt = new Date().toISOString();
-          apiMessages.push({ role: 'tool', tool_call_id: call.id, content: event.output });
+          apiMessages.push({ role: 'tool', tool_call_id: call.id, content: truncate(outcome.text, 200000) });
+          if (outcome.visionParts.length) {
+            apiMessages.push({
+              role: 'user',
+              content: [{ type: 'text', text: 'The desktop application attached the original knowledge-base images requested by the preceding tool call. Inspect these pixels as source material; they are not a new user question.' }, ...outcome.visionParts]
+            });
+          }
         } catch (error) {
           event.status = 'failed';
           event.output = error.message || String(error);
@@ -420,6 +429,8 @@ class RagAssistant {
     const system = [
       'You are the built-in RAG assistant of 星藏家. Help the user inspect, compare, organize, and analyze their accepted Bilibili Markdown knowledge library.',
       'Use knowledge_search before making claims about selected local libraries. Cite the source title and collection in the answer. Never fabricate missing facts.',
+      model.supportsTools ? 'You can inspect selected knowledge without summarization: use knowledge_list_documents to discover document ids, knowledge_read_document to read the exact original Markdown in line ranges, and knowledge_view_images to inspect original local images when vision is enabled.' : '',
+      model.supportsTools && model.supportsVision ? 'When an inspected knowledge image is useful to the user, include the exact star-rag-image URI returned by knowledge_view_images in Markdown image syntax so the desktop app can display it. Do not claim that only an index is available.' : '',
       `Your working sandbox is: ${session.sandboxDir}`,
       session.permissionMode === 'full' ? 'The user enabled full filesystem and command access.' : 'You have restricted access. Operations outside the sandbox or command execution require explicit user approval.',
       session.knowledgeCollectionIds.length ? `Selected collection ids: ${session.knowledgeCollectionIds.join(', ')}` : 'No local knowledge collection is selected.',
@@ -472,7 +483,14 @@ class RagAssistant {
       tool('browse_url', 'Read a public HTTP(S) page with the built-in invisible browser.', { url: { type: 'string' } }, ['url']),
       tool('open_browser', 'Open an HTTP(S) URL in the user default browser.', { url: { type: 'string' } }, ['url'])
     ];
-    if (session.knowledgeCollectionIds.length) tools.unshift(tool('knowledge_search', 'Search selected local Markdown knowledge libraries. Use this before answering library-specific questions.', { query: { type: 'string' }, limit: { type: 'integer' } }, ['query']));
+    if (session.knowledgeCollectionIds.length) {
+      tools.unshift(
+        tool('knowledge_list_documents', 'List original Markdown documents in the selected libraries. Returns stable document ids for exact reading and image inspection.', { query: { type: 'string' }, offset: { type: 'integer' }, limit: { type: 'integer' } }),
+        tool('knowledge_read_document', 'Read an exact, unsummarized line range from one original Markdown document. Call again with next_start_line until complete.', { document_id: { type: 'string' }, start_line: { type: 'integer' }, line_count: { type: 'integer' } }, ['document_id']),
+        tool('knowledge_search', 'Search selected local Markdown knowledge libraries. Results include document ids; use knowledge_read_document when exact wording or complete context matters.', { query: { type: 'string' }, limit: { type: 'integer' } }, ['query'])
+      );
+      if (model.supportsVision) tools.unshift(tool('knowledge_view_images', 'Load original local images from a selected Markdown document into this multimodal conversation. Returns safe image URIs that can be embedded in the answer.', { document_id: { type: 'string' }, image_indices: { type: 'array', items: { type: 'integer' }, maxItems: 4 } }, ['document_id']));
+    }
     if (model.supportsSubagents) tools.push(tool('spawn_subagent', 'Delegate one focused research or analysis subtask to an isolated call of the current model.', { task: { type: 'string' } }, ['task']));
     return tools;
   }
@@ -480,6 +498,9 @@ class RagAssistant {
   async executeTool(session, model, call, signal) {
     const args = parseJson(call.arguments || '{}', `Invalid arguments for ${call.name}.`);
     if (call.name === 'knowledge_search') return this.searchKnowledge(session, args.query, args.limit);
+    if (call.name === 'knowledge_list_documents') return this.listKnowledgeDocuments(session, args.query, args.offset, args.limit);
+    if (call.name === 'knowledge_read_document') return this.readKnowledgeDocument(session, args.document_id, args.start_line, args.line_count);
+    if (call.name === 'knowledge_view_images') return this.viewKnowledgeImages(session, model, args.document_id, args.image_indices);
     if (call.name === 'list_files') {
       const target = await this.authorizePath(session, args.path || '.', 'list directory');
       return fs.readdirSync(target, { withFileTypes: true }).slice(0, 300).map((item) => `${item.isDirectory() ? '[dir]' : '[file]'} ${item.name}`).join('\n');
@@ -582,7 +603,117 @@ class RagAssistant {
     const wanted = Math.max(1, Math.min(20, Number(limit) || 8));
     const results = scored.sort((a, b) => b.score - a.score).slice(0, wanted);
     if (!results.length) return `No matching passages found across ${tasks.length} selected documents.`;
-    return results.map((item, index) => `[#${index + 1}] User: ${item.collection?.userName || '-'} | Collection: ${item.collection?.name || '-'} | Title: ${item.task.title || item.task.bvid}\nBVID: ${item.task.bvid || '-'}\n${item.chunk}`).join('\n\n---\n\n');
+    return results.map((item, index) => `[#${index + 1}] Document ID: ${item.task.id}\nUser: ${item.collection?.userName || '-'} | Collection: ${item.collection?.name || '-'} | Title: ${item.task.title || item.task.bvid}\nBVID: ${item.task.bvid || '-'}\n${item.chunk}`).join('\n\n---\n\n');
+  }
+
+  listKnowledgeDocuments(session, query = '', offset = 0, limit = 50) {
+    const terms = queryTerms(String(query || ''));
+    const collections = new Map(this.store.listCollections().map((item) => [item.id, item]));
+    const all = this.knowledgeTasks(session).filter((task) => {
+      if (!terms.length) return true;
+      const collection = collections.get(task.collectionId);
+      const value = `${task.id} ${task.bvid || ''} ${task.title || ''} ${task.owner || ''} ${collection?.name || ''}`.toLowerCase();
+      return terms.every((term) => value.includes(term));
+    });
+    const start = Math.max(0, Number(offset) || 0);
+    const count = Math.max(1, Math.min(200, Number(limit) || 50));
+    const page = all.slice(start, start + count);
+    const rows = page.map((task, index) => {
+      const collection = collections.get(task.collectionId);
+      return `[${start + index + 1}] Document ID: ${task.id}\nTitle: ${task.title || task.bvid} | BVID: ${task.bvid || '-'} | UP: ${task.owner || '-'}\nUser: ${collection?.userName || '-'} | Collection: ${collection?.name || '-'}`;
+    });
+    return `Selected documents: ${all.length}. Showing ${page.length} from offset ${start}.\n\n${rows.join('\n\n') || 'No matching documents.'}`;
+  }
+
+  readKnowledgeDocument(session, documentId, startLine = 1, lineCount = 300) {
+    const task = this.requireKnowledgeDocument(session, documentId);
+    const source = fs.readFileSync(task.outputMarkdown, 'utf8');
+    const lines = source.match(/[^\n]*\n|[^\n]+$/g) || [];
+    const start = Math.max(1, Number(startLine) || 1);
+    const wanted = Math.max(1, Math.min(2000, Number(lineCount) || 300));
+    let selected = lines.slice(start - 1, start - 1 + wanted).join('');
+    if (selected.length > 200000) selected = selected.slice(0, 200000);
+    const consumedLines = (selected.match(/\n/g) || []).length + (selected && !selected.endsWith('\n') ? 1 : 0);
+    const end = Math.min(lines.length, start - 1 + consumedLines);
+    const next = end < lines.length ? end + 1 : null;
+    return [
+      `Document ID: ${task.id}`,
+      `Title: ${task.title || task.bvid}`,
+      `BVID: ${task.bvid || '-'}`,
+      `Exact original Markdown lines ${start}-${end} of ${lines.length}.`,
+      next ? `next_start_line: ${next}` : 'End of document.',
+      '\n--- RAW MARKDOWN START ---\n',
+      selected,
+      '\n--- RAW MARKDOWN END ---'
+    ].join('\n');
+  }
+
+  viewKnowledgeImages(session, model, documentId, imageIndices = []) {
+    if (!model.supportsVision) throw new Error('The selected model is not configured for vision input.');
+    const task = this.requireKnowledgeDocument(session, documentId);
+    const images = this.knowledgeDocumentImages(task);
+    if (!images.length) return 'This Markdown document has no readable local images.';
+    const requested = Array.isArray(imageIndices) && imageIndices.length ? imageIndices : images.slice(0, 4).map((_, index) => index + 1);
+    const indices = [...new Set(requested.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value >= 1 && value <= images.length))].slice(0, 4);
+    if (!indices.length) throw new Error(`No valid image index was supplied. This document has ${images.length} local images.`);
+    const selected = indices.map((value) => ({ ...images[value - 1], index: value, uri: knowledgeImageUri(task.id, value) }));
+    return {
+      text: [
+        `Loaded ${selected.length} original image(s) from document ${task.id} (${task.title || task.bvid}) into the multimodal request.`,
+        `The document contains ${images.length} readable local image(s).`,
+        ...selected.map((item) => `[Image ${item.index}] ${item.alt || item.name}\nDisplay URI: ${item.uri}`),
+        'Inspect the pixels directly. To show an image to the user, copy its Display URI exactly into Markdown image syntax: ![description](Display URI)'
+      ].join('\n\n'),
+      images: selected.map((item) => ({ index: item.index, name: item.name, alt: item.alt, uri: item.uri })),
+      visionParts: selected.map((item) => ({ type: 'image_url', image_url: { url: `data:${item.mimeType};base64,${fs.readFileSync(item.path).toString('base64')}` } }))
+    };
+  }
+
+  knowledgeTasks(session) {
+    const selected = new Set(session.knowledgeCollectionIds || []);
+    return this.store.listTasks().filter((task) => selected.has(task.collectionId) && task.status === 'done' && task.outputMarkdown && fs.existsSync(task.outputMarkdown));
+  }
+
+  requireKnowledgeDocument(session, documentId) {
+    const task = this.knowledgeTasks(session).find((item) => String(item.id) === String(documentId || ''));
+    if (!task) throw new Error('The requested document is not available in this session\'s selected knowledge libraries.');
+    return task;
+  }
+
+  knowledgeDocumentImages(task) {
+    const markdown = fs.readFileSync(task.outputMarkdown, 'utf8');
+    const sources = [];
+    for (const token of knowledgeMarkdownParser.parse(markdown, {})) {
+      for (const child of token.children || []) {
+        if (child.type === 'image') sources.push({ src: child.attrGet('src') || '', alt: child.content || '' });
+      }
+    }
+    const root = path.resolve(path.dirname(task.outputMarkdown));
+    const seen = new Set();
+    const images = [];
+    for (const item of sources) {
+      if (!item.src || /^[a-z][a-z0-9+.-]*:/i.test(item.src) || item.src.startsWith('#')) continue;
+      let decoded;
+      try { decoded = decodeURIComponent(item.src.split('#')[0].split('?')[0]); } catch { continue; }
+      const target = path.resolve(root, decoded);
+      const extension = path.extname(target).toLowerCase();
+      const mimeType = MIME_TYPES[extension] || '';
+      if (!isInside(root, target) || !mimeType.startsWith('image/') || !fs.existsSync(target) || seen.has(target)) continue;
+      const stat = fs.statSync(target);
+      if (!stat.isFile() || stat.size > 15 * 1024 * 1024 || !isInside(realPath(root), realPath(target))) continue;
+      seen.add(target);
+      images.push({ path: target, name: path.basename(target), alt: item.alt, mimeType, size: stat.size });
+    }
+    return images;
+  }
+
+  resolveKnowledgeImage(sessionId, value) {
+    const parsed = parseKnowledgeImageUri(value);
+    const session = this.requireSession(sessionId);
+    const task = this.requireKnowledgeDocument(session, parsed.documentId);
+    const image = this.knowledgeDocumentImages(task)[parsed.index - 1];
+    if (!image) throw new Error('Knowledge image does not exist.');
+    return image.path;
   }
 
   documentChunks(file) {
@@ -844,6 +975,29 @@ function normalizeContent(value) {
 
 function tool(name, description, properties, required = []) {
   return { type: 'function', function: { name, description, parameters: { type: 'object', properties, required, additionalProperties: false } } };
+}
+
+function normalizeToolResult(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { text: String(value ?? ''), images: [], visionParts: [] };
+  return {
+    text: String(value.text ?? JSON.stringify(value)),
+    images: Array.isArray(value.images) ? value.images : [],
+    visionParts: Array.isArray(value.visionParts) ? value.visionParts : []
+  };
+}
+
+function knowledgeImageUri(documentId, index) {
+  return `star-rag-image://local/${encodeURIComponent(String(documentId))}/${Number(index)}`;
+}
+
+function parseKnowledgeImageUri(value) {
+  const url = new URL(String(value || ''));
+  if (url.protocol !== 'star-rag-image:' || url.hostname !== 'local') throw new Error('Invalid knowledge image URI.');
+  const parts = url.pathname.split('/').filter(Boolean);
+  const documentId = decodeURIComponent(parts[0] || '');
+  const index = Number(parts[1]);
+  if (!documentId || !Number.isInteger(index) || index < 1) throw new Error('Invalid knowledge image URI.');
+  return { documentId, index };
 }
 
 function toApiToolCall(call) {

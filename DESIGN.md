@@ -461,14 +461,16 @@ Knowledge retrieval:
 - catalog only `done` tasks whose accepted Markdown path still exists;
 - group collections by Bilibili user and allow multiple collections per session;
 - split Markdown by headings and bounded character windows, cache by file modification time, and rank passages with title-aware lexical matching;
-- inject retrieved passages before inference when tools are disabled, or expose `knowledge_search` when tools are enabled;
+- inject retrieved passages before inference when tools are disabled, or expose `knowledge_search`, `knowledge_list_documents`, and paged `knowledge_read_document` when tools are enabled;
+- preserve exact original Markdown for document reads rather than reconstructing it from index chunks. Line ranges and a `next_start_line` cursor let the model inspect large files without forcing an entire collection into one context;
+- when vision is enabled, `knowledge_view_images` resolves only local images referenced by a selected accepted document, sends up to four originals as multimodal `image_url` parts, and returns session-scoped display URIs. Tool history shows viewed images and answers may embed the same safe URIs;
 - require the model system prompt to cite source title and collection and avoid claims not present in results.
 
 Conversation state persists in SQLite. Each session stores provider/model selection, selected collections, sandbox, permission mode, system prompt, token totals, and optional compressed summary. Messages store visible attachment metadata but not duplicate attachment bodies. Text/PDF/DOCX extraction and media files live in the session sandbox. Per-model accounting consumes provider usage fields when present and falls back to a clearly approximate character estimate.
 
 The session settings inspector is modal rather than permanently occupying chat width. It contains title, provider/model, capability, knowledge, sandbox, permission, and usage controls. The compact composer selectors update the same persisted provider/model fields, so switching from either surface remains synchronized. Each provider owns an independent multi-select enabled-model list; sessions reference one provider and one enabled model at a time.
 
-The tool loop permits at most six model/tool rounds per user turn. Supported tools cover knowledge search, sandbox file list/read/write, Windows CMD, hidden-browser web search/page reading, opening the default browser, and an isolated same-model subagent call. Tool calls, reasoning deltas, content deltas, completion state, and errors stream to the renderer. Cancellation aborts the active provider request and command child process.
+The tool loop permits at most six model/tool rounds per user turn. Supported tools cover knowledge search, exact source reads, multimodal source-image inspection, sandbox file list/read/write, Windows CMD, hidden-browser web search/page reading, opening the default browser, and an isolated same-model subagent call. Tool calls, reasoning deltas, content deltas, completion state, and errors stream to the renderer. The renderer creates its assistant row only after the main process assigns the durable message id, preventing a temporary request placeholder from appearing as a second response. Cancellation aborts the active provider request and command child process.
 
 Security model:
 

@@ -58,6 +58,12 @@ async function startFakeProvider() {
       response.end(JSON.stringify({ choices: [{ message: { reasoning_content: '普通 JSON 推理', content: '普通 JSON 兼容成功。' } }], usage: { prompt_tokens: 9, completion_tokens: 6, total_tokens: 15 } }));
       return;
     }
+    if (userText.includes('IMAGE_TEST') && !toolResult) {
+      sse(response, [
+        { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-image', type: 'function', function: { name: 'knowledge_view_images', arguments: '{"document_id":"rag-task","image_indices":[1]}' } }] } }] }
+      ]);
+      return;
+    }
     if (toolResult) {
       sse(response, [
         { choices: [{ delta: { content: '根据本地知识库，' } }] },
@@ -96,6 +102,9 @@ async function startFakeProvider() {
     const store = await Store.open(path.join(root, 'rag-test.sqlite'));
     const markdown = path.join(root, 'knowledge.md');
     fs.writeFileSync(markdown, '# 星藏家测试文档\n\nRAG 助手可以检索收藏夹中的 Markdown 内容。\n', 'utf8');
+    const knowledgeImage = path.join(root, 'frame.png');
+    fs.writeFileSync(knowledgeImage, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'));
+    fs.appendFileSync(markdown, '\n![测试关键帧](frame.png)\n', 'utf8');
     store.upsertUser({ id: 'rag-user', mid: 'rag-user', name: '测试用户' });
     store.upsertCollection({ id: 'rag-collection', name: 'AI 收藏夹', userId: 'rag-user', userName: '测试用户' });
     store.upsertTask({ id: 'rag-task', collectionId: 'rag-collection', bvid: 'BVRAGTEST', title: '星藏家测试文档', owner: '测试 UP', status: 'done', outputMarkdown: markdown, completedAt: new Date().toISOString() });
@@ -125,7 +134,7 @@ async function startFakeProvider() {
     const remoteModels = await assistant.fetchModels(provider.id);
     assert(remoteModels.length === 2, 'remote model list was not fetched');
     assert(assistant.rawProvider(provider.id).resolvedBaseUrl === fake.url, 'NewAPI /v1 endpoint was not discovered');
-    assistant.updateProviderModels(provider.id, [{ id: 'fake-agent', contextWindow: 4096, maxOutputTokens: 2048, supportsTools: true, supportsReasoning: true, supportsCompression: true, supportsSubagents: true }]);
+    assistant.updateProviderModels(provider.id, [{ id: 'fake-agent', contextWindow: 4096, maxOutputTokens: 2048, supportsTools: true, supportsReasoning: true, supportsVision: true, supportsCompression: true, supportsSubagents: true }]);
     const session = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', knowledgeCollectionIds: ['rag-collection'] });
 
     const attachmentFile = path.join(root, 'attachment.md');
@@ -143,6 +152,17 @@ async function startFakeProvider() {
     assert(firstApiRequest.max_tokens === 2048, 'model-specific output token limit was not used');
     const storedUser = store.list('ragMessages').find((item) => item.role === 'user');
     assert(!storedUser.attachments[0].extractedText && !storedUser.attachments[0].path, 'message storage duplicated private attachment content');
+
+    const documentList = assistant.listKnowledgeDocuments(assistant.requireSession(session.id));
+    assert(documentList.includes('Document ID: rag-task'), 'knowledge document ids were not listed');
+    const exactDocument = assistant.readKnowledgeDocument(assistant.requireSession(session.id), 'rag-task', 1, 20);
+    assert(exactDocument.includes('RAG 助手可以检索收藏夹中的 Markdown 内容。'), 'exact original Markdown could not be read');
+    const imageReply = await assistant.send(session.id, { content: 'IMAGE_TEST' });
+    assert(imageReply.toolEvents[0]?.name === 'knowledge_view_images' && imageReply.toolEvents[0]?.images?.length === 1, 'knowledge image tool did not expose a displayable original image');
+    const imageRequest = [...fake.requests].reverse().find((item) => item.messages?.some((message) => Array.isArray(message.content) && message.content.some((part) => part.type === 'image_url')));
+    assert(imageRequest, 'original knowledge image was not sent as multimodal model input');
+    const imageUri = imageReply.toolEvents[0].images[0].uri;
+    assert(assistant.resolveKnowledgeImage(session.id, imageUri) === knowledgeImage, 'safe knowledge image URI did not resolve to the original file');
 
     const fallback = await assistant.send(session.id, { content: 'JSON_FALLBACK' });
     assert(fallback.content === '普通 JSON 兼容成功。' && fallback.reasoning === '普通 JSON 推理', 'non-SSE JSON fallback failed');
@@ -168,7 +188,7 @@ async function startFakeProvider() {
 
     const state = assistant.state(session.id);
     assert(state.knowledgeCatalog[0]?.documentCount === 1, 'knowledge catalog classification failed');
-    assert(state.modelUsage[0]?.requests === 4, 'per-model request count is incorrect');
+    assert(state.modelUsage[0]?.requests === 5, 'per-model request count is incorrect');
     assert(events.some((item) => item.type === 'assistant-delta') && events.some((item) => item.type === 'tool'), 'stream events were not emitted');
     console.log('RAG assistant integration test passed.');
   } finally {

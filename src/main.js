@@ -633,7 +633,7 @@ ipcMain.handle('rag:approval-resolve', async (_event, payload = {}) => {
   return { resolved: true };
 });
 
-ipcMain.handle('rag:render-markdown', async (_event, markdown) => markdownRenderer.render(String(markdown || '')));
+ipcMain.handle('rag:render-markdown', async (_event, payload = {}) => renderRagMarkdown(payload?.markdown, payload?.sessionId));
 
 ipcMain.handle('internal-agent:state', async () => internalAgentManager ? internalAgentManager.state() : { providers: [], sessions: [], collections: [], internalCollections: [] });
 
@@ -898,4 +898,26 @@ function renderMarkdownPreview(markdown, sourceFile) {
   const withoutFrontMatter = String(markdown || '').replace(/^---\s*\r?\n[\s\S]*?\r?\n---\s*\r?\n/, '');
   const content = promoteMindMap(withoutFrontMatter);
   return renderer.render(content);
+}
+
+function renderRagMarkdown(markdown, sessionId) {
+  const renderer = new MarkdownIt({ html: false, linkify: true, typographer: false });
+  const defaultImage = renderer.renderer.rules.image;
+  renderer.renderer.rules.image = (tokens, index, options, env, self) => {
+    const token = tokens[index];
+    const src = token.attrGet('src') || '';
+    if (src.startsWith('star-rag-image:')) {
+      try {
+        const imagePath = ragAssistant?.resolveKnowledgeImage(String(sessionId || ''), src);
+        if (!imagePath) throw new Error('Knowledge image is unavailable.');
+        token.attrSet('src', pathToFileURL(imagePath).href);
+        token.attrSet('data-knowledge-image', 'true');
+      } catch {
+        token.attrSet('src', '');
+        token.attrSet('alt', `${token.attrGet('alt') || '知识库图片'}（不可用）`);
+      }
+    }
+    return defaultImage(tokens, index, options, env, self);
+  };
+  return renderer.render(String(markdown || ''));
 }
