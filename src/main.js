@@ -329,7 +329,7 @@ ipcMain.handle('store:snapshot', async () => {
   return {
     users: store.list('users'),
     collections: store.listCollections(),
-    tasks: store.listTasks(),
+    tasks: buildTaskSnapshot(store),
     tools: store.listTools(),
     toolRuns: store.listToolRuns(),
     workspaces: store.listWorkspaces(),
@@ -805,6 +805,40 @@ function publishEvent(event) {
   const record = { createdAt: new Date().toISOString(), ...event };
   if (store && event.type !== 'collection-sync-progress') store.recordActivity(record);
   mainWindow?.webContents.send('app:event', record);
+}
+
+function buildTaskSnapshot(activeStore) {
+  return activeStore.listTasks().map((task) => task.status === 'done'
+    ? { ...task, displayCover: resolveTaskDisplayCover(task) }
+    : task);
+}
+
+function resolveTaskDisplayCover(task) {
+  const artifactDir = path.resolve(task.artifactDir || path.dirname(task.outputMarkdown || '.'));
+  let info = {};
+  try { info = JSON.parse(fs.readFileSync(path.join(artifactDir, 'info.json'), 'utf8')); } catch {}
+  const localCandidates = [task.coverFile, info.coverFile].filter(Boolean).map((value) => {
+    const text = String(value);
+    return path.isAbsolute(text) ? text : path.join(artifactDir, text);
+  });
+  try {
+    for (const name of fs.readdirSync(artifactDir)) {
+      if (/^(cover|thumbnail|poster)\.(jpe?g|png|webp|avif)$/i.test(name)) localCandidates.push(path.join(artifactDir, name));
+    }
+    const framesDir = path.join(artifactDir, 'frames');
+    if (fs.existsSync(framesDir)) {
+      const frame = fs.readdirSync(framesDir).find((name) => /\.(jpe?g|png|webp)$/i.test(name));
+      if (frame) localCandidates.push(path.join(framesDir, frame));
+    }
+  } catch {}
+  const local = localCandidates.find((file) => {
+    try { return fs.statSync(file).isFile(); } catch { return false; }
+  });
+  if (local) return pathToFileURL(local).href;
+  const remote = String(task.cover || info.pic || info.thumbnail || '');
+  if (remote.startsWith('//')) return `https:${remote}`;
+  if (remote.startsWith('http://')) return `https://${remote.slice('http://'.length)}`;
+  return /^https:\/\//i.test(remote) ? remote : '';
 }
 
 function publishInternalAgentEvent(event) {

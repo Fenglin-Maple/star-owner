@@ -3,14 +3,16 @@ const path = require('path');
 const { execFile, spawn, spawnSync } = require('child_process');
 const { promisify } = require('util');
 const { AsrService } = require('./asr-service');
+const { isVideoUnavailableMessage, videoUnavailableError } = require('./media-errors');
 const { ResourceScheduler } = require('./resource-scheduler');
 const { abortTaskAttempt } = require('./task-attempt');
+const { removeUnavailableTask } = require('./unavailable-task');
 const { PROJECT_ROOT, assertInside, ensureDir, safeName } = require('./workspace');
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_STATUSES = new Set(['queued', 'running']);
-const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'timeout']);
+const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'timeout', 'skipped']);
 const DEFAULT_CONFIG = Object.freeze({
   cpuAsrEnabled: false,
   asrModel: 'medium',
@@ -267,7 +269,20 @@ class ToolRunner {
       if (state.cancelled || error.code === 'RUN_CANCELLED' || error.code === 'SCHEDULER_CANCELLED') {
         return this.finishRun(state, 'cancelled', { signal: 'CANCELLED', error: 'Cancelled by caller.' });
       }
-      const status = error.code === 'TOOL_TIMEOUT' ? 'timeout' : 'failed';
+      if (error.code === 'BILIBILI_VIDEO_UNAVAILABLE' || isVideoUnavailableMessage(error.message)) {
+        const terminalError = error.code === 'BILIBILI_VIDEO_UNAVAILABLE' ? error : videoUnavailableError(error.message);
+        const removal = removeUnavailableTask({
+          store: this.store,
+          toolRunner: this,
+          taskId: task.id,
+          reason: terminalError.message,
+          source: 'tool-runner',
+          excludeRunId: run.id
+        });
+        this.publish({ type: 'video-unavailable', taskId: task.id, collectionId: task.collectionId, bvid: task.bvid, reason: terminalError.message, removed: removal.removed });
+        error = terminalError;
+      }
+      const status = error.code === 'BILIBILI_VIDEO_UNAVAILABLE' ? 'skipped' : (error.code === 'TOOL_TIMEOUT' ? 'timeout' : 'failed');
       const finished = this.finishRun(state, status, {
         signal: status === 'timeout' ? 'TIMEOUT' : '',
         error: error.message || String(error),
@@ -293,6 +308,7 @@ class ToolRunner {
           await this.runChild(state, args, run.timeoutMs);
         } catch (error) {
           if (state.cancelled || error.code === 'TOOL_TIMEOUT') throw error;
+          if (error.code === 'BILIBILI_VIDEO_UNAVAILABLE' || isVideoUnavailableMessage(error.message)) throw videoUnavailableError(error.message);
           state.warnings.push(`${label}: ${error.message}`);
           this.appendLog(run.id, `[warning] ${label} failed: ${error.message}\n`);
         }
@@ -323,7 +339,13 @@ class ToolRunner {
 
   async runAsrStage(state, run) {
     const audioFile = path.join(run.artifactDir, 'audio', 'audio.wav');
-    if (!fs.existsSync(audioFile)) throw new Error(`ASR audio is missing: ${audioFile}`);
+    if (!fs.existsSync(audioFile)) {
+      let manifest = {};
+      try { manifest = JSON.parse(fs.readFileSync(path.join(run.artifactDir, 'manifest.json'), 'utf8')); } catch {}
+      const context = [...(state.warnings || []), ...(manifest.warnings || [])].join('\n');
+      if (isVideoUnavailableMessage(context)) throw videoUnavailableError(context);
+      throw new Error(`ASR audio is missing: ${audioFile}${context ? `\nEarlier tool errors:\n${context.slice(-2400)}` : ''}`);
+    }
     const outputDir = ensureDir(path.join(run.artifactDir, 'asr'));
     await this.runScheduledStage(state, 'asr', 'transcription', async (lane) => {
       const service = lane.id === 'cpu' ? this.cpuAsr : this.gpuAsr;
@@ -424,6 +446,10 @@ class ToolRunner {
     return new Promise((resolve, reject) => {
       let settled = false;
       let timedOut = false;
+      let outputTail = '';
+      const rememberOutput = (chunk) => {
+        outputTail = `${outputTail}${String(chunk)}`.slice(-8000);
+      };
       const child = spawn('node', args, {
         cwd: PROJECT_ROOT,
         windowsHide: true,
@@ -445,11 +471,15 @@ class ToolRunner {
       };
       child.stdout.on('data', (chunk) => {
         const text = String(chunk);
+        rememberOutput(text);
         this.appendLog(state.runId, text);
         const progress = parseDownloadProgress(text);
         if (progress) this.updateRun(state.runId, { downloadProgress: progress });
       });
-      child.stderr.on('data', (chunk) => this.appendLog(state.runId, String(chunk)));
+      child.stderr.on('data', (chunk) => {
+        rememberOutput(chunk);
+        this.appendLog(state.runId, String(chunk));
+      });
       child.on('error', (error) => finish(error));
       child.on('close', (code, signal) => {
         this.appendLog(state.runId, `[${new Date().toISOString()}] exit code=${code} signal=${signal || ''}\n`);
@@ -459,7 +489,16 @@ class ToolRunner {
           error.code = 'TOOL_TIMEOUT';
           return finish(error);
         }
-        if (code !== 0) return finish(new Error(`Tool process exited with code ${code}${signal ? ` (${signal})` : ''}.`));
+        if (code !== 0) {
+          const detail = outputTail.trim();
+          const error = new Error(`Tool process exited with code ${code}${signal ? ` (${signal})` : ''}.${detail ? `\n${detail}` : ''}`);
+          if (isVideoUnavailableMessage(detail)) {
+            const unavailable = videoUnavailableError(detail);
+            unavailable.exitCode = code;
+            return finish(unavailable);
+          }
+          return finish(error);
+        }
         finish(null, { exitCode: code, signal: signal || '' });
       });
     });

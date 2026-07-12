@@ -32,6 +32,14 @@ function assert(condition, message) {
   assert(store.listTasks({ collectionId: '100:7' }).length === 2, 'collection tasks were not persisted');
   assert(events.some((event) => event.type === 'collection-sync-progress' && event.stage === 'done'), 'completion progress event was not emitted');
   assert(fs.readdirSync(result.collection.exportDir).some((name) => /^sync-.*\.json$/.test(name)), 'collection export index was not written');
+  const removedTaskId = '100:7:BV1234567890';
+  store.set('unavailableTasks', removedTaskId, { id: removedTaskId, taskId: removedTaskId, bvid: 'BV1234567890', removedAt: new Date().toISOString() });
+  store.delete('tasks', removedTaskId);
+  store.delete('videos', removedTaskId);
+  store.commit();
+  await service.sync({ collectionName: 'AIcode' });
+  assert(!store.getTask(removedTaskId), 'unavailable task tombstone was recreated during collection sync');
+  assert(store.listTasks({ collectionId: '100:7' }).length === 1, 'collection sync did not retain the remaining available task');
   store.db.close();
   fs.rmSync(root, { recursive: true, force: true });
   console.log('collection sync service integration test passed');

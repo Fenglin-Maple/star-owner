@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const WORKSPACE_ROOT = path.join(PROJECT_ROOT, 'workspace');
@@ -90,7 +91,7 @@ function videoArtifactName(task = {}, collection = {}, filenameMetadata = DEFAUL
 }
 
 function videoArtifactDir(collectionDir, task = {}, collection = {}, filenameMetadata = DEFAULT_FILENAME_METADATA) {
-  const title = videoArtifactName(task, collection, filenameMetadata);
+  const title = fitArtifactName(collectionDir, videoArtifactName(task, collection, filenameMetadata));
   const direct = path.join(collectionDir, title);
   if (!fs.existsSync(direct)) return direct;
   for (let index = 2; index < 1000; index += 1) {
@@ -98,6 +99,16 @@ function videoArtifactDir(collectionDir, task = {}, collection = {}, filenameMet
     if (!fs.existsSync(candidate)) return candidate;
   }
   throw new Error(`Could not allocate a unique artifact directory for ${task.bvid || task.title || 'video'}.`);
+}
+
+function fitArtifactName(collectionDir, value) {
+  const rootLength = path.resolve(collectionDir).length;
+  // The leaf is used once as a directory and again as the Markdown basename.
+  const maxLength = Math.max(32, Math.min(180, Math.floor((238 - rootLength - 7) / 2)));
+  const name = safeName(value, 'video-summary', 180);
+  if (name.length <= maxLength) return name;
+  const suffix = crypto.createHash('sha1').update(name).digest('hex').slice(0, 8);
+  return safeName(`${name.slice(0, Math.max(1, maxLength - suffix.length - 1))}-${suffix}`, 'video-summary', maxLength);
 }
 
 function metadataToken(label, value, maxValueLength = 32) {
@@ -143,6 +154,7 @@ module.exports = {
   collectionDirs,
   collectionRoot,
   ensureDir,
+  fitArtifactName,
   initWorkspace,
   libraryUserRoot,
   normalizeFilenameMetadata,

@@ -111,6 +111,7 @@ let filenameSettingsSaveTimer = null;
 let lastTaskCollectionId = '';
 let snapshotPromise = null;
 let snapshotRefreshTimer = null;
+let lastUiInteractionAt = 0;
 let transientActivity = null;
 let profileCloseTimer = null;
 let readmeMarkdown = '';
@@ -1058,6 +1059,7 @@ function log(message) {
 async function refreshSnapshot() {
   if (snapshotPromise) return snapshotPromise;
   snapshotPromise = window.orchestrator.snapshot().then((snap) => {
+    const uiState = captureRefreshUiState();
     lastSnapshot = snap;
     if (snap.scheduler) runtime.scheduler = snap.scheduler;
     transientActivity = null;
@@ -1080,11 +1082,48 @@ async function refreshSnapshot() {
     renderActivityLog(snap.activities || []);
     renderSettingsSummary();
     updatePromptTemplate();
+    restoreRefreshUiState(uiState);
     return snap;
   }).finally(() => {
     snapshotPromise = null;
   });
   return snapshotPromise;
+}
+
+function captureRefreshUiState() {
+  const expanded = new Set([...document.querySelectorAll('[data-state-key]')]
+    .filter((node) => node.classList.contains('expanded') || (node.tagName === 'DETAILS' && node.open))
+    .map((node) => node.dataset.stateKey));
+  const selector = '#taskList, #toolList, #runList, #workerList, #apiToolAnalytics, .page.active .side-sheet, .page.active .settings-side, .page.active .document-list, .page.active .document-preview';
+  const scroll = [...document.querySelectorAll(selector)].map((node, index) => ({ index, top: node.scrollTop, left: node.scrollLeft }));
+  return { expanded, scroll, selector };
+}
+
+function restoreRefreshUiState(state) {
+  if (!state) return;
+  const apply = () => {
+    for (const node of document.querySelectorAll('[data-state-key]')) {
+      if (!state.expanded.has(node.dataset.stateKey)) continue;
+      if (node.tagName === 'DETAILS') node.open = true;
+      else if (node.classList.contains('setting-row')) {
+        node.classList.add('expanded');
+        const button = node.querySelector('.row-expand');
+        if (button) {
+          button.setAttribute('aria-expanded', 'true');
+          button.title = '收起详情';
+          button.setAttribute('aria-label', button.title);
+        }
+      }
+    }
+    const nodes = [...document.querySelectorAll(state.selector)];
+    for (const item of state.scroll) {
+      if (!nodes[item.index]) continue;
+      nodes[item.index].scrollTop = item.top;
+      nodes[item.index].scrollLeft = item.left;
+    }
+  };
+  apply();
+  requestAnimationFrame(apply);
 }
 
 function renderSettingsSummary() {
@@ -1443,6 +1482,7 @@ function renderTaskRows(tasks) {
     const enabled = task.enabled !== false;
     const selected = taskSelection.has(task.id);
     const row = settingRow({
+      stateKey: `task:${task.id}`,
       icon: `<input class="task-checkbox" type="checkbox" data-task-id="${escapeHtml(task.id)}" ${selected ? 'checked' : ''} aria-label="\u9009\u62e9\u4efb\u52a1" />`,
       title: task.title || task.bvid,
       subtitle: `${task.bvid}  /  ${task.owner || TEXT.unknownUp}  /  \u6536\u85cf\u4e8e ${formatDateTime(favoriteAt)}  /  ${formatSeconds(task.duration)}`,
@@ -1548,6 +1588,7 @@ function renderTools(tools) {
     }).join('');
     const outputs = (tool.outputs || []).map((item) => `<span>${escapeHtml(item)}</span>`).join('');
     const row = settingRow({
+      stateKey: `tool:${tool.id}`,
       icon: iconTool(),
       title: tool.name,
       subtitle: tool.description,
@@ -1582,20 +1623,22 @@ function renderRuns(runs) {
     groups.get(key).push(run);
   }
   for (const [toolId, toolRuns] of groups) {
-    const counts = { running: 0, queued: 0, succeeded: 0, failed: 0 };
+    const counts = { running: 0, queued: 0, succeeded: 0, failed: 0, skipped: 0 };
     for (const run of toolRuns) {
       if (run.status === 'running') counts.running += 1;
       else if (run.status === 'queued') counts.queued += 1;
       else if (['succeeded', 'done'].includes(run.status)) counts.succeeded += 1;
       else if (['failed', 'rejected', 'timeout'].includes(run.status)) counts.failed += 1;
+      else if (run.status === 'skipped') counts.skipped += 1;
     }
     const latest = toolRuns[0];
     const groupStatus = counts.running ? 'running' : counts.queued ? 'queued' : counts.failed ? 'failed' : 'succeeded';
     const history = toolRuns.map((run) => renderRunHistoryItem(run)).join('');
     const row = settingRow({
+      stateKey: `run-tool:${toolId}`,
       icon: iconRun(),
       title: latest.toolName || toolId,
-      subtitle: `共 ${toolRuns.length} 次 · 运行 ${counts.running} · 排队 ${counts.queued} · 成功 ${counts.succeeded} · 失败 ${counts.failed}`,
+      subtitle: `共 ${toolRuns.length} 次 · 运行 ${counts.running} · 排队 ${counts.queued} · 成功 ${counts.succeeded} · 失败 ${counts.failed} · 跳过 ${counts.skipped}`,
       right: `<span class="state-tag ${statusClass(groupStatus)}">${counts.running ? '运行中' : counts.queued ? '排队中' : counts.failed ? '有失败' : '正常'}</span>`,
       detail: `<div class="run-tool-overview"><div class="run-status-strip"><span class="run" style="--count:${counts.running}">运行 ${counts.running}</span><span class="queue" style="--count:${counts.queued}">排队 ${counts.queued}</span><span class="ok" style="--count:${counts.succeeded}">成功 ${counts.succeeded}</span><span class="bad" style="--count:${counts.failed}">失败 ${counts.failed}</span></div><div class="run-tool-latest"><span>最近执行</span><strong>${escapeHtml(formatDateTime(latest.finishedAt || latest.startedAt || latest.createdAt, true))}</strong><span>${escapeHtml(latest.workerId || latest.agentName || '-')}</span></div></div><div class="run-history-list">${history}</div>`
     });
@@ -1611,7 +1654,7 @@ function renderRunHistoryItem(run) {
   const progressSummary = run.asrProgress
     ? `ASR ${Math.round(Number(run.asrProgress.progress || 0) * 100)}% · ${run.asrProgress.phase || '-'} · ${Number(run.asrProgress.audioSeconds || 0).toFixed(1)}s / ${Number(run.asrProgress.totalSeconds || 0).toFixed(1)}s`
     : queueSummary;
-  return `<details class="run-history-item"><summary><span class="state-tag ${statusClass(run.status)}">${escapeHtml(run.status)}</span><strong>${escapeHtml(run.workerId || run.agentName || '-')}</strong><span>${escapeHtml(run.taskId || '-')}</span><time>${escapeHtml(formatDateTime(run.finishedAt || run.startedAt || run.createdAt, true))}</time><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></summary><div class="run-history-detail"><p>${escapeHtml(`${run.stage || '-'} · ${progressSummary}`)}</p><div class="run-resource-grid"><div><span>阶段</span><strong>${escapeHtml(run.stage || '-')}</strong></div><div><span>资源池 / 通道</span><strong>${escapeHtml(`${run.resourcePool || '-'} / ${run.resourceLane || '-'}`)}</strong></div><div><span>队列位置</span><strong>${escapeHtml(run.queuePosition ? `${run.queuePosition} / ${run.queueLength || run.queuePosition}` : '-')}</strong></div><div><span>等待原因</span><strong>${escapeHtml(run.status === 'queued' ? humanizeQueueReason(run.queueReason) : '-')}</strong></div><div><span>预估等待</span><strong>${escapeHtml(run.estimatedWaitMs ? formatMilliseconds(run.estimatedWaitMs) : '-')}</strong></div><div><span>${TEXT.exitCode}</span><strong>${escapeHtml(run.exitCode ?? '-')}</strong></div></div><div><h4>${TEXT.command}</h4><pre>${escapeHtml(run.actualCommand || run.command || '')}</pre></div><div><h4>${TEXT.logFile}</h4><pre>${escapeHtml(run.logFile || '')}</pre></div><div class="detail-grid"><div><span>创建</span><strong>${escapeHtml(run.createdAt || '-')}</strong></div><div><span>${TEXT.started}</span><strong>${escapeHtml(run.startedAt || '-')}</strong></div><div><span>${TEXT.finished}</span><strong>${escapeHtml(run.finishedAt || '-')}</strong></div></div>${run.error ? `<div class="run-error">${escapeHtml(run.error)}</div>` : ''}</div></details>`;
+  return `<details class="run-history-item" data-state-key="tool-run:${escapeHtml(run.id)}"><summary><span class="state-tag ${statusClass(run.status)}">${escapeHtml(run.status)}</span><strong>${escapeHtml(run.workerId || run.agentName || '-')}</strong><span>${escapeHtml(run.taskId || '-')}</span><time>${escapeHtml(formatDateTime(run.finishedAt || run.startedAt || run.createdAt, true))}</time><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></summary><div class="run-history-detail"><p>${escapeHtml(`${run.stage || '-'} · ${progressSummary}`)}</p><div class="run-resource-grid"><div><span>阶段</span><strong>${escapeHtml(run.stage || '-')}</strong></div><div><span>资源池 / 通道</span><strong>${escapeHtml(`${run.resourcePool || '-'} / ${run.resourceLane || '-'}`)}</strong></div><div><span>队列位置</span><strong>${escapeHtml(run.queuePosition ? `${run.queuePosition} / ${run.queueLength || run.queuePosition}` : '-')}</strong></div><div><span>等待原因</span><strong>${escapeHtml(run.status === 'queued' ? humanizeQueueReason(run.queueReason) : '-')}</strong></div><div><span>预估等待</span><strong>${escapeHtml(run.estimatedWaitMs ? formatMilliseconds(run.estimatedWaitMs) : '-')}</strong></div><div><span>${TEXT.exitCode}</span><strong>${escapeHtml(run.exitCode ?? '-')}</strong></div></div><div><h4>${TEXT.command}</h4><pre>${escapeHtml(run.actualCommand || run.command || '')}</pre></div><div><h4>${TEXT.logFile}</h4><pre>${escapeHtml(run.logFile || '')}</pre></div><div class="detail-grid"><div><span>创建</span><strong>${escapeHtml(run.createdAt || '-')}</strong></div><div><span>${TEXT.started}</span><strong>${escapeHtml(run.startedAt || '-')}</strong></div><div><span>${TEXT.finished}</span><strong>${escapeHtml(run.finishedAt || '-')}</strong></div></div>${run.error ? `<div class="run-error">${escapeHtml(run.error)}</div>` : ''}</div></details>`;
 }
 
 function renderWorkers(workers) {
@@ -1637,6 +1680,7 @@ function renderWorkers(workers) {
       : '<li class="empty-inline">\u5f53\u524d\u6ca1\u6709\u5904\u7406\u4e2d\u7684\u4efb\u52a1</li>';
     const detail = `<div class="worker-detail"><div class="worker-chart-grid"><div><span>\u9886\u53d6</span><strong>${worker.claimed}</strong></div><div><span>\u5b8c\u6210</span><strong>${worker.completed}</strong></div><div><span>\u5931\u8d25/\u6253\u56de</span><strong>${worker.failures}</strong></div><div><span>\u6210\u529f\u7387</span><strong>${success}</strong></div><div><span>\u8017\u65f6/\u89c6\u9891\u65f6\u957f</span><strong>${ratio}</strong></div><div><span>\u5de5\u5177\u8c03\u7528</span><strong>${worker.toolCalls}</strong></div></div><div class="worker-completion-chart"><div><span>${escapeHtml(worker.workerId)}</span><b>${worker.completed} \u5b8c\u6210</b></div><div><span style="width:${completedWidth}%"></span></div></div><div class="detail-grid"><div><span>\u8c03\u7528\u5de5\u5177 / \u6a21\u578b</span><strong>${escapeHtml(worker.tool)} / ${escapeHtml(worker.model)}</strong></div><div><span>\u9996\u6b21\u6ce8\u518c</span><strong>${escapeHtml(formatDateTime(worker.createdAt, true))}</strong></div><div><span>\u6700\u540e\u8c03\u7528</span><strong>${escapeHtml(formatDateTime(worker.lastSeenAt, true))}</strong></div></div><div><h4>\u5f53\u524d\u4efb\u52a1</h4><ul class="worker-current-tasks">${currentTasks}</ul></div>${pausedWorker ? `<div class="worker-pause-note">${escapeHtml(worker.pauseReason || 'Paused by user.')}</div>` : ''}</div>`;
     const row = settingRow({
+      stateKey: `worker:${worker.workerId}`,
       icon: iconWorker(),
       title: worker.sessionLabel ? `${worker.workerId} / ${worker.sessionLabel}` : worker.workerId,
       subtitle: `${worker.tool} / ${worker.model} / \u9886 ${worker.claimed} / \u6210 ${worker.completed} / \u5de5\u5177 ${worker.toolCalls}`,
@@ -1803,7 +1847,8 @@ function renderDocumentList() {
     row.className = `document-row${task.id === selectedDocumentId ? ' active' : ''}`;
     row.type = 'button';
     row.dataset.documentId = task.id;
-    row.innerHTML = `${task.cover ? `<img src="${escapeHtml(task.cover)}" alt="" loading="lazy" />` : '<span class="document-cover-placeholder"></span>'}<span class="document-row-copy"><strong>${escapeHtml(task.title || task.bvid)}</strong><small>${escapeHtml(task.bvid)} / ${escapeHtml(task.owner || TEXT.unknownUp)} / ${escapeHtml(formatSeconds(task.duration))}</small><em>\u6536\u85cf ${escapeHtml(formatDateTime(task.favoriteAddedAt))} / \u53d1\u5e03 ${escapeHtml(formatDateTime(task.publishedAt))}</em></span>`;
+    const cover = task.displayCover || task.cover || '';
+    row.innerHTML = `${cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy" />` : '<span class="document-cover-placeholder"></span>'}<span class="document-row-copy"><strong>${escapeHtml(task.title || task.bvid)}</strong><small>${escapeHtml(task.bvid)} / ${escapeHtml(task.owner || TEXT.unknownUp)} / ${escapeHtml(formatSeconds(task.duration))}</small><em>\u6536\u85cf ${escapeHtml(formatDateTime(task.favoriteAddedAt))} / \u53d1\u5e03 ${escapeHtml(formatDateTime(task.publishedAt))}</em></span>`;
     row.addEventListener('click', () => selectDocument(task.id));
     documentList.appendChild(row);
   }
@@ -1989,6 +2034,7 @@ function renderApiToolAnalytics(stats) {
       ? item.byAgent.map((agent) => `<div class="agent-call-row"><span>${escapeHtml(agent.workerId || agent.agentName)}</span><b>${agent.calls}</b></div>`).join('')
       : '<span class="empty-inline">\u6682\u65e0\u8c03\u7528\u8005</span>';
     const row = settingRow({
+      stateKey: `tool-analytics:${item.toolId}`,
       icon: iconTool(),
       title: item.toolName || item.toolId,
       subtitle: `${item.calls} \u6b21\u8c03\u7528 / ${item.callers} \u4e2a\u8c03\u7528\u8005 / \u5e73\u5747 ${formatMilliseconds(item.averageDurationMs)}`,
@@ -2039,9 +2085,10 @@ function formatMilliseconds(value) {
   return `${(ms / 3_600_000).toFixed(1)}h`;
 }
 
-function settingRow({ icon, title, subtitle, right, detail }) {
+function settingRow({ icon, title, subtitle, right, detail, stateKey = '' }) {
   const row = document.createElement('div');
   row.className = `setting-row${detail ? ' has-detail' : ''}`;
+  if (stateKey) row.dataset.stateKey = stateKey;
   const expand = detail
     ? `<button type="button" class="row-expand" title="\u5c55\u5f00\u8be6\u60c5" aria-label="\u5c55\u5f00\u8be6\u60c5" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>`
     : '';
@@ -2590,8 +2637,11 @@ window.orchestrator.onEvent((event) => {
   }
   log(event.type || JSON.stringify(event));
   if (snapshotRefreshTimer) clearTimeout(snapshotRefreshTimer);
-  snapshotRefreshTimer = setTimeout(() => refreshSnapshot(), 90);
+  const interactionDelay = Math.max(0, 450 - (Date.now() - lastUiInteractionAt));
+  snapshotRefreshTimer = setTimeout(() => refreshSnapshot(), Math.max(320, interactionDelay));
 });
+
+document.addEventListener('pointerdown', () => { lastUiInteractionAt = Date.now(); }, true);
 
 window.orchestrator.getRuntime().then(handleRuntime).catch((error) => {
   renderBootstrap({ phase: 'error', progress: 1, message: error.message || String(error) });

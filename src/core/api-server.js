@@ -111,7 +111,12 @@ class ApiServer {
         const action = taskMatch[2] || '';
         if (req.method === 'GET' && !action) {
           const task = this.store.getTask(taskId);
-          if (!task) return this.json(res, { task: null }, 404);
+          if (!task) {
+            const unavailable = this.store.get('unavailableTasks', taskId);
+            return this.json(res, unavailable
+              ? { task: null, code: 'BILIBILI_VIDEO_UNAVAILABLE', unavailable, directive: { action: 'stop', message: 'This video was removed from inventory and will not be reassigned.' } }
+              : { task: null }, unavailable ? 410 : 404);
+          }
           const collection = this.store.getCollectionById(task.collectionId);
           return this.json(res, { task: collection ? this.taskContext(task, collection) : task });
         }
@@ -252,7 +257,7 @@ class ApiServer {
     const existing = this.store.getToolRun(runId);
     if (!existing) throw new Error(`Tool run not found: ${runId}`);
     const task = this.store.getTask(existing.taskId);
-    if (!task) throw new Error(`Task not found: ${existing.taskId}`);
+    if (!task) throw missingTaskError(this.store, existing.taskId);
     this.assertTaskWorker(task, worker, body.workId);
     if (existing.workId && existing.workId !== String(body.workId || '')) throw workAttemptEndedError(task, String(body.workId || ''));
     if ((existing.workerId || existing.agentName) !== worker.id) throw new Error('This worker does not own the tool run.');
@@ -330,7 +335,7 @@ class ApiServer {
     const body = await readBody(req);
     const worker = this.requireWorker(body);
     const task = this.store.getTask(taskId);
-    if (!task) throw new Error(`Task not found: ${taskId}`);
+    if (!task) throw missingTaskError(this.store, taskId);
     this.assertTaskWorker(task, worker, body.workId);
     if (task.enabled === false) throw new Error('Task is disabled and cannot run tools.');
     const tool = this.store.get('tools', toolId);
@@ -350,7 +355,7 @@ class ApiServer {
     const body = await readBody(req);
     const worker = this.requireWorker(body);
     const task = this.store.getTask(taskId);
-    if (!task) throw new Error(`Task not found: ${taskId}`);
+    if (!task) throw missingTaskError(this.store, taskId);
     this.assertTaskWorker(task, worker, body.workId);
     task.leaseExpiresAt = new Date(Date.now() + DEFAULT_LEASE_MS).toISOString();
     task.updatedAt = new Date().toISOString();
@@ -363,7 +368,7 @@ class ApiServer {
     const body = await readBody(req);
     const worker = this.requireWorker(body);
     const task = this.store.getTask(taskId);
-    if (!task) throw new Error(`Task not found: ${taskId}`);
+    if (!task) throw missingTaskError(this.store, taskId);
     this.assertTaskWorker(task, worker, body.workId);
     const validation = validateSubmission(task, body);
     const now = new Date().toISOString();
@@ -435,7 +440,7 @@ class ApiServer {
     const body = await readBody(req);
     const worker = this.requireWorker(body);
     const task = this.store.getTask(taskId);
-    if (!task) throw new Error(`Task not found: ${taskId}`);
+    if (!task) throw missingTaskError(this.store, taskId);
     this.assertTaskWorker(task, worker, body.workId);
     const reason = String(body.reason || '').trim();
     if (!reason) throw new Error('reason is required so the application can record why this attempt stopped.');
@@ -629,6 +634,16 @@ function workIdRequiredError(task) {
     taskId: task.id,
     directive: { action: 'use-claimed-work-id', message: 'Read workId from the task claim response. Do not invent one.' }
   });
+}
+
+function missingTaskError(store, taskId) {
+  const unavailable = store.get('unavailableTasks', String(taskId || ''));
+  if (unavailable) return httpError(410, 'This Bilibili video was deleted, removed, or made unavailable. The task was permanently removed from inventory.', {
+    code: 'BILIBILI_VIDEO_UNAVAILABLE',
+    taskId,
+    directive: { action: 'stop', message: 'Do not retry this task. Request a new task with the same workerId.' }
+  });
+  return httpError(404, `Task not found: ${taskId}`, { code: 'TASK_NOT_FOUND', taskId });
 }
 
 function workAttemptEndedError(task, workId) {

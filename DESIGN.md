@@ -15,7 +15,8 @@ The same pipeline has two workers: external agents use the local HTTP API, while
 - Agents only write task artifacts inside the `artifactDir` returned by the claim API.
 - Agents never launch project media scripts directly. They call the tool-run API and the app launches the process.
 - Disabled tasks are excluded from claims and cannot start new tool runs.
-- The desktop task page owns the active collection target. Agents read that target from the API and cannot silently override it while claiming.
+- The desktop task page owns the active collection target for external HTTP API agents. Internal Agent sessions use the collection selected when each session is created and are independent of this external target.
+- Confirmed deleted, removed, or unavailable videos are terminal: the app removes them from task/video inventory, records an `unavailableTasks` tombstone, and collection sync must not recreate them.
 - A task lease lasts 15 minutes and can be extended with heartbeat calls.
 - Submission paths and Markdown structure are validated before a task becomes complete.
 - Accepted documents begin with `小结 -> 思维导图 -> 目录`; the mind map is a valid Mermaid fenced block.
@@ -51,6 +52,7 @@ Runtime modules:
 - `src/core/api-server.js`: Agent-only HTTP API and task lifecycle.
 - `src/core/collection-sync-service.js`: desktop-owned Bilibili collection synchronization and indexing.
 - `src/core/submission-artifacts.js`: shared final naming, relocation, and cached-video record updates.
+- `src/core/unavailable-task.js`: terminal unavailable-video removal, attempt cleanup, tombstones, and sync suppression.
 - `src/core/network-policy.js`: Bilibili URL, local API origin, and private-network policies.
 - `src/core/desktop-security.js`: main-window and Bilibili WebView navigation hardening.
 - `src/core/atomic-file.js`: recoverable whole-file SQLite persistence.
@@ -77,6 +79,7 @@ The generic `kv` table currently stores these scopes:
 - `collections`
 - `videos`
 - `tasks`
+- `unavailableTasks`
 - `taskEvents`
 - `submissions`
 - `tools`

@@ -2,8 +2,10 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { finalizeSubmissionArtifacts, relocateCachedVideo } = require('./submission-artifacts');
-const { isLoginRequiredMessage, loginRequiredError } = require('./media-errors');
+const { promoteMindMap } = require('./markdown');
+const { isLoginRequiredMessage, isVideoUnavailableMessage, loginRequiredError } = require('./media-errors');
 const { abortTaskAttempt, createWorkId } = require('./task-attempt');
+const { removeUnavailableTask } = require('./unavailable-task');
 const { validateSubmission } = require('./validation');
 const {
   WORKSPACE_ROOT,
@@ -18,7 +20,7 @@ const INTERNAL_USER_ID = 'builtin-agent-user';
 const INTERNAL_USER_NAME = '内置用户';
 const LEASE_MS = 15 * 60 * 1000;
 const TEMPLATE_FILE = path.join(__dirname, '..', '..', 'templates', 'video-summary-template.md');
-const TERMINAL_RUNS = new Set(['succeeded', 'failed', 'cancelled', 'timeout']);
+const TERMINAL_RUNS = new Set(['succeeded', 'failed', 'cancelled', 'timeout', 'skipped']);
 
 class InternalAgentManager {
   constructor({ store, toolRunner, ragAssistant, bili, getCurrentUser, emit }) {
@@ -32,6 +34,7 @@ class InternalAgentManager {
     this.running = new Map();
     this.ensureInternalUser();
     this.recoverInterruptedSessions();
+    this.purgeKnownUnavailableTasks();
   }
 
   state() {
@@ -127,6 +130,7 @@ class InternalAgentManager {
       logs: [],
       completed: 0,
       failed: 0,
+      skipped: 0,
       tokenUsage: { input: 0, output: 0, total: 0 },
       createdAt: now,
       updatedAt: now
@@ -231,13 +235,23 @@ class InternalAgentManager {
   stop(sessionId) {
     const session = this.requireSession(sessionId);
     session.acceptNewTasks = false;
-    session.status = 'stopping';
-    session.phase = '正在停止';
-    this.saveSession(session);
     this.controllers.get(session.id)?.abort();
-    if (session.currentRunId) {
-      try { this.toolRunner.cancel(session.currentRunId); } catch { /* run may already be terminal */ }
+    let cleanupMessage = '没有正在处理的任务';
+    if (session.currentTaskId) {
+      try {
+        const result = this.abortAttempt(session.currentTaskId, session.workerId, '用户立即停止了 Agent 工作。', 'internal-agent-stop');
+        cleanupMessage = result.alreadyAborted ? '任务已回滚' : '任务缓存已清理并回滚';
+      } catch (error) {
+        cleanupMessage = `停止完成，但任务清理需要启动恢复复查：${error.message || String(error)}`;
+        session.lastError = cleanupMessage;
+      }
     }
+    try { this.store.updateWorker(session.workerId, { status: 'paused', pauseReason: '用户立即停止了应用内 Agent。' }); } catch {}
+    session.status = 'stopped';
+    session.phase = `已停止，${cleanupMessage}`;
+    session.currentTaskId = '';
+    session.currentRunId = '';
+    this.saveSession(session);
     return this.publicSession(session);
   }
 
@@ -293,6 +307,29 @@ class InternalAgentManager {
           this.abortAttempt(task.id, latest.workerId, '用户或应用停止了 Agent 工作。', 'internal-agent-stop');
           this.finishSession(latest, 'stopped', '已停止，任务缓存已清理');
           return;
+        }
+        if (error.code === 'BILIBILI_VIDEO_UNAVAILABLE' || isVideoUnavailableMessage(error.message)) {
+          const removal = removeUnavailableTask({ store: this.store, toolRunner: this.toolRunner, taskId: task.id, reason: error.message, source: 'internal-agent' });
+          latest.skipped = Number(latest.skipped || 0) + 1;
+          latest.currentTaskId = '';
+          latest.currentRunId = '';
+          latest.lastError = error.message || String(error);
+          latest.phase = '视频不可用，已从库存移除';
+          this.saveSession(latest);
+          this.log(latest, `跳过并移除 ${task.bvid}：视频已删除、下架或不可用。`);
+          this.emit({ type: 'video-unavailable', sessionId: latest.id, taskId: task.id, bvid: task.bvid, reason: latest.lastError, removed: removal.removed });
+          if (latest.mode === 'single') {
+            latest.content = `## 视频不可用\n\n${task.bvid} 已被删除、下架或无法访问，任务已从库存移除，不会再次派发。\n\n详细原因：${latest.lastError}`;
+            this.finishSession(latest, 'unavailable', '视频不可用，任务已移除');
+            return;
+          }
+          if (!latest.acceptNewTasks) {
+            this.finishSession(latest, 'paused', '已暂停');
+            return;
+          }
+          latest.status = 'running';
+          this.saveSession(latest);
+          continue;
         }
         if (error.code === 'ASR_INFRASTRUCTURE_FAILURE' || error.failureKind === 'infrastructure') {
           const possibleCauses = Array.isArray(error.possibleCauses) ? error.possibleCauses : [];
@@ -508,7 +545,7 @@ class InternalAgentManager {
         max_tokens: this.ragAssistant.outputTokenLimit?.(provider, model) || model.maxOutputTokens || provider.maxOutputTokens || 128000
       }, signal, (delta) => this.streamDelta(session.id, delta));
       this.addUsage(session, result.usage || {});
-      previous = injectFrameGallery(stripMarkdownFence(result.content || ''), materials.frames);
+      previous = normalizeGeneratedMarkdown(injectFrameGallery(stripMarkdownFence(result.content || ''), materials.frames), task, materials);
       const draft = path.join(task.artifactDir, `agent-draft-${attempt + 1}.md`);
       fs.writeFileSync(draft, `${previous.trim()}\n`, 'utf8');
       const validation = validateSubmission(task, { artifactDir: task.artifactDir, markdownFile: draft, metadataFile: path.join(task.artifactDir, 'info.json') });
@@ -525,7 +562,9 @@ class InternalAgentManager {
     task.owner = String(info.owner?.name || info.uploader || info.owner || task.owner || '');
     task.duration = Number(info.duration || task.duration || 0);
     task.publishedAt = info.timestamp ? new Date(Number(info.timestamp) * 1000).toISOString() : (info.upload_date || task.publishedAt || '');
-    task.cover = info.thumbnail || task.cover || '';
+    task.cover = info.pic || info.thumbnail || task.cover || '';
+    const localCover = info.coverFile ? path.resolve(task.artifactDir, info.coverFile) : '';
+    task.coverFile = localCover && fs.existsSync(localCover) ? localCover : (task.coverFile || '');
     task.tags = normalizeTags(info.tags || task.tags);
     task.updatedAt = new Date().toISOString();
     this.store.upsertTask(task);
@@ -663,6 +702,32 @@ class InternalAgentManager {
     }
     this.store.save();
   }
+
+  purgeKnownUnavailableTasks() {
+    for (const task of this.store.listTasks()) {
+      if (task.status === 'done' || !isVideoUnavailableMessage(task.title || '')) continue;
+      this.reclassifyUnavailableHistory(task);
+      removeUnavailableTask({ store: this.store, toolRunner: this.toolRunner, taskId: task.id, reason: `同步条目已标记为“${task.title}”。`, source: 'startup-migration' });
+    }
+  }
+
+  reclassifyUnavailableHistory(task) {
+    const failures = this.store.list('taskEvents').filter((event) => event.taskId === task.id && event.type === 'attempt-aborted' && event.source === 'internal-agent-error');
+    const byWorker = new Map();
+    for (const event of failures) byWorker.set(event.workerId, Number(byWorker.get(event.workerId) || 0) + 1);
+    for (const session of this.listSessions()) {
+      const count = byWorker.get(session.workerId) || 0;
+      if (!count) continue;
+      session.failed = Math.max(0, Number(session.failed || 0) - count);
+      session.skipped = Number(session.skipped || 0) + count;
+      this.store.set('internalAgentSessions', session.id, session);
+    }
+    for (const run of this.store.listToolRuns({ taskId: task.id })) {
+      if (!['failed', 'timeout'].includes(run.status)) continue;
+      this.store.set('toolRuns', run.id, { ...run, status: 'skipped', errorCode: 'BILIBILI_VIDEO_UNAVAILABLE', failureKind: 'terminal-video' });
+    }
+    this.store.save();
+  }
 }
 
 function collectMaterials(artifactDir) {
@@ -688,6 +753,42 @@ function injectFrameGallery(markdown, frames) {
   const gallery = `\n\n## 精选关键帧\n\n${frames.slice(0, 3).map((file, index) => `![关键帧 ${index + 1}](${file})\n\n> 图：来自视频的代表性画面，用于辅助核对正文与字幕语义。`).join('\n\n')}\n`;
   const marker = markdown.search(/^##\s+字幕比对\s*$/m);
   return marker >= 0 ? `${markdown.slice(0, marker)}${gallery}\n${markdown.slice(marker)}` : `${markdown}${gallery}`;
+}
+
+function normalizeGeneratedMarkdown(markdown, task, materials) {
+  let result = String(markdown || '').trim();
+  const mapBlock = `## 思维导图\n\n\`\`\`mermaid\nmindmap\n  root((${mermaidLabel(task.title || task.bvid || '视频知识')}))\n    核心内容\n    字幕核对\n    关键帧\n    评论反馈\n\`\`\``;
+  const mapMatch = result.match(/^##\s+思维导图\s*$[\s\S]*?(?=^##\s+|$)/m);
+  if (!mapMatch) {
+    const contentsIndex = result.search(/^##\s+目录\s*$/m);
+    result = contentsIndex >= 0
+      ? `${result.slice(0, contentsIndex).trimEnd()}\n\n${mapBlock}\n\n${result.slice(contentsIndex)}`
+      : `${result}\n\n${mapBlock}`;
+  } else if (!/```mermaid\s+[\s\S]*?```/i.test(mapMatch[0])) {
+    result = `${result.slice(0, mapMatch.index)}${mapBlock}\n\n${result.slice(mapMatch.index + mapMatch[0].length).trimStart()}`;
+  }
+  result = promoteMindMap(result).trim();
+  if (!/^##\s+评论分析\s*$/m.test(result)) {
+    const comments = normalizeCommentItems(materials.comments).slice(0, 3);
+    const body = comments.length
+      ? `${comments.map((item, index) => `- 热评 ${index + 1}：${item}`).join('\n')}\n\n以上内容是观众反馈摘录，只用于补充理解视频反响，不作为正文事实依据。`
+      : '本次流程未获取到可用热评，因此不推断观众态度或额外结论。';
+    const section = `## 评论分析\n\n${body}`;
+    const recordIndex = result.search(/^##\s+处理记录\s*$/m);
+    result = recordIndex >= 0
+      ? `${result.slice(0, recordIndex).trimEnd()}\n\n${section}\n\n${result.slice(recordIndex)}`
+      : `${result}\n\n${section}`;
+  }
+  return result;
+}
+
+function normalizeCommentItems(value) {
+  const list = Array.isArray(value) ? value : (value?.comments || value?.replies || value?.data?.replies || []);
+  return list.map((item) => String(item?.message || item?.content?.message || item?.text || item || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+}
+
+function mermaidLabel(value) {
+  return String(value || '视频知识').replace(/[()\[\]{}"'\n\r:;]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 42) || '视频知识';
 }
 
 function stripMarkdownFence(value) {
@@ -752,4 +853,4 @@ function abortError() {
   return error;
 }
 
-module.exports = { InternalAgentManager, INTERNAL_USER_ID, INTERNAL_USER_NAME, extractBvid };
+module.exports = { InternalAgentManager, INTERNAL_USER_ID, INTERNAL_USER_NAME, extractBvid, normalizeGeneratedMarkdown };

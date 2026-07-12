@@ -1174,7 +1174,7 @@ body.theme-day input[type="date"], body.theme-bili input[type="date"], body.them
 .overview-layout > .activity-panel pre { flex: 1; min-height: 0; max-height: none; }
 
 /* Task target, analytics, and inventory */
-#page-tasks.active { grid-template-rows: auto 66px 112px minmax(0, 1fr); gap: 10px; }
+#page-tasks.active { grid-template-rows: auto 78px 112px minmax(0, 1fr); gap: 10px; }
 .task-target-bar {
   min-width: 0;
   display: grid;
@@ -1191,6 +1191,7 @@ body.theme-day input[type="date"], body.theme-bili input[type="date"], body.them
 .task-target-copy { min-width: 0; }
 .task-target-copy span { display: block; color: var(--muted); font-size: 10px; }
 .task-target-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 3px; font-size: 13px; }
+.task-target-copy small { display: block; max-width: 620px; margin-top: 4px; color: var(--muted-2); font-size: 9px; line-height: 1.35; }
 .task-target-controls { display: grid; grid-template-columns: 130px 150px auto 30px; gap: 7px; align-items: end; }
 .task-target-controls label { gap: 3px; }
 .task-target-controls label span { font-size: 10px; }

@@ -1,11 +1,11 @@
 const fs = require('fs');
 const path = require('path');
-const { videoArtifactDir, videoArtifactName } = require('./workspace');
+const { fitArtifactName, videoArtifactDir, videoArtifactName } = require('./workspace');
 
 function finalizeSubmissionArtifacts({ task, collection, validation, filenameMetadata }) {
   const currentDir = path.resolve(validation.artifactDir);
   const root = path.resolve(task.allowedRoot || path.dirname(currentDir));
-  const baseName = videoArtifactName(task, collection, filenameMetadata);
+  const baseName = fitArtifactName(root, videoArtifactName(task, collection, filenameMetadata));
   let finalDir = path.join(root, baseName);
   if (!samePath(currentDir, finalDir) && fs.existsSync(finalDir)) {
     finalDir = videoArtifactDir(root, task, collection, filenameMetadata);
@@ -13,7 +13,7 @@ function finalizeSubmissionArtifacts({ task, collection, validation, filenameMet
 
   const markdownRelative = path.relative(currentDir, validation.markdownFile);
   const metadataRelative = path.relative(currentDir, validation.metadataFile);
-  if (!samePath(currentDir, finalDir)) fs.renameSync(currentDir, finalDir);
+  if (!samePath(currentDir, finalDir)) moveDirectory(currentDir, finalDir);
 
   const sourceMarkdown = path.join(finalDir, markdownRelative);
   const finalMarkdown = path.join(finalDir, `${path.basename(finalDir)}.md`);
@@ -26,6 +26,27 @@ function finalizeSubmissionArtifacts({ task, collection, validation, filenameMet
     markdownFile: finalMarkdown,
     metadataFile: path.join(finalDir, metadataRelative)
   };
+}
+
+function moveDirectory(source, destination) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      fs.renameSync(source, destination);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!['EPERM', 'EBUSY', 'EACCES'].includes(error.code)) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 120 * (attempt + 1));
+    }
+  }
+  try {
+    fs.cpSync(source, destination, { recursive: true, errorOnExist: true });
+    fs.rmSync(source, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
+  } catch (fallbackError) {
+    fallbackError.cause = lastError;
+    throw fallbackError;
+  }
 }
 
 function relocateCachedVideo(store, task, finalized) {

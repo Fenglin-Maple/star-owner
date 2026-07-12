@@ -1,14 +1,17 @@
 const fs = require('fs');
 const path = require('path');
 const { Store } = require('../src/core/store');
-const { InternalAgentManager } = require('../src/core/internal-agent-manager');
-const { isLoginRequiredMessage } = require('../src/core/media-errors');
+const { InternalAgentManager, normalizeGeneratedMarkdown } = require('../src/core/internal-agent-manager');
+const { isLoginRequiredMessage, isVideoUnavailableMessage } = require('../src/core/media-errors');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
 (async () => {
+  const normalized = normalizeGeneratedMarkdown('# Test\n\n## 小结\n\nSummary\n\n## 目录\n\n- Body\n\n## 正文\n\nContent\n\n## 处理记录\n\nDone', { bvid: 'BVTEST', title: 'Test video' }, { comments: [] });
+  assert(normalized.indexOf('## 小结') < normalized.indexOf('## 思维导图') && normalized.indexOf('## 思维导图') < normalized.indexOf('## 目录'), 'generated Markdown opening was not normalized');
+  assert(normalized.includes('```mermaid\nmindmap') && normalized.includes('## 评论分析'), 'generated Markdown required sections were not repaired');
   const root = path.join(__dirname, '..', '.cache', 'internal-agent-test');
   fs.rmSync(root, { recursive: true, force: true });
   fs.mkdirSync(root, { recursive: true });
@@ -36,6 +39,7 @@ function assert(condition, message) {
 
   let forceLoginFailure = false;
   let forceInfrastructureFailure = false;
+  let forceUnavailableFailure = false;
   let holdToolRuns = false;
   let infrastructureArtifactDir = '';
   const toolRunner = {
@@ -43,10 +47,11 @@ function assert(condition, message) {
       const id = `run-${tool.id}-${Date.now()}`;
       const loginBlocked = forceLoginFailure && tool.id === 'material-bundle' && !runCollection?.cookieFile;
       const infrastructureBlocked = forceInfrastructureFailure && tool.id === 'material-bundle';
-      if (tool.id === 'material-bundle' && !loginBlocked) writeMaterials(task.artifactDir);
+      const unavailable = forceUnavailableFailure && tool.id === 'material-bundle';
+      if (tool.id === 'material-bundle' && !loginBlocked && !unavailable) writeMaterials(task.artifactDir);
       if (infrastructureBlocked) infrastructureArtifactDir = task.artifactDir;
       const waiting = holdToolRuns && tool.id === 'material-bundle';
-      store.createToolRun({ id, taskId: task.id, collectionId: task.collectionId, toolId: tool.id, toolName: tool.name, workerId, status: waiting ? 'running' : (loginBlocked || infrastructureBlocked ? 'failed' : 'succeeded'), stage: waiting ? 'test-hold' : (loginBlocked || infrastructureBlocked ? 'error' : 'complete'), error: loginBlocked ? 'This video is only available for registered users. Use --cookies.' : (infrastructureBlocked ? 'GPU ASR 常驻服务连续 3 次启动失败，应用已停止相关 Agent。' : ''), errorCode: infrastructureBlocked ? 'ASR_INFRASTRUCTURE_FAILURE' : '', failureKind: infrastructureBlocked ? 'infrastructure' : '', possibleCauses: infrastructureBlocked ? ['CTranslate2 原生运行库访问冲突', '项目依赖损坏'] : [], createdAt: new Date().toISOString(), finishedAt: waiting ? '' : new Date().toISOString() });
+      store.createToolRun({ id, taskId: task.id, collectionId: task.collectionId, toolId: tool.id, toolName: tool.name, workerId, status: waiting ? 'running' : (loginBlocked || infrastructureBlocked || unavailable ? 'failed' : 'succeeded'), stage: waiting ? 'test-hold' : (loginBlocked || infrastructureBlocked || unavailable ? 'error' : 'complete'), error: loginBlocked ? 'This video is only available for registered users. Use --cookies.' : (infrastructureBlocked ? 'GPU ASR 常驻服务连续 3 次启动失败，应用已停止相关 Agent。' : (unavailable ? 'Bilibili 视频已删除、下架或不可用：已失效视频' : '')), errorCode: infrastructureBlocked ? 'ASR_INFRASTRUCTURE_FAILURE' : (unavailable ? 'BILIBILI_VIDEO_UNAVAILABLE' : ''), failureKind: infrastructureBlocked ? 'infrastructure' : (unavailable ? 'terminal-video' : ''), possibleCauses: infrastructureBlocked ? ['CTranslate2 原生运行库访问冲突', '项目依赖损坏'] : [], createdAt: new Date().toISOString(), finishedAt: waiting ? '' : new Date().toISOString() });
       return store.getToolRun(id);
     },
     cancel: (runId) => {
@@ -84,6 +89,8 @@ function assert(condition, message) {
   assert(events.some((event) => event.type === 'stream') && events.some((event) => event.type === 'session-updated'), 'internal agent events were not emitted');
   assert(isLoginRequiredMessage('This video is only available for registered users. Use --cookies.'), 'login-required classifier missed yt-dlp guidance');
   assert(!isLoginRequiredMessage('network timeout while downloading'), 'ordinary network failure was misclassified as login-required');
+  assert(isVideoUnavailableMessage('ERROR: video is no longer available'), 'unavailable-video classifier missed yt-dlp output');
+  assert(!isVideoUnavailableMessage('HTTP 429: too many requests'), 'temporary network failure was misclassified as unavailable');
 
   holdToolRuns = true;
   const stoppedSession = await manager.createSingleTask({ video: 'BVMANUAL0001', outputDir: path.join(root, 'stopped-output'), collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
@@ -123,6 +130,15 @@ function assert(condition, message) {
   assert(store.getTask(blocked.singleTaskId)?.status === 'pending', 'infrastructure failure did not return the video task to pending');
   assert(infrastructureArtifactDir && !fs.existsSync(infrastructureArtifactDir), 'infrastructure failure left partial task files behind');
   assert(events.some((event) => event.type === 'infrastructure-stopped' && event.sessionId === blocked.id), 'infrastructure stop event was not emitted');
+  forceInfrastructureFailure = false;
+  forceUnavailableFailure = true;
+  const unavailableSession = await manager.createSingleTask({ video: 'BVDELETED001', outputDir: path.join(root, 'unavailable-output'), collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  await manager.start(unavailableSession.id);
+  const unavailable = await waitForStatus(manager, unavailableSession.id, 'unavailable');
+  assert(unavailable.skipped === 1 && unavailable.failed === 0, 'unavailable video was counted as an ordinary Agent failure');
+  assert(!store.getTask(unavailableSession.singleTaskId), 'unavailable video remained in task inventory');
+  assert(store.get('unavailableTasks', unavailableSession.singleTaskId)?.bvid === 'BVDELETED001', 'unavailable video tombstone was not persisted');
+  assert(events.some((event) => event.type === 'video-unavailable' && event.sessionId === unavailable.id), 'unavailable video event was not emitted');
   manager.shutdown();
   fs.rmSync(root, { recursive: true, force: true });
   console.log('internal agent integration test passed');

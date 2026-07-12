@@ -1,6 +1,8 @@
 const fs = require('fs');
 const path = require('path');
+const { isVideoUnavailableMessage } = require('./media-errors');
 const { collectionDirs, ensureDir, timestampForFile } = require('./workspace');
+const { isUnavailableTask, removeUnavailableTask } = require('./unavailable-task');
 
 class CollectionSyncService {
   constructor({ store, bili, getCurrentUser, onEvent }) {
@@ -80,6 +82,25 @@ class CollectionSyncService {
 
   persistVideo(collectionId, dirs, video, now) {
     const key = `${collectionId}:${video.bvid}`;
+    if (isUnavailableTask(this.store, key)) return;
+    if (isVideoUnavailableMessage(video.title || '')) {
+      const existing = this.store.getTask(key);
+      if (existing && existing.status !== 'done') {
+        removeUnavailableTask({ store: this.store, taskId: key, reason: `收藏夹同步返回“${video.title}”。`, source: 'collection-sync' });
+      } else if (!existing) {
+        this.store.set('unavailableTasks', key, {
+          id: key,
+          taskId: key,
+          collectionId,
+          bvid: video.bvid,
+          title: video.title,
+          reason: `收藏夹同步返回“${video.title}”。`,
+          source: 'collection-sync',
+          removedAt: now
+        });
+      }
+      return;
+    }
     this.store.upsertVideo({ key, collectionId, ...video, syncedAt: now });
     const existing = this.store.getTask(key);
     this.store.upsertTask({

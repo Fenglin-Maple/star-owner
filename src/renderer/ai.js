@@ -22,8 +22,10 @@
   let collectionModalSource = 'single';
   let refreshTimer = null;
   let streamRenderTimer = null;
+  let streamStructuralRender = false;
   let initialized = false;
   let modelSaveTimer = null;
+  const pendingSessionActions = new Set();
 
   async function refreshAll({ quiet = false } = {}) {
     try {
@@ -94,12 +96,15 @@
     const canStart = !active && session.status !== 'completed';
     const logs = (session.logs || []).slice().reverse().map((entry) => `<div class="ai-log-entry"><time>${time(entry.at)}</time><span>${html(entry.message)}</span></div>`).join('') || '<div class="rag-list-empty">暂无工作记录</div>';
     const output = session.externalOutput || session.lastOutput || '';
-    container.innerHTML = `<div class="ai-session-view"><header class="ai-session-head"><div class="ai-session-identity"><strong>${html(session.title)}</strong><span>${html(collection ? `${collection.userName} / ${collection.name}` : session.collectionId)} · ${html(providerName(session.providerId))} / ${html(session.modelId)} · ${html(session.workerId)}</span></div><div class="ai-session-actions">${canStart ? '<button class="primary-button compact-button" data-agent-action="start">开始/继续</button>' : ''}${active && session.acceptNewTasks ? '<button class="secondary-button compact-button" data-agent-action="pause">完成本单后暂停</button>' : ''}${active ? '<button class="secondary-button compact-button danger-button" data-agent-action="stop">立即停止</button>' : ''}<button class="icon-action danger-icon" data-agent-action="delete" title="删除会话" ${active ? 'disabled' : ''}><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14"/></svg></button></div></header><div class="ai-session-progress"><div><span>${html(session.phase || statusLabel(session.status))}</span><strong>${Math.round(Number(session.progress || 0) * 100)}%</strong></div><div class="ai-progress-track"><span style="width:${Math.round(Number(session.progress || 0) * 100)}%"></span></div>${output ? `<div class="ai-session-path" title="${esc(output)}">${html(output)}</div>` : ''}</div><div class="ai-session-body"><section class="ai-stream-pane"><div class="ai-subpanel-title"><strong>模型输出</strong><span>${formatTokens(session.tokenUsage?.total || 0)} tokens</span></div><div class="ai-stream-scroll">${session.reasoning ? `<details class="ai-reasoning" open><summary>模型思考</summary><pre>${html(session.reasoning)}</pre></details>` : ''}<pre class="ai-content-stream">${html(session.content || (active ? '正在等待模型输出…' : '该会话尚无模型输出。'))}</pre></div></section><aside class="ai-log-pane"><div class="ai-subpanel-title"><strong>工作记录</strong><span>${session.completed || 0} 完成 / ${session.failed || 0} 失败</span></div><div class="ai-log-scroll">${logs}</div></aside></div></div>`;
+    const pending = [...pendingSessionActions].some((key) => key.startsWith(`${session.id}:`));
+    container.innerHTML = `<div class="ai-session-view" data-agent-session-view="${esc(session.id)}"><header class="ai-session-head"><div class="ai-session-identity"><strong>${html(session.title)}</strong><span>${html(collection ? `${collection.userName} / ${collection.name}` : session.collectionId)} · ${html(providerName(session.providerId))} / ${html(session.modelId)} · ${html(session.workerId)}</span></div><div class="ai-session-actions">${canStart ? `<button class="primary-button compact-button" data-agent-action="start" ${pending ? 'disabled' : ''}>开始/继续</button>` : ''}${active && session.acceptNewTasks ? `<button class="secondary-button compact-button" data-agent-action="pause" ${pending ? 'disabled' : ''}>完成本单后暂停</button>` : ''}${active ? `<button class="secondary-button compact-button danger-button" data-agent-action="stop" ${pending ? 'disabled' : ''}>${pendingSessionActions.has(`${session.id}:stop`) ? '正在停止…' : '立即停止'}</button>` : ''}<button class="icon-action danger-icon" data-agent-action="delete" title="删除会话" ${active || pending ? 'disabled' : ''}><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14"/></svg></button></div></header><div class="ai-session-progress"><div><span data-agent-role="phase">${html(session.phase || statusLabel(session.status))}</span><strong data-agent-role="percent">${Math.round(Number(session.progress || 0) * 100)}%</strong></div><div class="ai-progress-track"><span data-agent-role="progress" style="width:${Math.round(Number(session.progress || 0) * 100)}%"></span></div><div class="ai-session-path" data-agent-role="output" title="${esc(output)}" ${output ? '' : 'hidden'}>${html(output)}</div></div><div class="ai-session-body"><section class="ai-stream-pane"><div class="ai-subpanel-title"><strong>模型输出</strong><span data-agent-role="tokens">${formatTokens(session.tokenUsage?.total || 0)} tokens</span></div><div class="ai-stream-scroll"><div data-agent-role="reasoning">${session.reasoning ? `<details class="ai-reasoning" open><summary>模型思考</summary><pre>${html(session.reasoning)}</pre></details>` : ''}</div><pre class="ai-content-stream" data-agent-role="content">${html(session.content || (active ? '正在等待模型输出…' : '该会话尚无模型输出。'))}</pre></div></section><aside class="ai-log-pane"><div class="ai-subpanel-title"><strong>工作记录</strong><span data-agent-role="stats">${session.completed || 0} 完成 / ${session.failed || 0} 失败 / ${session.skipped || 0} 跳过</span></div><div class="ai-log-scroll" data-agent-role="logs">${logs}</div></aside></div></div>`;
     for (const button of container.querySelectorAll('[data-agent-action]')) button.addEventListener('click', () => handleSessionAction(session, button));
   }
 
   async function handleSessionAction(session, button) {
     const action = button.dataset.agentAction;
+    const pendingKey = `${session.id}:${action}`;
+    if (pendingSessionActions.has(pendingKey)) return;
     if (action === 'delete' && button.dataset.confirm !== '1') {
       button.dataset.confirm = '1';
       button.title = '再次点击确认删除';
@@ -107,7 +112,9 @@
       setTimeout(() => { button.dataset.confirm = ''; button.title = '删除会话'; }, 2600);
       return;
     }
+    pendingSessionActions.add(pendingKey);
     button.disabled = true;
+    if (action === 'stop') button.textContent = '正在停止…';
     try {
       if (action === 'start') await window.orchestrator.internalAgentStart(session.id);
       if (action === 'pause') await window.orchestrator.internalAgentPause(session.id);
@@ -119,11 +126,17 @@
       }
       await refreshAll({ quiet: true });
     } catch (error) { notify('Agent 操作失败', error.message || String(error), 'error'); }
+    finally {
+      pendingSessionActions.delete(pendingKey);
+      const latest = state.sessions.find((item) => item.id === session.id);
+      const isSelected = latest && (latest.mode === 'single' ? latest.id === activeSingleId : latest.id === activeAgentId);
+      if (isSelected) renderSessionDetail(containerForSession(latest), latest, { compact: latest.mode === 'single' });
+    }
   }
 
   function sessionButton(session, active) {
     const collection = state.collections.find((item) => item.id === session.collectionId);
-    return `<button class="ai-agent-session ${active ? 'active' : ''}" type="button" data-agent-session="${esc(session.id)}"><div><strong>${html(session.title)}</strong><em class="ai-status ${esc(session.status)}">${statusLabel(session.status)}</em></div><span>${html(collection ? `${collection.userName} / ${collection.name}` : session.collectionId)}</span><small>${session.currentTask ? `${html(session.currentTask.bvid)} · ${html(session.phase)}` : `${session.completed || 0} 完成 / ${session.failed || 0} 失败`}</small></button>`;
+    return `<button class="ai-agent-session ${active ? 'active' : ''}" type="button" data-agent-session="${esc(session.id)}"><div><strong>${html(session.title)}</strong><em class="ai-status ${esc(session.status)}" data-agent-role="list-status">${statusLabel(session.status)}</em></div><span>${html(collection ? `${collection.userName} / ${collection.name}` : session.collectionId)}</span><small data-agent-role="list-summary">${session.currentTask ? `${html(session.currentTask.bvid)} · ${html(session.phase)}` : `${session.completed || 0} 完成 / ${session.failed || 0} 失败 / ${session.skipped || 0} 跳过`}</small></button>`;
   }
 
   function openCreateModal() {
@@ -320,7 +333,12 @@
 
   function handleInternalEvent(event) {
     if (!event) return;
-    if (event.type === 'session-updated' && event.session) replaceSession(event.session);
+    let structural = false;
+    if (event.type === 'session-updated' && event.session) {
+      const previous = state.sessions.find((item) => item.id === event.session.id);
+      structural = !previous || sessionStructureKey(previous) !== sessionStructureKey(event.session);
+      replaceSession(event.session);
+    }
     if (event.type === 'stream') {
       const session = state.sessions.find((item) => item.id === event.sessionId);
       if (session) {
@@ -339,7 +357,7 @@
       elements.loginRequiredReason.textContent = event.reason || '登录完成后回到“视频总结（单个）”，点击“开始/继续”即可重试。';
       elements.loginRequiredModal.hidden = false;
     }
-    scheduleStreamRender();
+    scheduleStreamRender(structural);
   }
 
   function replaceSession(session) {
@@ -348,9 +366,103 @@
     else state.sessions.unshift(session);
   }
 
-  function scheduleStreamRender() {
+  function scheduleStreamRender(structural = false) {
+    streamStructuralRender = streamStructuralRender || structural;
     if (streamRenderTimer) return;
-    streamRenderTimer = setTimeout(() => { streamRenderTimer = null; renderAgentPage(); renderSinglePage(); }, 90);
+    streamRenderTimer = setTimeout(() => {
+      streamRenderTimer = null;
+      if (streamStructuralRender) {
+        streamStructuralRender = false;
+        renderAgentPage();
+        renderSinglePage();
+      } else {
+        patchAgentPage();
+        patchSinglePage();
+      }
+    }, 90);
+  }
+
+  function patchAgentPage() {
+    const sessions = state.sessions.filter((item) => item.mode === 'queue');
+    elements.metricSessions.textContent = String(sessions.length);
+    elements.metricRunning.textContent = String(sessions.filter((item) => ['running', 'draining'].includes(item.status)).length);
+    elements.metricCompleted.textContent = String(sessions.reduce((sum, item) => sum + Number(item.completed || 0), 0));
+    elements.metricFailed.textContent = String(sessions.reduce((sum, item) => sum + Number(item.failed || 0), 0));
+    for (const session of sessions) patchSessionButton(elements.agentList, session, session.id === activeAgentId);
+    patchSessionDetail(elements.agentDetail, sessions.find((item) => item.id === activeAgentId));
+  }
+
+  function patchSinglePage() {
+    const session = state.sessions.find((item) => item.id === activeSingleId && item.mode === 'single');
+    const option = [...elements.singleSession.options].find((item) => item.value === activeSingleId);
+    if (option && session) option.textContent = `${session.title} · ${statusLabel(session.status)}`;
+    patchSessionDetail(elements.singleDetail, session);
+  }
+
+  function patchSessionButton(list, session, active) {
+    const button = list.querySelector(`[data-agent-session="${CSS.escape(session.id)}"]`);
+    if (!button) return;
+    button.classList.toggle('active', active);
+    const status = button.querySelector('[data-agent-role="list-status"]');
+    if (status) {
+      status.className = `ai-status ${session.status}`;
+      status.textContent = statusLabel(session.status);
+    }
+    const summary = button.querySelector('[data-agent-role="list-summary"]');
+    if (summary) summary.textContent = session.currentTask
+      ? `${session.currentTask.bvid} · ${session.phase}`
+      : `${session.completed || 0} 完成 / ${session.failed || 0} 失败 / ${session.skipped || 0} 跳过`;
+  }
+
+  function patchSessionDetail(container, session) {
+    if (!session || container.querySelector('[data-agent-session-view]')?.dataset.agentSessionView !== session.id) return;
+    const percent = Math.round(Number(session.progress || 0) * 100);
+    setText(container, 'phase', session.phase || statusLabel(session.status));
+    setText(container, 'percent', `${percent}%`);
+    const bar = container.querySelector('[data-agent-role="progress"]');
+    if (bar) bar.style.width = `${percent}%`;
+    setText(container, 'tokens', `${formatTokens(session.tokenUsage?.total || 0)} tokens`);
+    setText(container, 'stats', `${session.completed || 0} 完成 / ${session.failed || 0} 失败 / ${session.skipped || 0} 跳过`);
+    setText(container, 'content', session.content || (['running', 'draining', 'stopping'].includes(session.status) ? '正在等待模型输出…' : '该会话尚无模型输出。'));
+    const output = session.externalOutput || session.lastOutput || '';
+    const outputNode = container.querySelector('[data-agent-role="output"]');
+    if (outputNode) {
+      outputNode.hidden = !output;
+      outputNode.textContent = output;
+      outputNode.title = output;
+    }
+    const reasoningHost = container.querySelector('[data-agent-role="reasoning"]');
+    if (reasoningHost) {
+      const details = reasoningHost.querySelector('details');
+      if (session.reasoning && !details) reasoningHost.innerHTML = `<details class="ai-reasoning" open><summary>模型思考</summary><pre>${html(session.reasoning)}</pre></details>`;
+      else if (details) {
+        const wasOpen = details.open;
+        details.querySelector('pre').textContent = session.reasoning || '';
+        details.open = wasOpen;
+      }
+    }
+    const logNode = container.querySelector('[data-agent-role="logs"]');
+    if (logNode) {
+      const previousScroll = logNode.scrollTop;
+      const logs = (session.logs || []).slice().reverse().map((entry) => `<div class="ai-log-entry"><time>${time(entry.at)}</time><span>${html(entry.message)}</span></div>`).join('') || '<div class="rag-list-empty">暂无工作记录</div>';
+      if (logNode.innerHTML !== logs) {
+        logNode.innerHTML = logs;
+        logNode.scrollTop = previousScroll;
+      }
+    }
+  }
+
+  function setText(container, role, value) {
+    const node = container.querySelector(`[data-agent-role="${role}"]`);
+    if (node && node.textContent !== String(value)) node.textContent = String(value);
+  }
+
+  function sessionStructureKey(session) {
+    return [session.mode, session.status, Boolean(session.acceptNewTasks), session.title, session.collectionId, session.providerId, session.modelId].join('|');
+  }
+
+  function containerForSession(session) {
+    return session.mode === 'single' ? elements.singleDetail : elements.agentDetail;
   }
 
   function scheduleRefresh() {
