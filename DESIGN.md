@@ -226,6 +226,7 @@ POST /api/tasks/claim
 GET  /api/tasks/:id
 POST /api/tasks/:id/heartbeat
 POST /api/tasks/:id/submit
+POST /api/tasks/:id/abort
 POST /api/tasks/:id/fail
 GET  /api/tools
 POST /api/tasks/:taskId/tools/:toolId/run
@@ -251,7 +252,7 @@ Every fresh Agent session first registers its actual caller tool and model:
 }
 ```
 
-`POST /api/workers/register` creates and returns an app-owned ID such as `worker-...`. Agents must not invent or reuse a name as identity. The same `workerId` is included in claim, heartbeat, tool-run, cancellation, submission, and failure bodies for the lifetime of that Agent session.
+`POST /api/workers/register` creates and returns an app-owned ID such as `worker-...`. Agents must not invent or reuse a name as identity. The same `workerId` is included in claim, heartbeat, tool-run, cancellation, submission, and abort bodies for the lifetime of that Agent session.
 
 The user first selects and activates a collection in the desktop task page. `GET /api/active-collection` exposes that target. The claim endpoint always uses it; an agent request cannot override the active target with a different collection id or name.
 
@@ -264,6 +265,10 @@ Recommended claim body:
 ```
 
 The claim response includes Worker identity, user, collection, video, lease, cookie, workspace, assigned artifact path, document requirements, API-manifest URL, Markdown-template URL, and every enabled app tool.
+
+`POST /api/tasks/:id/abort` is the canonical interruption path. It requires an actionable `reason`, cancels queued/running app tools owned by the attempt, removes attempt files, clears claim/completion/output fields, records an `attempt-aborted` event, and returns the task to `pending`. `/fail` is retained only as a compatibility alias with identical rollback behavior. The operation is idempotent so simultaneous stop signals from the tool layer and Agent manager cannot duplicate destructive work.
+
+Normal artifacts are removed as a whole. A cache-collection task preserves only its registered merged video, local cover, `info.json`, and `cache-record.json`; generated audio, ASR, subtitles, frames, comments, drafts, manifests, and tool logs are removed. Application shutdown, crash recovery on the next launch, lease expiry without an active tool, internal Agent stop, login-required restart, and fatal infrastructure errors all use the same service. No interrupted summary tool run is resumed after restart.
 
 Worker allocation state is controlled only by the desktop UI. Pausing a Worker stops future claims and returns HTTP `423`, `WORKER_PAUSED`, and `来自用户的信息，你需要暂停工作`. It does not invalidate an already claimed task, so the Worker may heartbeat or submit that task. Reactivation resumes future allocation. The public Agent API exposes Worker status but cannot pause or reactivate a Worker.
 
@@ -487,7 +492,7 @@ The current retrieval engine is deterministic lexical RAG rather than an embeddi
 
 ## 17. Internal Agent Execution
 
-The internal Agent manager persists sessions in SQLite and registers each one through the same Worker store as external callers. Queue sessions claim only from their selected collection, so multiple internal sessions can work concurrently without changing the desktop collection activated for external agents. Claim ownership is synchronous, leases are renewed while app-managed tools are queued or running, and interrupted app sessions recover in a paused state after restart.
+The internal Agent manager persists sessions in SQLite and registers each one through the same Worker store as external callers. Queue sessions claim only from their selected collection, so multiple internal sessions can work concurrently without changing the desktop collection activated for external agents. Claim ownership is synchronous and leases are renewed while app-managed tools are queued or running. Interrupted app sessions recover as stopped after restart; their tasks and attempt files are rolled back instead of resumed.
 
 For each task the manager runs the material bundle, refreshes task metadata from `info.json`, sends the template, subtitles, ASR transcript, comments, manifest, metadata, and optionally up to four keyframes to the selected model, streams explicit reasoning/content fields to the renderer, and validates the draft. One repair attempt includes concrete validator errors. Accepted work runs cache cleanup and the same `submission-artifacts` service as the public API. Usage is recorded in both the session and shared per-model accounting.
 

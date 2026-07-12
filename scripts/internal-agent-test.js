@@ -36,16 +36,24 @@ function assert(condition, message) {
 
   let forceLoginFailure = false;
   let forceInfrastructureFailure = false;
+  let holdToolRuns = false;
+  let infrastructureArtifactDir = '';
   const toolRunner = {
     start: ({ task, tool, workerId, collection: runCollection }) => {
       const id = `run-${tool.id}-${Date.now()}`;
       const loginBlocked = forceLoginFailure && tool.id === 'material-bundle' && !runCollection?.cookieFile;
       const infrastructureBlocked = forceInfrastructureFailure && tool.id === 'material-bundle';
-      if (tool.id === 'material-bundle' && !loginBlocked && !infrastructureBlocked) writeMaterials(task.artifactDir);
-      store.createToolRun({ id, taskId: task.id, collectionId: task.collectionId, toolId: tool.id, toolName: tool.name, workerId, status: loginBlocked || infrastructureBlocked ? 'failed' : 'succeeded', stage: loginBlocked || infrastructureBlocked ? 'error' : 'complete', error: loginBlocked ? 'This video is only available for registered users. Use --cookies.' : (infrastructureBlocked ? 'GPU ASR 常驻服务连续 3 次启动失败，应用已停止相关 Agent。' : ''), errorCode: infrastructureBlocked ? 'ASR_INFRASTRUCTURE_FAILURE' : '', failureKind: infrastructureBlocked ? 'infrastructure' : '', possibleCauses: infrastructureBlocked ? ['CTranslate2 原生运行库访问冲突', '项目依赖损坏'] : [], createdAt: new Date().toISOString(), finishedAt: new Date().toISOString() });
+      if (tool.id === 'material-bundle' && !loginBlocked) writeMaterials(task.artifactDir);
+      if (infrastructureBlocked) infrastructureArtifactDir = task.artifactDir;
+      const waiting = holdToolRuns && tool.id === 'material-bundle';
+      store.createToolRun({ id, taskId: task.id, collectionId: task.collectionId, toolId: tool.id, toolName: tool.name, workerId, status: waiting ? 'running' : (loginBlocked || infrastructureBlocked ? 'failed' : 'succeeded'), stage: waiting ? 'test-hold' : (loginBlocked || infrastructureBlocked ? 'error' : 'complete'), error: loginBlocked ? 'This video is only available for registered users. Use --cookies.' : (infrastructureBlocked ? 'GPU ASR 常驻服务连续 3 次启动失败，应用已停止相关 Agent。' : ''), errorCode: infrastructureBlocked ? 'ASR_INFRASTRUCTURE_FAILURE' : '', failureKind: infrastructureBlocked ? 'infrastructure' : '', possibleCauses: infrastructureBlocked ? ['CTranslate2 原生运行库访问冲突', '项目依赖损坏'] : [], createdAt: new Date().toISOString(), finishedAt: waiting ? '' : new Date().toISOString() });
       return store.getToolRun(id);
     },
-    cancel: () => ({ status: 'cancelled' })
+    cancel: (runId) => {
+      const run = store.getToolRun(runId);
+      if (!run || ['succeeded', 'failed', 'cancelled', 'timeout'].includes(run.status)) return run;
+      return store.updateToolRun(runId, { status: 'cancelled', stage: 'cancelled', finishedAt: new Date().toISOString() });
+    }
   };
 
   const events = [];
@@ -77,6 +85,20 @@ function assert(condition, message) {
   assert(isLoginRequiredMessage('This video is only available for registered users. Use --cookies.'), 'login-required classifier missed yt-dlp guidance');
   assert(!isLoginRequiredMessage('network timeout while downloading'), 'ordinary network failure was misclassified as login-required');
 
+  holdToolRuns = true;
+  const stoppedSession = await manager.createSingleTask({ video: 'BVMANUAL0001', outputDir: path.join(root, 'stopped-output'), collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  await manager.start(stoppedSession.id);
+  const working = await waitForCurrentTask(manager, stoppedSession.id);
+  const interruptedArtifactDir = store.getTask(working.currentTaskId).artifactDir;
+  assert(fs.existsSync(path.join(interruptedArtifactDir, 'manifest.json')), 'manual stop fixture did not create partial artifacts');
+  manager.stop(stoppedSession.id);
+  const stopped = await waitForSession(manager, stoppedSession.id);
+  assert(stopped.status === 'stopped' && stopped.phase.includes('缓存已清理'), 'manual stop did not report attempt cleanup');
+  const stoppedTask = store.getTask(stoppedSession.singleTaskId);
+  assert(stoppedTask.status === 'pending' && !stoppedTask.claimedBy && !stoppedTask.artifactDir, 'manual stop did not reset the task claim');
+  assert(!fs.existsSync(interruptedArtifactDir), 'manual stop left partial task files behind');
+  holdToolRuns = false;
+
   forceLoginFailure = true;
   const loginSession = await manager.createSingleTask({ video: 'BV0987654321', outputDir: path.join(root, 'login-output'), collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
   await manager.start(loginSession.id);
@@ -97,6 +119,7 @@ function assert(condition, message) {
   assert(blocked.content.includes('Agent 因基础设施故障停止') && blocked.content.includes('可能原因'), 'blocked Agent did not report the infrastructure problem and likely causes');
   assert(blocked.acceptNewTasks === false && store.getWorker(blocked.workerId)?.status === 'paused', 'blocked Agent continued accepting work');
   assert(store.getTask(blocked.singleTaskId)?.status === 'pending', 'infrastructure failure did not return the video task to pending');
+  assert(infrastructureArtifactDir && !fs.existsSync(infrastructureArtifactDir), 'infrastructure failure left partial task files behind');
   assert(events.some((event) => event.type === 'infrastructure-stopped' && event.sessionId === blocked.id), 'infrastructure stop event was not emitted');
   manager.shutdown();
   fs.rmSync(root, { recursive: true, force: true });
@@ -192,5 +215,21 @@ function waitForStatus(manager, id, status) {
         reject(new Error(`Timed out waiting for internal agent status: ${status}`));
       }
     }, 60);
+  });
+}
+
+function waitForCurrentTask(manager, id) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const timer = setInterval(() => {
+      const session = manager.listSessions().find((item) => item.id === id);
+      if (session?.currentTaskId && session.currentRunId) {
+        clearInterval(timer);
+        resolve(session);
+      } else if (Date.now() - started > 10000) {
+        clearInterval(timer);
+        reject(new Error('Timed out waiting for an active internal Agent task.'));
+      }
+    }, 30);
   });
 }

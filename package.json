@@ -12,6 +12,7 @@
     "smoke": "node scripts/smoke-test.js",
     "test:rag": "node scripts/rag-assistant-test.js",
     "test:internal-agent": "node scripts/internal-agent-test.js",
+    "test:task-attempt": "node scripts/task-attempt-test.js",
     "test:video-cache": "node scripts/video-cache-test.js",
     "test:security": "node scripts/security-test.js",
     "test:persistence": "node scripts/persistence-test.js",

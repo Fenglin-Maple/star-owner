@@ -5,6 +5,7 @@ const { validateSubmission } = require('./validation');
 const { buildAnalytics } = require('./analytics');
 const { isAllowedApiOrigin } = require('./network-policy');
 const { finalizeSubmissionArtifacts, relocateCachedVideo } = require('./submission-artifacts');
+const { abortTaskAttempt } = require('./task-attempt');
 const { PROJECT_ROOT, collectionDirs, ensureDir, normalizeTags, videoArtifactDir } = require('./workspace');
 
 const DEFAULT_LEASE_MS = 15 * 60 * 1000;
@@ -116,6 +117,7 @@ class ApiServer {
         }
         if (req.method === 'POST' && action === 'heartbeat') return this.heartbeatTask(req, res, taskId);
         if (req.method === 'POST' && action === 'submit') return this.submitTask(req, res, taskId);
+        if (req.method === 'POST' && action === 'abort') return this.abortTask(req, res, taskId);
         if (req.method === 'POST' && action === 'fail') return this.failTask(req, res, taskId);
       }
 
@@ -155,7 +157,7 @@ class ApiServer {
     const base = this.url();
     return {
       product: '星藏家',
-      protocolVersion: '2.2',
+      protocolVersion: '2.3',
       baseUrl: base,
       worker: worker ? this.publicWorker(worker) : null,
       activeCollection: this.store.getActiveCollection(),
@@ -164,7 +166,8 @@ class ApiServer {
         'Every state-changing agent request includes workerId.',
         'Read the desktop-selected active collection, then claim one task.',
         'Use app-managed tool endpoints. Tool calls return HTTP 202 and may remain queued; poll the run until it reaches a terminal status.',
-        'The app protects the task lease while one of its tool runs is queued or running. Clean cache and submit final artifacts after tools finish.'
+        'The app protects the task lease while one of its tool runs is queued or running. Clean cache and submit final artifacts after tools finish.',
+        'If the attempt cannot continue, call the task abort endpoint with workerId and a concrete reason. The app removes the attempt and the next claim starts from scratch.'
       ],
       endpoints: [
         { method: 'GET', path: '/api/manifest?workerId=<workerId>', purpose: 'Return this complete interface manifest and current context.', params: { workerId: 'Optional after registration.' } },
@@ -180,7 +183,8 @@ class ApiServer {
         { method: 'POST', path: '/api/tool-runs/<runId>/cancel', purpose: 'Cancel a tool run owned by this worker.', body: { workerId: 'Required.' } },
         { method: 'GET', path: '/api/templates/video-summary', purpose: 'Return the reference Markdown template.' },
         { method: 'POST', path: '/api/tasks/<taskId>/submit', purpose: 'Validate and submit final artifacts.', body: { workerId: 'Required.', artifactDir: 'Assigned artifact directory.', markdownFile: 'Final Markdown path.', metadataFile: 'info.json path.' } },
-        { method: 'POST', path: '/api/tasks/<taskId>/fail', purpose: 'Report an actionable terminal failure.', body: { workerId: 'Required.', reason: 'Required failure explanation.' } }
+        { method: 'POST', path: '/api/tasks/<taskId>/abort', purpose: 'Stop the current attempt, cancel app-managed tools, delete attempt files, and return the task to pending.', body: { workerId: 'Required.', reason: 'Required explanation of why work cannot continue.' } },
+        { method: 'POST', path: '/api/tasks/<taskId>/fail', purpose: 'Compatibility alias for abort. Failed attempts are cleaned and returned to pending.', body: { workerId: 'Required.', reason: 'Required failure explanation.' } }
       ],
       tools: this.store.listTools({ enabled: true }).map((tool) => this.publicTool(tool)),
       markdownTemplateUrl: `${base}/api/templates/video-summary`,
@@ -262,7 +266,7 @@ class ApiServer {
     if (body.collectionName && body.collectionName !== collection.name) {
       throw new Error('The desktop app owns task targeting. Remove collectionName or activate that collection in the task inventory.');
     }
-    reclaimExpired(this.store, collection.id);
+    reclaimExpired(this.store, collection.id, this.toolRunner);
     const task = this.store.listTasks({ collectionId: collection.id })
       .find((item) => item.enabled !== false && (item.status === 'pending' || item.status === 'rejected' || item.status === 'failed'));
     if (!task) return this.json(res, { task: null, message: 'NO_TASK' });
@@ -286,6 +290,11 @@ class ApiServer {
       allowedRoot: task.cachedVideoId ? task.allowedRoot : dirs.root,
       artifactDir,
       validatorErrors: [],
+      failureReason: '',
+      infrastructureError: '',
+      abortReason: '',
+      abortSource: '',
+      abortedAt: '',
       updatedAt: now.toISOString()
     });
     this.store.upsertTask(task);
@@ -400,26 +409,20 @@ class ApiServer {
   }
 
   async failTask(req, res, taskId) {
+    return this.abortTask(req, res, taskId, 'agent-fail');
+  }
+
+  async abortTask(req, res, taskId, source = 'agent-abort') {
     const body = await readBody(req);
     const worker = this.requireWorker(body);
     const task = this.store.getTask(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
     this.assertTaskWorker(task, worker);
-    Object.assign(task, {
-      status: 'failed',
-      failureReason: body.reason || 'unknown',
-      updatedAt: new Date().toISOString()
-    });
-    this.store.upsertTask(task);
-    this.store.commit();
-    this.store.recordTaskEvent(task.id, 'failed', {
-      collectionId: task.collectionId,
-      workerId: worker.id,
-      agentName: worker.id,
-      reason: task.failureReason
-    });
-    this.onEvent({ type: 'task-failed', taskId: task.id, collectionId: task.collectionId, workerId: worker.id, agentName: worker.id });
-    this.json(res, { task });
+    const reason = String(body.reason || '').trim();
+    if (!reason) throw new Error('reason is required so the application can record why this attempt stopped.');
+    const result = abortTaskAttempt({ store: this.store, toolRunner: this.toolRunner, taskId, workerId: worker.id, reason, source });
+    this.onEvent({ type: 'task-attempt-aborted', taskId: task.id, collectionId: task.collectionId, workerId: worker.id, agentName: worker.id, reason, source, cleanup: result.cleanup });
+    this.json(res, { aborted: true, task: result.task, cancelledRuns: result.cancelledRuns, cleanup: result.cleanup });
   }
 
   requireWorker(body = {}) {
@@ -481,8 +484,10 @@ class ApiServer {
         requiredOpeningOrder: ['小结', '思维导图', '目录'],
         cleanup: task.cachedVideoId
           ? '最终产物保存后仍调用 clean-cache；应用会保留缓存库中的合轨视频，只删除音频等过渡缓存。'
-          : '最终产物保存后，通过 clean-cache 工具运行 API 删除临时视频和音频缓存。'
+          : '最终产物保存后，通过 clean-cache 工具运行 API 删除临时视频和音频缓存。',
+        interruption: `如果当前任务因错误、用户要求或其它原因无法继续，必须立即 POST ${this.url()}/api/tasks/${encodeURIComponent(task.id)}/abort 并提交 workerId 与 reason。应用会取消工具、删除本次产物并将任务退回 pending；不要自行保留断点或直接修改文件状态。`
       },
+      abortUsage: `POST ${this.url()}/api/tasks/${encodeURIComponent(task.id)}/abort`,
       toolPolicy: 'Agent 不直接运行本地工具脚本。必须通过 /api/tasks/<taskId>/tools/<toolId>/run 请求桌面应用代为执行。',
       tools: this.store.listTools({ enabled: true }).map((tool) => this.publicTool(tool, task.id))
     };
@@ -518,7 +523,7 @@ class ApiServer {
   }
 }
 
-function reclaimExpired(store, collectionId) {
+function reclaimExpired(store, collectionId, toolRunner = null) {
   const now = new Date();
   const protectedTaskIds = new Set(
     store.listToolRuns().filter((run) => ['queued', 'running'].includes(run.status)).map((run) => run.taskId)
@@ -526,15 +531,9 @@ function reclaimExpired(store, collectionId) {
   for (const task of store.listTasks({ collectionId })) {
     if (task.status === 'claimed' && task.leaseExpiresAt && new Date(task.leaseExpiresAt) <= now) {
       if (protectedTaskIds.has(task.id)) continue;
-      task.status = 'pending';
-      task.claimedBy = '';
-      task.claimedAt = '';
-      task.leaseExpiresAt = '';
-      task.updatedAt = now.toISOString();
-      store.upsertTask(task);
+      abortTaskAttempt({ store, toolRunner, taskId: task.id, workerId: task.claimedBy, reason: 'Task lease expired before the Agent completed or aborted the attempt.', source: 'lease-expired' });
     }
   }
-  store.commit();
 }
 
 function resourcePolicyForAction(action) {

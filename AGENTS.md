@@ -17,6 +17,7 @@ Star Owner (星藏家) turns a user's Bilibili favorite folders into a managed q
 9. Include comprehensive body content, Bilibili timestamp links, selected keyframes, subtitle comparison, up to three hot-comment analyses, limitations, and processing provenance.
 10. Clean temporary video/audio through the application tool API before submission. For a task with `cachedVideoId`/`reuseCachedMedia`, still call cleanup; the application preserves the registered merged video automatically.
 11. Submit through `/api/tasks/<taskId>/submit`; the application validates and finalizes the directory and Markdown filename.
+12. If an error, user instruction, or other condition prevents completion, call `/api/tasks/<taskId>/abort` with `workerId` and a concrete `reason`. Do not leave files as a checkpoint. The application cancels tools, removes this attempt, and returns the task to `pending` so the next worker starts from scratch. `/fail` is a legacy alias with the same behavior.
 
 The canonical Markdown contract is `templates/video-summary-template.md` and is also returned by `GET /api/templates/video-summary`.
 
@@ -60,6 +61,7 @@ npm run smoke
 npm run test:scheduler
 npm run test:rag
 npm run test:internal-agent
+npm run test:task-attempt
 npm run test:video-cache
 npm run test:security
 npm run test:persistence

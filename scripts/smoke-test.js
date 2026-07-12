@@ -144,6 +144,28 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   });
   const claim = await claimResponse.json();
   if (!claimResponse.ok || claim.task?.bvid !== 'BVENABLED') throw new Error('disabled task was claimable');
+  if (!claim.task.abortUsage || !claim.task.requirements?.interruption?.includes('/abort')) throw new Error('claim context omitted attempt-abort instructions');
+  const abortArtifactDir = claim.task.artifactDir;
+  fs.writeFileSync(path.join(abortArtifactDir, 'partial.md'), '# interrupted');
+  store.createToolRun({
+    id: 'abort-run',
+    taskId: claim.task.id,
+    collectionId: claim.task.collectionId,
+    toolId: 'material-bundle',
+    toolName: '素材流水线',
+    workerId: registration.workerId,
+    status: 'queued',
+    artifactDir: abortArtifactDir,
+    createdAt: new Date().toISOString()
+  });
+  const abortResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(claim.task.id)}/abort`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ workerId: registration.workerId, reason: 'smoke interruption' })
+  });
+  const aborted = await abortResponse.json();
+  if (!abortResponse.ok || !aborted.aborted || aborted.task?.status !== 'pending') throw new Error('task abort API failed');
+  if (fs.existsSync(abortArtifactDir) || store.getToolRun('abort-run')?.status !== 'cancelled') throw new Error('task abort API left attempt files or active runs behind');
   const pausedWorker = store.updateWorker(registration.workerId, { status: 'paused', pauseReason: 'smoke pause' });
   if (pausedWorker.status !== 'paused') throw new Error('worker pause failed');
   const pausedClaimResponse = await fetch(`${api.url()}/api/tasks/claim`, {

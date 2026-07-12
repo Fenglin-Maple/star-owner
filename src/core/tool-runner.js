@@ -1,9 +1,10 @@
 const fs = require('fs');
 const path = require('path');
-const { execFile, spawn } = require('child_process');
+const { execFile, spawn, spawnSync } = require('child_process');
 const { promisify } = require('util');
 const { AsrService } = require('./asr-service');
 const { ResourceScheduler } = require('./resource-scheduler');
+const { abortTaskAttempt } = require('./task-attempt');
 const { PROJECT_ROOT, assertInside, ensureDir, safeName } = require('./workspace');
 
 const execFileAsync = promisify(execFile);
@@ -91,9 +92,9 @@ class ToolRunner {
     this.gpuTimer.unref?.();
     this.leaseTimer = setInterval(() => this.protectActiveTaskLeases(), 60 * 1000);
     this.leaseTimer.unref?.();
-    const restored = this.restoreInterruptedRuns();
+    const recovery = this.restoreInterruptedRuns();
     this.protectActiveTaskLeases();
-    this.publish({ type: 'resource-scheduler-ready', restoredRuns: restored, cpuAsrEnabled: this.config.cpuAsrEnabled });
+    this.publish({ type: 'resource-scheduler-ready', restoredRuns: recovery.restoredRuns, rolledBackTasks: recovery.rolledBackTasks, cpuAsrEnabled: this.config.cpuAsrEnabled });
     this.notifyState(true);
     return this.getState();
   }
@@ -248,6 +249,8 @@ class ToolRunner {
       return this.finishRun(state, 'succeeded', { exitCode: 0, stage: 'complete' });
     } catch (error) {
       if (this.shuttingDown) {
+        const current = this.store.getToolRun(run.id);
+        if (state.cancelled || current?.status === 'cancelled') return current;
         return this.updateRun(run.id, {
           status: 'queued',
           stage: 'recovery',
@@ -539,9 +542,31 @@ class ToolRunner {
   }
 
   restoreInterruptedRuns() {
-    let restored = 0;
+    const rolledBackTaskIds = new Set();
+    for (const task of this.store.listTasks().filter((item) => item.status === 'claimed')) {
+      try {
+        abortTaskAttempt({
+          store: this.store,
+          toolRunner: this,
+          taskId: task.id,
+          workerId: task.claimedBy,
+          reason: '应用在本次视频总结任务完成前退出，启动时已执行完整回滚。',
+          source: 'app-restart-recovery'
+        });
+        rolledBackTaskIds.add(task.id);
+      } catch (error) {
+        rolledBackTaskIds.add(task.id);
+        this.publish({ type: 'task-attempt-cleanup-failed', taskId: task.id, workerId: task.claimedBy, error: error.message || String(error), source: 'app-restart-recovery' });
+      }
+    }
+
+    let restoredRuns = 0;
     for (const run of this.store.listToolRuns()) {
       if (!ACTIVE_STATUSES.has(run.status)) continue;
+      if (rolledBackTaskIds.has(run.taskId)) {
+        this.store.updateToolRun(run.id, { status: 'cancelled', stage: 'cancelled', signal: 'ATTEMPT_ROLLED_BACK', finishedAt: new Date().toISOString() });
+        continue;
+      }
       const task = this.store.getTask(run.taskId);
       const tool = this.store.get('tools', run.toolId);
       if (!task || !tool) {
@@ -564,9 +589,9 @@ class ToolRunner {
         signal: ''
       });
       this.enqueuePersistedRun(recovered);
-      restored += 1;
+      restoredRuns += 1;
     }
-    return restored;
+    return { restoredRuns, rolledBackTasks: rolledBackTaskIds.size };
   }
 
   protectActiveTaskLeases() {
@@ -651,20 +676,14 @@ class ToolRunner {
     const reason = [error.message || String(error), possibleCauses.length ? `可能原因：${possibleCauses.join('；')}` : ''].filter(Boolean).join('\n');
     const worker = this.store.getWorker(run.workerId);
     if (worker) this.store.updateWorker(worker.id, { status: 'paused', pauseReason: reason, pausedAt: new Date().toISOString() });
-    if (task?.status === 'claimed' && task.claimedBy === run.workerId) {
-      Object.assign(task, {
-        status: 'pending',
-        claimedBy: '',
-        claimedAt: '',
-        leaseExpiresAt: '',
-        infrastructureError: reason,
-        updatedAt: new Date().toISOString()
-      });
-      this.store.upsertTask(task);
-      this.store.recordTaskEvent(task.id, 'infrastructure-stopped', { collectionId: task.collectionId, workerId: run.workerId, reason, possibleCauses });
+    let cleanup = null;
+    try {
+      cleanup = abortTaskAttempt({ store: this.store, toolRunner: this, taskId: task?.id || run.taskId, workerId: run.workerId, reason, source: 'infrastructure-failure' }).cleanup;
+    } catch (cleanupError) {
+      this.store.commit();
+      this.publish({ type: 'task-attempt-cleanup-failed', workerId: run.workerId, taskId: task?.id || run.taskId, error: cleanupError.message || String(cleanupError) });
     }
-    this.store.commit();
-    this.publish({ type: 'agent-infrastructure-stopped', workerId: run.workerId, taskId: task?.id || run.taskId, error: error.message || String(error), possibleCauses });
+    this.publish({ type: 'agent-infrastructure-stopped', workerId: run.workerId, taskId: task?.id || run.taskId, error: error.message || String(error), possibleCauses, cleanup });
   }
 
   async refreshGpuState() {
@@ -805,6 +824,20 @@ class ToolRunner {
 
   shutdown() {
     if (this.shuttingDown) return;
+    for (const task of this.store.listTasks().filter((item) => item.status === 'claimed')) {
+      try {
+        abortTaskAttempt({
+          store: this.store,
+          toolRunner: this,
+          taskId: task.id,
+          workerId: task.claimedBy,
+          reason: '应用关闭，中止并回滚当前视频总结任务。',
+          source: 'app-shutdown'
+        });
+      } catch (error) {
+        this.publish({ type: 'task-attempt-cleanup-failed', taskId: task.id, workerId: task.claimedBy, error: error.message || String(error), source: 'app-shutdown' });
+      }
+    }
     this.shuttingDown = true;
     if (this.gpuTimer) clearInterval(this.gpuTimer);
     if (this.leaseTimer) clearInterval(this.leaseTimer);
@@ -1051,7 +1084,7 @@ function withTimeout(promise, timeoutMs, onTimeout) {
 function killProcessTree(child) {
   if (!child || child.killed) return;
   if (process.platform === 'win32' && child.pid) {
-    spawn('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).unref();
+    spawnSync('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
     return;
   }
   try { child.kill('SIGTERM'); } catch {}

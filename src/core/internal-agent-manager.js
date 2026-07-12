@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { finalizeSubmissionArtifacts, relocateCachedVideo } = require('./submission-artifacts');
 const { isLoginRequiredMessage, loginRequiredError } = require('./media-errors');
+const { abortTaskAttempt } = require('./task-attempt');
 const { validateSubmission } = require('./validation');
 const {
   WORKSPACE_ROOT,
@@ -252,8 +253,17 @@ class InternalAgentManager {
     for (const controller of this.controllers.values()) controller.abort();
     for (const session of this.listSessions()) {
       if (!['running', 'draining', 'stopping'].includes(session.status)) continue;
-      session.status = 'paused';
-      session.phase = '应用已关闭，等待下次手动恢复';
+      if (session.currentRunId) {
+        try { this.toolRunner.cancel(session.currentRunId); } catch {}
+      }
+      if (session.currentTaskId) {
+        try { this.abortAttempt(session.currentTaskId, session.workerId, '应用关闭，中止当前任务。', 'app-shutdown'); }
+        catch (error) { session.lastError = `关闭时清理失败，将在下次启动重试：${error.message || String(error)}`; }
+      }
+      session.status = 'stopped';
+      session.phase = '应用关闭，任务已回滚';
+      session.acceptNewTasks = false;
+      session.currentTaskId = '';
       session.currentRunId = '';
       session.updatedAt = new Date().toISOString();
       this.store.set('internalAgentSessions', session.id, session);
@@ -280,8 +290,8 @@ class InternalAgentManager {
       } catch (error) {
         const latest = this.requireSession(session.id);
         if (signal.aborted) {
-          this.releaseTask(task.id, latest.workerId);
-          this.finishSession(latest, 'stopped', '已停止');
+          this.abortAttempt(task.id, latest.workerId, '用户或应用停止了 Agent 工作。', 'internal-agent-stop');
+          this.finishSession(latest, 'stopped', '已停止，任务缓存已清理');
           return;
         }
         if (error.code === 'ASR_INFRASTRUCTURE_FAILURE' || error.failureKind === 'infrastructure') {
@@ -306,7 +316,7 @@ class InternalAgentManager {
           latest.content = report;
           latest.currentTaskId = '';
           latest.currentRunId = '';
-          this.releaseTask(task.id, latest.workerId);
+          this.abortAttempt(task.id, latest.workerId, latest.lastError, 'infrastructure-failure');
           this.store.updateWorker(latest.workerId, { status: 'paused', pauseReason: report, pausedAt: new Date().toISOString() });
           this.saveSession(latest);
           this.log(latest, `基础设施故障，Agent 已停止：${latest.lastError}`);
@@ -314,7 +324,7 @@ class InternalAgentManager {
           return;
         }
         if (latest.mode === 'single' && error.code === 'BILIBILI_LOGIN_REQUIRED') {
-          this.releaseTask(task.id, latest.workerId);
+          this.abortAttempt(task.id, latest.workerId, error.message || String(error), 'login-required');
           latest.status = 'waiting-login';
           latest.phase = '需要登录后继续';
           latest.lastError = error.message || String(error);
@@ -333,7 +343,7 @@ class InternalAgentManager {
         latest.lastError = error.message || String(error);
         latest.currentTaskId = '';
         latest.currentRunId = '';
-        this.failTask(task.id, latest.workerId, latest.lastError);
+        this.abortAttempt(task.id, latest.workerId, latest.lastError, 'internal-agent-error');
         this.saveSession(latest);
         this.log(latest, `任务失败：${latest.lastError}`);
         if (latest.mode === 'single' || !latest.acceptNewTasks) return;
@@ -376,6 +386,11 @@ class InternalAgentManager {
       allowedRoot: task.cachedVideoId ? task.allowedRoot : dirs.root,
       artifactDir,
       validatorErrors: [],
+      failureReason: '',
+      infrastructureError: '',
+      abortReason: '',
+      abortSource: '',
+      abortedAt: '',
       updatedAt: now.toISOString()
     });
     this.store.upsertTask(task);
@@ -535,31 +550,18 @@ class InternalAgentManager {
     return finalized;
   }
 
-  failTask(taskId, workerId, reason) {
-    const task = this.store.getTask(taskId);
-    if (!task || task.claimedBy !== workerId) return;
-    Object.assign(task, { status: 'failed', failureReason: reason, updatedAt: new Date().toISOString() });
-    this.store.upsertTask(task);
-    this.store.commit();
-    this.store.recordTaskEvent(task.id, 'failed', { collectionId: task.collectionId, workerId, agentName: workerId, reason, internalAgent: true });
-  }
-
-  releaseTask(taskId, workerId) {
-    const task = this.store.getTask(taskId);
-    if (!task || task.claimedBy !== workerId || task.status !== 'claimed') return;
-    Object.assign(task, { status: 'pending', claimedBy: '', claimedAt: '', leaseExpiresAt: '', updatedAt: new Date().toISOString() });
-    this.store.upsertTask(task);
-    this.store.commit();
+  abortAttempt(taskId, workerId, reason, source) {
+    const result = abortTaskAttempt({ store: this.store, toolRunner: this.toolRunner, taskId, workerId, reason, source });
+    if (!result.alreadyAborted) this.emitEvent({ type: 'task-attempt-aborted', taskId, workerId, reason, source, cleanup: result.cleanup });
+    return result;
   }
 
   reclaimExpired(collectionId) {
     const active = new Set(this.store.listToolRuns().filter((run) => ['queued', 'running'].includes(run.status)).map((run) => run.taskId));
     for (const task of this.store.listTasks({ collectionId })) {
       if (task.status !== 'claimed' || !task.leaseExpiresAt || Date.parse(task.leaseExpiresAt) > Date.now() || active.has(task.id)) continue;
-      Object.assign(task, { status: 'pending', claimedBy: '', claimedAt: '', leaseExpiresAt: '', updatedAt: new Date().toISOString() });
-      this.store.upsertTask(task);
+      this.abortAttempt(task.id, task.claimedBy, '任务租约已超时，内置 Agent 未完成或未正常中止本次工作。', 'lease-expired');
     }
-    this.store.commit();
   }
 
   streamDelta(sessionId, delta) {
@@ -645,8 +647,14 @@ class InternalAgentManager {
   recoverInterruptedSessions() {
     for (const session of this.listSessions()) {
       if (!['running', 'draining', 'stopping'].includes(session.status)) continue;
-      session.status = 'paused';
-      session.phase = '应用重启后等待手动恢复';
+      if (session.currentTaskId) {
+        try { this.abortAttempt(session.currentTaskId, session.workerId, '应用在上次任务执行期间退出。', 'app-restart-recovery'); }
+        catch (error) { session.lastError = `中断任务清理失败：${error.message || String(error)}`; }
+      }
+      session.status = 'stopped';
+      session.phase = '上次中断任务已回滚，请重新开始';
+      session.acceptNewTasks = false;
+      session.currentTaskId = '';
       session.currentRunId = '';
       session.updatedAt = new Date().toISOString();
       this.store.set('internalAgentSessions', session.id, session);

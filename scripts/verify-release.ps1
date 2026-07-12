@@ -84,6 +84,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "RAG assistant test failed." }
   & npm run test:internal-agent
   if ($LASTEXITCODE -ne 0) { throw "Internal agent test failed." }
+  & npm run test:task-attempt
+  if ($LASTEXITCODE -ne 0) { throw "Task attempt rollback test failed." }
   & npm run test:video-cache
   if ($LASTEXITCODE -ne 0) { throw "Video cache test failed." }
   & npm run test:security
