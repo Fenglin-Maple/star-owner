@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = PROJECT_ROOT / "runtime"
 MODELS_ROOT = RUNTIME_ROOT / "models"
 HF_CACHE_ROOT = RUNTIME_ROOT / "cache" / "huggingface"
+VC_RUNTIME_ROOT = RUNTIME_ROOT / "vc-runtime"
 DEFAULT_MODEL = "medium"
 DLL_HANDLES = []
 
@@ -20,6 +21,7 @@ def configure_project_dlls():
     site_packages = Path(sys.prefix) / "Lib" / "site-packages"
     project_site_packages = RUNTIME_ROOT / "faster-whisper" / "Lib" / "site-packages"
     candidates = [
+        VC_RUNTIME_ROOT,
         project_site_packages / "nvidia" / "cublas" / "bin",
         project_site_packages / "nvidia" / "cudnn" / "bin",
         project_site_packages / "nvidia" / "cuda_nvrtc" / "bin",

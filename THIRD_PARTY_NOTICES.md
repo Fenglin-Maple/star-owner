@@ -22,6 +22,7 @@ The npm dependency tree also contains MIT, ISC, BSD-2-Clause, BSD-3-Clause, Apac
 | Component | Version | License | Role / upstream |
 | --- | --- | --- | --- |
 | CPython | 3.12.13 | PSF License | Project-local Python runtime, [python/cpython](https://github.com/python/cpython) |
+| Microsoft Visual C++ Redistributable | 14.44.35211.0 | Microsoft Visual Studio licensing terms | Project-local x64 C/C++ runtime for CTranslate2, [official redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe) |
 | faster-whisper | 1.2.1 | MIT | Speech recognition, [SYSTRAN/faster-whisper](https://github.com/SYSTRAN/faster-whisper) |
 | CTranslate2 | 4.8.1 | MIT | GPU/CPU inference, [OpenNMT/CTranslate2](https://github.com/OpenNMT/CTranslate2) |
 | PyAV | 18.0.0 | BSD-3-Clause | Audio/video decoding, [PyAV-Org/PyAV](https://github.com/PyAV-Org/PyAV) |
@@ -34,6 +35,8 @@ The npm dependency tree also contains MIT, ISC, BSD-2-Clause, BSD-3-Clause, Apac
 | `Systran/faster-whisper-medium` | revision `08e178d48790749d25932bbc082711ddcfdfbc4f` | MIT | Default balanced multilingual ASR model |
 
 Model files are data artifacts and are published as release payloads rather than committed to Git. Their repository/model-card terms must be retained in any redistributed model archive.
+
+The Microsoft Visual C++ runtime files are signed Microsoft redistributable components, not open-source software and not covered by this project's GPL license. Their hashes and private loading purpose are recorded in `runtime/vc-runtime/README.md`.
 
 ## NVIDIA Runtime
 

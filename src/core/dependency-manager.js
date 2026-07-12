@@ -23,14 +23,15 @@ class DependencyManager {
       {
         id: 'runtime-base',
         name: '媒体与 ASR 基础运行时',
-        description: '项目内 Python、faster-whisper、CTranslate2、FFmpeg、yt-dlp 与 CUDA 运行库。',
+        description: '项目内 Python、Microsoft VC++、faster-whisper、CTranslate2、FFmpeg、yt-dlp 与 CUDA 运行库。',
         required: true,
         assetName: `Star-Owner-v${this.version}-runtime-win-x64.zip`,
         assetPattern: /Star-Owner-v[\d.]+-runtime-win-x64\.zip$/i,
         fallbackAssetPattern: /Star-Owner-v[\d.]+-win-x64-core\.zip$/i,
         probes: [
           'runtime/python/cpython-3.12.13-windows-x86_64-none/python.exe',
-          'runtime/faster-whisper/Lib/site-packages/faster_whisper'
+          'runtime/faster-whisper/Lib/site-packages/faster_whisper',
+          'runtime/vc-runtime/msvcp140.dll'
         ]
       },
       {

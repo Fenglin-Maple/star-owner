@@ -1,5 +1,8 @@
 node_modules/
-runtime/
+runtime/*
+!runtime/vc-runtime/
+!runtime/vc-runtime/*.dll
+!runtime/vc-runtime/README.md
 workspace/
 dist/
 release/

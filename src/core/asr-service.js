@@ -21,11 +21,20 @@ class AsrService {
     this.startedAt = '';
     this.readyAt = '';
     this.loadMs = 0;
+    this.consecutiveFailures = 0;
+    this.restartNotBefore = 0;
+    this.intentionalStop = false;
   }
 
   async start() {
     if (this.ready && this.child) return this.status();
     if (this.startPromise) return this.startPromise;
+    const retryAfterMs = Math.max(0, this.restartNotBefore - Date.now());
+    if (retryAfterMs > 0) {
+      const error = new Error(`${this.lastError || 'ASR service failed.'} Retry in ${Math.ceil(retryAfterMs / 1000)}s.`);
+      error.retryAfterMs = retryAfterMs;
+      return Promise.reject(error);
+    }
     this.startPromise = this.spawnService().finally(() => { this.startPromise = null; });
     return this.startPromise;
   }
@@ -37,6 +46,7 @@ class AsrService {
     if (!fs.existsSync(script)) return Promise.reject(new Error(`ASR service is missing: ${script}`));
     this.startedAt = new Date().toISOString();
     this.lastError = '';
+    this.intentionalStop = false;
 
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -63,6 +73,8 @@ class AsrService {
           this.ready = true;
           this.readyAt = new Date().toISOString();
           this.loadMs = Number(message.loadMs || 0);
+          this.consecutiveFailures = 0;
+          this.restartNotBefore = 0;
           this.onEvent({ type: 'asr-service-ready', serviceId: this.id, device: this.device, loadMs: this.loadMs });
           if (!settled) {
             settled = true;
@@ -105,11 +117,27 @@ class AsrService {
         clearTimeout(timeout);
         this.ready = false;
         this.child = null;
+        const intentionallyStopped = this.intentionalStop;
+        this.intentionalStop = false;
         const error = new Error(this.lastError || `ASR service exited: code=${code} signal=${signal || ''}`);
+        if (!intentionallyStopped && code !== 0) {
+          this.lastError = error.message;
+          this.consecutiveFailures += 1;
+          const delay = Math.min(60000, 5000 * (2 ** Math.min(4, this.consecutiveFailures - 1)));
+          this.restartNotBefore = Date.now() + delay;
+        }
         for (const pending of this.pending.values()) pending.reject(error);
         this.pending.clear();
         this.currentRequestId = '';
-        this.onEvent({ type: 'asr-service-stopped', serviceId: this.id, device: this.device, exitCode: code, signal: signal || '' });
+        this.onEvent({
+          type: 'asr-service-stopped',
+          serviceId: this.id,
+          device: this.device,
+          exitCode: code,
+          signal: signal || '',
+          error: this.lastError,
+          retryAfterMs: Math.max(0, this.restartNotBefore - Date.now())
+        });
         if (!settled) {
           settled = true;
           reject(error);
@@ -138,12 +166,14 @@ class AsrService {
   cancel(requestId) {
     if (!this.child || this.currentRequestId !== String(requestId)) return false;
     this.lastError = `ASR request cancelled: ${requestId}`;
+    this.intentionalStop = true;
     this.child.kill('SIGTERM');
     return true;
   }
 
   stop() {
     if (!this.child) return;
+    this.intentionalStop = true;
     try { this.child.stdin.write(`${JSON.stringify({ id: `shutdown-${Date.now()}`, action: 'shutdown' })}\n`); } catch {}
     const child = this.child;
     setTimeout(() => { if (this.child === child) child.kill('SIGTERM'); }, 1500);
@@ -161,7 +191,9 @@ class AsrService {
       startedAt: this.startedAt,
       readyAt: this.readyAt,
       loadMs: this.loadMs,
-      lastError: this.lastError
+      lastError: this.lastError,
+      consecutiveFailures: this.consecutiveFailures,
+      restartAfter: this.restartNotBefore ? new Date(this.restartNotBefore).toISOString() : ''
     };
   }
 }
@@ -179,6 +211,7 @@ function findRuntimePython() {
 
 function serviceEnvironment() {
   const venv = path.join(PROJECT_ROOT, 'runtime', 'faster-whisper');
+  const vcRuntime = path.join(PROJECT_ROOT, 'runtime', 'vc-runtime');
   const sitePackages = process.platform === 'win32'
     ? path.join(venv, 'Lib', 'site-packages')
     : path.join(venv, 'lib', 'python3', 'site-packages');
@@ -188,7 +221,7 @@ function serviceEnvironment() {
     PYTHONUTF8: '1',
     PYTHONIOENCODING: 'utf-8',
     PYTHONPATH: [sitePackages, process.env.PYTHONPATH || ''].filter(Boolean).join(path.delimiter),
-    PATH: [path.join(venv, process.platform === 'win32' ? 'Scripts' : 'bin'), process.env.PATH || ''].filter(Boolean).join(path.delimiter)
+    PATH: [vcRuntime, path.join(venv, process.platform === 'win32' ? 'Scripts' : 'bin'), process.env.PATH || ''].filter((item) => item && fs.existsSync(item)).join(path.delimiter)
   };
 }
 

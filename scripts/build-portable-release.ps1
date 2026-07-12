@@ -44,7 +44,7 @@ function Write-ReleaseArchive([string]$archive, [string]$sourceRoot, [string]$it
 function Write-RuntimeArchive([string]$archive) {
   Assert-InsideDist $archive
   if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
-  & tar.exe -a -c -f $archive -C $stage "runtime\python" "runtime\faster-whisper"
+  & tar.exe -a -c -f $archive -C $stage "runtime\python" "runtime\faster-whisper" "runtime\vc-runtime"
   if ($LASTEXITCODE -ne 0) { throw "Could not create runtime dependency ZIP." }
   $size = (Get-Item -LiteralPath $archive).Length
   $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
@@ -106,6 +106,7 @@ $runtimeTarget = Join-Path $stage "runtime"
 New-Item -ItemType Directory -Path (Join-Path $runtimeTarget "models") -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $root "runtime\python") -Destination (Join-Path $runtimeTarget "python") -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $root "runtime\faster-whisper") -Destination (Join-Path $runtimeTarget "faster-whisper") -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $root "runtime\vc-runtime") -Destination (Join-Path $runtimeTarget "vc-runtime") -Recurse -Force
 Set-PortableVenvHome $stage
 if (-not $SeparateModelAsset -and $ModelBundle -in @("small", "all")) {
   Copy-Item -LiteralPath (Join-Path $root "runtime\models\small") -Destination (Join-Path $runtimeTarget "models\small") -Recurse -Force
@@ -126,7 +127,7 @@ $manifest = [ordered]@{
   requiredRuntimeAssets = @("Star-Owner-v$($package.version)-runtime-win-x64.zip")
   builtAt = (Get-Date).ToUniversalTime().ToString("o")
   launcher = "Start-StarOwner.cmd"
-  bundled = @("Electron", "Node dependencies", "FFmpeg", "yt-dlp", "Python 3.12", "faster-whisper", "CTranslate2", "CUDA runtime", "Mermaid") + $(if ($splitModels.Count -eq 0 -and $ModelBundle -ne "none") { @("ASR model: $ModelBundle") } else { @() })
+  bundled = @("Electron", "Node dependencies", "FFmpeg", "yt-dlp", "Python 3.12", "Microsoft Visual C++ runtime", "faster-whisper", "CTranslate2", "CUDA runtime", "Mermaid") + $(if ($splitModels.Count -eq 0 -and $ModelBundle -ne "none") { @("ASR model: $ModelBundle") } else { @() })
 }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $stage "portable-manifest.json") -Encoding utf8
 

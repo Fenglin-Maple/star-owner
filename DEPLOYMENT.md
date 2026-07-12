@@ -13,7 +13,7 @@ Star-Owner-v<version>-model-small.zip
 Star-Owner-v<version>-model-medium.zip
 ```
 
-The core archive contains Electron, all npm dependencies, Mermaid, and may include the base media/ASR runtime for immediate startup. The runtime repair asset contains `runtime/python` and `runtime/faster-whisper`; model assets preserve `runtime/models/<model>` paths. Assets remain separate because complete Windows distributions can exceed GitHub's 2GB per-file limit. Users do not install Node.js, Python, FFmpeg, yt-dlp, CUDA Toolkit, packages, or a model downloader.
+The core archive contains Electron, all npm dependencies, Mermaid, and may include the base media/ASR runtime for immediate startup. The runtime repair asset contains `runtime/python`, `runtime/vc-runtime`, and `runtime/faster-whisper`; model assets preserve `runtime/models/<model>` paths. Assets remain separate because complete Windows distributions can exceed GitHub's 2GB per-file limit. Users do not install Node.js, Python, Microsoft Visual C++ Redistributable, FFmpeg, yt-dlp, CUDA Toolkit, packages, or a model downloader.
 
 Usage:
 
@@ -29,7 +29,7 @@ The AI features do not require another local model runtime. Open `AI -> AI æ¨¡åž
 
 The application creates `workspace/` beside itself and uses only project-relative runtime paths. Moving the extracted directory is supported. Cached videos stay below the selected Workspace under the reserved internal user and selected managed cache collection. User cookies, SQLite data, cached videos, task artifacts, and generated Markdown are never included in a public release archive.
 
-The bundled faster-whisper environment is relocated automatically. Release archives contain only a relative `pyvenv.cfg` marker; both the Electron main process and `tools/video-tool.js` rewrite its Python `home` to the current extracted directory before invoking the environment. This repair runs after the folder is moved as well as on first launch.
+The bundled faster-whisper environment is relocated automatically. Release archives contain only a relative `pyvenv.cfg` marker; both the Electron main process and `tools/video-tool.js` rewrite its Python `home` to the current extracted directory before invoking the environment. This repair runs after the folder is moved as well as on first launch. On Windows, the ASR process registers the signed x64 libraries under `runtime/vc-runtime` before importing CTranslate2, so an outdated or damaged machine-wide Visual C++ runtime cannot crash model loading.
 
 ### Hardware
 
@@ -138,7 +138,7 @@ Star-Owner-v<version>-model-medium.zip
 Star-Owner-v<version>-model-medium.zip.sha256
 ```
 
-The runtime archive must contain both `runtime/python/cpython-3.12.13-windows-x86_64-none/python.exe` and `runtime/faster-whisper/Lib/site-packages/faster_whisper`. The model archives must contain `runtime/models/small/model.bin` and `runtime/models/medium/model.bin`. Without these probes, extraction succeeds but installation is reported as incomplete.
+The runtime archive must contain `runtime/python/cpython-3.12.13-windows-x86_64-none/python.exe`, `runtime/vc-runtime/msvcp140.dll`, and `runtime/faster-whisper/Lib/site-packages/faster_whisper`. The model archives must contain `runtime/models/small/model.bin` and `runtime/models/medium/model.bin`. Without these probes, extraction succeeds but installation is reported as incomplete.
 
 ## 6. Troubleshooting
 

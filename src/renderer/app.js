@@ -1182,7 +1182,8 @@ function renderActivityLog(activities) {
   }
   eventLog.textContent = rows.slice(0, 300).map((item) => {
     const time = new Date(item.createdAt || Date.now()).toLocaleTimeString('zh-CN', { hour12: false });
-    const detail = [item.workerId || item.agentName, item.taskId, item.toolId, item.workspaceId].filter(Boolean).join(' / ');
+    const failure = item.error || item.message || (item.exitCode ? `退出码 ${item.exitCode}` : '');
+    const detail = [item.workerId || item.agentName, item.taskId, item.toolId, item.workspaceId, failure ? String(failure).slice(0, 180) : ''].filter(Boolean).join(' / ');
     return `[${time}] ${humanizeEvent(item.type)}${detail ? `  ${detail}` : ''}`;
   }).join('\n');
 }
@@ -1219,6 +1220,11 @@ function humanizeEvent(type) {
     'tool-run-failed': '\u5de5\u5177\u6267\u884c\u5931\u8d25',
     'tool-run-timeout': '\u5de5\u5177\u6267\u884c\u8d85\u65f6',
     'tool-run-cancelled': '\u5de5\u5177\u6267\u884c\u5df2\u53d6\u6d88',
+    'asr-service-ready': 'ASR \u5e38\u9a7b\u670d\u52a1\u5df2\u5c31\u7eea',
+    'asr-service-stopped': 'ASR \u5e38\u9a7b\u670d\u52a1\u5df2\u505c\u6b62',
+    'asr-service-log': 'ASR \u670d\u52a1\u65e5\u5fd7',
+    'asr-gpu-start-failed': 'GPU ASR \u542f\u52a8\u5931\u8d25',
+    'asr-cpu-start-failed': 'CPU ASR \u542f\u52a8\u5931\u8d25',
     'workspace-added': 'Workspace \u5e93\u5df2\u6dfb\u52a0',
     'workspace-default-changed': '\u9ed8\u8ba4 Workspace \u5df2\u5207\u6362',
     'workspace-removed': 'Workspace \u5e93\u5df2\u79fb\u9664'

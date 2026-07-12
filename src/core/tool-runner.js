@@ -598,7 +598,7 @@ class ToolRunner {
         await this.gpuAsr.start();
         await this.refreshGpuState();
       } catch (error) {
-        return { ready: false, reason: 'GPU_SERVICE_UNAVAILABLE', message: error.message, retryAfterMs: 5000 };
+        return { ready: false, reason: 'GPU_SERVICE_UNAVAILABLE', message: error.message, retryAfterMs: Number(error.retryAfterMs || 5000) };
       }
     }
     if (this.gpu.freeMiB < this.config.gpuReserveMiB) {
@@ -619,7 +619,7 @@ class ToolRunner {
       await this.cpuAsr.start();
       return { ready: true };
     } catch (error) {
-      return { ready: false, reason: 'CPU_SERVICE_UNAVAILABLE', message: error.message, retryAfterMs: 5000 };
+      return { ready: false, reason: 'CPU_SERVICE_UNAVAILABLE', message: error.message, retryAfterMs: Number(error.retryAfterMs || 5000) };
     }
   }
 
