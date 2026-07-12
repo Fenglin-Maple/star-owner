@@ -107,6 +107,7 @@ Content-Type: application/json
 - 返回 `NO_TASK`：当前没有可领取任务，可以正常结束。
 - 返回 HTTP `423` 和 `WORKER_PAUSED`：用户已暂停该 Worker，停止继续申请新任务。
 - 领取响应中的 `workId` 是本次工作的唯一凭证。心跳、工具执行/取消、提交和中止必须同时携带 `workerId` 与 `workId`。
+- 同一个 Agent 可以持有同一个 `workerId` 连续完成很多任务，但每次成功调用 `/api/tasks/claim` 都会获得全新的 `workId`；完成上一单后申请下一单也绝不复用。
 - 已领取任务应在 15 分钟内发送心跳，并严格使用返回的 `artifactDir`。
 - `workId` 不得自行生成。任务完成、中止、租约回收或被重新领取后，旧 `workId` 永久失效。
 

@@ -163,7 +163,8 @@ class ApiServer {
       activeCollection: this.store.getActiveCollection(),
       requiredFlow: [
         'A new agent session registers once and receives an app-generated workerId.',
-        'Every state-changing task request includes workerId and the one-time workId returned by claim.',
+        'A long-running agent keeps one workerId, while every successful claim returns a brand-new one-time workId.',
+        'Every state-changing task request includes workerId and the workId returned by that specific claim.',
         'Read the desktop-selected active collection, then claim one task.',
         'Use app-managed tool endpoints. Tool calls return HTTP 202 and may remain queued; poll the run until it reaches a terminal status.',
         'The app protects the task lease while one of its tool runs is queued or running. Clean cache and submit final artifacts after tools finish.',

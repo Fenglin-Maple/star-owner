@@ -8,7 +8,7 @@ Star Owner (星藏家) turns a user's Bilibili favorite folders into a managed q
 
 1. Discover the current protocol with `GET http://127.0.0.1:17391/api/manifest`.
 2. Every fresh Agent session registers its real caller and model with `POST /api/workers/register`.
-3. Keep the returned `workerId` as this Agent session's identity. Every claim also returns a one-time `workId`; include both IDs in heartbeat, tool-run/cancel, submit, and abort requests. Never invent or reuse an ended `workId`.
+3. Keep the returned `workerId` as this Agent session's identity across consecutive tasks. Every successful claim returns a brand-new one-time `workId`, including the next claim made by the same Worker; include both IDs in heartbeat, tool-run/cancel, submit, and abort requests. Never invent or reuse an ended `workId`.
 4. Work only on the collection activated by the desktop user and claim one task at a time.
 5. Create files only inside the returned `artifactDir`.
 6. Invoke media, metadata, subtitle, ASR, comment, and cleanup tools through the application API. Do not run internal scripts directly.

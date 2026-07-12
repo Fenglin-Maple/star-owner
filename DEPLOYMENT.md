@@ -104,8 +104,12 @@ An Agent should:
 3. save the returned `workerId`
 4. `GET /api/active-collection`
 5. `POST /api/tasks/claim`
-6. invoke tools only through the returned application API
-7. submit validated artifacts and let the application finalize paths
+6. save the claim response's one-time `workId`
+7. include both `workerId` and `workId` in heartbeat, tool-run/cancel, submit, and abort requests
+8. invoke tools only through the returned application API
+9. submit validated artifacts and let the application finalize paths
+
+A continuously running Agent retains one `workerId` across many tasks. Every successful claim creates a new `workId`; after completion, interruption, expiry, or replacement, the old value is invalid and must never be reused. `WORK_ATTEMPT_ENDED` instructs the Agent to keep its `workerId` and claim again.
 
 When the activated collection is an internal video-cache collection, the returned task includes `cachedVideoId`, `cachedVideoFile`, and `reuseCachedMedia`. Run the same material and cleanup APIs: the application reuses the merged video and preserves it during cleanup. Do not move or delete that cached file directly.
 

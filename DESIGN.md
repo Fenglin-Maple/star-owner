@@ -254,6 +254,8 @@ Every fresh Agent session first registers its actual caller tool and model:
 
 `POST /api/workers/register` creates and returns an app-owned identity such as `worker-...`. A Worker can claim multiple tasks over its session lifetime. Every successful claim also creates a one-time `workId` such as `work-...`; heartbeat, tool-run/cancellation, submission, and abort bodies require both IDs. Agents must never invent a `workId`.
 
+A long-running Worker keeps its `workerId` while processing task after task, but `workId` is never a session identifier: claim N and claim N+1 always receive different values, including when both claims happen to target the same video after a rollback.
+
 The user first selects and activates a collection in the desktop task page. `GET /api/active-collection` exposes that target. The claim endpoint always uses it; an agent request cannot override the active target with a different collection id or name.
 
 Recommended claim body:
