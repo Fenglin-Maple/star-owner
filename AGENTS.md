@@ -67,6 +67,7 @@ npm run test:internal-agent
 npm run test:task-attempt
 npm run test:video-cache
 npm run test:security
+npm run test:image-clipboard
 npm run test:persistence
 npm run test:collection-sync
 npm run test:asr-service

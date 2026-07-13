@@ -129,7 +129,7 @@ See `AGENTS.md` for the complete worker and contributor contract.
 6. Publish the source from the exact Git tag used to build the binary.
 7. Do not upload credentials, Bilibili cookies, account names, task databases, or generated media without permission.
 
-Before a public release, also verify the RAG supplier dialog, remote model pull against a test-compatible endpoint, one streaming response, one knowledge search, restricted-mode approval, and context compression. Never configure a maintainer API key in the database used to assemble a release.
+Before a public release, also verify the RAG supplier dialog, remote model pull against a test-compatible endpoint, one streaming response, one knowledge search, restricted-mode approval, context compression, one fenced-code copy action, and lightbox/right-click copy for both a local attachment and a knowledge-tool image. Never configure a maintainer API key in the database used to assemble a release.
 
 Also verify one internal collection Agent and one single-task run with a disposable compatible provider: confirm streamed output, Worker accounting, material-tool queueing, Markdown validation, cache cleanup, the canonical `内置用户/<内置收藏夹>` archive, and the second copy in the requested external directory. Remove the test provider and test Workspace before building release assets.
 
@@ -164,3 +164,4 @@ The runtime archive must contain `runtime/python/cpython-3.12.13-windows-x86_64-
 - If a model returns no reasoning panel, confirm the provider exposes an explicit compatible reasoning field; the application does not reveal or synthesize hidden chain-of-thought.
 - If tool calls fail, verify that the selected model really implements OpenAI-compatible function calling and that its model capability switch is enabled.
 - In restricted RAG sessions, CMD and paths outside the selected sandbox intentionally wait for an in-app approval dialog.
+- If a RAG image cannot be copied, confirm that a local image remains inside a registered Workspace or that a remote URL returns a public `image/*` response no larger than 15 MiB. Private-network and Workspace-external sources are intentionally rejected.

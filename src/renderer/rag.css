@@ -133,9 +133,16 @@
 .rag-message-content { color: var(--text); font-size: 13px; line-height: 1.72; overflow-wrap: anywhere; }
 .rag-message-content p { margin: 0 0 10px; }
 .rag-message-content p:last-child { margin-bottom: 0; }
-.rag-message-content pre { max-height: 360px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: color-mix(in srgb, var(--bg) 75%, transparent); }
-.rag-message-content code { font-family: var(--font-mono); }
-.rag-message-content img { max-width: 100%; max-height: 460px; border-radius: 6px; border: 1px solid var(--line); }
+.rag-message-content code { padding: 1px 4px; border-radius: 4px; color: color-mix(in srgb, var(--text) 88%, var(--accent)); background: color-mix(in srgb, var(--row) 72%, transparent); font-family: var(--font-mono); }
+.rag-message-content img { max-width: 100%; max-height: 460px; border-radius: 6px; border: 1px solid var(--line); cursor: zoom-in; }
+.rag-code-block { margin: 10px 0; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: color-mix(in srgb, var(--bg) 78%, transparent); }
+.rag-code-toolbar { height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 8px 0 12px; border-bottom: 1px solid var(--line); color: var(--muted); background: color-mix(in srgb, var(--row) 72%, var(--content)); }
+.rag-code-toolbar > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 10px var(--font-mono); text-transform: uppercase; }
+.rag-code-toolbar button { height: 25px; display: inline-flex; align-items: center; gap: 5px; padding: 0 7px; border: 1px solid transparent; border-radius: 4px; color: var(--muted); background: transparent; font-size: 10px; }
+.rag-code-toolbar button:hover { color: var(--text); border-color: var(--line); background: var(--row-hover); }
+.rag-code-toolbar svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+.rag-code-block pre { max-height: 380px; margin: 0; overflow: auto; padding: 13px; border: 0; border-radius: 0; background: transparent; }
+.rag-code-block pre code { display: block; min-width: max-content; padding: 0; color: var(--text); background: transparent; font: 11px/1.65 var(--font-mono); white-space: pre; }
 .rag-message.failed .rag-message-content { color: var(--red); }
 .rag-stream-caret { display: inline-block; width: 7px; height: 15px; margin-left: 3px; vertical-align: -2px; background: var(--accent); animation: rag-caret .8s steps(2, end) infinite; }
 @keyframes rag-caret { 50% { opacity: 0; } }
@@ -154,6 +161,7 @@
 .rag-tool-images figure { min-width: 0; margin: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); }
 .rag-tool-images p { margin: 0; }
 .rag-tool-images img { display: block; width: 100%; height: 150px; object-fit: contain; background: color-mix(in srgb, var(--bg) 82%, #000); }
+.rag-tool-images img, .rag-message-image img { cursor: zoom-in; }
 .rag-tool-images figcaption { overflow: hidden; padding: 5px 7px; text-overflow: ellipsis; white-space: nowrap; }
 @keyframes rag-pulse { 50% { opacity: .35; } }
 
@@ -182,6 +190,17 @@
 .rag-message-image { width: min(300px, 100%); margin: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: color-mix(in srgb, var(--bg) 78%, #000); }
 .rag-message-image img { width: 100%; max-height: 300px; display: block; object-fit: contain; }
 .rag-message-image figcaption { overflow: hidden; padding: 5px 7px; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; background: var(--row); font-size: 9px; }
+
+.rag-image-lightbox { position: fixed; z-index: 240; inset: 0; display: grid; grid-template-rows: 44px minmax(0, 1fr) 28px; padding: 12px 16px 10px; color: #f7f7f7; background: rgba(5, 7, 10, .9); backdrop-filter: blur(10px); animation: rag-lightbox-in .16s ease-out; }
+.rag-image-lightbox[hidden] { display: none; }
+.rag-image-lightbox-toolbar { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
+.rag-image-lightbox-toolbar > span { min-width: 0; max-width: min(560px, 62vw); margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(255,255,255,.72); font-size: 11px; }
+.rag-image-lightbox .icon-action { color: rgba(255,255,255,.82); border-color: rgba(255,255,255,.18); background: rgba(255,255,255,.06); }
+.rag-image-lightbox .icon-action:hover { color: #fff; background: rgba(255,255,255,.13); }
+.rag-image-lightbox-stage { min-height: 0; display: grid; place-items: center; overflow: hidden; }
+.rag-image-lightbox-stage img { max-width: 96vw; max-height: calc(100vh - 104px); object-fit: contain; border-radius: 6px; box-shadow: 0 22px 70px rgba(0,0,0,.52); cursor: default; user-select: none; }
+.rag-image-lightbox > p { margin: 0; align-self: end; color: rgba(255,255,255,.48); text-align: center; font-size: 9px; }
+@keyframes rag-lightbox-in { from { opacity: 0; } to { opacity: 1; } }
 
 .rag-composer { margin: 10px clamp(14px, 3vw, 34px) 14px; min-height: 92px; display: grid; grid-template-columns: 30px minmax(0, 1fr); grid-template-rows: minmax(38px, auto) minmax(30px, auto); gap: 5px 8px; align-items: end; padding: 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--row); box-shadow: 0 8px 22px var(--shadow); }
 .rag-composer:focus-within { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); box-shadow: 0 0 0 3px var(--accent-soft); }

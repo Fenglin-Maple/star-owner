@@ -12,7 +12,8 @@
     sessionSettingsModal: $('#ragSessionSettingsModal'), closeSessionSettings: $('#ragCloseSessionSettings'), sessionTitleInput: $('#ragSessionTitleInput'),
     sessionContextMenu: $('#ragSessionContextMenu'), contextEdit: $('#ragContextEdit'), contextDelete: $('#ragContextDelete'),
     providerModal: $('#ragProviderModal'), closeProviders: $('#ragCloseProviders'), providerList: $('#ragProviderList'), newProvider: $('#ragNewProvider'), providerId: $('#ragProviderId'), providerName: $('#ragProviderName'), providerType: $('#ragProviderType'), providerBaseUrl: $('#ragProviderBaseUrl'), providerApiKey: $('#ragProviderApiKey'), providerTemperature: $('#ragProviderTemperature'), providerMaxTokens: $('#ragProviderMaxTokens'), providerHeaders: $('#ragProviderHeaders'), saveProvider: $('#ragSaveProvider'), deleteProvider: $('#ragDeleteProvider'), fetchModels: $('#ragFetchModels'), remoteModels: $('#ragRemoteModels'), remoteModelCount: $('#ragRemoteModelCount'),
-    approvalModal: $('#ragApprovalModal'), approvalAction: $('#ragApprovalAction'), approvalTarget: $('#ragApprovalTarget'), approvalDetail: $('#ragApprovalDetail'), denyApproval: $('#ragDenyApproval'), approveOnce: $('#ragApproveOnce'), approveFull: $('#ragApproveFull')
+    approvalModal: $('#ragApprovalModal'), approvalAction: $('#ragApprovalAction'), approvalTarget: $('#ragApprovalTarget'), approvalDetail: $('#ragApprovalDetail'), denyApproval: $('#ragDenyApproval'), approveOnce: $('#ragApproveOnce'), approveFull: $('#ragApproveFull'),
+    imageLightbox: $('#ragImageLightbox'), imageLightboxImage: $('#ragImageLightboxImage'), imageLightboxLabel: $('#ragImageLightboxLabel'), imageLightboxCopy: $('#ragImageLightboxCopy'), imageLightboxClose: $('#ragImageLightboxClose')
   };
 
   let state = { providers: [], sessions: [], activeSession: null, knowledgeCatalog: [], modelUsage: [] };
@@ -340,7 +341,54 @@
     const content = article.querySelector('.rag-message-content');
     if (message.error) content.textContent = message.error;
     else content.innerHTML = await window.orchestrator.ragRenderMarkdown(message.content || '', message.sessionId);
+    enhanceCodeBlocks(content);
     if (message.status === 'streaming') content.insertAdjacentHTML('beforeend', '<span class="rag-stream-caret"></span>');
+  }
+
+  function enhanceCodeBlocks(content) {
+    for (const code of content.querySelectorAll('pre > code')) {
+      const pre = code.parentElement;
+      if (pre.parentElement?.classList.contains('rag-code-block')) continue;
+      const languageClass = [...code.classList].find((name) => name.startsWith('language-')) || '';
+      const language = languageClass.slice('language-'.length) || '代码';
+      const wrapper = document.createElement('div');
+      wrapper.className = 'rag-code-block';
+      pre.replaceWith(wrapper);
+      wrapper.innerHTML = `<div class="rag-code-toolbar"><span>${escapeHtml(language)}</span><button type="button" data-rag-copy-code title="复制代码" aria-label="复制代码"><svg viewBox="0 0 24 24"><path d="M9 9h10v10H9zM5 15H4V4h11v1"/></svg><span>复制</span></button></div>`;
+      wrapper.appendChild(pre);
+    }
+  }
+
+  function conversationImage(target) {
+    const image = target.closest?.('.rag-message-content img, .rag-message-image img, .rag-tool-images img');
+    return image && elements.messages.contains(image) ? image : null;
+  }
+
+  function openImageLightbox(image) {
+    const source = image.currentSrc || image.src;
+    if (!source) return;
+    elements.imageLightboxImage.src = source;
+    elements.imageLightboxImage.alt = image.alt || '对话图片';
+    elements.imageLightboxLabel.textContent = image.alt || '图片预览';
+    elements.imageLightbox.dataset.source = source;
+    elements.imageLightbox.hidden = false;
+    elements.imageLightboxClose.focus();
+  }
+
+  function closeImageLightbox() {
+    elements.imageLightbox.hidden = true;
+    elements.imageLightboxImage.removeAttribute('src');
+    delete elements.imageLightbox.dataset.source;
+  }
+
+  async function copyConversationImage(source) {
+    if (!source) return;
+    try {
+      await window.orchestrator.copyImage(source);
+      notify('图片已复制', '已将原图写入系统剪贴板。', 'success');
+    } catch (error) {
+      notify('图片复制失败', error.message || String(error), 'error');
+    }
   }
 
   async function toolList(tools, sessionId) {
@@ -387,9 +435,17 @@
     elements.pendingAttachments.innerHTML = pendingAttachments.map((item) => isImageAttachment(item)
       ? `<div class="rag-pending-image"><img src="${escapeAttr(item.previewUrl)}" alt="" /><div><span title="${escapeAttr(item.name)}">${escapeHtml(item.name)}</span><small>${formatBytes(item.size)}</small></div><button type="button" data-remove-attachment="${escapeAttr(item.id)}" aria-label="移除图片">×</button></div>`
       : `<div class="rag-attachment-chip"><span title="${escapeAttr(item.path || item.name)}">${escapeHtml(item.name)}</span><button type="button" data-remove-attachment="${escapeAttr(item.id)}" aria-label="移除">×</button></div>`).join('');
-    for (const button of elements.pendingAttachments.querySelectorAll('[data-remove-attachment]')) button.addEventListener('click', () => {
-      pendingAttachments = pendingAttachments.filter((item) => item.id !== button.dataset.removeAttachment);
-      renderInspector();
+    for (const button of elements.pendingAttachments.querySelectorAll('[data-remove-attachment]')) button.addEventListener('click', async () => {
+      const attachmentId = button.dataset.removeAttachment;
+      button.disabled = true;
+      try {
+        await window.orchestrator.ragDiscardAttachment(activeSessionId, attachmentId);
+        pendingAttachments = pendingAttachments.filter((item) => item.id !== attachmentId);
+        renderInspector();
+      } catch (error) {
+        button.disabled = false;
+        notify('附件移除失败', error.message || String(error), 'error');
+      }
     });
   }
 
@@ -731,7 +787,8 @@
   });
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
-    if (!elements.providerModal.hidden) closeProviderModal();
+    if (!elements.imageLightbox.hidden) closeImageLightbox();
+    else if (!elements.providerModal.hidden) closeProviderModal();
     else if (!elements.sessionSettingsModal.hidden) closeSessionSettingsModal();
     else { closeKnowledgeMenus(); hideSessionContextMenu(); }
   });
@@ -781,6 +838,14 @@
   elements.approveOnce.addEventListener('click', () => resolveApproval(true, false));
   elements.approveFull.addEventListener('click', () => resolveApproval(true, true));
   elements.messages.addEventListener('click', (event) => {
+    const copyButton = event.target.closest('[data-rag-copy-code]');
+    if (copyButton) {
+      const code = copyButton.closest('.rag-code-block')?.querySelector('pre > code')?.textContent || '';
+      window.orchestrator.copyText(code).then(() => notify('代码已复制', '代码块内容已写入剪贴板。', 'success')).catch((error) => notify('复制失败', error.message, 'error'));
+      return;
+    }
+    const image = conversationImage(event.target);
+    if (image) { event.preventDefault(); openImageLightbox(image); return; }
     const link = event.target.closest('a[href]');
     if (!link) return;
     const href = link.getAttribute('href');
@@ -788,6 +853,16 @@
     event.preventDefault();
     window.orchestrator.openExternal(href).catch((error) => notify('无法打开链接', error.message, 'error'));
   });
+  elements.messages.addEventListener('contextmenu', (event) => {
+    const image = conversationImage(event.target);
+    if (!image) return;
+    event.preventDefault();
+    copyConversationImage(image.currentSrc || image.src);
+  });
+  elements.imageLightboxClose.addEventListener('click', closeImageLightbox);
+  elements.imageLightboxCopy.addEventListener('click', () => copyConversationImage(elements.imageLightbox.dataset.source));
+  elements.imageLightbox.addEventListener('click', (event) => { if (event.target === elements.imageLightbox || event.target.closest('.rag-image-lightbox-stage') && event.target !== elements.imageLightboxImage) closeImageLightbox(); });
+  elements.imageLightboxImage.addEventListener('contextmenu', (event) => { event.preventDefault(); copyConversationImage(elements.imageLightbox.dataset.source); });
   document.querySelector('[data-page="rag"]')?.addEventListener('click', () => refresh(activeSessionId, { quiet: initialized }));
   window.orchestrator.onRagEvent(handleEvent);
 

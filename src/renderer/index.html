@@ -802,6 +802,15 @@
         <footer><button id="ragDenyApproval" class="secondary-button danger-button" type="button">拒绝</button><span></span><button id="ragApproveOnce" class="secondary-button" type="button">仅本次允许</button><button id="ragApproveFull" class="primary-button" type="button">允许并开启完全访问</button></footer>
       </section>
     </div>
+    <div id="ragImageLightbox" class="rag-image-lightbox" role="dialog" aria-modal="true" aria-label="图片预览" hidden>
+      <div class="rag-image-lightbox-toolbar">
+        <span id="ragImageLightboxLabel">图片预览</span>
+        <button id="ragImageLightboxCopy" class="icon-action" type="button" title="复制图片" aria-label="复制图片"><svg viewBox="0 0 24 24"><path d="M9 9h10v10H9zM5 15H4V4h11v1"/></svg></button>
+        <button id="ragImageLightboxClose" class="icon-action" type="button" title="关闭" aria-label="关闭图片预览"><svg viewBox="0 0 24 24"><path d="M5 5l14 14M19 5L5 19"/></svg></button>
+      </div>
+      <div class="rag-image-lightbox-stage"><img id="ragImageLightboxImage" alt="" /></div>
+      <p>左键空白处或按 Esc 关闭，右键图片可复制原图</p>
+    </div>
     <div id="toastViewport" class="toast-viewport" aria-live="polite" aria-atomic="true"></div>
     <script src="../../node_modules/mermaid/dist/mermaid.min.js"></script>
     <script src="./app.js"></script>

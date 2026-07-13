@@ -90,6 +90,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Video cache test failed." }
   & npm run test:security
   if ($LASTEXITCODE -ne 0) { throw "Security policy test failed." }
+  & npm run test:image-clipboard
+  if ($LASTEXITCODE -ne 0) { throw "Image clipboard security test failed." }
   & npm run test:persistence
   if ($LASTEXITCODE -ne 0) { throw "SQLite persistence test failed." }
   & npm run test:collection-sync

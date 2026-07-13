@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, session, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, safeStorage, session, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
@@ -10,6 +10,7 @@ const { CollectionSyncService } = require('./core/collection-sync-service');
 const { DependencyManager } = require('./core/dependency-manager');
 const { secureMainWindow } = require('./core/desktop-security');
 const { InternalAgentManager } = require('./core/internal-agent-manager');
+const { loadClipboardImage } = require('./core/image-clipboard');
 const { promoteMindMap } = require('./core/markdown');
 const { isPrivateNetworkHost } = require('./core/network-policy');
 const { repairPortablePythonHome } = require('./core/portable-runtime');
@@ -458,6 +459,15 @@ ipcMain.handle('clipboard:write', async (_event, value) => {
   return { ok: true };
 });
 
+ipcMain.handle('clipboard:write-image', async (_event, source) => {
+  const trustedRoots = [WORKSPACE_ROOT, ...(store?.listWorkspaces?.() || []).map((item) => item.root)];
+  const { buffer } = await loadClipboardImage(source, { trustedRoots });
+  const image = nativeImage.createFromBuffer(buffer);
+  if (image.isEmpty()) throw new Error('图片格式无法读取或内容已经损坏。');
+  clipboard.writeImage(image);
+  return { ok: true, size: image.getSize() };
+});
+
 ipcMain.handle('credentials:list', async () => store ? store.list('credentials').map((item) => ({
   id: item.id,
   username: item.username,
@@ -634,6 +644,11 @@ ipcMain.handle('rag:clipboard-image-import', async (_event, sessionId) => {
     name: `clipboard-${timestampForFile()}.png`
   });
   return { attachment };
+});
+
+ipcMain.handle('rag:attachment-discard', async (_event, payload = {}) => {
+  assertBackendReady();
+  return ragAssistant.discardAttachment(payload.sessionId, payload.attachmentId);
 });
 
 ipcMain.handle('rag:approval-resolve', async (_event, payload = {}) => {

@@ -170,6 +170,12 @@ async function startFakeProvider() {
       name: 'clipboard-test.png'
     });
     assert(clipboardImage.previewUrl.startsWith('file:') && fs.existsSync(clipboardImage.path), 'clipboard image was not imported with a local preview');
+    const disposableImage = await assistant.importBuffer(session.id, {
+      buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
+      mimeType: 'image/png',
+      name: 'discard-before-send.png'
+    });
+    assert(assistant.discardAttachment(session.id, disposableImage.id).removed && !fs.existsSync(disposableImage.path) && !store.get('ragAttachments', disposableImage.id), 'unsent attachment discard left a file or record behind');
     const fallback = await assistant.send(session.id, { content: 'JSON_FALLBACK', attachmentIds: [clipboardImage.id] });
     assert(fallback.content === '普通 JSON 兼容成功。' && fallback.reasoning === '普通 JSON 推理', 'non-SSE JSON fallback failed');
     const clipboardRequest = [...fake.requests].reverse().find((item) => latestUserText(item.messages || []).includes('JSON_FALLBACK'));

@@ -1,7 +1,7 @@
 {
   "name": "star-owner",
   "productName": "星藏家",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "private": true,
   "license": "GPL-3.0-or-later",
   "description": "星藏家：Bilibili 收藏视频 Markdown 多 Agent 本地编排工作台。",
@@ -15,6 +15,7 @@
     "test:task-attempt": "node scripts/task-attempt-test.js",
     "test:video-cache": "node scripts/video-cache-test.js",
     "test:security": "node scripts/security-test.js",
+    "test:image-clipboard": "node scripts/image-clipboard-test.js",
     "test:persistence": "node scripts/persistence-test.js",
     "test:collection-sync": "node scripts/collection-sync-test.js",
     "test:scheduler": "node scripts/resource-scheduler-test.js",

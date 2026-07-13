@@ -340,6 +340,20 @@ class RagAssistant {
     return record;
   }
 
+  discardAttachment(sessionId, attachmentId) {
+    const session = this.requireSession(sessionId);
+    const attachment = this.store.get('ragAttachments', String(attachmentId || ''));
+    if (!attachment || attachment.sessionId !== session.id) return { removed: false };
+    const inMessage = this.store.list('ragMessages').some((message) => message.sessionId === session.id
+      && (message.attachments || []).some((item) => item.id === attachment.id));
+    if (inMessage) throw new Error('已经发送的附件不能从会话历史中单独删除。');
+    const attachmentsRoot = path.join(session.sandboxDir, 'attachments');
+    if (attachment.path && isInside(attachmentsRoot, attachment.path)) fs.rmSync(attachment.path, { force: true });
+    this.store.delete('ragAttachments', attachment.id);
+    this.store.save();
+    return { removed: true, id: attachment.id };
+  }
+
   async send(sessionId, input = {}) {
     const session = this.requireSession(sessionId);
     if (!session.providerId || !session.modelId) throw new Error('Select a provider and model before sending a message.');
