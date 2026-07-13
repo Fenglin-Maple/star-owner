@@ -100,6 +100,8 @@
     elements.sessionTitleInput.disabled = !enabled || streaming;
     const percent = Number(session?.contextPercent || 0);
     elements.contextPercent.textContent = `${percent}%`;
+    elements.contextPercent.title = session ? `自动压缩阈值 ${Number(session.autoCompactionThresholdPercent || 75)}% · 已自动压缩 ${Number(session.autoCompactionCount || 0)} 次` : '';
+    elements.contextBar.title = elements.contextPercent.title;
     elements.contextBar.style.width = `${Math.min(100, percent)}%`;
     elements.contextBar.className = percent >= 90 ? 'danger' : (percent >= 72 ? 'warning' : '');
 
@@ -685,6 +687,15 @@
       else streaming.toolEvents.push(event.tool);
       setGenerating(true, `正在调用 ${toolLabel(event.tool.name)}`);
       scheduleStreamRender();
+    } else if (event.type === 'context-compaction') {
+      if (event.phase === 'started') {
+        setGenerating(true, `上下文达到 ${event.contextPercent || '-'}%，正在自动压缩`);
+      } else if (event.phase === 'completed') {
+        if (event.detail && state.activeSession) state.activeSession = event.detail;
+        renderInspector();
+        setGenerating(true, '上下文已整理，模型正在继续回答');
+        notify('已自动压缩上下文', `触发阈值 ${event.thresholdPercent || 75}%，当前提问保留原文。`, 'info');
+      }
     } else if (event.type === 'assistant-complete') {
       streaming = null;
       setGenerating(false);

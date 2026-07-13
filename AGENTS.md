@@ -45,6 +45,8 @@ The canonical Markdown contract is `templates/video-summary-template.md` and is 
 - Provider/model records are shared by RAG and video Agents. Removing a provider or enabled model must expose affected sessions as unavailable; an active attempt must be aborted through the standard cleanup service, returned to `pending`, and leave its Worker paused until a valid configuration is restored and the user starts it again.
 - A single task may request `keepVideoCache`; cache-collection tasks always preserve their registered merged video. Neither mode lets an Agent bypass application cleanup or edit the cache index directly.
 - RAG, collection Agents, and single-task Agents share provider/model records and per-model usage accounting. Never expose decrypted API keys to the renderer or logs.
+- RAG conversation history automatically compresses at 75% of the model window or the lower reserve-safe input boundary. Keep the current user turn verbatim, fold only history after the prior compression marker, process every source chunk, and never re-send both a durable summary and the messages it already represents.
+- RAG knowledge tools must expose distinct publish and favorite-addition dates. Preserve the 24 tool-round budget plus one final-answer request, restricted-mode approvals, and cancellation through automatic compression.
 
 ## Dependency Asset Contract
 

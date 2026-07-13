@@ -135,6 +135,15 @@
 .rag-message-content p:last-child { margin-bottom: 0; }
 .rag-message-content code { padding: 1px 4px; border-radius: 4px; color: color-mix(in srgb, var(--text) 88%, var(--accent)); background: color-mix(in srgb, var(--row) 72%, transparent); font-family: var(--font-mono); }
 .rag-message-content img { max-width: 100%; max-height: 460px; border-radius: 6px; border: 1px solid var(--line); cursor: zoom-in; }
+.rag-table-wrap { max-width: 100%; margin: 10px 0 12px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; background: color-mix(in srgb, var(--row) 42%, transparent); }
+.rag-message-content table { width: 100%; min-width: 420px; border-collapse: collapse; border-spacing: 0; font-size: 12px; line-height: 1.55; }
+.rag-message-content th,
+.rag-message-content td { padding: 8px 10px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.rag-message-content th:last-child,
+.rag-message-content td:last-child { border-right: 0; }
+.rag-message-content tr:last-child td { border-bottom: 0; }
+.rag-message-content th { color: var(--text); background: color-mix(in srgb, var(--accent-soft) 34%, var(--row)); font-weight: 650; }
+.rag-message-content tbody tr:nth-child(even) { background: color-mix(in srgb, var(--row-hover) 50%, transparent); }
 .rag-code-block { margin: 10px 0; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: color-mix(in srgb, var(--bg) 78%, transparent); }
 .rag-code-toolbar { height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 8px 0 12px; border-bottom: 1px solid var(--line); color: var(--muted); background: color-mix(in srgb, var(--row) 72%, var(--content)); }
 .rag-code-toolbar > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 10px var(--font-mono); text-transform: uppercase; }

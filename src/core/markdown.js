@@ -18,4 +18,10 @@ function promoteMindMap(markdown) {
   return `${prefix}${sections.map((section) => section.content).join('\n\n')}\n`;
 }
 
-module.exports = { promoteMindMap };
+function wrapMarkdownTables(renderer, className = 'rag-table-wrap') {
+  renderer.renderer.rules.table_open = () => `<div class="${className}"><table>\n`;
+  renderer.renderer.rules.table_close = () => '</table></div>\n';
+  return renderer;
+}
+
+module.exports = { promoteMindMap, wrapMarkdownTables };

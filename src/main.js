@@ -11,7 +11,7 @@ const { DependencyManager } = require('./core/dependency-manager');
 const { secureMainWindow } = require('./core/desktop-security');
 const { InternalAgentManager } = require('./core/internal-agent-manager');
 const { loadClipboardImage } = require('./core/image-clipboard');
-const { promoteMindMap } = require('./core/markdown');
+const { promoteMindMap, wrapMarkdownTables } = require('./core/markdown');
 const { isPrivateNetworkHost } = require('./core/network-policy');
 const { repairPortablePythonHome } = require('./core/portable-runtime');
 const { RagAssistant } = require('./core/rag-assistant');
@@ -978,7 +978,7 @@ function renderMarkdownPreview(markdown, sourceFile) {
 }
 
 function renderRagMarkdown(markdown, sessionId) {
-  const renderer = new MarkdownIt({ html: false, linkify: true, typographer: false });
+  const renderer = wrapMarkdownTables(new MarkdownIt({ html: false, linkify: true, typographer: false }));
   const defaultImage = renderer.renderer.rules.image;
   renderer.renderer.rules.image = (tokens, index, options, env, self) => {
     const token = tokens[index];

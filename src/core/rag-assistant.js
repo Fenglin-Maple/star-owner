@@ -25,6 +25,8 @@ const MIME_TYPES = {
 const TOKEN_CONFIG_VERSION = 2;
 const DEFAULT_CONTEXT_WINDOW = 1000000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 128000;
+const RAG_AUTO_COMPACT_TRIGGER = 0.75;
+const MAX_RAG_TOOL_ROUNDS = 24;
 const knowledgeMarkdownParser = new MarkdownIt({ html: false, linkify: false, typographer: false });
 
 class RagAssistant {
@@ -242,15 +244,16 @@ class RagAssistant {
       attachments: (message.attachments || []).map((item) => publicAttachment(attachmentMap.get(item.id) || item))
     }));
     const model = this.sessionModel(session);
-    const contextTokens = estimateTokens(JSON.stringify(messages.slice(session.compressedSummary ? -8 : 0))) + estimateTokens(session.compressedSummary || '');
+    const context = this.contextPlan(session, model, 0, messages);
     return {
       ...session,
       messages,
       attachments,
       modelCapabilities: model,
-      contextTokens,
+      contextTokens: context.inputTokens,
       contextWindow: model.contextWindow,
-      contextPercent: Math.min(100, Math.round((contextTokens / Math.max(1, model.contextWindow)) * 1000) / 10)
+      contextPercent: context.contextPercent,
+      autoCompactionThresholdPercent: context.thresholdPercent
     };
   }
 
@@ -378,7 +381,8 @@ class RagAssistant {
     this.controllers.set(sessionId, controller);
     this.emit({ type: 'assistant-start', sessionId, messageId: assistantId });
     try {
-      const result = await this.runConversation(session, { ...userMessage, attachments }, assistantId, controller.signal);
+      await this.maybeAutoCompact(session, userMessage.id, attachments, controller.signal);
+      const result = await this.runConversation(this.requireSession(session.id), { ...userMessage, attachments }, assistantId, controller.signal);
       const assistant = this.saveMessage({
         id: assistantId,
         sessionId,
@@ -425,7 +429,8 @@ class RagAssistant {
     let usage = { input: 0, output: 0, total: 0 };
     const toolEvents = [];
     let finished = false;
-    for (let round = 0; round < 6; round += 1) {
+    let toolRounds = 0;
+    while (toolRounds <= MAX_RAG_TOOL_ROUNDS) {
       const result = await this.streamCompletion(provider, {
         model: session.modelId,
         messages: apiMessages,
@@ -443,6 +448,8 @@ class RagAssistant {
         finished = true;
         break;
       }
+      if (toolRounds >= MAX_RAG_TOOL_ROUNDS) break;
+      toolRounds += 1;
       apiMessages.push({ role: 'assistant', content: result.content || null, tool_calls: result.toolCalls.map(toApiToolCall) });
       for (const call of result.toolCalls) {
         const event = { id: call.id, name: call.name, status: 'running', arguments: call.arguments, startedAt: new Date().toISOString() };
@@ -470,24 +477,15 @@ class RagAssistant {
         this.emit({ type: 'tool', sessionId: session.id, messageId: assistantId, tool: event });
       }
     }
-    if (!finished && toolEvents.length) throw new Error('The model exceeded the six-round tool-call limit. Refine the request and try again.');
+    if (!finished && toolEvents.length) throw new Error(`The model exceeded the ${MAX_RAG_TOOL_ROUNDS}-round tool-call limit. Refine the request and try again.`);
     if (!content.trim() && !reasoning.trim()) throw new Error('The model returned an empty response. Check the model and provider compatibility settings.');
     return { content, reasoning, usage, toolEvents };
   }
 
   buildHistory(session, model, excludeMessageId = '') {
-    const messages = this.store.list('ragMessages').filter((item) => item.sessionId === session.id && item.id !== excludeMessageId && ['user', 'assistant'].includes(item.role) && item.status === 'complete').sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
-    const system = [
-      'You are the built-in RAG assistant of 星藏家. Help the user inspect, compare, organize, and analyze their accepted Bilibili Markdown knowledge library.',
-      'Use knowledge_search before making claims about selected local libraries. Cite the source title and collection in the answer. Never fabricate missing facts.',
-      model.supportsTools ? 'You can inspect selected knowledge without summarization: use knowledge_list_documents to discover document ids, knowledge_read_document to read the exact original Markdown in line ranges, and knowledge_view_images to inspect original local images when vision is enabled.' : '',
-      model.supportsTools && model.supportsVision ? 'When an inspected knowledge image is useful to the user, include the exact star-rag-image URI returned by knowledge_view_images in Markdown image syntax so the desktop app can display it. Do not claim that only an index is available.' : '',
-      `Your working sandbox is: ${session.sandboxDir}`,
-      session.permissionMode === 'full' ? 'The user enabled full filesystem and command access.' : 'You have restricted access. Operations outside the sandbox or command execution require explicit user approval.',
-      session.knowledgeCollectionIds.length ? `Selected collection ids: ${session.knowledgeCollectionIds.join(', ')}` : 'No local knowledge collection is selected.',
-      session.systemPrompt,
-      session.compressedSummary ? `Compressed earlier context:\n${session.compressedSummary}` : ''
-    ].filter(Boolean).join('\n\n');
+    const storedMessages = this.store.list('ragMessages').filter((item) => item.sessionId === session.id && item.id !== excludeMessageId && ['user', 'assistant'].includes(item.role) && item.status === 'complete').sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    const messages = this.activeHistoryMessages(session, storedMessages);
+    const system = this.systemPrompt(session, model);
     const contextWindow = positiveInteger(model.contextWindow, null, DEFAULT_CONTEXT_WINDOW);
     const outputReserve = Math.min(this.outputTokenLimit(this.rawProvider(session.providerId), model), Math.floor(contextWindow * 0.5));
     const protocolReserve = Math.min(16000, Math.max(512, Math.floor(contextWindow * 0.05)));
@@ -502,6 +500,68 @@ class RagAssistant {
       used += tokens;
     }
     return [{ role: 'system', content: system }, ...recent.map((message) => ({ role: message.role, content: message.content || '' }))];
+  }
+
+  systemPrompt(session, model) {
+    return [
+      'You are the built-in RAG assistant of 星藏家. Help the user inspect, compare, organize, and analyze their accepted Bilibili Markdown knowledge library.',
+      'Use knowledge_search before making claims about selected local libraries. Cite the source title and collection in the answer. Never fabricate missing facts.',
+      model.supportsTools ? 'You can inspect selected knowledge without summarization: use knowledge_list_documents to discover document ids, knowledge_read_document to read the exact original Markdown in line ranges, and knowledge_view_images to inspect original local images when vision is enabled.' : '',
+      model.supportsTools ? 'Knowledge document metadata includes both the Bilibili publish date and the date when the user added the video to favorites. Preserve the distinction and use these fields when the user asks about chronology or freshness.' : '',
+      model.supportsTools && model.supportsVision ? 'When an inspected knowledge image is useful to the user, include the exact star-rag-image URI returned by knowledge_view_images in Markdown image syntax so the desktop app can display it. Do not claim that only an index is available.' : '',
+      `Your working sandbox is: ${session.sandboxDir}`,
+      session.permissionMode === 'full' ? 'The user enabled full filesystem and command access.' : 'You have restricted access. Operations outside the sandbox or command execution require explicit user approval.',
+      session.knowledgeCollectionIds.length ? `Selected collection ids: ${session.knowledgeCollectionIds.join(', ')}` : 'No local knowledge collection is selected.',
+      session.systemPrompt,
+      session.compressedSummary ? `Compressed earlier context:\n${session.compressedSummary}` : ''
+    ].filter(Boolean).join('\n\n');
+  }
+
+  activeHistoryMessages(session, messagesInput) {
+    const messages = [...(messagesInput || [])].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    if (!session.compressedSummary) return messages;
+    if (session.compressedThroughMessageId) {
+      const index = messages.findIndex((message) => message.id === session.compressedThroughMessageId);
+      if (index >= 0) return messages.slice(index + 1);
+    }
+    const legacyBoundary = session.compressedThroughAt || session.compressedAt;
+    if (legacyBoundary) return messages.filter((message) => String(message.createdAt || '') > String(legacyBoundary));
+    return messages;
+  }
+
+  contextPlan(session, model, extraTokens = 0, messagesInput = null) {
+    const messages = messagesInput || this.store.list('ragMessages').filter((item) => item.sessionId === session.id && ['user', 'assistant'].includes(item.role) && item.status === 'complete');
+    const activeMessages = this.activeHistoryMessages(session, messages);
+    const systemTokens = estimateTokens(this.systemPrompt(session, model));
+    const messageTokens = activeMessages.reduce((sum, message) => sum + estimateTokens(message.content || '') + 8, 0);
+    const inputTokens = systemTokens + messageTokens + Math.max(0, Number(extraTokens || 0));
+    const contextWindow = positiveInteger(model.contextWindow, null, DEFAULT_CONTEXT_WINDOW);
+    const provider = session.providerId ? this.store.get('ragProviders', session.providerId) : null;
+    const outputReserve = Math.min(this.outputTokenLimit(provider || {}, model), Math.floor(contextWindow * 0.5));
+    const protocolReserve = Math.min(16000, Math.max(512, Math.floor(contextWindow * 0.05)));
+    const thresholdTokens = Math.max(512, Math.min(Math.floor(contextWindow * RAG_AUTO_COMPACT_TRIGGER), contextWindow - outputReserve - protocolReserve - 512));
+    return {
+      inputTokens,
+      contextWindow,
+      contextPercent: Math.min(100, Math.round((inputTokens / Math.max(1, contextWindow)) * 1000) / 10),
+      thresholdTokens,
+      thresholdPercent: Math.max(0, Math.round((thresholdTokens / Math.max(1, contextWindow)) * 1000) / 10),
+      shouldCompact: inputTokens >= thresholdTokens
+    };
+  }
+
+  async maybeAutoCompact(session, currentMessageId, attachments, signal) {
+    const model = this.sessionModel(session);
+    const attachmentTokens = estimateAttachmentTokens(attachments, model);
+    const plan = this.contextPlan(session, model, attachmentTokens);
+    if (!plan.shouldCompact) return { compacted: false, plan };
+    const stored = this.store.list('ragMessages').filter((item) => item.sessionId === session.id && item.id !== currentMessageId && ['user', 'assistant'].includes(item.role) && item.status === 'complete');
+    const candidates = this.activeHistoryMessages(session, stored);
+    if (!candidates.length && !session.compressedSummary) return { compacted: false, plan };
+    this.emit({ type: 'context-compaction', phase: 'started', automatic: true, sessionId: session.id, contextPercent: plan.contextPercent, thresholdPercent: plan.thresholdPercent });
+    const detail = await this.compactContext(session, { automatic: true, excludeMessageId: currentMessageId, signal });
+    this.emit({ type: 'context-compaction', phase: 'completed', automatic: true, sessionId: session.id, contextPercent: plan.contextPercent, thresholdPercent: plan.thresholdPercent, detail });
+    return { compacted: true, plan, detail };
   }
 
   async userApiMessage(message, model) {
@@ -646,7 +706,7 @@ class RagAssistant {
     for (const task of tasks) {
       const chunks = this.documentChunks(task.outputMarkdown);
       for (const chunk of chunks) {
-        const haystack = `${task.title || ''}\n${task.owner || ''}\n${chunk}`.toLowerCase();
+        const haystack = `${task.title || ''}\n${task.owner || ''}\n${task.publishedAt || ''}\n${task.favoriteAddedAt || ''}\n${chunk}`.toLowerCase();
         const score = terms.reduce((sum, term) => sum + countOccurrences(haystack, term), 0) + (terms.some((term) => String(task.title || '').toLowerCase().includes(term)) ? 6 : 0);
         if (score > 0 || !terms.length) scored.push({ score, task, chunk, collection: collections.get(task.collectionId) });
       }
@@ -654,7 +714,7 @@ class RagAssistant {
     const wanted = Math.max(1, Math.min(20, Number(limit) || 8));
     const results = scored.sort((a, b) => b.score - a.score).slice(0, wanted);
     if (!results.length) return `No matching passages found across ${tasks.length} selected documents.`;
-    return results.map((item, index) => `[#${index + 1}] Document ID: ${item.task.id}\nUser: ${item.collection?.userName || '-'} | Collection: ${item.collection?.name || '-'} | Title: ${item.task.title || item.task.bvid}\nBVID: ${item.task.bvid || '-'}\n${item.chunk}`).join('\n\n---\n\n');
+    return results.map((item, index) => `[#${index + 1}] Document ID: ${item.task.id}\nUser: ${item.collection?.userName || '-'} | Collection: ${item.collection?.name || '-'} | Title: ${item.task.title || item.task.bvid}\nBVID: ${item.task.bvid || '-'} | UP: ${item.task.owner || '-'}\nPublished at: ${item.task.publishedAt || '-'}\nFavorited at: ${item.task.favoriteAddedAt || '-'}\n${item.chunk}`).join('\n\n---\n\n');
   }
 
   listKnowledgeDocuments(session, query = '', offset = 0, limit = 50) {
@@ -663,7 +723,7 @@ class RagAssistant {
     const all = this.knowledgeTasks(session).filter((task) => {
       if (!terms.length) return true;
       const collection = collections.get(task.collectionId);
-      const value = `${task.id} ${task.bvid || ''} ${task.title || ''} ${task.owner || ''} ${collection?.name || ''}`.toLowerCase();
+      const value = `${task.id} ${task.bvid || ''} ${task.title || ''} ${task.owner || ''} ${task.publishedAt || ''} ${task.favoriteAddedAt || ''} ${collection?.name || ''}`.toLowerCase();
       return terms.every((term) => value.includes(term));
     });
     const start = Math.max(0, Number(offset) || 0);
@@ -671,7 +731,7 @@ class RagAssistant {
     const page = all.slice(start, start + count);
     const rows = page.map((task, index) => {
       const collection = collections.get(task.collectionId);
-      return `[${start + index + 1}] Document ID: ${task.id}\nTitle: ${task.title || task.bvid} | BVID: ${task.bvid || '-'} | UP: ${task.owner || '-'}\nUser: ${collection?.userName || '-'} | Collection: ${collection?.name || '-'}`;
+      return `[${start + index + 1}] Document ID: ${task.id}\nTitle: ${task.title || task.bvid} | BVID: ${task.bvid || '-'} | UP: ${task.owner || '-'}\nUser: ${collection?.userName || '-'} | Collection: ${collection?.name || '-'}\nPublished at: ${task.publishedAt || '-'} | Favorited at: ${task.favoriteAddedAt || '-'}`;
     });
     return `Selected documents: ${all.length}. Showing ${page.length} from offset ${start}.\n\n${rows.join('\n\n') || 'No matching documents.'}`;
   }
@@ -691,6 +751,9 @@ class RagAssistant {
       `Document ID: ${task.id}`,
       `Title: ${task.title || task.bvid}`,
       `BVID: ${task.bvid || '-'}`,
+      `UP: ${task.owner || '-'}`,
+      `Published at: ${task.publishedAt || '-'}`,
+      `Favorited at: ${task.favoriteAddedAt || '-'}`,
       `Exact original Markdown lines ${start}-${end} of ${lines.length}.`,
       next ? `next_start_line: ${next}` : 'End of document.',
       '\n--- RAW MARKDOWN START ---\n',
@@ -711,6 +774,7 @@ class RagAssistant {
     return {
       text: [
         `Loaded ${selected.length} original image(s) from document ${task.id} (${task.title || task.bvid}) into the multimodal request.`,
+        `Published at: ${task.publishedAt || '-'} | Favorited at: ${task.favoriteAddedAt || '-'}`,
         `The document contains ${images.length} readable local image(s).`,
         ...selected.map((item) => `[Image ${item.index}] ${item.alt || item.name}\nDisplay URI: ${item.uri}`),
         'Inspect the pixels directly. To show an image to the user, copy its Display URI exactly into Markdown image syntax: ![description](Display URI)'
@@ -785,18 +849,84 @@ class RagAssistant {
     const session = this.requireSession(sessionId);
     const model = this.sessionModel(session);
     if (!model.supportsCompression) throw new Error('Context compression is disabled for this model.');
+    return this.compactContext(session, { automatic: false });
+  }
+
+  async compactContext(sessionInput, options = {}) {
+    const session = this.requireSession(sessionInput.id);
     const provider = this.rawProvider(session.providerId);
-    const messages = this.store.list('ragMessages').filter((item) => item.sessionId === sessionId && item.status === 'complete').sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
-    if (messages.length < 4) throw new Error('There is not enough conversation history to compress.');
-    const transcript = messages.map((item) => `${item.role.toUpperCase()}: ${item.content}`).join('\n\n').slice(-180000);
-    const result = await this.complete(provider, { model: session.modelId, messages: [{ role: 'system', content: 'Compress the conversation into a durable working-memory summary. Preserve user goals, decisions, facts, citations, file paths, unfinished work, and constraints. Do not add new facts.' }, { role: 'user', content: transcript }], temperature: 0, max_tokens: Math.min(6000, this.outputTokenLimit(provider, model)) });
-    session.compressedSummary = result.content;
-    session.compressedAt = new Date().toISOString();
-    session.updatedAt = new Date().toISOString();
-    this.store.set('ragSessions', session.id, session);
-    this.recordUsage(session, result.usage || estimateUsage([], result.content));
+    const model = this.sessionModel(session);
+    const messages = this.store.list('ragMessages')
+      .filter((item) => item.sessionId === session.id && item.id !== options.excludeMessageId && ['user', 'assistant'].includes(item.role) && item.status === 'complete')
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    const activeMessages = this.activeHistoryMessages(session, messages);
+    if (!session.compressedSummary && activeMessages.length < (options.automatic ? 1 : 4)) throw new Error('There is not enough conversation history to compress.');
+    const transcript = [
+      session.compressedSummary ? `[PREVIOUS DURABLE SUMMARY]\n${session.compressedSummary}` : '',
+      ...activeMessages.map((item) => `[${String(item.role || '').toUpperCase()} | ${item.createdAt || '-'} | ${item.id}]\n${item.content || ''}`)
+    ].filter(Boolean).join('\n\n---\n\n');
+    if (!transcript.trim()) throw new Error('There is no compressible conversation context.');
+    const summary = await this.summarizeConversationContext(session, provider, model, transcript, options.signal);
+    const latest = this.requireSession(session.id);
+    const lastMessage = activeMessages.at(-1);
+    latest.compressedSummary = summary;
+    latest.compressedAt = new Date().toISOString();
+    if (lastMessage) {
+      latest.compressedThroughMessageId = lastMessage.id;
+      latest.compressedThroughAt = lastMessage.createdAt || latest.compressedAt;
+    }
+    latest.compactionCount = Number(latest.compactionCount || 0) + 1;
+    if (options.automatic) {
+      latest.autoCompactionCount = Number(latest.autoCompactionCount || 0) + 1;
+      latest.lastAutoCompressedAt = latest.compressedAt;
+    }
+    latest.lastCompactionMode = options.automatic ? 'automatic' : 'manual';
+    latest.updatedAt = new Date().toISOString();
+    this.store.set('ragSessions', latest.id, latest);
     this.store.save();
-    return this.sessionDetail(session.id);
+    const detail = this.sessionDetail(latest.id);
+    return detail;
+  }
+
+  async summarizeConversationContext(session, provider, model, transcript, signal) {
+    const contextWindow = positiveInteger(model.contextWindow, null, DEFAULT_CONTEXT_WINDOW);
+    const maxTokens = Math.max(256, Math.min(6000, this.outputTokenLimit(provider, model), Math.floor(contextWindow * 0.2)));
+    const system = 'Compress conversation context into durable working memory. Preserve user goals, decisions, facts, source titles and citations, dates, file paths, constraints, preferences, unfinished work, errors, and uncertainty. Do not add facts. Do not omit unresolved requirements.';
+    const protocolReserve = Math.min(8000, Math.max(512, Math.floor(contextWindow * 0.05)));
+    const chunkBudget = Math.max(256, contextWindow - maxTokens - protocolReserve - estimateTokens(system) - 256);
+    let chunks = splitTextByTokenBudget(transcript, chunkBudget);
+    let summaries = [];
+    for (let index = 0; index < chunks.length; index += 1) {
+      const prompt = chunks.length === 1
+        ? `Create one durable working-memory summary from the complete conversation below.\n\n${chunks[index]}`
+        : `Summarize conversation chunk ${index + 1}/${chunks.length}. Preserve every durable fact and unresolved item so a later merge can reconstruct the working state.\n\n${chunks[index]}`;
+      summaries.push(await this.completeAndRecordCompression(session, provider, model, system, prompt, maxTokens, signal));
+    }
+    for (let mergeRound = 0; summaries.length > 1 && mergeRound < 6; mergeRound += 1) {
+      const mergeSource = summaries.map((summary, index) => `[SUMMARY CHUNK ${index + 1}/${summaries.length}]\n${summary}`).join('\n\n---\n\n');
+      chunks = splitTextByTokenBudget(mergeSource, chunkBudget);
+      const merged = [];
+      for (let index = 0; index < chunks.length; index += 1) {
+        const prompt = `Merge summary group ${index + 1}/${chunks.length} into durable working memory. Remove repetition only; preserve all goals, facts, dates, citations, paths, constraints, unfinished work, errors, and uncertainty.\n\n${chunks[index]}`;
+        merged.push(await this.completeAndRecordCompression(session, provider, model, system, prompt, maxTokens, signal));
+      }
+      summaries = merged;
+    }
+    if (summaries.length > 1) throw new Error('Conversation context could not be reduced within the model context window.');
+    const summary = String(summaries[0] || '').trim();
+    if (!summary) throw new Error('The context compression model returned an empty summary.');
+    return summary;
+  }
+
+  async completeAndRecordCompression(session, provider, model, system, prompt, maxTokens, signal) {
+    const result = await this.complete(provider, {
+      model: session.modelId,
+      messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }],
+      temperature: 0,
+      max_tokens: maxTokens
+    }, signal);
+    this.recordUsage(session, result.usage || estimateUsage([], result.content));
+    return String(result.content || '');
   }
 
   async streamCompletion(provider, body, signal, onDelta) {
@@ -1161,6 +1291,54 @@ function abortError() {
   return error;
 }
 
+function estimateAttachmentTokens(attachments, model) {
+  return (attachments || []).reduce((sum, attachment) => {
+    if (attachment.extractedText) return sum + estimateTokens(attachment.extractedText.slice(0, 30000));
+    if (model.supportsVision && String(attachment.mimeType || '').startsWith('image/')) return sum + 2600;
+    if (model.supportsAudio && String(attachment.mimeType || '').startsWith('audio/')) return sum + Math.max(1200, Math.ceil(Number(attachment.size || 0) / 1600));
+    return sum + estimateTokens(`${attachment.name || ''} ${attachment.path || ''}`);
+  }, 0);
+}
+
+function splitTextByTokenBudget(value, budgetTokens) {
+  const text = String(value || '');
+  if (!text) return [''];
+  if (estimateTokens(text) <= budgetTokens) return [text];
+  const chunks = [];
+  let current = '';
+  for (const line of text.match(/[^\n]*\n|[^\n]+$/g) || [text]) {
+    if (estimateTokens(line) > budgetTokens) {
+      if (current) { chunks.push(current); current = ''; }
+      let remaining = line;
+      while (remaining) {
+        const size = prefixLengthForTokenBudget(remaining, budgetTokens);
+        chunks.push(remaining.slice(0, size));
+        remaining = remaining.slice(size);
+      }
+      continue;
+    }
+    if (current && estimateTokens(current + line) > budgetTokens) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current += line;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks.filter(Boolean);
+}
+
+function prefixLengthForTokenBudget(text, budgetTokens) {
+  let low = 1;
+  let high = text.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (estimateTokens(text.slice(0, middle)) <= budgetTokens) low = middle;
+    else high = middle - 1;
+  }
+  return Math.max(1, low);
+}
+
 function queryTerms(query) {
   const lower = query.toLowerCase();
   const latin = lower.match(/[a-z0-9_+#.-]{2,}/g) || [];
@@ -1181,4 +1359,4 @@ function truncate(value, limit) {
   return text.length > limit ? `${text.slice(0, limit)}\n...[truncated]` : text;
 }
 
-module.exports = { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, RagAssistant, normalizeModel };
+module.exports = { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, MAX_RAG_TOOL_ROUNDS, RAG_AUTO_COMPACT_TRIGGER, RagAssistant, normalizeModel, splitTextByTokenBudget };

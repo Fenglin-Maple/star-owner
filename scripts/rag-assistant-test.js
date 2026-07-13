@@ -1,8 +1,10 @@
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+const MarkdownIt = require('markdown-it');
 const { Store } = require('../src/core/store');
-const { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, RagAssistant, normalizeModel } = require('../src/core/rag-assistant');
+const { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, MAX_RAG_TOOL_ROUNDS, RAG_AUTO_COMPACT_TRIGGER, RagAssistant, normalizeModel, splitTextByTokenBudget } = require('../src/core/rag-assistant');
+const { wrapMarkdownTables } = require('../src/core/markdown');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -58,6 +60,20 @@ async function startFakeProvider() {
       response.end(JSON.stringify({ choices: [{ message: { reasoning_content: '普通 JSON 推理', content: '普通 JSON 兼容成功。' } }], usage: { prompt_tokens: 9, completion_tokens: 6, total_tokens: 15 } }));
       return;
     }
+    if (userText.includes('TOOL_ROUND_LIMIT')) {
+      const completedToolRounds = (body.messages || []).filter((item) => item.role === 'tool').length;
+      if (completedToolRounds < MAX_RAG_TOOL_ROUNDS) {
+        sse(response, [
+          { choices: [{ delta: { tool_calls: [{ index: 0, id: `call-round-${completedToolRounds + 1}`, type: 'function', function: { name: 'knowledge_search', arguments: '{"query":"星藏家","limit":1}' } }] } }] }
+        ]);
+      } else {
+        sse(response, [
+          { choices: [{ delta: { content: `已完成 ${completedToolRounds} 轮知识库检索。` } }] },
+          { choices: [], usage: { prompt_tokens: 90, completion_tokens: 12, total_tokens: 102 } }
+        ]);
+      }
+      return;
+    }
     if (userText.includes('IMAGE_TEST') && !toolResult) {
       sse(response, [
         { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-image', type: 'function', function: { name: 'knowledge_view_images', arguments: '{"document_id":"rag-task","image_indices":[1]}' } }] } }] }
@@ -107,7 +123,7 @@ async function startFakeProvider() {
     fs.appendFileSync(markdown, '\n![测试关键帧](frame.png)\n', 'utf8');
     store.upsertUser({ id: 'rag-user', mid: 'rag-user', name: '测试用户' });
     store.upsertCollection({ id: 'rag-collection', name: 'AI 收藏夹', userId: 'rag-user', userName: '测试用户' });
-    store.upsertTask({ id: 'rag-task', collectionId: 'rag-collection', bvid: 'BVRAGTEST', title: '星藏家测试文档', owner: '测试 UP', status: 'done', outputMarkdown: markdown, completedAt: new Date().toISOString() });
+    store.upsertTask({ id: 'rag-task', collectionId: 'rag-collection', bvid: 'BVRAGTEST', title: '星藏家测试文档', owner: '测试 UP', status: 'done', outputMarkdown: markdown, publishedAt: '2026-06-18T08:00:00.000Z', favoriteAddedAt: '2026-06-20T09:30:00.000Z', completedAt: new Date().toISOString() });
     store.set('ragProviders', 'legacy-provider', { id: 'legacy-provider', name: 'Legacy', type: 'openai', baseUrl: fake.url, maxOutputTokens: 8192, enabledModels: [{ id: 'gpt-5.4-mini', contextWindow: 128000 }], remoteModels: [] });
     store.commit();
 
@@ -127,6 +143,11 @@ async function startFakeProvider() {
     const migrated = assistant.rawProvider('legacy-provider');
     assert(migrated.maxOutputTokens === DEFAULT_MAX_OUTPUT_TOKENS && migrated.enabledModels[0].contextWindow === 400000 && migrated.enabledModels[0].maxOutputTokens === 128000, 'legacy token defaults were not migrated');
     assert(normalizeModel({ id: 'unknown-modern-model' }).contextWindow === DEFAULT_CONTEXT_WINDOW, 'modern default context window is incorrect');
+    assert(MAX_RAG_TOOL_ROUNDS === 24 && RAG_AUTO_COMPACT_TRIGGER === 0.75, 'RAG tool/auto-compression limits are incorrect');
+    const tableHtml = wrapMarkdownTables(new MarkdownIt()).render('| 名称 | 日期 |\n| --- | --- |\n| 测试 | 2026-06-18 |');
+    assert(tableHtml.includes('<div class="rag-table-wrap"><table>') && tableHtml.includes('<th>名称</th>') && tableHtml.includes('</table></div>'), 'RAG Markdown table wrapper was not rendered');
+    const splitFixture = `${'第一段完整上下文。'.repeat(500)}\n${'second complete context line. '.repeat(500)}`;
+    assert(splitTextByTokenBudget(splitFixture, 700).join('') === splitFixture, 'RAG context chunking dropped or reordered source text');
     store.delete('ragProviders', 'legacy-provider');
     store.commit();
 
@@ -155,8 +176,10 @@ async function startFakeProvider() {
 
     const documentList = assistant.listKnowledgeDocuments(assistant.requireSession(session.id));
     assert(documentList.includes('Document ID: rag-task'), 'knowledge document ids were not listed');
+    assert(documentList.includes('Published at: 2026-06-18T08:00:00.000Z') && documentList.includes('Favorited at: 2026-06-20T09:30:00.000Z'), 'knowledge document index omitted publish/favorite dates');
     const exactDocument = assistant.readKnowledgeDocument(assistant.requireSession(session.id), 'rag-task', 1, 20);
     assert(exactDocument.includes('RAG 助手可以检索收藏夹中的 Markdown 内容。'), 'exact original Markdown could not be read');
+    assert(exactDocument.includes('Published at: 2026-06-18T08:00:00.000Z') && exactDocument.includes('Favorited at: 2026-06-20T09:30:00.000Z'), 'exact document metadata omitted publish/favorite dates');
     const imageReply = await assistant.send(session.id, { content: 'IMAGE_TEST' });
     assert(imageReply.toolEvents[0]?.name === 'knowledge_view_images' && imageReply.toolEvents[0]?.images?.length === 1, 'knowledge image tool did not expose a displayable original image');
     const imageRequest = [...fake.requests].reverse().find((item) => item.messages?.some((message) => Array.isArray(message.content) && message.content.some((part) => part.type === 'image_url')));
@@ -190,6 +213,28 @@ async function startFakeProvider() {
     const longHistory = assistant.buildHistory(assistant.requireSession(historySession.id), normalizeModel({ id: 'unknown-modern-model' }));
     assert(longHistory.length === 61, 'large-context history is still truncated to the legacy fixed message count');
 
+    for (let index = 0; index < 8; index += 1) {
+      store.set('ragMessages', `auto-history-${index}`, { id: `auto-history-${index}`, sessionId: historySession.id, role: index % 2 ? 'assistant' : 'user', content: `AUTO_HISTORY_MARKER_${index} ${'long context '.repeat(110)}`, status: 'complete', createdAt: new Date(Date.now() + 1000 + index).toISOString() });
+    }
+    store.save();
+    const usageBeforeAuto = assistant.state(historySession.id).modelUsage.find((item) => item.providerId === provider.id && item.modelId === 'fake-agent')?.requests || 0;
+    const autoReply = await assistant.send(historySession.id, { content: 'AUTO_COMPACT_TEST：请继续回答当前问题。' });
+    assert(autoReply.content.includes('测试回复'), 'automatic context compression did not continue the current answer');
+    const autoDetail = assistant.sessionDetail(historySession.id);
+    assert(autoDetail.autoCompactionCount === 1 && autoDetail.lastCompactionMode === 'automatic' && autoDetail.compressedThroughMessageId === 'auto-history-7', 'automatic context compression state was not persisted');
+    assert(autoDetail.contextPercent < autoDetail.autoCompactionThresholdPercent, 'automatic compression did not reduce active context below its trigger');
+    const autoRequest = [...fake.requests].reverse().find((item) => latestUserText(item.messages || []).includes('AUTO_COMPACT_TEST'));
+    assert(autoRequest.messages[0].content.includes('Compressed earlier context') && !JSON.stringify(autoRequest.messages).includes('AUTO_HISTORY_MARKER_0'), 'compressed history was duplicated into the post-compression model request');
+    const usageAfterAuto = assistant.state(historySession.id).modelUsage.find((item) => item.providerId === provider.id && item.modelId === 'fake-agent')?.requests || 0;
+    assert(usageAfterAuto >= usageBeforeAuto + 2, 'automatic compression model calls were not included in usage accounting');
+    assert(events.some((item) => item.type === 'context-compaction' && item.phase === 'completed' && item.automatic), 'automatic compression UI event was not emitted');
+
+    const usageBeforeToolRounds = usageAfterAuto;
+    const manyToolRounds = await assistant.send(session.id, { content: 'TOOL_ROUND_LIMIT：连续检索后给出答案。' });
+    assert(manyToolRounds.toolEvents.length === 24 && manyToolRounds.content.includes('24 轮'), 'RAG assistant did not allow 24 complete knowledge-tool rounds plus a final answer');
+    const usageAfterToolRounds = assistant.state(session.id).modelUsage.find((item) => item.providerId === provider.id && item.modelId === 'fake-agent')?.requests || 0;
+    assert(usageAfterToolRounds === usageBeforeToolRounds + 1, 'multi-round answer usage should be recorded as one conversation turn');
+
     await assistant.send(session.id, { content: '再补一轮测试。' });
     const compacted = await assistant.compact(session.id);
     assert(compacted.compressedSummary.includes('保留目标'), 'context compression failed');
@@ -204,7 +249,7 @@ async function startFakeProvider() {
 
     const state = assistant.state(session.id);
     assert(state.knowledgeCatalog[0]?.documentCount === 1, 'knowledge catalog classification failed');
-    assert(state.modelUsage[0]?.requests === 5, 'per-model request count is incorrect');
+    assert(state.modelUsage[0]?.requests >= 8, 'per-model request count did not include extended RAG and compression calls');
     assert(events.some((item) => item.type === 'assistant-delta') && events.some((item) => item.type === 'tool'), 'stream events were not emitted');
     console.log('RAG assistant integration test passed.');
   } finally {
