@@ -21,7 +21,9 @@ const TEMPLATE_FILE = path.join(__dirname, '..', '..', 'templates', 'video-summa
 const TERMINAL_RUNS = new Set(['succeeded', 'failed', 'cancelled', 'timeout', 'skipped']);
 const DEFAULT_AGENT_CONTEXT_WINDOW = 1_000_000;
 const DEFAULT_AGENT_OUTPUT_TOKENS = 128_000;
+const CONTEXT_COMPACTION_TRIGGER = 0.82;
 const GENERATION_SYSTEM_PROMPT = '你是星藏家的内置视频知识整理 Agent。必须依据提供的真实素材生成完整、严谨、带时间轴和关键帧的中文 Markdown，不得编造未出现的信息。只返回 Markdown 正文。';
+const COMPACTOR_SYSTEM_PROMPT = '你是星藏家的上下文整理 Agent。你的任务不是写最终视频总结，而是把超长原始素材整理为无重复、可继续推理的结构化证据。必须保留时间轴、事实、步骤、参数、代码、限制、例外、字幕冲突、评论立场和不确定性；不得补充素材外事实，不得用“其余略”省略未处理内容。';
 
 class InternalAgentManager {
   constructor({ store, toolRunner, ragAssistant, bili, getCurrentUser, emit }) {
@@ -33,6 +35,7 @@ class InternalAgentManager {
     this.emitEvent = emit || (() => {});
     this.controllers = new Map();
     this.running = new Map();
+    this.forcedStops = new Map();
     this.ensureInternalUser();
     this.recoverInterruptedSessions();
     this.purgeKnownUnavailableTasks();
@@ -47,8 +50,7 @@ class InternalAgentManager {
         name: collection.name,
         userName: collection.userName,
         internal: collection.userId === INTERNAL_USER_ID || collection.internal === true,
-        tasks: this.store.listTasks({ collectionId: collection.id }).length,
-        pending: this.store.listTasks({ collectionId: collection.id }).filter((task) => task.enabled !== false && ['pending', 'failed', 'rejected'].includes(task.status)).length
+        ...this.collectionProgress(collection.id)
       })),
       internalCollections: this.listInternalCollections()
     };
@@ -59,7 +61,10 @@ class InternalAgentManager {
   }
 
   listSessions() {
-    return this.store.list('internalAgentSessions').sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+    return this.store.list('internalAgentSessions').sort((a, b) => {
+      const created = String(b.createdAt || '').localeCompare(String(a.createdAt || ''));
+      return created || String(b.id || '').localeCompare(String(a.id || ''));
+    });
   }
 
   listInternalCollections() {
@@ -207,6 +212,8 @@ class InternalAgentManager {
   async start(sessionId) {
     const session = this.requireSession(sessionId);
     if (this.running.has(session.id)) return this.publicSession(session);
+    const modelAvailability = this.modelAvailability(session);
+    if (!modelAvailability.available) throw new Error(modelAvailability.reason);
     if (session.status === 'waiting-login') {
       const user = this.getCurrentUser();
       if (!user?.isLogin) {
@@ -304,6 +311,50 @@ class InternalAgentManager {
     this.store.save();
   }
 
+  reconcileModelAvailability(providerId = '') {
+    const affected = [];
+    for (const session of this.listSessions()) {
+      if (providerId && session.providerId !== providerId) continue;
+      const availability = this.modelAvailability(session);
+      if (availability.available) {
+        if (session.status === 'model-unavailable') {
+          session.status = 'stopped';
+          session.phase = 'AI 模型配置已恢复，可重新开始';
+          session.lastError = '';
+          this.saveSession(session);
+        }
+        continue;
+      }
+      session.acceptNewTasks = false;
+      session.lastError = availability.reason;
+      try { this.store.updateWorker(session.workerId, { status: 'paused', pauseReason: availability.reason, pausedAt: new Date().toISOString() }); } catch {}
+      if (this.running.has(session.id) && session.currentTaskId) {
+        this.forcedStops.set(session.id, {
+          status: 'model-unavailable',
+          phase: 'AI 模型配置不可用，当前任务已回退',
+          reason: availability.reason,
+          source: 'model-configuration-unavailable'
+        });
+        session.status = 'stopping';
+        session.phase = 'AI 模型配置不可用，正在清理当前任务';
+        this.saveSession(session);
+        this.controllers.get(session.id)?.abort();
+      } else if (!['completed', 'unavailable'].includes(session.status)) {
+        this.controllers.get(session.id)?.abort();
+        session.status = 'model-unavailable';
+        session.phase = 'AI 模型配置不可用';
+        session.currentTaskId = '';
+        session.currentRunId = '';
+        this.saveSession(session);
+        this.log(session, availability.reason);
+      } else {
+        this.saveSession(session);
+      }
+      affected.push(session.id);
+    }
+    return { affected };
+  }
+
   async runLoop(sessionId, signal) {
     const excluded = new Set();
     while (!signal.aborted) {
@@ -323,8 +374,16 @@ class InternalAgentManager {
       } catch (error) {
         const latest = this.requireSession(session.id);
         if (signal.aborted) {
-          this.abortAttempt(task.id, latest.workerId, '用户或应用停止了 Agent 工作。', 'internal-agent-stop');
-          this.finishSession(latest, 'stopped', '已停止，任务缓存已清理');
+          const forced = this.forcedStops.get(session.id);
+          this.forcedStops.delete(session.id);
+          const reason = forced?.reason || '用户或应用停止了 Agent 工作。';
+          this.abortAttempt(task.id, latest.workerId, reason, forced?.source || 'internal-agent-stop');
+          latest.acceptNewTasks = false;
+          latest.lastError = forced?.reason || latest.lastError;
+          latest.currentTaskId = '';
+          latest.currentRunId = '';
+          this.finishSession(latest, forced?.status || 'stopped', forced?.phase || '已停止，任务缓存已清理');
+          if (forced) this.log(latest, `${forced.reason} 当前视频缓存已清理，任务已退回待领取。`);
           return;
         }
         if (error.code === 'BILIBILI_VIDEO_UNAVAILABLE' || isVideoUnavailableMessage(error.message)) {
@@ -540,28 +599,40 @@ class InternalAgentManager {
   async generateMarkdown(session, task, collection, signal) {
     const provider = this.ragAssistant.rawProvider(session.providerId);
     const model = this.ragAssistant.sessionModel(session);
-    const materials = collectMaterials(task.artifactDir);
+    const originalMaterials = collectMaterials(task.artifactDir);
+    let generationMaterials = originalMaterials;
     const template = fs.readFileSync(TEMPLATE_FILE, 'utf8');
     let previous = '';
     let errors = [];
     for (let attempt = 0; attempt < 2; attempt += 1) {
       let result;
-      for (let contextAttempt = 0; contextAttempt < 2; contextAttempt += 1) {
+      let repairContext = previous;
+      for (let contextAttempt = 0; contextAttempt < 3; contextAttempt += 1) {
         const plan = planGenerationRequest({
           session,
           task,
           collection,
-          materials,
+          materials: generationMaterials,
           template,
           model,
           provider,
           configuredOutput: this.ragAssistant.outputTokenLimit?.(provider, model),
-          previous,
+          previous: repairContext,
           errors,
-          repair: attempt > 0,
-          aggressive: contextAttempt > 0
+          repair: attempt > 0
         });
-        const frames = model.supportsVision ? materials.frames.slice(0, plan.frameLimit) : [];
+        if (plan.requiresSemanticCompaction) {
+          if (!generationMaterials.evidencePack) {
+            generationMaterials = await this.compactTaskMaterials(session, task, collection, originalMaterials, provider, model, signal);
+            continue;
+          }
+          if (attempt > 0 && repairContext && !repairContext.startsWith('[语义整理后的修订稿]')) {
+            repairContext = `[语义整理后的修订稿]\n${await this.compactRepairDraft(session, task, repairContext, errors, provider, model, signal)}`;
+            continue;
+          }
+          throw new Error(`语义整理后的当前视频证据仍无法装入模型上下文（预计 ${plan.contextPercent}%）。请检查模型配置的上下文窗口是否与供应商实际限制一致。`);
+        }
+        const frames = model.supportsVision ? generationMaterials.frames.slice(0, plan.frameLimit) : [];
         const userContent = frames.length
           ? [{ type: 'text', text: plan.prompt }, ...frames.map((file) => ({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${fs.readFileSync(path.join(task.artifactDir, file)).toString('base64')}` } }))]
           : plan.prompt;
@@ -571,10 +642,8 @@ class InternalAgentManager {
         latest.contextPercent = plan.contextPercent;
         latest.contextInputTokens = plan.inputTokens;
         latest.contextOutputLimit = plan.maxTokens;
-        if (plan.compacted) latest.contextCompactions = Number(latest.contextCompactions || 0) + 1;
         this.saveSession(latest);
         Object.assign(session, latest);
-        if (plan.compacted) this.log(session, `上下文预算保护已压缩超长素材${attempt ? '与上一稿' : ''}；预计占用 ${plan.contextPercent}%，输出上限 ${plan.maxTokens} tokens。`);
         try {
           result = await this.ragAssistant.streamCompletion(provider, {
             model: session.modelId,
@@ -587,13 +656,22 @@ class InternalAgentManager {
           }, signal, (delta) => this.streamDelta(session.id, delta));
           break;
         } catch (error) {
-          if (contextAttempt > 0 || !isContextLimitError(error.message)) throw error;
-          this.log(session, '模型供应商仍报告上下文超限，正在保留 Worker ID 和当前任务，使用更紧凑的全新请求重试。');
+          if (!isContextLimitError(error.message)) throw error;
+          if (!generationMaterials.evidencePack) {
+            this.log(session, '供应商报告当前视频上下文超限，正在保留 Worker ID 与 workId，并启动同模型的上下文整理 Agent。');
+            generationMaterials = await this.compactTaskMaterials(session, task, collection, originalMaterials, provider, model, signal);
+            continue;
+          }
+          if (attempt > 0 && repairContext && !repairContext.startsWith('[语义整理后的修订稿]')) {
+            repairContext = `[语义整理后的修订稿]\n${await this.compactRepairDraft(session, task, repairContext, errors, provider, model, signal)}`;
+            continue;
+          }
+          throw new Error(`相同模型完成上下文语义整理后，供应商仍报告上下文超限：${error.message || String(error)}`);
         }
       }
       if (!result) throw new Error('模型上下文重试未返回结果。');
       this.addUsage(session, result.usage || {});
-      previous = normalizeGeneratedMarkdown(injectFrameGallery(stripMarkdownFence(result.content || ''), materials.frames), task, materials);
+      previous = normalizeGeneratedMarkdown(injectFrameGallery(stripMarkdownFence(result.content || ''), originalMaterials.frames), task, originalMaterials);
       const draft = path.join(task.artifactDir, `agent-draft-${attempt + 1}.md`);
       fs.writeFileSync(draft, `${previous.trim()}\n`, 'utf8');
       const validation = validateSubmission(task, { artifactDir: task.artifactDir, markdownFile: draft, metadataFile: path.join(task.artifactDir, 'info.json') });
@@ -602,6 +680,136 @@ class InternalAgentManager {
       this.log(session, `第 ${attempt + 1} 稿未通过校验：${errors.join('；')}`);
     }
     throw new Error(`模型生成的 Markdown 未通过校验：${errors.join('；')}`);
+  }
+
+  async compactTaskMaterials(session, task, collection, materials, provider, model, signal) {
+    const sources = [
+      { label: '任务与收藏夹', text: JSON.stringify({ bvid: task.bvid, title: task.title, owner: task.owner, duration: task.duration, collection: collection.name }, null, 2) },
+      { label: '视频元数据', text: JSON.stringify(materials.info, null, 2) },
+      { label: '素材清单', text: JSON.stringify(materials.manifest, null, 2) },
+      { label: '站内字幕', text: materials.station || '未提供可用站内字幕' },
+      { label: '本次 ASR 字幕', text: materials.asr || 'ASR 输出为空' },
+      { label: '热评', text: JSON.stringify(materials.comments, null, 2) }
+    ];
+    this.setProgress(session, '极端长视频：上下文整理 Agent 正在分块读取素材', 0.57);
+    this.log(session, '当前单视频素材预计接近模型上下文上限，已启动相同供应商/模型的独立上下文整理 Agent；原始素材不会裁剪或删除。');
+    const evidencePack = await this.semanticCompactSources(session, provider, model, sources, signal, {
+      purpose: '当前视频完整证据包',
+      targetRatio: 0.38,
+      progressStart: 0.57,
+      progressEnd: 0.69
+    });
+    const latest = this.requireSession(session.id);
+    latest.contextCompactions = Number(latest.contextCompactions || 0) + 1;
+    this.saveSession(latest);
+    Object.assign(session, latest);
+    this.log(session, `上下文整理 Agent 已生成证据包（约 ${estimateAgentTokens(evidencePack)} tokens），继续由原 Agent 完成本视频。`);
+    return { ...materials, station: '', asr: '', evidencePack };
+  }
+
+  async compactRepairDraft(session, task, draft, errors, provider, model, signal) {
+    this.setProgress(session, '极端长修订稿：上下文整理 Agent 正在整理校验依据', 0.6);
+    const result = await this.semanticCompactSources(session, provider, model, [
+      { label: '当前视频校验错误', text: errors.join('\n') || '结构校验失败' },
+      { label: '当前视频上一版完整草稿', text: draft }
+    ], signal, {
+      purpose: `${task.bvid} 修订证据`,
+      targetRatio: 0.2,
+      progressStart: 0.6,
+      progressEnd: 0.68
+    });
+    const latest = this.requireSession(session.id);
+    latest.contextCompactions = Number(latest.contextCompactions || 0) + 1;
+    this.saveSession(latest);
+    Object.assign(session, latest);
+    this.log(session, '上下文整理 Agent 已整理当前视频的超长修订稿，原 Agent 将依据校验错误继续修订。');
+    return result;
+  }
+
+  async semanticCompactSources(session, provider, model, sources, signal, options = {}) {
+    const contextWindow = positiveInteger(model.contextWindow, DEFAULT_AGENT_CONTEXT_WINDOW);
+    const configuredOutput = positiveInteger(this.ragAssistant.outputTokenLimit?.(provider, model) || model.maxOutputTokens || provider.maxOutputTokens, DEFAULT_AGENT_OUTPUT_TOKENS);
+    const outputTokens = Math.min(configuredOutput, 12000, Math.max(2048, Math.floor(contextWindow * 0.08)));
+    const targetTokens = Math.max(4000, Math.floor(contextWindow * Number(options.targetRatio || 0.38)));
+    const scales = [0.52, 0.3, 0.16];
+    let lastContextError = null;
+    for (const scale of scales) {
+      const chunkBudget = Math.max(2000, Math.floor(contextWindow * scale));
+      try {
+        return await this.semanticMapReduce(session, provider, model, sources, signal, {
+          ...options,
+          outputTokens,
+          targetTokens,
+          chunkBudget
+        });
+      } catch (error) {
+        if (!isContextLimitError(error.message)) throw error;
+        lastContextError = error;
+        this.log(session, `上下文整理分块仍超过供应商实际限制，自动把分块预算降至 ${chunkBudget} tokens 后重试。`);
+      }
+    }
+    throw new Error(`上下文整理 Agent 无法适配供应商实际窗口：${lastContextError?.message || '持续报告上下文超限'}`);
+  }
+
+  async semanticMapReduce(session, provider, model, sources, signal, options) {
+    const chunks = [];
+    for (const source of sources) {
+      const parts = splitTextByTokenBudget(String(source.text || ''), options.chunkBudget);
+      parts.forEach((text, index) => chunks.push({ label: source.label, index: index + 1, total: parts.length, text }));
+    }
+    const summaries = [];
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index];
+      const fraction = chunks.length ? index / chunks.length : 0;
+      this.setProgress(session, `上下文整理 Agent：读取 ${index + 1}/${chunks.length} · ${chunk.label}`, Number(options.progressStart || 0.57) + (Number(options.progressEnd || 0.69) - Number(options.progressStart || 0.57)) * fraction, false);
+      const content = await this.runContextCompactor(session, provider, model, [
+        `整理目标：${options.purpose || '视频证据包'}`,
+        `素材来源：${chunk.label}（分块 ${chunk.index}/${chunk.total}）`,
+        '按时间或原文顺序提取本块全部有效信息。输出结构化 Markdown，至少覆盖：时间范围、事实与论据、步骤与参数、术语/代码、限制与例外、与其它字幕可能冲突之处、不确定内容。不要写最终总结，不要省略本块后半段。',
+        '\n--- 原始素材分块开始 ---\n',
+        chunk.text,
+        '\n--- 原始素材分块结束 ---'
+      ].join('\n'), signal, options.outputTokens);
+      summaries.push(`## ${chunk.label} · 分块 ${chunk.index}/${chunk.total}\n\n${content}`);
+    }
+    let evidence = summaries.join('\n\n---\n\n');
+    for (let round = 1; estimateAgentTokens(evidence) > options.targetTokens && round <= 4; round += 1) {
+      const groups = splitTextByTokenBudget(evidence, options.chunkBudget);
+      const merged = [];
+      for (let index = 0; index < groups.length; index += 1) {
+        const content = await this.runContextCompactor(session, provider, model, [
+          `整理目标：${options.purpose || '视频证据包'}，分层合并第 ${round} 轮（${index + 1}/${groups.length}）`,
+          `请去除重复表述并合并同一时间点的信息，但必须保留来源标签、时间轴、事实、步骤、参数、代码、限制、例外、字幕冲突和不确定性。目标长度不超过 ${Math.max(2000, Math.floor(options.targetTokens / Math.max(1, groups.length)))} tokens。`,
+          '\n--- 待合并证据开始 ---\n',
+          groups[index],
+          '\n--- 待合并证据结束 ---'
+        ].join('\n'), signal, Math.min(options.outputTokens, Math.max(2000, Math.floor(options.targetTokens / Math.max(1, groups.length)))));
+        merged.push(content);
+      }
+      evidence = merged.join('\n\n---\n\n');
+    }
+    if (!evidence.trim()) throw new Error('上下文整理 Agent 返回了空证据包。');
+    if (estimateAgentTokens(evidence) > options.targetTokens) throw new Error('上下文整理 Agent 的分层证据包仍超过目标预算。');
+    return evidence;
+  }
+
+  async runContextCompactor(session, provider, model, prompt, signal, maxTokens) {
+    const body = {
+      model: session.modelId,
+      messages: [
+        { role: 'system', content: COMPACTOR_SYSTEM_PROMPT },
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0,
+      max_tokens: maxTokens
+    };
+    const result = this.ragAssistant.complete
+      ? await this.ragAssistant.complete(provider, body, signal)
+      : await this.ragAssistant.streamCompletion(provider, body, signal, () => {});
+    this.addUsage(session, result.usage || {});
+    const content = String(result.content || '').trim();
+    if (!content) throw new Error('上下文整理 Agent 未返回可用内容。');
+    return content;
   }
 
   refreshTaskMetadata(task) {
@@ -658,7 +866,8 @@ class InternalAgentManager {
     if (delta.content) session.content = `${session.content || ''}${delta.content}`;
     if (delta.reasoning) session.reasoning = `${session.reasoning || ''}${delta.reasoning}`;
     session.phase = delta.reasoning && !session.content ? '模型正在思考' : '模型正在撰写';
-    session.progress = Math.min(0.86, 0.58 + Math.log10(1 + String(session.content || '').length) * 0.055);
+    const baseProgress = Number(session.contextCompactions || 0) > 0 ? 0.7 : 0.58;
+    session.progress = Math.min(0.86, baseProgress + Math.log10(1 + String(session.content || '').length) * 0.045);
     session.updatedAt = new Date().toISOString();
     this.store.set('internalAgentSessions', session.id, session);
     this.emit({ type: 'stream', sessionId, delta, phase: session.phase, progress: session.progress });
@@ -713,7 +922,42 @@ class InternalAgentManager {
 
   publicSession(session) {
     const task = session.currentTaskId ? this.store.getTask(session.currentTaskId) : null;
-    return { ...session, currentTask: task ? { id: task.id, bvid: task.bvid, title: task.title, duration: task.duration, artifactDir: task.artifactDir } : null };
+    const modelAvailability = this.modelAvailability(session);
+    return {
+      ...session,
+      modelAvailable: modelAvailability.available,
+      modelUnavailableReason: modelAvailability.reason,
+      collectionProgress: this.collectionProgress(session.collectionId),
+      currentTask: task ? { id: task.id, bvid: task.bvid, title: task.title, duration: task.duration, artifactDir: task.artifactDir } : null
+    };
+  }
+
+  modelAvailability(session) {
+    const provider = this.store.get('ragProviders', String(session.providerId || ''));
+    if (!provider) return { available: false, reason: 'AI 模型配置不可用：供应商已被删除。请在“AI 模型配置”中重新配置后再启动。' };
+    const enabled = (provider.enabledModels || []).some((model) => model.id === session.modelId);
+    if (!enabled) return { available: false, reason: `AI 模型配置不可用：${provider.name || session.providerId} 中的模型 ${session.modelId} 已被删除或停用。` };
+    return { available: true, reason: '' };
+  }
+
+  collectionProgress(collectionId) {
+    const tasks = this.store.listTasks({ collectionId: String(collectionId || '') });
+    const enabledTasks = tasks.filter((task) => task.enabled !== false);
+    const done = enabledTasks.filter((task) => task.status === 'done').length;
+    const claimed = enabledTasks.filter((task) => task.status === 'claimed').length;
+    const failed = enabledTasks.filter((task) => ['failed', 'rejected'].includes(task.status)).length;
+    const pending = enabledTasks.filter((task) => task.status === 'pending').length;
+    return {
+      tasks: tasks.length,
+      enabled: enabledTasks.length,
+      done,
+      claimed,
+      failed,
+      pending,
+      remaining: Math.max(0, enabledTasks.length - done - claimed),
+      disabled: tasks.length - enabledTasks.length,
+      progress: enabledTasks.length ? done / enabledTasks.length : 0
+    };
   }
 
   requireSession(id) {
@@ -780,28 +1024,22 @@ class InternalAgentManager {
 
 function collectMaterials(artifactDir) {
   const frames = listFiles(path.join(artifactDir, 'frames'), '.jpg').map((file) => `frames/${path.basename(file)}`);
-  const asr = readText(path.join(artifactDir, 'asr', 'asr-transcript.txt'), 70000);
+  const asr = readText(path.join(artifactDir, 'asr', 'asr-transcript.txt'));
   const stationFile = listFiles(path.join(artifactDir, 'subtitles'), '.txt')[0];
   return {
     info: readJson(path.join(artifactDir, 'info.json')),
     manifest: readJson(path.join(artifactDir, 'manifest.json')),
     comments: readJson(path.join(artifactDir, 'comments', 'comments.json')),
     asr,
-    station: stationFile ? readText(stationFile, 70000) : '',
+    station: stationFile ? readText(stationFile) : '',
     frames
   };
 }
 
-function buildGenerationPrompt({ session, task, collection, materials, template, limits = {} }) {
-  const sectionLimits = {
-    requirements: Number(limits.requirements || 12000),
-    info: Number(limits.info || 30000),
-    manifest: Number(limits.manifest || 16000),
-    station: Number(limits.station || 70000),
-    asr: Number(limits.asr || 70000),
-    comments: Number(limits.comments || 18000),
-    template: Number(limits.template || 30000)
-  };
+function buildGenerationPrompt({ session, task, collection, materials, template }) {
+  const transcriptContext = materials.evidencePack
+    ? `极端长视频语义证据包（由相同供应商/模型的独立上下文整理 Agent 分块读取全部原始素材后生成）：\n${materials.evidencePack}\n\n注意：证据包用于替代本次请求中的超长原始字幕，但原始文件仍保存在任务目录。必须覆盖证据包中的全部时间段、事实、步骤、参数、限制、冲突和不确定性。`
+    : `站内字幕：\n${materials.station || '未提供可用站内字幕'}\n\nASR 字幕：\n${materials.asr || 'ASR 输出为空，请在文档中如实说明'}`;
   return `请基于以下真实素材生成一份完整的视频知识 Markdown。
 
 强制要求：
@@ -815,104 +1053,87 @@ function buildGenerationPrompt({ session, task, collection, materials, template,
 8. 不要输出 Markdown 外层代码围栏。
 
 用户附加要求：
-${truncateSection(session.taskRequirements || '无额外要求', sectionLimits.requirements)}
+${session.taskRequirements || '无额外要求'}
 
 任务：
 ${JSON.stringify({ bvid: task.bvid, title: task.title, owner: task.owner, duration: task.duration, collection: collection.name, workerId: session.workerId, model: session.modelId }, null, 2)}
 
 元数据：
-${truncateSection(JSON.stringify(materials.info, null, 2), sectionLimits.info)}
+${JSON.stringify(materials.info, null, 2)}
 
 素材清单：
-${truncateSection(JSON.stringify(materials.manifest, null, 2), sectionLimits.manifest)}
+${JSON.stringify(materials.manifest, null, 2)}
 
 关键帧路径：
 ${materials.frames.join('\n') || '无'}
 
-站内字幕：
-${truncateSection(materials.station || '未提供可用站内字幕', sectionLimits.station)}
-
-ASR 字幕：
-${truncateSection(materials.asr || 'ASR 输出为空，请在文档中如实说明', sectionLimits.asr)}
+${transcriptContext}
 
 热评：
-${truncateSection(JSON.stringify(materials.comments, null, 2), sectionLimits.comments)}
+${JSON.stringify(materials.comments, null, 2)}
 
 参考模板（按真实内容改写，不保留占位符）：
-${truncateSection(template, sectionLimits.template)}`;
+${template}`;
 }
 
-function planGenerationRequest({ session, task, collection, materials, template, model = {}, provider = {}, configuredOutput, previous = '', errors = [], repair = false, aggressive = false }) {
+function planGenerationRequest({ session, task, collection, materials, template, model = {}, provider = {}, configuredOutput, previous = '', errors = [], repair = false }) {
   const contextWindow = positiveInteger(model.contextWindow, DEFAULT_AGENT_CONTEXT_WINDOW);
   const wantedOutput = positiveInteger(configuredOutput || model.maxOutputTokens || provider.maxOutputTokens, DEFAULT_AGENT_OUTPUT_TOKENS);
   const protocolReserve = Math.min(16000, Math.max(1024, Math.floor(contextWindow * 0.05)));
-  const frameLimit = model.supportsVision && materials.frames.length ? (aggressive ? 2 : 4) : 0;
+  const frameLimit = model.supportsVision && materials.frames.length ? 4 : 0;
   const imageReserve = frameLimit * 2600;
   const targetOutput = Math.min(wantedOutput, Math.max(2048, Math.floor(contextWindow * 0.3)));
-  const fullInputBudget = Math.max(2048, contextWindow - targetOutput - protocolReserve - imageReserve - estimateAgentTokens(GENERATION_SYSTEM_PROMPT));
-  const inputBudget = Math.max(2048, Math.floor(fullInputBudget * (aggressive ? 0.58 : 1)));
-  const baseBudget = repair ? Math.max(2048, Math.floor(inputBudget * 0.68)) : inputBudget;
-  const fitted = fitGenerationPrompt({ session, task, collection, materials, template }, baseBudget, aggressive);
-  let prompt = fitted.prompt;
-  let compacted = fitted.compacted || aggressive;
+  let prompt = buildGenerationPrompt({ session, task, collection, materials, template });
   if (repair) {
     const correction = `\n\n上一稿未通过校验。请只返回修正后的完整 Markdown。\n校验错误：\n- ${errors.join('\n- ') || '文档结构或引用不合规'}\n\n上一稿：\n`;
-    const remaining = Math.max(0, inputBudget - estimateAgentTokens(prompt) - estimateAgentTokens(correction));
-    const priorDraft = truncateToTokenBudget(previous, remaining);
-    compacted = compacted || priorDraft.length < previous.length;
-    prompt = `${prompt}${correction}${priorDraft || '上一稿过长，已省略；请依据素材和校验错误重新生成完整文档。'}`;
+    prompt = `${prompt}${correction}${previous}`;
   }
   const inputTokens = estimateAgentTokens(GENERATION_SYSTEM_PROMPT) + estimateAgentTokens(prompt) + 16;
   const availableOutput = contextWindow - inputTokens - protocolReserve - imageReserve;
-  if (availableOutput < 1024) throw new Error(`当前模型上下文窗口过小（${contextWindow} tokens），无法容纳最低限度的视频素材。`);
-  const maxTokens = Math.max(1024, Math.min(wantedOutput, targetOutput, availableOutput));
-  const contextPercent = Math.min(100, Math.round(((inputTokens + imageReserve + protocolReserve + maxTokens) / contextWindow) * 1000) / 10);
-  return { prompt, maxTokens, frameLimit, inputTokens, contextWindow, contextPercent, compacted };
+  const plannedTokens = inputTokens + imageReserve + protocolReserve + targetOutput;
+  const contextPercent = Math.round((plannedTokens / contextWindow) * 1000) / 10;
+  const requiresSemanticCompaction = plannedTokens > contextWindow * CONTEXT_COMPACTION_TRIGGER || availableOutput < 2048;
+  const maxTokens = Math.max(1024, Math.min(wantedOutput, targetOutput, Math.max(1024, availableOutput)));
+  return { prompt, maxTokens, frameLimit, inputTokens, contextWindow, contextPercent, requiresSemanticCompaction };
 }
 
-function fitGenerationPrompt(input, budgetTokens, aggressive) {
-  const factors = aggressive ? [0.38, 0.24, 0.14, 0.08] : [1, 0.72, 0.48, 0.3, 0.18, 0.1];
-  let last = '';
-  for (const factor of factors) {
-    const limits = generationLimits(factor);
-    const prompt = buildGenerationPrompt({ ...input, limits });
-    last = prompt;
-    if (estimateAgentTokens(prompt) <= budgetTokens) return { prompt, compacted: factor < 1 };
+function splitTextByTokenBudget(value, budgetTokens) {
+  const text = String(value || '');
+  if (!text) return [''];
+  if (estimateAgentTokens(text) <= budgetTokens) return [text];
+  const chunks = [];
+  let current = '';
+  for (const line of text.match(/[^\n]*\n|[^\n]+$/g) || [text]) {
+    if (estimateAgentTokens(line) > budgetTokens) {
+      if (current) { chunks.push(current); current = ''; }
+      let remaining = line;
+      while (remaining) {
+        const size = prefixLengthForTokenBudget(remaining, budgetTokens);
+        chunks.push(remaining.slice(0, size));
+        remaining = remaining.slice(size);
+      }
+      continue;
+    }
+    if (current && estimateAgentTokens(current + line) > budgetTokens) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current += line;
+    }
   }
-  return { prompt: truncateToTokenBudget(last, budgetTokens), compacted: true };
+  if (current) chunks.push(current);
+  return chunks.filter(Boolean);
 }
 
-function generationLimits(factor) {
-  const scaled = (maximum, minimum) => Math.max(minimum, Math.floor(maximum * factor));
-  return {
-    requirements: scaled(12000, 2000),
-    info: scaled(30000, 5000),
-    manifest: scaled(16000, 3000),
-    station: scaled(70000, 8000),
-    asr: scaled(70000, 12000),
-    comments: scaled(18000, 2500),
-    template: scaled(30000, 6000)
-  };
-}
-
-function truncateSection(value, maxChars) {
-  const text = String(value || '');
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, Math.max(0, maxChars - 38))}\n...[此素材因上下文预算已截断]`;
-}
-
-function truncateToTokenBudget(value, budgetTokens) {
-  const text = String(value || '');
-  if (budgetTokens <= 0) return '';
-  if (estimateAgentTokens(text) <= budgetTokens) return text;
-  let low = 0;
+function prefixLengthForTokenBudget(text, budgetTokens) {
+  let low = 1;
   let high = text.length;
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
     if (estimateAgentTokens(text.slice(0, middle)) <= budgetTokens) low = middle;
     else high = middle - 1;
   }
-  return `${text.slice(0, Math.max(0, low - 38))}\n...[因上下文预算已截断]`;
+  return Math.max(1, low);
 }
 
 function estimateAgentTokens(value) {
@@ -990,7 +1211,10 @@ function listFiles(directory, extension) {
 }
 
 function readText(file, max) {
-  try { return fs.readFileSync(file, 'utf8').slice(0, max); } catch { return ''; }
+  try {
+    const text = fs.readFileSync(file, 'utf8');
+    return Number.isFinite(Number(max)) ? text.slice(0, Number(max)) : text;
+  } catch { return ''; }
 }
 
 function readJson(file) {
@@ -1032,4 +1256,4 @@ function abortError() {
   return error;
 }
 
-module.exports = { InternalAgentManager, INTERNAL_USER_ID, INTERNAL_USER_NAME, extractBvid, normalizeGeneratedMarkdown, planGenerationRequest };
+module.exports = { InternalAgentManager, INTERNAL_USER_ID, INTERNAL_USER_NAME, extractBvid, normalizeGeneratedMarkdown, planGenerationRequest, splitTextByTokenBudget };

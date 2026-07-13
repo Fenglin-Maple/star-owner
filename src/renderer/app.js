@@ -128,7 +128,7 @@ const TEXT = {
   navOverview: '\u542f\u52a8\u9875',
   navLogin: 'B\u7ad9\u767b\u5f55',
   navCollections: '\u6536\u85cf\u5939\u540c\u6b65',
-  navTasks: '\u4efb\u52a1\u6fc0\u6d3b',
+  navTasks: '\u4efb\u52a1\u603b\u89c8',
   navDocuments: '\u6587\u6863\u5e93',
   navWorkers: 'Agent \u5de5\u4f5c\u5217\u8868',
   navExport: '\u5bfc\u51fa',
@@ -154,7 +154,7 @@ const TEXT = {
   toolOffline: '\u79bb\u7ebf',
   toolChecking: '\u68c0\u67e5\u4e2d',
   recentStatus: '\u6700\u8fd1\u72b6\u6001',
-  quickStart: '\u5feb\u901f\u4e0a\u624b',
+  quickStart: '\u5916\u90e8Agent\u5e94\u7528\u63a5\u5165\u89c6\u9891\u603b\u7ed3\u5de5\u4f5c\u63d0\u793a\u8bcd',
   quickStartHint: '\u5c55\u5f00\u67e5\u770b\u5de5\u4f5c\u76ee\u6807\u3001\u534f\u4f5c\u539f\u5219\u4e0e\u5b8c\u6574 agent \u63d0\u793a\u8bcd\u3002',
   agentPromptTitle: '\u4ea4\u7ed9 Codex\u3001Claude Code \u6216\u5176\u5b83 agent',
   copyPrompt: '\u590d\u5236\u63d0\u793a\u8bcd',
@@ -186,13 +186,13 @@ const TEXT = {
   syncTasks: '\u540c\u6b65\u4efb\u52a1',
   readFoldersFirst: '\u8bf7\u5148\u8bfb\u53d6\u6536\u85cf\u5939',
   syncPreparing: '\u6b63\u5728\u51c6\u5907\u540c\u6b65...',
-  tasksTitle: '\u4efb\u52a1\u6fc0\u6d3b',
-  tasksHint: '\u67e5\u770b\u4efb\u52a1\u9886\u53d6\u3001\u5b8c\u6210\u548c\u6253\u56de\u72b6\u6001\u3002',
+  tasksTitle: '\u4efb\u52a1\u603b\u89c8',
+  tasksHint: '\u67e5\u770b\u4efb\u52a1\u9886\u53d6\u3001\u5b8c\u6210\u548c\u6253\u56de\u72b6\u6001\uff0c\u5e76\u8bbe\u7f6e\u5916\u90e8 Agent \u7684\u89c6\u9891\u603b\u7ed3\u4efb\u52a1\u8303\u56f4\u3002',
   taskInventory: '\u4efb\u52a1\u5e93\u5b58',
   currentInventory: '\u5f53\u524d\u5e93\u5b58',
-  activeAgentTarget: 'Agent \u5f53\u524d\u5de5\u4f5c\u76ee\u6807',
-  noActiveCollection: '\u5c1a\u672a\u6fc0\u6d3b\u6536\u85cf\u5939',
-  activateCollection: '\u6fc0\u6d3b\u5f53\u524d\u6536\u85cf\u5939',
+  activeAgentTarget: '\u5916\u90e8 Agent \u89c6\u9891\u603b\u7ed3\u4efb\u52a1\u8303\u56f4',
+  noActiveCollection: '\u5c1a\u672a\u6fc0\u6d3b\u5916\u90e8 Agent \u4efb\u52a1\u8303\u56f4',
+  activateCollection: '\u6fc0\u6d3b\u5916\u90e8Agent\u4efb\u52a1\u8303\u56f4\uff08\u89c6\u9891\u603b\u7ed3\uff09',
   videoTasks: '\u89c6\u9891\u4efb\u52a1',
   advancedFilters: '\u9ad8\u7ea7\u7b5b\u9009',
   inventoryUser: '\u7528\u6237',
@@ -1213,13 +1213,13 @@ function humanizeQueueReason(reason) {
 }
 
 function renderActivityLog(activities) {
-  const rows = transientActivity ? [transientActivity, ...activities] : activities;
+  const rows = (transientActivity ? [transientActivity, ...activities] : activities).slice(0, 500);
   document.querySelector('#activityCount').textContent = String(rows.length);
   if (!rows.length) {
     eventLog.textContent = TEXT.waiting;
     return;
   }
-  eventLog.textContent = rows.slice(0, 300).map((item) => {
+  eventLog.textContent = rows.map((item) => {
     const time = new Date(item.createdAt || Date.now()).toLocaleTimeString('zh-CN', { hour12: false });
     const failure = item.error || item.message || (item.exitCode ? `退出码 ${item.exitCode}` : '');
     const detail = [item.workerId || item.agentName, item.taskId, item.toolId, item.workspaceId, failure ? String(failure).slice(0, 180) : ''].filter(Boolean).join(' / ');
@@ -1423,7 +1423,7 @@ function renderActiveCollection(viewedCollection) {
   const isViewedActive = Boolean(active && viewedCollection && active.id === viewedCollection.id);
   if (button) {
     button.disabled = !viewedCollection || isViewedActive;
-    button.textContent = isViewedActive ? '\u5df2\u6fc0\u6d3b' : TEXT.activateCollection;
+    button.textContent = isViewedActive ? '\u5916\u90e8Agent\u4efb\u52a1\u8303\u56f4\u5df2\u6fc0\u6d3b\uff08\u89c6\u9891\u603b\u7ed3\uff09' : TEXT.activateCollection;
   }
 }
 
@@ -2238,7 +2238,7 @@ document.querySelector('#activateCollection')?.addEventListener('click', async (
     lastSnapshot.activeCollection = collection;
     renderTaskInventory();
     updatePromptTemplate();
-    showToast(TEXT.toastSuccess, `Agent \u5de5\u4f5c\u76ee\u6807\u5df2\u5207\u6362\uff1a${collection.userName || '-'} / ${collection.name}`, 'success');
+    showToast(TEXT.toastSuccess, `\u5916\u90e8 Agent \u89c6\u9891\u603b\u7ed3\u4efb\u52a1\u8303\u56f4\u5df2\u5207\u6362\uff1a${collection.userName || '-'} / ${collection.name}`, 'success');
   } catch (error) {
     showToast(TEXT.toastError, error.message || String(error), 'error');
   }
@@ -2669,7 +2669,7 @@ function updatePromptTemplate() {
 - \u684c\u9762\u5e94\u7528\u662f\u4efb\u52a1\u3001\u79df\u7ea6\u3001\u5de5\u5177\u3001\u5de5\u4f5c\u76ee\u5f55\u548c\u4ea7\u7269\u72b6\u6001\u7684\u552f\u4e00\u771f\u5b9e\u6765\u6e90\u3002
 - \u6bcf\u4e2a\u65b0 Agent \u6216\u65e0\u4e0a\u4e0b\u6587\u8bb0\u5fc6\u7684\u65b0\u4f1a\u8bdd\uff0c\u90fd\u5fc5\u987b\u5148\u5411\u5e94\u7528\u6ce8\u518c\u81ea\u5df1\u4f7f\u7528\u7684\u8c03\u7528\u5de5\u5177\u548c\u6a21\u578b\uff0c\u7531\u5e94\u7528\u751f\u6210 Worker ID\u3002\u4e0d\u8981\u81ea\u884c\u8d77 ID \u6216\u590d\u7528\u5176\u5b83\u4f1a\u8bdd\u7684 ID\u3002
 - \u6ce8\u518c\u540e\u8981\u5728\u5f53\u524d\u4f1a\u8bdd\u4e2d\u59a5\u5584\u4fdd\u5b58 Worker ID\u3002\u6bcf\u6b21\u9886\u5355\u8fd4\u56de\u7684 workId \u53ea\u5c5e\u4e8e\u8be5\u6b21\u5de5\u4f5c\uff0c\u5fc3\u8df3\u3001\u5de5\u5177\u8c03\u7528/\u53d6\u6d88\u3001\u63d0\u4ea4\u548c\u4e2d\u6b62\u90fd\u5fc5\u987b\u540c\u65f6\u643a\u5e26 workerId \u4e0e workId\u3002
-- \u7528\u6237\u4f1a\u5148\u5728\u684c\u9762\u5e94\u7528\u7684\u4efb\u52a1\u9875\u9009\u62e9\u5e76\u6fc0\u6d3b\u4e00\u4e2a\u6536\u85cf\u5939\uff1b\u4f60\u4e0d\u9700\u8981\u8ba9\u7528\u6237\u53e6\u884c\u63d0\u4f9b\u4efb\u4f55\u76ee\u6807\u53c2\u6570\u3002
+- \u7528\u6237\u4f1a\u5148\u5728\u684c\u9762\u5e94\u7528\u7684\u300c\u4efb\u52a1\u603b\u89c8\u300d\u4e2d\u9009\u62e9\u5e76\u6fc0\u6d3b\u5916\u90e8 Agent \u7684\u89c6\u9891\u603b\u7ed3\u4efb\u52a1\u8303\u56f4\uff1b\u4f60\u4e0d\u9700\u8981\u8ba9\u7528\u6237\u53e6\u884c\u63d0\u4f9b\u4efb\u4f55\u76ee\u6807\u53c2\u6570\u3002
 - \u6bcf\u4e2a Agent \u4e00\u6b21\u53ea\u9886\u53d6\u4e00\u4e2a\u89c6\u9891\uff0c\u5176\u5b83 Agent \u4e0d\u91cd\u590d\u5904\u7406\u5df2\u9886\u53d6\u4efb\u52a1\u3002
 - \u4f60\u53ea\u80fd\u5728 claim \u8fd4\u56de\u7684 artifactDir \u4e2d\u521b\u5efa\u8be5\u89c6\u9891\u7684\u4ea7\u7269\uff0c\u4e0d\u8981\u7f16\u8f91 SQLite\u3001\u7d22\u5f15\u3001workspace \u914d\u7f6e\u6216\u5176\u5b83\u4efb\u52a1\u76ee\u5f55\u3002
 - \u6240\u6709\u5a92\u4f53\u5de5\u5177\u5fc5\u987b\u901a\u8fc7\u684c\u9762\u5e94\u7528 API \u8c03\u7528\uff0c\u4e0d\u8981\u76f4\u63a5\u8fd0\u884c\u9879\u76ee\u5185\u90e8\u811a\u672c\u3002
@@ -2680,7 +2680,7 @@ function updatePromptTemplate() {
 1. \u9996\u5148 GET ${apiUrl}/api/manifest \u83b7\u53d6\u5f53\u524d\u7248\u672c\u7684\u5168\u90e8\u53ef\u7528\u63a5\u53e3\u3001\u53c2\u6570\u3001\u5de5\u5177\u548c\u534f\u4f5c\u89c4\u8303\u3002
 2. \u65b0\u4f1a\u8bdd POST ${apiUrl}/api/workers/register\uff0cbody \u4e3a {"tool":"<codex/claude-code/\u5176\u5b83\u8c03\u7528\u7aef>","model":"<\u5b9e\u9645\u6a21\u578b\u540d>","sessionLabel":"<\u53ef\u9009\u5907\u6ce8>"}\u3002\u4fdd\u5b58\u5e94\u7528\u8fd4\u56de\u7684 workerId\uff0c\u4e0d\u8981\u81ea\u884c\u751f\u6210\u3002
 3. \u6ce8\u518c\u540e\u53ef GET ${apiUrl}/api/manifest?workerId=<workerId> \u83b7\u53d6\u5e26\u5f53\u524d Worker \u72b6\u6001\u7684\u7edf\u4e00\u63a5\u53e3\u6e05\u5355\u3002
-4. GET ${apiUrl}/api/active-collection \u786e\u8ba4\u684c\u9762\u5e94\u7528\u5df2\u6fc0\u6d3b\u7684\u6536\u85cf\u5939\u3002\u5982\u679c\u8fd4\u56de NO_ACTIVE_COLLECTION\uff0c\u8bf7\u7528\u6237\u5148\u5728\u5e94\u7528\u91cc\u6fc0\u6d3b\u76ee\u6807\u3002
+4. GET ${apiUrl}/api/active-collection \u786e\u8ba4\u684c\u9762\u5e94\u7528\u5df2\u6fc0\u6d3b\u7684\u5916\u90e8 Agent \u89c6\u9891\u603b\u7ed3\u4efb\u52a1\u8303\u56f4\u3002\u5982\u679c\u8fd4\u56de NO_ACTIVE_COLLECTION\uff0c\u8bf7\u7528\u6237\u5148\u5728\u300c\u4efb\u52a1\u603b\u89c8\u300d\u4e2d\u6fc0\u6d3b\u76ee\u6807\u3002
 5. POST ${apiUrl}/api/tasks/claim\uff0cbody \u4e3a {"workerId":"<workerId>"}\u3002\u540c\u4e00 Agent \u53ef\u4ee5\u4fdd\u6301 workerId \u8fde\u7eed\u5de5\u4f5c\uff0c\u4f46\u6bcf\u6b21\u6210\u529f\u9886\u53d6\u90fd\u4f1a\u8fd4\u56de\u5168\u65b0 workId\u3002\u8fd4\u56de NO_TASK \u65f6\u6b63\u5e38\u7ed3\u675f\uff1b\u8fd4\u56de WORKER_PAUSED \u65f6\uff0c\u9075\u5faa\u300c\u6765\u81ea\u7528\u6237\u7684\u4fe1\u606f\uff0c\u4f60\u9700\u8981\u6682\u505c\u5de5\u4f5c\u300d\uff0c\u4e0d\u518d\u7ee7\u7eed\u7533\u8bf7\u65b0\u4efb\u52a1\u3002
 6. \u9605\u8bfb claim \u8fd4\u56de\u7684 workId\u3001\u89c6\u9891\u4fe1\u606f\u3001requirements\u3001tools\u3001artifactDir \u548c leaseExpiresAt\u3002\u5de5\u5177\u6392\u961f/\u8fd0\u884c\u671f\u95f4\u5e94\u7528\u4f1a\u81ea\u52a8\u4fdd\u62a4\u79df\u7ea6\uff1b\u5176\u5b83\u957f\u65f6\u5de5\u4f5c\u4ecd\u8981\u6bcf 15 \u5206\u949f\u5185 POST /api/tasks/<taskId>/heartbeat\uff0cbody \u540c\u65f6\u5e26 workerId \u548c workId\u3002
 7. \u901a\u8fc7 POST /api/tasks/<taskId>/tools/material-bundle/run \u51c6\u5907\u7d20\u6750\uff0cbody \u5305\u542b workerId\u3001workId \u548c options\u3002\u63a5\u53e3\u4f1a\u7acb\u5373\u8fd4\u56de HTTP 202\uff1bqueued \u662f\u6b63\u5e38\u72b6\u6001\uff0c\u6309 queuePosition\u3001queueReason\u3001estimatedWaitMs \u7b49\u5f85\uff0c\u4e0d\u8981\u91cd\u590d\u63d0\u4ea4\u540c\u4e00\u5de5\u5177\u3002\u7528 GET /api/tool-runs/<runId>?log=1 \u8ddf\u8e2a\u5230\u7ec8\u6001\uff1b\u5982\u679c\u8fd4\u56de WORK_ATTEMPT_ENDED\uff0c\u7acb\u5373\u505c\u6b62\u4f7f\u7528\u65e7 workId \u5e76\u91cd\u65b0\u9886\u53d6\u3002

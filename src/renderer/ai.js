@@ -26,6 +26,7 @@
   let initialized = false;
   let modelSaveTimer = null;
   const pendingSessionActions = new Set();
+  let agentContextMenu = null;
 
   async function refreshAll({ quiet = false } = {}) {
     try {
@@ -53,18 +54,27 @@
   }
 
   function renderAgentPage() {
-    const sessions = state.sessions.filter((item) => item.mode === 'queue');
+    const sessions = state.sessions
+      .filter((item) => item.mode === 'queue')
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || String(b.id || '').localeCompare(String(a.id || '')));
     elements.metricSessions.textContent = String(sessions.length);
     elements.metricRunning.textContent = String(sessions.filter((item) => ['running', 'draining'].includes(item.status)).length);
     elements.metricCompleted.textContent = String(sessions.reduce((sum, item) => sum + Number(item.completed || 0), 0));
     elements.metricFailed.textContent = String(sessions.reduce((sum, item) => sum + Number(item.failed || 0), 0));
     elements.agentList.innerHTML = sessions.map((session) => sessionButton(session, session.id === activeAgentId)).join('');
     if (!sessions.length) elements.agentList.innerHTML = '<div class="rag-list-empty">暂无应用内 Agent<br>点击右上角新建</div>';
-    for (const button of elements.agentList.querySelectorAll('[data-agent-session]')) button.addEventListener('click', () => {
-      activeAgentId = button.dataset.agentSession;
-      persistActiveIds();
-      renderAgentPage();
-    });
+    for (const button of elements.agentList.querySelectorAll('[data-agent-session]')) {
+      button.addEventListener('click', () => {
+        activeAgentId = button.dataset.agentSession;
+        persistActiveIds();
+        renderAgentPage();
+      });
+      button.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        const session = sessions.find((item) => item.id === button.dataset.agentSession);
+        if (session) openAgentContextMenu(session, event.clientX, event.clientY);
+      });
+    }
     renderSessionDetail(elements.agentDetail, sessions.find((item) => item.id === activeAgentId));
   }
 
@@ -93,12 +103,39 @@
       return;
     }
     const collection = state.collections.find((item) => item.id === session.collectionId);
+    const collectionProgress = session.collectionProgress || collection || {};
+    const collectionPercent = Math.round(Number(collectionProgress.progress || 0) * 100);
     const active = ['running', 'draining', 'stopping'].includes(session.status);
-    const canStart = !active && session.status !== 'completed';
+    const modelUnavailable = session.modelAvailable === false;
+    const canStart = !active && session.status !== 'completed' && !modelUnavailable;
     const logs = (session.logs || []).slice().reverse().map((entry) => `<div class="ai-log-entry"><time>${time(entry.at)}</time><span>${html(entry.message)}</span></div>`).join('') || '<div class="rag-list-empty">暂无工作记录</div>';
     const output = session.lastOutput || '';
     const pending = [...pendingSessionActions].some((key) => key.startsWith(`${session.id}:`));
-    container.innerHTML = `<div class="ai-session-view" data-agent-session-view="${esc(session.id)}"><header class="ai-session-head"><div class="ai-session-identity"><strong>${html(session.title)}</strong><span>${html(collection ? `${collection.userName} / ${collection.name}` : session.collectionId)} · ${html(providerName(session.providerId))} / ${html(session.modelId)} · ${html(session.workerId)}</span></div><div class="ai-session-actions">${session.mode === 'single' && output ? `<button class="secondary-button compact-button" data-agent-action="open-output"><svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v10H4z"/></svg><span>打开产物</span></button>` : ''}${canStart ? `<button class="primary-button compact-button" data-agent-action="start" ${pending ? 'disabled' : ''}>${startActionLabel(session)}</button>` : ''}${active && session.acceptNewTasks ? `<button class="secondary-button compact-button" data-agent-action="pause" ${pending ? 'disabled' : ''}>完成本单后暂停</button>` : ''}${active ? `<button class="secondary-button compact-button danger-button" data-agent-action="stop" ${pending ? 'disabled' : ''}>${pendingSessionActions.has(`${session.id}:stop`) ? '正在停止…' : '立即停止'}</button>` : ''}<button class="icon-action danger-icon" data-agent-action="delete" title="删除会话" ${active || pending ? 'disabled' : ''}><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14"/></svg></button></div></header><div class="ai-session-progress"><div><span data-agent-role="phase">${html(session.phase || statusLabel(session.status))}</span><strong data-agent-role="percent">${Math.round(Number(session.progress || 0) * 100)}%</strong></div><div class="ai-progress-track"><span data-agent-role="progress" style="width:${Math.round(Number(session.progress || 0) * 100)}%"></span></div><div class="ai-context-state"><span>独立上下文 <strong data-agent-role="context-cycle">${Number(session.contextCycle || 0)}</strong></span><span>预计占用 <strong data-agent-role="context-percent">${Number(session.contextPercent || 0)}%</strong></span><span>压缩 <strong data-agent-role="context-compactions">${Number(session.contextCompactions || 0)}</strong> 次</span></div><div class="ai-session-path" data-agent-role="output" title="${esc(output)}" ${output ? '' : 'hidden'}>${html(output)}</div></div><div class="ai-session-body"><section class="ai-stream-pane"><div class="ai-subpanel-title"><strong>模型输出</strong><span data-agent-role="tokens">${formatTokens(session.tokenUsage?.total || 0)} 累计 tokens</span></div><div class="ai-stream-scroll"><div data-agent-role="reasoning">${session.reasoning ? `<details class="ai-reasoning" open><summary>模型思考</summary><pre>${html(session.reasoning)}</pre></details>` : ''}</div><pre class="ai-content-stream" data-agent-role="content">${html(session.content || (active ? '正在等待模型输出…' : '该会话尚无模型输出。'))}</pre></div></section><aside class="ai-log-pane"><div class="ai-subpanel-title"><strong>工作记录</strong><span data-agent-role="stats">${session.completed || 0} 完成 / ${session.failed || 0} 失败 / ${session.skipped || 0} 跳过</span></div><div class="ai-log-scroll" data-agent-role="logs">${logs}</div></aside></div></div>`;
+    container.innerHTML = `<div class="ai-session-view" data-agent-session-view="${esc(session.id)}">
+      <header class="ai-session-head">
+        <div class="ai-session-identity"><strong>${html(session.title)}</strong><span>${html(collection ? `${collection.userName} / ${collection.name}` : session.collectionId)} · ${html(providerName(session.providerId))} / ${html(session.modelId)} · ${html(session.workerId)}</span></div>
+        <div class="ai-session-actions">
+          ${session.mode === 'single' && output ? `<button class="secondary-button compact-button" data-agent-action="open-output"><svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v10H4z"/></svg><span>打开产物</span></button>` : ''}
+          ${modelUnavailable ? `<button class="primary-button compact-button" type="button" disabled title="${esc(session.modelUnavailableReason || 'AI 模型配置不可用')}">模型不可用</button>` : (canStart ? `<button class="primary-button compact-button" data-agent-action="start" ${pending ? 'disabled' : ''}>${startActionLabel(session)}</button>` : '')}
+          ${active && session.acceptNewTasks ? `<button class="secondary-button compact-button" data-agent-action="pause" ${pending ? 'disabled' : ''}>完成本单后暂停</button>` : ''}
+          ${active ? `<button class="secondary-button compact-button danger-button" data-agent-action="stop" ${pending ? 'disabled' : ''}>${pendingSessionActions.has(`${session.id}:stop`) ? '正在停止…' : '立即停止'}</button>` : ''}
+          <button class="icon-action danger-icon" data-agent-action="delete" title="删除会话" ${active || pending ? 'disabled' : ''}><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14"/></svg></button>
+        </div>
+      </header>
+      <div class="ai-session-progress">
+        ${modelUnavailable ? `<div class="ai-model-unavailable"><strong>AI 模型配置不可用</strong><span>${html(session.modelUnavailableReason || '')}</span></div>` : ''}
+        <div class="ai-collection-overview">
+          <div><span>收藏夹总进度</span><strong data-agent-role="collection-summary">${Number(collectionProgress.done || 0)} / ${Number(collectionProgress.enabled || 0)} · ${collectionPercent}%</strong></div>
+          <div class="ai-collection-progress-track"><span data-agent-role="collection-progress" style="width:${collectionPercent}%"></span></div>
+          <small data-agent-role="collection-detail">处理中 ${Number(collectionProgress.claimed || 0)} · 剩余 ${Number(collectionProgress.remaining || 0)} · 失败/打回 ${Number(collectionProgress.failed || 0)} · 已关闭 ${Number(collectionProgress.disabled || 0)}</small>
+        </div>
+        <div class="ai-task-progress-head"><span data-agent-role="phase">${html(session.phase || statusLabel(session.status))}</span><strong data-agent-role="percent">${Math.round(Number(session.progress || 0) * 100)}%</strong></div>
+        <div class="ai-progress-track"><span data-agent-role="progress" style="width:${Math.round(Number(session.progress || 0) * 100)}%"></span></div>
+        <div class="ai-context-state"><span>独立上下文 <strong data-agent-role="context-cycle">${Number(session.contextCycle || 0)}</strong></span><span>预计占用 <strong data-agent-role="context-percent">${Number(session.contextPercent || 0)}%</strong></span><span>语义整理 <strong data-agent-role="context-compactions">${Number(session.contextCompactions || 0)}</strong> 次</span></div>
+        <div class="ai-session-path" data-agent-role="output" title="${esc(output)}" ${output ? '' : 'hidden'}>${html(output)}</div>
+      </div>
+      <div class="ai-session-body"><section class="ai-stream-pane"><div class="ai-subpanel-title"><strong>模型输出</strong><span data-agent-role="tokens">${formatTokens(session.tokenUsage?.total || 0)} 累计 tokens</span></div><div class="ai-stream-scroll"><div data-agent-role="reasoning">${session.reasoning ? `<details class="ai-reasoning" open><summary>模型思考</summary><pre>${html(session.reasoning)}</pre></details>` : ''}</div><pre class="ai-content-stream" data-agent-role="content">${html(session.content || (active ? '正在等待模型输出…' : '该会话尚无模型输出。'))}</pre></div></section><aside class="ai-log-pane"><div class="ai-subpanel-title"><strong>工作记录</strong><span data-agent-role="stats">${session.completed || 0} 完成 / ${session.failed || 0} 失败 / ${session.skipped || 0} 跳过</span></div><div class="ai-log-scroll" data-agent-role="logs">${logs}</div></aside></div>
+    </div>`;
     for (const button of container.querySelectorAll('[data-agent-action]')) button.addEventListener('click', () => handleSessionAction(session, button));
   }
 
@@ -138,7 +175,44 @@
 
   function sessionButton(session, active) {
     const collection = state.collections.find((item) => item.id === session.collectionId);
-    return `<button class="ai-agent-session ${active ? 'active' : ''}" type="button" data-agent-session="${esc(session.id)}"><div><strong>${html(session.title)}</strong><em class="ai-status ${esc(session.status)}" data-agent-role="list-status">${statusLabel(session.status)}</em></div><span>${html(collection ? `${collection.userName} / ${collection.name}` : session.collectionId)}</span><small data-agent-role="list-summary">${session.currentTask ? `${html(session.currentTask.bvid)} · ${html(session.phase)}` : `${session.completed || 0} 完成 / ${session.failed || 0} 失败 / ${session.skipped || 0} 跳过`}</small></button>`;
+    const status = session.modelAvailable === false ? 'model-unavailable' : session.status;
+    const summary = session.modelAvailable === false ? session.modelUnavailableReason : (session.currentTask ? `${session.currentTask.bvid} · ${session.phase}` : `${session.completed || 0} 完成 / ${session.failed || 0} 失败 / ${session.skipped || 0} 跳过`);
+    return `<button class="ai-agent-session ${active ? 'active' : ''}" type="button" data-agent-session="${esc(session.id)}"><div><strong>${html(session.title)}</strong><em class="ai-status ${esc(status)}" data-agent-role="list-status">${statusLabel(status)}</em></div><span>${html(collection ? `${collection.userName} / ${collection.name}` : session.collectionId)}</span><small data-agent-role="list-summary">${html(summary)}</small></button>`;
+  }
+
+  function openAgentContextMenu(session, x, y) {
+    closeAgentContextMenu();
+    const active = ['running', 'draining', 'stopping'].includes(session.status);
+    agentContextMenu = document.createElement('div');
+    agentContextMenu.className = 'ai-agent-context-menu';
+    agentContextMenu.innerHTML = `<button type="button" ${active ? 'disabled' : ''}><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14"/></svg><span>${active ? '请先停止此工作流' : '删除这个工作流'}</span></button>`;
+    document.body.appendChild(agentContextMenu);
+    const bounds = agentContextMenu.getBoundingClientRect();
+    agentContextMenu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - bounds.width - 8))}px`;
+    agentContextMenu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - bounds.height - 8))}px`;
+    agentContextMenu.querySelector('button').addEventListener('click', async () => {
+      closeAgentContextMenu();
+      if (!window.confirm(`删除工作流“${session.title}”？\n\n只删除会话记录，不删除已经归档的视频知识文档。`)) return;
+      const pendingKey = `${session.id}:delete`;
+      if (pendingSessionActions.has(pendingKey)) return;
+      pendingSessionActions.add(pendingKey);
+      try {
+        await window.orchestrator.internalAgentDelete(session.id);
+        if (activeAgentId === session.id) activeAgentId = '';
+        persistActiveIds();
+        await refreshAll({ quiet: true });
+        notify('工作流已删除', '已保留归档的视频知识文档。', 'success');
+      } catch (error) {
+        notify('删除工作流失败', error.message || String(error), 'error');
+      } finally {
+        pendingSessionActions.delete(pendingKey);
+      }
+    });
+  }
+
+  function closeAgentContextMenu() {
+    agentContextMenu?.remove();
+    agentContextMenu = null;
   }
 
   function openCreateModal() {
@@ -384,7 +458,9 @@
   }
 
   function patchAgentPage() {
-    const sessions = state.sessions.filter((item) => item.mode === 'queue');
+    const sessions = state.sessions
+      .filter((item) => item.mode === 'queue')
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || String(b.id || '').localeCompare(String(a.id || '')));
     elements.metricSessions.textContent = String(sessions.length);
     elements.metricRunning.textContent = String(sessions.filter((item) => ['running', 'draining'].includes(item.status)).length);
     elements.metricCompleted.textContent = String(sessions.reduce((sum, item) => sum + Number(item.completed || 0), 0));
@@ -406,13 +482,14 @@
     button.classList.toggle('active', active);
     const status = button.querySelector('[data-agent-role="list-status"]');
     if (status) {
-      status.className = `ai-status ${session.status}`;
-      status.textContent = statusLabel(session.status);
+      const displayedStatus = session.modelAvailable === false ? 'model-unavailable' : session.status;
+      status.className = `ai-status ${displayedStatus}`;
+      status.textContent = statusLabel(displayedStatus);
     }
     const summary = button.querySelector('[data-agent-role="list-summary"]');
-    if (summary) summary.textContent = session.currentTask
-      ? `${session.currentTask.bvid} · ${session.phase}`
-      : `${session.completed || 0} 完成 / ${session.failed || 0} 失败 / ${session.skipped || 0} 跳过`;
+    if (summary) summary.textContent = session.modelAvailable === false
+      ? session.modelUnavailableReason
+      : (session.currentTask ? `${session.currentTask.bvid} · ${session.phase}` : `${session.completed || 0} 完成 / ${session.failed || 0} 失败 / ${session.skipped || 0} 跳过`);
   }
 
   function patchSessionDetail(container, session) {
@@ -426,6 +503,12 @@
     setText(container, 'context-cycle', Number(session.contextCycle || 0));
     setText(container, 'context-percent', `${Number(session.contextPercent || 0)}%`);
     setText(container, 'context-compactions', Number(session.contextCompactions || 0));
+    const collectionProgress = session.collectionProgress || {};
+    const collectionPercent = Math.round(Number(collectionProgress.progress || 0) * 100);
+    setText(container, 'collection-summary', `${Number(collectionProgress.done || 0)} / ${Number(collectionProgress.enabled || 0)} · ${collectionPercent}%`);
+    setText(container, 'collection-detail', `处理中 ${Number(collectionProgress.claimed || 0)} · 剩余 ${Number(collectionProgress.remaining || 0)} · 失败/打回 ${Number(collectionProgress.failed || 0)} · 已关闭 ${Number(collectionProgress.disabled || 0)}`);
+    const collectionBar = container.querySelector('[data-agent-role="collection-progress"]');
+    if (collectionBar) collectionBar.style.width = `${collectionPercent}%`;
     setText(container, 'stats', `${session.completed || 0} 完成 / ${session.failed || 0} 失败 / ${session.skipped || 0} 跳过`);
     setText(container, 'content', session.content || (['running', 'draining', 'stopping'].includes(session.status) ? '正在等待模型输出…' : '该会话尚无模型输出。'));
     const output = session.lastOutput || '';
@@ -462,7 +545,7 @@
   }
 
   function sessionStructureKey(session) {
-    return [session.mode, session.status, Boolean(session.acceptNewTasks), session.title, session.collectionId, session.providerId, session.modelId].join('|');
+    return [session.mode, session.status, Boolean(session.acceptNewTasks), session.title, session.collectionId, session.providerId, session.modelId, session.modelAvailable !== false, session.modelUnavailableReason || ''].join('|');
   }
 
   function containerForSession(session) {
@@ -475,6 +558,8 @@
   }
 
   elements.newAgent.addEventListener('click', openCreateModal);
+  document.addEventListener('pointerdown', (event) => { if (agentContextMenu && !agentContextMenu.contains(event.target)) closeAgentContextMenu(); });
+  window.addEventListener('blur', closeAgentContextMenu);
   elements.refreshAgents.addEventListener('click', () => refreshAll());
   elements.closeCreate.addEventListener('click', closeCreateModal);
   elements.cancelCreate.addEventListener('click', closeCreateModal);
@@ -519,7 +604,7 @@
   });
 
   function providerName(id) { return state.providers.find((item) => item.id === id)?.name || '未配置供应商'; }
-  function statusLabel(status) { return ({ idle: '等待任务', running: '工作中', draining: '即将暂停', paused: '已暂停', blocked: '故障停止', 'waiting-login': '等待登录', stopping: '停止中', stopped: '已停止', completed: '已完成', error: '失败' })[status] || status || '未知'; }
+  function statusLabel(status) { return ({ idle: '等待任务', running: '工作中', draining: '即将暂停', paused: '已暂停', blocked: '故障停止', 'waiting-login': '等待登录', stopping: '停止中', stopped: '已停止', completed: '已完成', error: '失败', unavailable: '视频不可用', 'model-unavailable': '模型不可用' })[status] || status || '未知'; }
   function startActionLabel(session) {
     if (session.mode === 'single') {
       if (session.status === 'waiting-login') return '登录后重试';

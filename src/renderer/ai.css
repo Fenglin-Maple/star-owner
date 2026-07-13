@@ -39,7 +39,8 @@
 .ai-status.completed,
 .ai-status.idle { color: var(--green); border-color: color-mix(in srgb, var(--green) 42%, var(--line)); }
 .ai-status.error,
-.ai-status.blocked { color: var(--red); border-color: color-mix(in srgb, var(--red) 42%, var(--line)); }
+.ai-status.blocked,
+.ai-status.model-unavailable { color: var(--red); border-color: color-mix(in srgb, var(--red) 42%, var(--line)); }
 
 .ai-agent-detail { min-width: 0; min-height: 0; overflow: hidden; }
 .ai-empty { min-height: 100%; display: grid; place-content: center; justify-items: center; gap: 8px; padding: 24px; color: var(--muted); text-align: center; }
@@ -55,10 +56,18 @@
 .ai-session-actions { display: flex; gap: 6px; }
 .ai-session-actions { flex-wrap: wrap; justify-content: flex-end; }
 .ai-session-progress { display: grid; gap: 6px; padding: 9px 14px; border-bottom: 1px solid var(--line); }
-.ai-session-progress > div:first-child { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 10px; }
+.ai-task-progress-head { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 10px; }
 .ai-session-progress strong { color: var(--text); }
 .ai-progress-track { height: 6px; overflow: hidden; border-radius: 99px; background: color-mix(in srgb, var(--bg) 66%, transparent); }
 .ai-progress-track span { display: block; width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--green)); transition: width .25s ease; }
+.ai-collection-overview { display: grid; gap: 5px; padding-bottom: 7px; border-bottom: 1px solid color-mix(in srgb, var(--line) 62%, transparent); }
+.ai-collection-overview > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 10px; }
+.ai-collection-overview small { color: var(--muted-2); font-size: 9px; }
+.ai-collection-progress-track { height: 7px; overflow: hidden; border-radius: 99px; background: color-mix(in srgb, var(--bg) 66%, transparent); }
+.ai-collection-progress-track span { display: block; width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--green)); transition: width .25s ease; }
+.ai-model-unavailable { display: grid; gap: 3px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--red) 38%, var(--line)); border-radius: 5px; background: color-mix(in srgb, var(--red) 8%, transparent); }
+.ai-model-unavailable strong { color: var(--red); font-size: 10px; }
+.ai-model-unavailable span { color: var(--muted); font-size: 10px; line-height: 1.45; }
 .ai-session-body { min-height: 0; display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(240px, .65fr); }
 .ai-stream-pane,
 .ai-log-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
@@ -102,6 +111,12 @@
 .single-agent-detail { flex: 1; min-height: 0; overflow: hidden; border: 1px solid color-mix(in srgb, var(--line) 58%, transparent); border-radius: 6px; }
 .ai-context-state { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--muted-2); font-size: 9px; }
 .ai-context-state strong { color: var(--muted); font-family: var(--font-mono); }
+.ai-agent-context-menu { position: fixed; z-index: 1400; min-width: 176px; padding: 5px; border: 1px solid var(--line); border-radius: 6px; background: var(--row); box-shadow: 0 14px 34px var(--shadow); animation: ai-menu-in .12s ease-out; }
+.ai-agent-context-menu button { width: 100%; min-height: 34px; display: flex; align-items: center; gap: 8px; padding: 7px 9px; border: 0; border-radius: 4px; color: var(--red); background: transparent; font: 11px var(--font-ui); text-align: left; }
+.ai-agent-context-menu button:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 10%, transparent); }
+.ai-agent-context-menu button:disabled { color: var(--muted-2); cursor: not-allowed; }
+.ai-agent-context-menu svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+@keyframes ai-menu-in { from { opacity: 0; transform: translateY(-3px) scale(.98); } to { opacity: 1; transform: none; } }
 
 .ai-model-provider-pane { padding: 12px; }
 .ai-model-provider-pane .rag-provider-list { min-height: 0; overflow: auto; }

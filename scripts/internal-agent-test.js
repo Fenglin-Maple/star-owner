@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { Store } = require('../src/core/store');
-const { InternalAgentManager, normalizeGeneratedMarkdown, planGenerationRequest } = require('../src/core/internal-agent-manager');
+const { InternalAgentManager, normalizeGeneratedMarkdown, planGenerationRequest, splitTextByTokenBudget } = require('../src/core/internal-agent-manager');
 const { isLoginRequiredMessage, isVideoUnavailableMessage } = require('../src/core/media-errors');
 
 function assert(condition, message) {
@@ -21,8 +21,10 @@ function assert(condition, message) {
     model: { contextWindow: 24000, maxOutputTokens: 8192, supportsVision: false },
     provider: { maxOutputTokens: 8192 }
   });
-  assert(oversizedPlan.compacted && oversizedPlan.contextPercent <= 100, 'oversized video material did not activate context budgeting');
-  assert(oversizedPlan.inputTokens + oversizedPlan.maxTokens < oversizedPlan.contextWindow, 'generation plan exceeded the configured context window');
+  assert(oversizedPlan.requiresSemanticCompaction && oversizedPlan.contextPercent > 82, 'oversized video material did not activate semantic context fallback');
+  const completeTranscript = `${'[00:00] 第一段字幕。'.repeat(4000)}\n${'[10:00] second segment with code foo();'.repeat(3000)}`;
+  const transcriptChunks = splitTextByTokenBudget(completeTranscript, 1800);
+  assert(transcriptChunks.length > 2 && transcriptChunks.join('') === completeTranscript, 'semantic compactor chunking dropped or reordered transcript text');
   const root = path.join(__dirname, '..', '.cache', 'internal-agent-test');
   fs.rmSync(root, { recursive: true, force: true });
   fs.mkdirSync(root, { recursive: true });
@@ -104,7 +106,7 @@ function assert(condition, message) {
   assert(manager.collectionOutputDirectory(collection.id) === collection.collectionRoot, 'single-task collection output directory is incorrect');
   assert(manager.sessionOutputDirectory(finished.id) === task.artifactDir, 'completed session did not resolve its artifact directory');
   assert(store.getWorker(finished.workerId)?.tool === 'star-owner-internal', 'internal worker identity was not registered');
-  assert(finished.contextCycle === 1 && finished.contextPercent > 0, 'single task did not create and report an independent context cycle');
+  assert(finished.contextCycle === 1 && finished.contextPercent > 0 && finished.contextCompactions === 0, 'ordinary single task unexpectedly used context fallback');
   assert(completionBodies[0]?.messages?.length === 2 && completionBodies[0].messages[0].role === 'system' && completionBodies[0].messages[1].role === 'user', 'video generation request unexpectedly carried prior task history');
   assert(events.some((event) => event.type === 'stream') && events.some((event) => event.type === 'session-updated'), 'internal agent events were not emitted');
   assert(isLoginRequiredMessage('This video is only available for registered users. Use --cookies.'), 'login-required classifier missed yt-dlp guidance');
@@ -117,8 +119,9 @@ function assert(condition, message) {
   const contextRetrySession = await manager.createSingleTask({ video: 'BVCONTEXT001', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
   await manager.start(contextRetrySession.id);
   const contextRetried = await waitForSession(manager, contextRetrySession.id);
-  assert(contextRetried.status === 'completed' && completionBodies.length === requestsBeforeRetry + 2, 'context-limit error did not use one fresh compact retry');
-  assert(contextRetried.contextCompactions >= 1 && contextRetried.logs.some((item) => item.message.includes('全新请求重试')), 'context retry was not reported in session state');
+  assert(contextRetried.status === 'completed' && completionBodies.length > requestsBeforeRetry + 2, 'context-limit error did not use independent compactor requests before retry');
+  assert(completionBodies.slice(requestsBeforeRetry).some((body) => body.messages?.[0]?.content?.includes('上下文整理 Agent')), 'context fallback did not use the same model as a dedicated compactor role');
+  assert(contextRetried.contextCompactions >= 1 && contextRetried.logs.some((item) => item.message.includes('上下文整理 Agent')), 'context retry was not reported in session state');
 
   const queueTaskIds = ['BVCYCLE00001', 'BVCYCLE00002'].map((bvid) => {
     const id = `${collection.id}:${bvid}:queue-test`;
@@ -181,6 +184,32 @@ function assert(condition, message) {
   assert(!store.getTask(unavailableSession.singleTaskId), 'unavailable video remained in task inventory');
   assert(store.get('unavailableTasks', unavailableSession.singleTaskId)?.bvid === 'BVDELETED001', 'unavailable video tombstone was not persisted');
   assert(events.some((event) => event.type === 'video-unavailable' && event.sessionId === unavailable.id), 'unavailable video event was not emitted');
+  forceUnavailableFailure = false;
+  holdToolRuns = true;
+  const modelSession = await manager.createSingleTask({ video: 'BVMCFG000001', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  await manager.start(modelSession.id);
+  const modelWorking = await waitForCurrentTask(manager, modelSession.id);
+  const modelTaskArtifact = store.getTask(modelWorking.currentTaskId).artifactDir;
+  const providerWithoutModel = store.get('ragProviders', 'provider-test');
+  providerWithoutModel.enabledModels = [];
+  store.set('ragProviders', providerWithoutModel.id, providerWithoutModel);
+  store.save();
+  manager.reconcileModelAvailability('provider-test');
+  await waitForStatus(manager, modelSession.id, 'model-unavailable');
+  const modelUnavailable = manager.publicSession(manager.listSessions().find((item) => item.id === modelSession.id));
+  assert(modelUnavailable.modelAvailable === false && modelUnavailable.modelUnavailableReason.includes('删除或停用'), 'removed model was not exposed as unavailable');
+  assert(store.getTask(modelSession.singleTaskId)?.status === 'pending', 'model removal did not return the active task to pending');
+  assert(!fs.existsSync(modelTaskArtifact), 'model removal left current task cache files behind');
+  assert(store.getWorker(modelSession.workerId)?.status === 'paused', 'model removal did not pause the internal worker');
+  providerWithoutModel.enabledModels = [{ id: 'model-test', name: 'model-test', contextWindow: 128000, supportsTools: true, supportsVision: false }];
+  store.set('ragProviders', providerWithoutModel.id, providerWithoutModel);
+  store.save();
+  manager.reconcileModelAvailability('provider-test');
+  const modelRestored = manager.publicSession(manager.listSessions().find((item) => item.id === modelSession.id));
+  assert(modelRestored.modelAvailable === true && modelRestored.status === 'stopped', 'restored model did not make the Agent restartable');
+  assert(manager.listSessions()[0].id === modelSession.id, 'Agent sessions were not ordered by newest creation time');
+  assert(Number.isFinite(modelRestored.collectionProgress?.progress) && modelRestored.collectionProgress.enabled >= modelRestored.collectionProgress.done, 'collection progress was not included in Agent state');
+  holdToolRuns = false;
   manager.shutdown();
   fs.rmSync(root, { recursive: true, force: true });
   console.log('internal agent integration test passed');

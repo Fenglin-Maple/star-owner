@@ -341,7 +341,7 @@ ipcMain.handle('store:snapshot', async () => {
     analytics: buildAnalytics(store),
     scheduler: toolRunner?.getState() || null,
     settings: { filenameMetadata: store.getFilenameMetadata() },
-    activities: store.listRecent('activities', 300),
+    activities: store.listRecent('activities', 500),
     taskEvents: store.listRecent('taskEvents', 500)
   };
 });
@@ -555,12 +555,16 @@ ipcMain.handle('rag:state', async (_event, sessionId) => {
 
 ipcMain.handle('rag:provider-save', async (_event, payload) => {
   assertBackendReady();
-  return ragAssistant.saveProvider(payload || {});
+  const provider = ragAssistant.saveProvider(payload || {});
+  internalAgentManager?.reconcileModelAvailability(provider.id);
+  return provider;
 });
 
 ipcMain.handle('rag:provider-delete', async (_event, providerId) => {
   assertBackendReady();
-  return ragAssistant.deleteProvider(providerId);
+  const result = ragAssistant.deleteProvider(providerId);
+  internalAgentManager?.reconcileModelAvailability(providerId);
+  return result;
 });
 
 ipcMain.handle('rag:models-fetch', async (_event, providerId) => {
@@ -570,7 +574,9 @@ ipcMain.handle('rag:models-fetch', async (_event, providerId) => {
 
 ipcMain.handle('rag:models-update', async (_event, payload) => {
   assertBackendReady();
-  return ragAssistant.updateProviderModels(payload?.providerId, payload?.models || []);
+  const provider = ragAssistant.updateProviderModels(payload?.providerId, payload?.models || []);
+  internalAgentManager?.reconcileModelAvailability(payload?.providerId);
+  return provider;
 });
 
 ipcMain.handle('rag:session-create', async (_event, payload) => {
