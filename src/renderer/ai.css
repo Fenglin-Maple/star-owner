@@ -89,7 +89,10 @@
 .ai-model-editor textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .single-form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 9px; margin: 10px 0; }
 .single-form-grid .field-button { align-self: end; width: 100%; }
-.path-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
+.single-collection-actions { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 6px; }
+.single-collection-actions button { min-width: 0; width: 100%; padding-inline: 8px; }
+.single-collection-actions .icon-action { width: 34px; padding: 0; }
+.single-collection-actions svg, .ai-session-actions svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; }
 .single-start-button { width: 100%; margin-top: 12px; }
 .single-agent-monitor { display: flex; flex-direction: column; }
 .single-agent-monitor .section-title select { width: 230px; }
@@ -97,6 +100,8 @@
 .single-agent-monitor .section-title > div { min-width: 0; }
 .single-agent-monitor .section-title select { max-width: 46%; flex: 0 1 230px; }
 .single-agent-detail { flex: 1; min-height: 0; overflow: hidden; border: 1px solid color-mix(in srgb, var(--line) 58%, transparent); border-radius: 6px; }
+.ai-context-state { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--muted-2); font-size: 9px; }
+.ai-context-state strong { color: var(--muted); font-family: var(--font-mono); }
 
 .ai-model-provider-pane { padding: 12px; }
 .ai-model-provider-pane .rag-provider-list { min-height: 0; overflow: auto; }

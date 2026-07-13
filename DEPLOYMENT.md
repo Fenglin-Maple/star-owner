@@ -131,7 +131,7 @@ See `AGENTS.md` for the complete worker and contributor contract.
 
 Before a public release, also verify the RAG supplier dialog, remote model pull against a test-compatible endpoint, one streaming response, one knowledge search, restricted-mode approval, context compression, one fenced-code copy action, and lightbox/right-click copy for both a local attachment and a knowledge-tool image. Never configure a maintainer API key in the database used to assemble a release.
 
-Also verify one internal collection Agent and one single-task run with a disposable compatible provider: confirm streamed output, Worker accounting, material-tool queueing, Markdown validation, cache cleanup, the canonical `内置用户/<内置收藏夹>` archive, and the second copy in the requested external directory. Remove the test provider and test Workspace before building release assets.
+Also verify one internal collection Agent and one single-task run with a disposable compatible provider: confirm streamed output, stable Worker identity across fresh per-video context cycles, context-budget reporting, material-tool queueing, Markdown validation, cache cleanup, the canonical `内置用户/<内置收藏夹>` archive, and both output-directory buttons. Confirm that single-task mode neither requests nor creates an arbitrary external destination. Remove the test provider and test Workspace before building release assets.
 
 ### Release asset contract for in-app installation
 

@@ -671,6 +671,22 @@ ipcMain.handle('internal-agent:collection-create', async (_event, name) => {
   return collection;
 });
 
+ipcMain.handle('internal-agent:collection-open', async (_event, collectionId) => {
+  assertBackendReady();
+  const target = internalAgentManager.collectionOutputDirectory(collectionId);
+  const error = await shell.openPath(target);
+  if (error) throw new Error(error);
+  return { opened: true, path: target };
+});
+
+ipcMain.handle('internal-agent:output-open', async (_event, sessionId) => {
+  assertBackendReady();
+  const target = internalAgentManager.sessionOutputDirectory(sessionId);
+  const error = await shell.openPath(target);
+  if (error) throw new Error(error);
+  return { opened: true, path: target };
+});
+
 ipcMain.handle('internal-agent:session-create', async (_event, payload) => {
   assertBackendReady();
   return internalAgentManager.createSession(payload || {});
@@ -699,12 +715,6 @@ ipcMain.handle('internal-agent:stop', async (_event, sessionId) => {
 ipcMain.handle('internal-agent:delete', async (_event, sessionId) => {
   assertBackendReady();
   return internalAgentManager.deleteSession(sessionId);
-});
-
-ipcMain.handle('internal-agent:choose-output', async () => {
-  assertBackendReady();
-  const result = await dialog.showOpenDialog(mainWindow, { title: '选择单任务输出目录', properties: ['openDirectory', 'createDirectory'] });
-  return { canceled: result.canceled, path: result.filePaths[0] || '' };
 });
 
 ipcMain.handle('dependencies:state', async () => dependencyManager?.state() || null);

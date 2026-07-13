@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { Store } = require('../src/core/store');
-const { InternalAgentManager, normalizeGeneratedMarkdown } = require('../src/core/internal-agent-manager');
+const { InternalAgentManager, normalizeGeneratedMarkdown, planGenerationRequest } = require('../src/core/internal-agent-manager');
 const { isLoginRequiredMessage, isVideoUnavailableMessage } = require('../src/core/media-errors');
 
 function assert(condition, message) {
@@ -12,6 +12,17 @@ function assert(condition, message) {
   const normalized = normalizeGeneratedMarkdown('# Test\n\n## 小结\n\nSummary\n\n## 目录\n\n- Body\n\n## 正文\n\nContent\n\n## 处理记录\n\nDone', { bvid: 'BVTEST', title: 'Test video' }, { comments: [] });
   assert(normalized.indexOf('## 小结') < normalized.indexOf('## 思维导图') && normalized.indexOf('## 思维导图') < normalized.indexOf('## 目录'), 'generated Markdown opening was not normalized');
   assert(normalized.includes('```mermaid\nmindmap') && normalized.includes('## 评论分析'), 'generated Markdown required sections were not repaired');
+  const oversizedPlan = planGenerationRequest({
+    session: { workerId: 'worker-budget', modelId: 'small-context', taskRequirements: '保留事实。' },
+    task: { bvid: 'BVBUDGET0001', title: '超长素材', owner: '测试 UP', duration: 7200 },
+    collection: { name: '预算测试' },
+    materials: { info: { title: '超长素材' }, manifest: {}, station: '站内字幕。'.repeat(30000), asr: '语音识别字幕。'.repeat(30000), comments: [], frames: [] },
+    template: '# 模板\n'.repeat(8000),
+    model: { contextWindow: 24000, maxOutputTokens: 8192, supportsVision: false },
+    provider: { maxOutputTokens: 8192 }
+  });
+  assert(oversizedPlan.compacted && oversizedPlan.contextPercent <= 100, 'oversized video material did not activate context budgeting');
+  assert(oversizedPlan.inputTokens + oversizedPlan.maxTokens < oversizedPlan.contextWindow, 'generation plan exceeded the configured context window');
   const root = path.join(__dirname, '..', '.cache', 'internal-agent-test');
   fs.rmSync(root, { recursive: true, force: true });
   fs.mkdirSync(root, { recursive: true });
@@ -25,11 +36,18 @@ function assert(condition, message) {
   });
   store.save();
 
+  const completionBodies = [];
+  let forceContextLimitOnce = false;
   const rag = {
     listProviders: () => [{ id: 'provider-test', name: 'Test provider', type: 'openai', baseUrl: 'http://127.0.0.1:1/v1', enabledModels: [{ id: 'model-test', name: 'model-test' }] }],
     rawProvider: () => store.get('ragProviders', 'provider-test'),
-    sessionModel: () => ({ id: 'model-test', supportsVision: false }),
-    streamCompletion: async (_provider, _body, _signal, onDelta) => {
+    sessionModel: () => ({ id: 'model-test', contextWindow: 128000, maxOutputTokens: 8192, supportsVision: false }),
+    streamCompletion: async (_provider, body, _signal, onDelta) => {
+      completionBodies.push(body);
+      if (forceContextLimitOnce) {
+        forceContextLimitOnce = false;
+        throw new Error('maximum context length exceeded');
+      }
       onDelta({ reasoning: '先核对字幕和关键帧。' });
       onDelta({ content: validMarkdown() });
       return { content: validMarkdown(), reasoning: '先核对字幕和关键帧。', usage: { input: 120, output: 240, total: 360 } };
@@ -66,10 +84,8 @@ function assert(condition, message) {
   const cookieFixture = path.join(root, 'login-cookies.txt');
   const manager = new InternalAgentManager({ store, toolRunner, ragAssistant: rag, bili: { exportCookies: async () => { fs.writeFileSync(cookieFixture, 'cookie'); return cookieFixture; } }, getCurrentUser: () => currentUser, emit: (event) => events.push(event) });
   const collection = manager.listInternalCollections()[0];
-  const outputDir = path.join(root, 'external-output');
   const session = await manager.createSingleTask({
     video: 'https://www.bilibili.com/video/BV1234567890',
-    outputDir,
     collectionId: collection.id,
     providerId: 'provider-test',
     modelId: 'model-test',
@@ -81,19 +97,45 @@ function assert(condition, message) {
   const finished = await waitForSession(manager, session.id);
   assert(finished.status === 'completed', `single session did not complete: ${finished.lastError || finished.status}`);
   assert(finished.completed === 1, 'completed count was not updated');
-  assert(finished.externalOutput && fs.existsSync(finished.externalOutput), 'external artifact copy is missing');
+  assert(!finished.externalOutput && finished.lastOutput && fs.existsSync(finished.lastOutput), 'single task did not use its canonical internal artifact as the only output');
   const task = store.getTask(finished.singleTaskId);
   assert(task.status === 'done' && fs.existsSync(task.outputMarkdown), 'accepted internal document is missing');
   assert(task.outputMarkdown.includes('内置用户') || task.artifactDir.includes('内置用户'), 'internal collection artifact path is incorrect');
+  assert(manager.collectionOutputDirectory(collection.id) === collection.collectionRoot, 'single-task collection output directory is incorrect');
+  assert(manager.sessionOutputDirectory(finished.id) === task.artifactDir, 'completed session did not resolve its artifact directory');
   assert(store.getWorker(finished.workerId)?.tool === 'star-owner-internal', 'internal worker identity was not registered');
+  assert(finished.contextCycle === 1 && finished.contextPercent > 0, 'single task did not create and report an independent context cycle');
+  assert(completionBodies[0]?.messages?.length === 2 && completionBodies[0].messages[0].role === 'system' && completionBodies[0].messages[1].role === 'user', 'video generation request unexpectedly carried prior task history');
   assert(events.some((event) => event.type === 'stream') && events.some((event) => event.type === 'session-updated'), 'internal agent events were not emitted');
   assert(isLoginRequiredMessage('This video is only available for registered users. Use --cookies.'), 'login-required classifier missed yt-dlp guidance');
   assert(!isLoginRequiredMessage('network timeout while downloading'), 'ordinary network failure was misclassified as login-required');
   assert(isVideoUnavailableMessage('ERROR: video is no longer available'), 'unavailable-video classifier missed yt-dlp output');
   assert(!isVideoUnavailableMessage('HTTP 429: too many requests'), 'temporary network failure was misclassified as unavailable');
 
+  forceContextLimitOnce = true;
+  const requestsBeforeRetry = completionBodies.length;
+  const contextRetrySession = await manager.createSingleTask({ video: 'BVCONTEXT001', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  await manager.start(contextRetrySession.id);
+  const contextRetried = await waitForSession(manager, contextRetrySession.id);
+  assert(contextRetried.status === 'completed' && completionBodies.length === requestsBeforeRetry + 2, 'context-limit error did not use one fresh compact retry');
+  assert(contextRetried.contextCompactions >= 1 && contextRetried.logs.some((item) => item.message.includes('全新请求重试')), 'context retry was not reported in session state');
+
+  const queueTaskIds = ['BVCYCLE00001', 'BVCYCLE00002'].map((bvid) => {
+    const id = `${collection.id}:${bvid}:queue-test`;
+    store.upsertTask({ id, collectionId: collection.id, bvid, title: bvid, status: 'pending', enabled: true, attempts: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    return id;
+  });
+  store.commit();
+  const queueSession = manager.createSession({ title: '上下文轮换测试', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  await manager.start(queueSession.id);
+  const queueFinished = await waitForStatus(manager, queueSession.id, 'idle');
+  assert(queueFinished.completed === 2 && queueFinished.contextCycle === 2, 'continuous Agent did not create one fresh context per video');
+  const queueClaims = store.list('taskEvents').filter((event) => queueTaskIds.includes(event.taskId) && event.type === 'claimed');
+  assert(new Set(queueClaims.map((event) => event.workerId)).size === 1 && queueClaims[0]?.workerId === queueSession.workerId, 'continuous context rotation changed the Worker ID');
+  assert(new Set(queueClaims.map((event) => event.workId)).size === 2, 'continuous Agent reused a workId across videos');
+
   holdToolRuns = true;
-  const stoppedSession = await manager.createSingleTask({ video: 'BVMANUAL0001', outputDir: path.join(root, 'stopped-output'), collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  const stoppedSession = await manager.createSingleTask({ video: 'BVMANUAL0001', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
   await manager.start(stoppedSession.id);
   const working = await waitForCurrentTask(manager, stoppedSession.id);
   const workingTask = store.getTask(working.currentTaskId);
@@ -109,7 +151,7 @@ function assert(condition, message) {
   holdToolRuns = false;
 
   forceLoginFailure = true;
-  const loginSession = await manager.createSingleTask({ video: 'BV0987654321', outputDir: path.join(root, 'login-output'), collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  const loginSession = await manager.createSingleTask({ video: 'BV0987654321', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
   await manager.start(loginSession.id);
   const waiting = await waitForStatus(manager, loginSession.id, 'waiting-login');
   assert(waiting.lastError.includes('Bilibili'), 'single task did not preserve login-required reason');
@@ -122,7 +164,7 @@ function assert(condition, message) {
 
   forceLoginFailure = false;
   forceInfrastructureFailure = true;
-  const blockedSession = await manager.createSingleTask({ video: 'BVINFRA00001', outputDir: path.join(root, 'blocked-output'), collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  const blockedSession = await manager.createSingleTask({ video: 'BVINFRA00001', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
   await manager.start(blockedSession.id);
   const blocked = await waitForStatus(manager, blockedSession.id, 'blocked');
   assert(blocked.content.includes('Agent 因基础设施故障停止') && blocked.content.includes('可能原因'), 'blocked Agent did not report the infrastructure problem and likely causes');
@@ -132,7 +174,7 @@ function assert(condition, message) {
   assert(events.some((event) => event.type === 'infrastructure-stopped' && event.sessionId === blocked.id), 'infrastructure stop event was not emitted');
   forceInfrastructureFailure = false;
   forceUnavailableFailure = true;
-  const unavailableSession = await manager.createSingleTask({ video: 'BVDELETED001', outputDir: path.join(root, 'unavailable-output'), collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  const unavailableSession = await manager.createSingleTask({ video: 'BVDELETED001', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
   await manager.start(unavailableSession.id);
   const unavailable = await waitForStatus(manager, unavailableSession.id, 'unavailable');
   assert(unavailable.skipped === 1 && unavailable.failed === 0, 'unavailable video was counted as an ordinary Agent failure');

@@ -7,7 +7,7 @@
     createModal: $('#aiAgentCreateModal'), closeCreate: $('#aiCloseAgentCreate'), cancelCreate: $('#aiCancelAgentCreate'), createOnly: $('#aiCreateAgentOnly'), createStart: $('#aiCreateAgentStart'),
     agentTitle: $('#aiAgentTitle'), agentProvider: $('#aiAgentProvider'), agentModel: $('#aiAgentModel'), agentCollection: $('#aiAgentCollection'), agentRequirements: $('#aiAgentRequirements'),
     collectionModal: $('#aiCollectionModal'), collectionName: $('#aiCollectionName'), closeCollection: $('#aiCloseCollection'), cancelCollection: $('#aiCancelCollection'), saveCollection: $('#aiSaveCollection'),
-    singleVideo: $('#singleVideoInput'), singleCollection: $('#singleCollectionSelect'), singleCreateCollection: $('#singleCreateCollection'), singleProvider: $('#singleProviderSelect'), singleModel: $('#singleModelSelect'), singleFrames: $('#singleFrames'), singleComments: $('#singleComments'), singleOutput: $('#singleOutputDir'), singleChooseOutput: $('#singleChooseOutput'), singleRequirements: $('#singleRequirements'), singleKeepVideoCache: $('#singleKeepVideoCache'), singleStart: $('#singleStart'), singleSession: $('#singleSessionSelect'), singleDetail: $('#singleAgentDetail'),
+    singleVideo: $('#singleVideoInput'), singleCollection: $('#singleCollectionSelect'), singleCreateCollection: $('#singleCreateCollection'), singleOpenCollection: $('#singleOpenCollection'), singleProvider: $('#singleProviderSelect'), singleModel: $('#singleModelSelect'), singleFrames: $('#singleFrames'), singleComments: $('#singleComments'), singleRequirements: $('#singleRequirements'), singleKeepVideoCache: $('#singleKeepVideoCache'), singleStart: $('#singleStart'), singleSession: $('#singleSessionSelect'), singleDetail: $('#singleAgentDetail'),
     modelNew: $('#aiModelNewProvider'), modelProviderList: $('#aiModelProviderList'), modelProviderId: $('#aiModelProviderId'), modelProviderName: $('#aiModelProviderName'), modelProviderType: $('#aiModelProviderType'), modelProviderBaseUrl: $('#aiModelProviderBaseUrl'), modelProviderApiKey: $('#aiModelProviderApiKey'), modelProviderTemperature: $('#aiModelProviderTemperature'), modelProviderMaxTokens: $('#aiModelProviderMaxTokens'), modelProviderHeaders: $('#aiModelProviderHeaders'), modelDelete: $('#aiModelDeleteProvider'), modelSave: $('#aiModelSaveProvider'), modelFetch: $('#aiModelFetchModels'), modelCount: $('#aiModelRemoteCount'), modelRemote: $('#aiModelRemoteModels'),
     dependencyList: $('#dependencyList'), dependencyRefresh: $('#dependencyRefresh'), dependencyModal: $('#dependencyPromptModal'), dependencyMissing: $('#dependencyPromptMissing'), dependencyLater: $('#dependencyPromptLater'), dependencyDownload: $('#dependencyPromptDownload'),
     loginRequiredModal: $('#singleLoginRequiredModal'), loginRequiredVideo: $('#singleLoginRequiredVideo'), loginRequiredReason: $('#singleLoginRequiredReason'), loginLater: $('#singleLoginLater'), goLogin: $('#singleGoLogin')
@@ -73,6 +73,7 @@
     const previousCollection = elements.singleCollection.value;
     elements.singleCollection.innerHTML = '<option value="">选择内置收藏夹</option>' + state.internalCollections.map((item) => `<option value="${esc(item.id)}">${html(item.name)}</option>`).join('');
     elements.singleCollection.value = state.internalCollections.some((item) => item.id === previousCollection) ? previousCollection : (state.internalCollections[0]?.id || '');
+    elements.singleOpenCollection.disabled = !elements.singleCollection.value;
     const singles = state.sessions.filter((item) => item.mode === 'single');
     elements.singleSession.innerHTML = '<option value="">选择单任务会话</option>' + singles.map((item) => `<option value="${esc(item.id)}">${html(item.title)} · ${statusLabel(item.status)}</option>`).join('');
     elements.singleSession.value = activeSingleId;
@@ -95,9 +96,9 @@
     const active = ['running', 'draining', 'stopping'].includes(session.status);
     const canStart = !active && session.status !== 'completed';
     const logs = (session.logs || []).slice().reverse().map((entry) => `<div class="ai-log-entry"><time>${time(entry.at)}</time><span>${html(entry.message)}</span></div>`).join('') || '<div class="rag-list-empty">暂无工作记录</div>';
-    const output = session.externalOutput || session.lastOutput || '';
+    const output = session.lastOutput || '';
     const pending = [...pendingSessionActions].some((key) => key.startsWith(`${session.id}:`));
-    container.innerHTML = `<div class="ai-session-view" data-agent-session-view="${esc(session.id)}"><header class="ai-session-head"><div class="ai-session-identity"><strong>${html(session.title)}</strong><span>${html(collection ? `${collection.userName} / ${collection.name}` : session.collectionId)} · ${html(providerName(session.providerId))} / ${html(session.modelId)} · ${html(session.workerId)}</span></div><div class="ai-session-actions">${canStart ? `<button class="primary-button compact-button" data-agent-action="start" ${pending ? 'disabled' : ''}>${startActionLabel(session)}</button>` : ''}${active && session.acceptNewTasks ? `<button class="secondary-button compact-button" data-agent-action="pause" ${pending ? 'disabled' : ''}>完成本单后暂停</button>` : ''}${active ? `<button class="secondary-button compact-button danger-button" data-agent-action="stop" ${pending ? 'disabled' : ''}>${pendingSessionActions.has(`${session.id}:stop`) ? '正在停止…' : '立即停止'}</button>` : ''}<button class="icon-action danger-icon" data-agent-action="delete" title="删除会话" ${active || pending ? 'disabled' : ''}><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14"/></svg></button></div></header><div class="ai-session-progress"><div><span data-agent-role="phase">${html(session.phase || statusLabel(session.status))}</span><strong data-agent-role="percent">${Math.round(Number(session.progress || 0) * 100)}%</strong></div><div class="ai-progress-track"><span data-agent-role="progress" style="width:${Math.round(Number(session.progress || 0) * 100)}%"></span></div><div class="ai-session-path" data-agent-role="output" title="${esc(output)}" ${output ? '' : 'hidden'}>${html(output)}</div></div><div class="ai-session-body"><section class="ai-stream-pane"><div class="ai-subpanel-title"><strong>模型输出</strong><span data-agent-role="tokens">${formatTokens(session.tokenUsage?.total || 0)} tokens</span></div><div class="ai-stream-scroll"><div data-agent-role="reasoning">${session.reasoning ? `<details class="ai-reasoning" open><summary>模型思考</summary><pre>${html(session.reasoning)}</pre></details>` : ''}</div><pre class="ai-content-stream" data-agent-role="content">${html(session.content || (active ? '正在等待模型输出…' : '该会话尚无模型输出。'))}</pre></div></section><aside class="ai-log-pane"><div class="ai-subpanel-title"><strong>工作记录</strong><span data-agent-role="stats">${session.completed || 0} 完成 / ${session.failed || 0} 失败 / ${session.skipped || 0} 跳过</span></div><div class="ai-log-scroll" data-agent-role="logs">${logs}</div></aside></div></div>`;
+    container.innerHTML = `<div class="ai-session-view" data-agent-session-view="${esc(session.id)}"><header class="ai-session-head"><div class="ai-session-identity"><strong>${html(session.title)}</strong><span>${html(collection ? `${collection.userName} / ${collection.name}` : session.collectionId)} · ${html(providerName(session.providerId))} / ${html(session.modelId)} · ${html(session.workerId)}</span></div><div class="ai-session-actions">${session.mode === 'single' && output ? `<button class="secondary-button compact-button" data-agent-action="open-output"><svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v10H4z"/></svg><span>打开产物</span></button>` : ''}${canStart ? `<button class="primary-button compact-button" data-agent-action="start" ${pending ? 'disabled' : ''}>${startActionLabel(session)}</button>` : ''}${active && session.acceptNewTasks ? `<button class="secondary-button compact-button" data-agent-action="pause" ${pending ? 'disabled' : ''}>完成本单后暂停</button>` : ''}${active ? `<button class="secondary-button compact-button danger-button" data-agent-action="stop" ${pending ? 'disabled' : ''}>${pendingSessionActions.has(`${session.id}:stop`) ? '正在停止…' : '立即停止'}</button>` : ''}<button class="icon-action danger-icon" data-agent-action="delete" title="删除会话" ${active || pending ? 'disabled' : ''}><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14"/></svg></button></div></header><div class="ai-session-progress"><div><span data-agent-role="phase">${html(session.phase || statusLabel(session.status))}</span><strong data-agent-role="percent">${Math.round(Number(session.progress || 0) * 100)}%</strong></div><div class="ai-progress-track"><span data-agent-role="progress" style="width:${Math.round(Number(session.progress || 0) * 100)}%"></span></div><div class="ai-context-state"><span>独立上下文 <strong data-agent-role="context-cycle">${Number(session.contextCycle || 0)}</strong></span><span>预计占用 <strong data-agent-role="context-percent">${Number(session.contextPercent || 0)}%</strong></span><span>压缩 <strong data-agent-role="context-compactions">${Number(session.contextCompactions || 0)}</strong> 次</span></div><div class="ai-session-path" data-agent-role="output" title="${esc(output)}" ${output ? '' : 'hidden'}>${html(output)}</div></div><div class="ai-session-body"><section class="ai-stream-pane"><div class="ai-subpanel-title"><strong>模型输出</strong><span data-agent-role="tokens">${formatTokens(session.tokenUsage?.total || 0)} 累计 tokens</span></div><div class="ai-stream-scroll"><div data-agent-role="reasoning">${session.reasoning ? `<details class="ai-reasoning" open><summary>模型思考</summary><pre>${html(session.reasoning)}</pre></details>` : ''}</div><pre class="ai-content-stream" data-agent-role="content">${html(session.content || (active ? '正在等待模型输出…' : '该会话尚无模型输出。'))}</pre></div></section><aside class="ai-log-pane"><div class="ai-subpanel-title"><strong>工作记录</strong><span data-agent-role="stats">${session.completed || 0} 完成 / ${session.failed || 0} 失败 / ${session.skipped || 0} 跳过</span></div><div class="ai-log-scroll" data-agent-role="logs">${logs}</div></aside></div></div>`;
     for (const button of container.querySelectorAll('[data-agent-action]')) button.addEventListener('click', () => handleSessionAction(session, button));
   }
 
@@ -116,6 +117,7 @@
     button.disabled = true;
     if (action === 'stop') button.textContent = '正在停止…';
     try {
+      if (action === 'open-output') await window.orchestrator.internalAgentOpenOutput(session.id);
       if (action === 'start') await window.orchestrator.internalAgentStart(session.id);
       if (action === 'pause') await window.orchestrator.internalAgentPause(session.id);
       if (action === 'stop') await window.orchestrator.internalAgentStop(session.id);
@@ -204,7 +206,6 @@
         collectionId: elements.singleCollection.value,
         providerId: elements.singleProvider.value,
         modelId: elements.singleModel.value,
-        outputDir: elements.singleOutput.value,
         title: `单视频总结 · ${elements.singleVideo.value.trim().slice(0, 24)}`,
         taskRequirements: elements.singleRequirements.value,
         taskOptions: { frames: Number(elements.singleFrames.value), commentLimit: Number(elements.singleComments.value) },
@@ -421,10 +422,13 @@
     setText(container, 'percent', `${percent}%`);
     const bar = container.querySelector('[data-agent-role="progress"]');
     if (bar) bar.style.width = `${percent}%`;
-    setText(container, 'tokens', `${formatTokens(session.tokenUsage?.total || 0)} tokens`);
+    setText(container, 'tokens', `${formatTokens(session.tokenUsage?.total || 0)} 累计 tokens`);
+    setText(container, 'context-cycle', Number(session.contextCycle || 0));
+    setText(container, 'context-percent', `${Number(session.contextPercent || 0)}%`);
+    setText(container, 'context-compactions', Number(session.contextCompactions || 0));
     setText(container, 'stats', `${session.completed || 0} 完成 / ${session.failed || 0} 失败 / ${session.skipped || 0} 跳过`);
     setText(container, 'content', session.content || (['running', 'draining', 'stopping'].includes(session.status) ? '正在等待模型输出…' : '该会话尚无模型输出。'));
-    const output = session.externalOutput || session.lastOutput || '';
+    const output = session.lastOutput || '';
     const outputNode = container.querySelector('[data-agent-role="output"]');
     if (outputNode) {
       outputNode.hidden = !output;
@@ -481,14 +485,15 @@
   elements.singleProvider.addEventListener('change', () => { syncModelForProvider(elements.singleProvider, elements.singleModel); updateSingleStartState(); });
   elements.singleModel.addEventListener('change', updateSingleStartState);
   elements.singleCreateCollection.addEventListener('click', () => openCollectionModal('single'));
+  elements.singleCollection.addEventListener('change', () => { elements.singleOpenCollection.disabled = !elements.singleCollection.value; });
+  elements.singleOpenCollection.addEventListener('click', async () => {
+    try { await window.orchestrator.internalAgentOpenCollection(elements.singleCollection.value); }
+    catch (error) { notify('无法打开输出目录', error.message || String(error), 'error'); }
+  });
   elements.closeCollection.addEventListener('click', closeCollectionModal);
   elements.cancelCollection.addEventListener('click', closeCollectionModal);
   elements.collectionModal.addEventListener('click', (event) => { if (event.target === elements.collectionModal) closeCollectionModal(); });
   elements.saveCollection.addEventListener('click', saveCollection);
-  elements.singleChooseOutput.addEventListener('click', async () => {
-    const result = await window.orchestrator.internalAgentChooseOutput();
-    if (!result.canceled) elements.singleOutput.value = result.path;
-  });
   elements.singleStart.addEventListener('click', startSingleTask);
   elements.loginLater.addEventListener('click', () => { elements.loginRequiredModal.hidden = true; });
   elements.goLogin.addEventListener('click', () => { elements.loginRequiredModal.hidden = true; window.dispatchEvent(new CustomEvent('star:navigate', { detail: { page: 'login' } })); });

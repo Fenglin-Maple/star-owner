@@ -8,11 +8,9 @@ const { abortTaskAttempt, createWorkId } = require('./task-attempt');
 const { removeUnavailableTask } = require('./unavailable-task');
 const { validateSubmission } = require('./validation');
 const {
-  WORKSPACE_ROOT,
   collectionDirs,
   ensureDir,
   normalizeTags,
-  safeName,
   videoArtifactDir
 } = require('./workspace');
 
@@ -21,6 +19,9 @@ const INTERNAL_USER_NAME = '内置用户';
 const LEASE_MS = 15 * 60 * 1000;
 const TEMPLATE_FILE = path.join(__dirname, '..', '..', 'templates', 'video-summary-template.md');
 const TERMINAL_RUNS = new Set(['succeeded', 'failed', 'cancelled', 'timeout', 'skipped']);
+const DEFAULT_AGENT_CONTEXT_WINDOW = 1_000_000;
+const DEFAULT_AGENT_OUTPUT_TOKENS = 128_000;
+const GENERATION_SYSTEM_PROMPT = '你是星藏家的内置视频知识整理 Agent。必须依据提供的真实素材生成完整、严谨、带时间轴和关键帧的中文 Markdown，不得编造未出现的信息。只返回 Markdown 正文。';
 
 class InternalAgentManager {
   constructor({ store, toolRunner, ragAssistant, bili, getCurrentUser, emit }) {
@@ -119,7 +120,6 @@ class InternalAgentManager {
         frames: clamp(input.taskOptions?.frames, 4, 30, 12),
         commentLimit: clamp(input.taskOptions?.commentLimit, 0, 3, 3)
       },
-      singleOutputDir: String(input.singleOutputDir || ''),
       singleTaskId: String(input.singleTaskId || ''),
       currentTaskId: '',
       currentRunId: '',
@@ -132,6 +132,11 @@ class InternalAgentManager {
       failed: 0,
       skipped: 0,
       tokenUsage: { input: 0, output: 0, total: 0 },
+      contextCycle: 0,
+      contextPercent: 0,
+      contextInputTokens: 0,
+      contextOutputLimit: 0,
+      contextCompactions: 0,
       createdAt: now,
       updatedAt: now
     };
@@ -143,9 +148,6 @@ class InternalAgentManager {
   async createSingleTask(input = {}) {
     const bvid = extractBvid(input.video);
     if (!bvid) throw new Error('请输入有效的 BV 号或 Bilibili 视频链接。');
-    const outputDir = path.resolve(String(input.outputDir || ''));
-    if (!String(input.outputDir || '').trim()) throw new Error('单任务模式必须指定输出目录。');
-    ensureDir(outputDir);
     const collection = this.store.getCollectionById(String(input.collectionId || ''));
     if (!collection || !(collection.userId === INTERNAL_USER_ID || collection.internal === true)) throw new Error('请选择内置用户下的内置收藏夹。');
     const workspace = this.requireWorkspace();
@@ -182,7 +184,24 @@ class InternalAgentManager {
     collection.updatedAt = now;
     this.store.upsertCollection(collection);
     this.store.commit();
-    return this.createSession({ ...input, mode: 'single', singleTaskId: taskId, singleOutputDir: outputDir, collectionId: collection.id, acceptNewTasks: false });
+    return this.createSession({ ...input, mode: 'single', singleTaskId: taskId, collectionId: collection.id, acceptNewTasks: false });
+  }
+
+  collectionOutputDirectory(collectionId) {
+    const collection = this.store.getCollectionById(String(collectionId || ''));
+    if (!collection || !(collection.userId === INTERNAL_USER_ID || collection.internal === true) || collection.collectionKind === 'video-cache') {
+      throw new Error('请选择内置用户下的内置收藏夹。');
+    }
+    const workspace = this.requireWorkspace();
+    return collectionDirs(collection.workspaceRoot || workspace.root, INTERNAL_USER_NAME, collection.name).root;
+  }
+
+  sessionOutputDirectory(sessionId) {
+    const session = this.requireSession(sessionId);
+    const collectionRoot = this.collectionOutputDirectory(session.collectionId);
+    const output = path.resolve(String(session.lastOutput || collectionRoot));
+    if (!isInside(collectionRoot, output)) throw new Error('会话产物目录不在所选内置收藏夹中。');
+    return fs.existsSync(output) ? output : collectionRoot;
   }
 
   async start(sessionId) {
@@ -441,8 +460,13 @@ class InternalAgentManager {
     session.reasoning = '';
     session.content = '';
     session.lastError = '';
+    session.contextCycle = Number(session.contextCycle || 0) + 1;
+    session.contextPercent = 0;
+    session.contextInputTokens = 0;
+    session.contextOutputLimit = 0;
     this.saveSession(session);
     this.log(session, `领取任务 ${task.bvid} · ${task.title || task.bvid}`);
+    this.log(session, `已创建第 ${session.contextCycle} 个独立任务上下文；Worker ID ${session.workerId} 保持不变。`);
     return task;
   }
 
@@ -462,11 +486,6 @@ class InternalAgentManager {
     await this.waitForRun(session, task, cleanup.id, signal, 0.89, 0.94);
     this.setProgress(session, '校验并归档产物', 0.95);
     const finalized = this.submitTask(session, task, markdownFile);
-    let externalOutput = '';
-    if (session.mode === 'single') {
-      externalOutput = copyArtifact(finalized.artifactDir, session.singleOutputDir);
-      this.log(session, `单任务产物已复制到：${externalOutput}`);
-    }
     const latest = this.requireSession(session.id);
     latest.completed = Number(latest.completed || 0) + 1;
     latest.currentTaskId = '';
@@ -474,7 +493,6 @@ class InternalAgentManager {
     latest.progress = 1;
     latest.phase = '任务完成';
     latest.lastOutput = finalized.artifactDir;
-    latest.externalOutput = externalOutput;
     latest.updatedAt = new Date().toISOString();
     this.saveSession(latest);
     this.log(latest, `完成 ${task.bvid}，产物已通过应用校验。`);
@@ -524,26 +542,56 @@ class InternalAgentManager {
     const model = this.ragAssistant.sessionModel(session);
     const materials = collectMaterials(task.artifactDir);
     const template = fs.readFileSync(TEMPLATE_FILE, 'utf8');
-    const basePrompt = buildGenerationPrompt({ session, task, collection, materials, template });
     let previous = '';
     let errors = [];
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const prompt = attempt === 0 ? basePrompt : `${basePrompt}\n\n上一稿未通过校验。请只返回修正后的完整 Markdown。\n校验错误：\n- ${errors.join('\n- ')}\n\n上一稿：\n${previous.slice(0, 120000)}`;
-      const userContent = model.supportsVision && materials.frames.length
-        ? [{ type: 'text', text: prompt }, ...materials.frames.slice(0, 4).map((file) => ({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${fs.readFileSync(path.join(task.artifactDir, file)).toString('base64')}` } }))]
-        : prompt;
-      session.reasoning = '';
-      session.content = '';
-      this.saveSession(session);
-      const result = await this.ragAssistant.streamCompletion(provider, {
-        model: session.modelId,
-        messages: [
-          { role: 'system', content: '你是星藏家的内置视频知识整理 Agent。必须依据提供的真实素材生成完整、严谨、带时间轴和关键帧的中文 Markdown，不得编造未出现的信息。只返回 Markdown 正文。' },
-          { role: 'user', content: userContent }
-        ],
-        temperature: provider.temperature,
-        max_tokens: this.ragAssistant.outputTokenLimit?.(provider, model) || model.maxOutputTokens || provider.maxOutputTokens || 128000
-      }, signal, (delta) => this.streamDelta(session.id, delta));
+      let result;
+      for (let contextAttempt = 0; contextAttempt < 2; contextAttempt += 1) {
+        const plan = planGenerationRequest({
+          session,
+          task,
+          collection,
+          materials,
+          template,
+          model,
+          provider,
+          configuredOutput: this.ragAssistant.outputTokenLimit?.(provider, model),
+          previous,
+          errors,
+          repair: attempt > 0,
+          aggressive: contextAttempt > 0
+        });
+        const frames = model.supportsVision ? materials.frames.slice(0, plan.frameLimit) : [];
+        const userContent = frames.length
+          ? [{ type: 'text', text: plan.prompt }, ...frames.map((file) => ({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${fs.readFileSync(path.join(task.artifactDir, file)).toString('base64')}` } }))]
+          : plan.prompt;
+        const latest = this.requireSession(session.id);
+        latest.reasoning = '';
+        latest.content = '';
+        latest.contextPercent = plan.contextPercent;
+        latest.contextInputTokens = plan.inputTokens;
+        latest.contextOutputLimit = plan.maxTokens;
+        if (plan.compacted) latest.contextCompactions = Number(latest.contextCompactions || 0) + 1;
+        this.saveSession(latest);
+        Object.assign(session, latest);
+        if (plan.compacted) this.log(session, `上下文预算保护已压缩超长素材${attempt ? '与上一稿' : ''}；预计占用 ${plan.contextPercent}%，输出上限 ${plan.maxTokens} tokens。`);
+        try {
+          result = await this.ragAssistant.streamCompletion(provider, {
+            model: session.modelId,
+            messages: [
+              { role: 'system', content: GENERATION_SYSTEM_PROMPT },
+              { role: 'user', content: userContent }
+            ],
+            temperature: provider.temperature,
+            max_tokens: plan.maxTokens
+          }, signal, (delta) => this.streamDelta(session.id, delta));
+          break;
+        } catch (error) {
+          if (contextAttempt > 0 || !isContextLimitError(error.message)) throw error;
+          this.log(session, '模型供应商仍报告上下文超限，正在保留 Worker ID 和当前任务，使用更紧凑的全新请求重试。');
+        }
+      }
+      if (!result) throw new Error('模型上下文重试未返回结果。');
       this.addUsage(session, result.usage || {});
       previous = normalizeGeneratedMarkdown(injectFrameGallery(stripMarkdownFence(result.content || ''), materials.frames), task, materials);
       const draft = path.join(task.artifactDir, `agent-draft-${attempt + 1}.md`);
@@ -744,8 +792,147 @@ function collectMaterials(artifactDir) {
   };
 }
 
-function buildGenerationPrompt({ session, task, collection, materials, template }) {
-  return `请基于以下真实素材生成一份完整的视频知识 Markdown。\n\n强制要求：\n1. 开头章节严格为“小结 -> 思维导图 -> 目录”，思维导图使用有效 Mermaid mindmap。\n2. 正文完整覆盖视频的新闻、技术、经验、步骤、参数、限制和时效性，不能只做简短摘要。\n3. 章节标题加入 Bilibili 时间轴链接：https://www.bilibili.com/video/${task.bvid}?t=<秒数>。\n4. 必须比较站内字幕与本次 ASR；无论有无站内字幕，本次 ASR 都已经执行。\n5. 从给出的关键帧中选择适合正文的图片，使用相对路径 frames/xxx.jpg，并解释图片价值。\n6. 评论分析只处理可获取的热评前三条。\n7. 处理记录写明 Worker ID、模型、工具、字幕选择、关键帧依据和缓存清理。\n8. 不要输出 Markdown 外层代码围栏。\n\n用户附加要求：\n${session.taskRequirements || '无额外要求'}\n\n任务：\n${JSON.stringify({ bvid: task.bvid, title: task.title, owner: task.owner, duration: task.duration, collection: collection.name, workerId: session.workerId, model: session.modelId }, null, 2)}\n\n元数据：\n${JSON.stringify(materials.info, null, 2).slice(0, 30000)}\n\n素材清单：\n${JSON.stringify(materials.manifest, null, 2).slice(0, 16000)}\n\n关键帧路径：\n${materials.frames.join('\n') || '无'}\n\n站内字幕：\n${materials.station || '未提供可用站内字幕'}\n\nASR 字幕：\n${materials.asr || 'ASR 输出为空，请在文档中如实说明'}\n\n热评：\n${JSON.stringify(materials.comments, null, 2).slice(0, 18000)}\n\n参考模板（按真实内容改写，不保留占位符）：\n${template}`;
+function buildGenerationPrompt({ session, task, collection, materials, template, limits = {} }) {
+  const sectionLimits = {
+    requirements: Number(limits.requirements || 12000),
+    info: Number(limits.info || 30000),
+    manifest: Number(limits.manifest || 16000),
+    station: Number(limits.station || 70000),
+    asr: Number(limits.asr || 70000),
+    comments: Number(limits.comments || 18000),
+    template: Number(limits.template || 30000)
+  };
+  return `请基于以下真实素材生成一份完整的视频知识 Markdown。
+
+强制要求：
+1. 开头章节严格为“小结 -> 思维导图 -> 目录”，思维导图使用有效 Mermaid mindmap。
+2. 正文完整覆盖视频的新闻、技术、经验、步骤、参数、限制和时效性，不能只做简短摘要。
+3. 章节标题加入 Bilibili 时间轴链接：https://www.bilibili.com/video/${task.bvid}?t=<秒数>。
+4. 必须比较站内字幕与本次 ASR；无论有无站内字幕，本次 ASR 都已经执行。
+5. 从给出的关键帧中选择适合正文的图片，使用相对路径 frames/xxx.jpg，并解释图片价值。
+6. 评论分析只处理可获取的热评前三条。
+7. 处理记录写明 Worker ID、模型、工具、字幕选择、关键帧依据和缓存清理。
+8. 不要输出 Markdown 外层代码围栏。
+
+用户附加要求：
+${truncateSection(session.taskRequirements || '无额外要求', sectionLimits.requirements)}
+
+任务：
+${JSON.stringify({ bvid: task.bvid, title: task.title, owner: task.owner, duration: task.duration, collection: collection.name, workerId: session.workerId, model: session.modelId }, null, 2)}
+
+元数据：
+${truncateSection(JSON.stringify(materials.info, null, 2), sectionLimits.info)}
+
+素材清单：
+${truncateSection(JSON.stringify(materials.manifest, null, 2), sectionLimits.manifest)}
+
+关键帧路径：
+${materials.frames.join('\n') || '无'}
+
+站内字幕：
+${truncateSection(materials.station || '未提供可用站内字幕', sectionLimits.station)}
+
+ASR 字幕：
+${truncateSection(materials.asr || 'ASR 输出为空，请在文档中如实说明', sectionLimits.asr)}
+
+热评：
+${truncateSection(JSON.stringify(materials.comments, null, 2), sectionLimits.comments)}
+
+参考模板（按真实内容改写，不保留占位符）：
+${truncateSection(template, sectionLimits.template)}`;
+}
+
+function planGenerationRequest({ session, task, collection, materials, template, model = {}, provider = {}, configuredOutput, previous = '', errors = [], repair = false, aggressive = false }) {
+  const contextWindow = positiveInteger(model.contextWindow, DEFAULT_AGENT_CONTEXT_WINDOW);
+  const wantedOutput = positiveInteger(configuredOutput || model.maxOutputTokens || provider.maxOutputTokens, DEFAULT_AGENT_OUTPUT_TOKENS);
+  const protocolReserve = Math.min(16000, Math.max(1024, Math.floor(contextWindow * 0.05)));
+  const frameLimit = model.supportsVision && materials.frames.length ? (aggressive ? 2 : 4) : 0;
+  const imageReserve = frameLimit * 2600;
+  const targetOutput = Math.min(wantedOutput, Math.max(2048, Math.floor(contextWindow * 0.3)));
+  const fullInputBudget = Math.max(2048, contextWindow - targetOutput - protocolReserve - imageReserve - estimateAgentTokens(GENERATION_SYSTEM_PROMPT));
+  const inputBudget = Math.max(2048, Math.floor(fullInputBudget * (aggressive ? 0.58 : 1)));
+  const baseBudget = repair ? Math.max(2048, Math.floor(inputBudget * 0.68)) : inputBudget;
+  const fitted = fitGenerationPrompt({ session, task, collection, materials, template }, baseBudget, aggressive);
+  let prompt = fitted.prompt;
+  let compacted = fitted.compacted || aggressive;
+  if (repair) {
+    const correction = `\n\n上一稿未通过校验。请只返回修正后的完整 Markdown。\n校验错误：\n- ${errors.join('\n- ') || '文档结构或引用不合规'}\n\n上一稿：\n`;
+    const remaining = Math.max(0, inputBudget - estimateAgentTokens(prompt) - estimateAgentTokens(correction));
+    const priorDraft = truncateToTokenBudget(previous, remaining);
+    compacted = compacted || priorDraft.length < previous.length;
+    prompt = `${prompt}${correction}${priorDraft || '上一稿过长，已省略；请依据素材和校验错误重新生成完整文档。'}`;
+  }
+  const inputTokens = estimateAgentTokens(GENERATION_SYSTEM_PROMPT) + estimateAgentTokens(prompt) + 16;
+  const availableOutput = contextWindow - inputTokens - protocolReserve - imageReserve;
+  if (availableOutput < 1024) throw new Error(`当前模型上下文窗口过小（${contextWindow} tokens），无法容纳最低限度的视频素材。`);
+  const maxTokens = Math.max(1024, Math.min(wantedOutput, targetOutput, availableOutput));
+  const contextPercent = Math.min(100, Math.round(((inputTokens + imageReserve + protocolReserve + maxTokens) / contextWindow) * 1000) / 10);
+  return { prompt, maxTokens, frameLimit, inputTokens, contextWindow, contextPercent, compacted };
+}
+
+function fitGenerationPrompt(input, budgetTokens, aggressive) {
+  const factors = aggressive ? [0.38, 0.24, 0.14, 0.08] : [1, 0.72, 0.48, 0.3, 0.18, 0.1];
+  let last = '';
+  for (const factor of factors) {
+    const limits = generationLimits(factor);
+    const prompt = buildGenerationPrompt({ ...input, limits });
+    last = prompt;
+    if (estimateAgentTokens(prompt) <= budgetTokens) return { prompt, compacted: factor < 1 };
+  }
+  return { prompt: truncateToTokenBudget(last, budgetTokens), compacted: true };
+}
+
+function generationLimits(factor) {
+  const scaled = (maximum, minimum) => Math.max(minimum, Math.floor(maximum * factor));
+  return {
+    requirements: scaled(12000, 2000),
+    info: scaled(30000, 5000),
+    manifest: scaled(16000, 3000),
+    station: scaled(70000, 8000),
+    asr: scaled(70000, 12000),
+    comments: scaled(18000, 2500),
+    template: scaled(30000, 6000)
+  };
+}
+
+function truncateSection(value, maxChars) {
+  const text = String(value || '');
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, Math.max(0, maxChars - 38))}\n...[此素材因上下文预算已截断]`;
+}
+
+function truncateToTokenBudget(value, budgetTokens) {
+  const text = String(value || '');
+  if (budgetTokens <= 0) return '';
+  if (estimateAgentTokens(text) <= budgetTokens) return text;
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (estimateAgentTokens(text.slice(0, middle)) <= budgetTokens) low = middle;
+    else high = middle - 1;
+  }
+  return `${text.slice(0, Math.max(0, low - 38))}\n...[因上下文预算已截断]`;
+}
+
+function estimateAgentTokens(value) {
+  const text = String(value || '');
+  const cjk = (text.match(/[\u3400-\u9fff\uf900-\ufaff]/g) || []).length;
+  return Math.max(1, Math.ceil(cjk + (text.length - cjk) / 4));
+}
+
+function positiveInteger(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
+}
+
+function isInside(root, target) {
+  const relative = path.relative(path.resolve(root), path.resolve(target));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function isContextLimitError(value) {
+  return /context(?:[_ -]?(?:length|window))?|maximum context|too many tokens|token limit|上下文.{0,8}(?:超|长|限)|请求.{0,8}过长/i.test(String(value || ''));
 }
 
 function injectFrameGallery(markdown, frames) {
@@ -797,14 +984,6 @@ function stripMarkdownFence(value) {
   return match ? match[1].trim() : text;
 }
 
-function copyArtifact(source, outputRoot) {
-  const root = ensureDir(path.resolve(outputRoot));
-  let target = path.join(root, path.basename(source));
-  for (let index = 2; fs.existsSync(target); index += 1) target = path.join(root, safeName(`${path.basename(source)} (${index})`, 'video-summary', 180));
-  fs.cpSync(source, target, { recursive: true, errorOnExist: true });
-  return target;
-}
-
 function listFiles(directory, extension) {
   if (!fs.existsSync(directory)) return [];
   return fs.readdirSync(directory).map((name) => path.join(directory, name)).filter((file) => fs.statSync(file).isFile() && (!extension || path.extname(file).toLowerCase() === extension)).sort();
@@ -853,4 +1032,4 @@ function abortError() {
   return error;
 }
 
-module.exports = { InternalAgentManager, INTERNAL_USER_ID, INTERNAL_USER_NAME, extractBvid, normalizeGeneratedMarkdown };
+module.exports = { InternalAgentManager, INTERNAL_USER_ID, INTERNAL_USER_NAME, extractBvid, normalizeGeneratedMarkdown, planGenerationRequest };

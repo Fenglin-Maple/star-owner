@@ -40,7 +40,8 @@ The canonical Markdown contract is `templates/video-summary-template.md` and is 
 - Treat the RAG assistant as an analysis client for accepted Markdown, not as a replacement for the external Worker submission protocol.
 - Application-managed video Agents are a separate feature from RAG. They use the same Worker store, ToolRunner, leases, validation, cleanup, artifact finalization, and analytics as external Workers, but their orchestration is owned by `src/core/internal-agent-manager.js`.
 - Internal Agent stop is an immediate, idempotent rollback: one stop request aborts the provider/tool work, removes attempt files, invalidates the current `workId`, returns an ordinary task to `pending`, and leaves the persistent Worker paused until the user starts it again.
-- Single-task mode creates an ordinary task under `内置用户` and a selected internal collection, then archives the accepted artifact in the default Workspace and copies it to the explicitly selected external destination.
+- Single-task mode creates an ordinary task under `内置用户` and a selected internal collection. Its only accepted output is the canonical default-Workspace artifact under that collection; there is no arbitrary external-destination copy.
+- Application-managed queue Agents retain one Worker ID but start a fresh model request context for every claimed video. Each video still gets a new `workId`. Context accounting, section-aware material compaction, and one aggressive context-limit retry are application responsibilities; do not carry a previous video's messages into a new task.
 - A single task may request `keepVideoCache`; cache-collection tasks always preserve their registered merged video. Neither mode lets an Agent bypass application cleanup or edit the cache index directly.
 - RAG, collection Agents, and single-task Agents share provider/model records and per-model usage accounting. Never expose decrypted API keys to the renderer or logs.
 

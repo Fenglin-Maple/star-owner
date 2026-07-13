@@ -482,21 +482,20 @@
 
           <section class="page ai-page" id="page-single-agent">
             <div class="page-head ai-page-head">
-              <div><h1>视频总结（单个）</h1><p>粘贴一个 BV 号或视频链接，优先公开获取素材，直接生成到指定目录并同步归档。</p></div>
+              <div><h1>视频总结（单个）</h1><p>粘贴一个 BV 号或视频链接，优先公开获取素材，直接归档到所选内置收藏夹。</p></div>
             </div>
             <div class="single-agent-layout">
               <section class="section-block single-agent-form">
-                <div class="section-title"><div><h2>任务参数</h2><p>输出目录与内置收藏夹均为必填项。</p></div></div>
+                <div class="section-title"><div><h2>任务参数</h2><p>产物直接归档到所选的“内置用户 / 内置收藏夹”。</p></div></div>
                 <label class="wide"><span>BV 号 / Bilibili 视频链接</span><input id="singleVideoInput" placeholder="BV... 或 https://www.bilibili.com/video/BV..." /></label>
                 <div class="single-form-grid">
                   <label><span>内置收藏夹</span><select id="singleCollectionSelect"></select></label>
-                  <button id="singleCreateCollection" class="secondary-button field-button" type="button">新建收藏夹</button>
+                  <div class="single-collection-actions field-button"><button id="singleCreateCollection" class="icon-action" type="button" title="新建收藏夹" aria-label="新建收藏夹"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button><button id="singleOpenCollection" class="secondary-button" type="button"><svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v10H4z"/></svg><span>打开输出目录</span></button></div>
                   <label><span>模型供应商</span><select id="singleProviderSelect"></select></label>
                   <label><span>模型</span><select id="singleModelSelect"></select></label>
                   <label><span>关键帧数量</span><input id="singleFrames" type="number" min="4" max="30" value="12" /></label>
                   <label><span>热评数量</span><input id="singleComments" type="number" min="0" max="3" value="3" /></label>
                 </div>
-                <label><span>指定输出目录</span><div class="path-picker"><input id="singleOutputDir" readonly placeholder="必须选择一个目录" /><button id="singleChooseOutput" class="secondary-button" type="button">选择目录</button></div></label>
                 <label><span>任务要求微调</span><textarea id="singleRequirements" rows="5" placeholder="例如：重点解释代码实现、保留所有关键参数、面向有前端经验的读者……"></textarea></label>
                 <label class="single-keep-cache"><input id="singleKeepVideoCache" class="app-checkbox" type="checkbox" /><span>处理完成后保留缓存视频到视频文件夹</span><small>默认关闭；开启后只清理音频等过渡缓存。</small></label>
                 <button id="singleStart" class="primary-button single-start-button" type="button" disabled title="请先在 AI 模型配置中启用至少一个模型">创建并开始处理</button>
