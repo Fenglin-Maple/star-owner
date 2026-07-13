@@ -51,6 +51,7 @@ Runtime modules:
 - `src/core/store.js`: SQLite-backed records and migrations.
 - `src/core/api-server.js`: Agent-only HTTP API and task lifecycle.
 - `src/core/collection-sync-service.js`: desktop-owned Bilibili collection synchronization and indexing.
+- `src/core/collection-state.js`: shared remote-folder, favorite-membership, immutable-storage, and dispatch-readiness rules.
 - `src/core/submission-artifacts.js`: shared final naming, relocation, and cached-video record updates.
 - `src/core/unavailable-task.js`: terminal unavailable-video removal, attempt cleanup, tombstones, and sync suppression.
 - `src/core/network-policy.js`: Bilibili URL, local API origin, and private-network policies.
@@ -158,15 +159,17 @@ The top-right profile popover is disabled while logged out. After login it lists
 
 Collection sync:
 
-1. Resolves the current Bilibili account and requested favorite folder.
-2. Reads the full video list through the official Bilibili web API.
-3. Upserts collection and video metadata into SQLite.
-4. Creates missing tasks and preserves existing task state and enable flags.
-5. Exports a compact app-owned synchronization snapshot.
-6. Emits transient page/record/progress events while Bilibili pages are being read and indexed.
-7. Emits one persisted completion activity after the full synchronization succeeds.
+1. Resolves the current Bilibili account and stable favorite-folder id. Display names are mutable; `storageName`, `mediaId`, and existing artifact roots are not changed by a remote rename.
+2. Persists a `collectionSyncTransactions` recovery record, marks the collection `syncing`, blocks external claims, immediately stops every internal queue Agent bound to that collection, aborts all current internal/external attempts, cleans attempt files, and invalidates their `workId` values.
+3. Reads every page of the remote video list before changing inventory. Partial pagination, HTTP errors, cancellation, process exit, and crash restore the previous complete collection snapshot and emit only a persisted rollback log entry.
+4. Applies the complete remote/local diff in one SQLite transaction. New videos become `pending`; current videos refresh metadata without resetting accepted artifacts; unavailable-video tombstones remain suppressed.
+5. A missing unfinished favorite task is removed from dispatch inventory and recorded in `removedFavoriteTasks`, so stale external requests receive `REMOVED_FROM_FAVORITES`. A missing `done` task keeps its artifact and `outputMarkdown`, becomes disabled/archived, and gains the `（已移出收藏夹）` display suffix.
+6. Folder discovery is authoritative for known Bilibili `mediaId` values. A missing remote folder gains `（已在B站删除的收藏夹）`, keeps only completed local artifacts, permanently blocks dispatch, and marks bound internal sessions collection-unavailable. A reappearing or renamed folder requires a successful full sync before restart.
+7. Successful sync leaves internal sessions stopped for explicit user restart and leaves external dispatch paused until the user reactivates that collection in Task Overview. It then writes a compact app-owned synchronization snapshot and one persisted completion activity.
 
 Task metadata includes BV id, title, UP owner, duration, cover, URL, favorite time, publish time, and collection ownership.
+
+RAG search, document listing, exact Markdown reads, and knowledge-image inspection expose favorite membership separately from the historical favorite-added date. Archived accepted documents remain usable in Document Library, Export, and RAG, while the model is told whether the item was removed or its source Bilibili folder was deleted.
 
 The Collections page shows loaded/total counts and a determinate progress bar. Progress events are not written to the activity table, which avoids hundreds of low-value log records during large-folder synchronization.
 

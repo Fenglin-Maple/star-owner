@@ -6,6 +6,7 @@ const MarkdownIt = require('markdown-it');
 const { buildAnalytics } = require('./core/analytics');
 const { ApiServer } = require('./core/api-server');
 const { BiliClient } = require('./core/bili');
+const { collectionBlockReason } = require('./core/collection-state');
 const { CollectionSyncService } = require('./core/collection-sync-service');
 const { DependencyManager } = require('./core/dependency-manager');
 const { secureMainWindow } = require('./core/desktop-security');
@@ -116,12 +117,6 @@ async function bootstrap() {
   });
   emitBootstrap('Preparing Bilibili session...', 0.52);
   bili = new BiliClient(biliSession);
-  collectionSyncService = new CollectionSyncService({
-    store,
-    bili,
-    getCurrentUser: () => currentUser,
-    onEvent: publishEvent
-  });
   emitBootstrap('Registering tool runner...', 0.66);
   toolRunner = new ToolRunner({
     store,
@@ -135,6 +130,14 @@ async function bootstrap() {
     bili,
     getCurrentUser: () => currentUser,
     emit: publishInternalAgentEvent
+  });
+  collectionSyncService = new CollectionSyncService({
+    store,
+    bili,
+    toolRunner,
+    internalAgentManager,
+    getCurrentUser: () => currentUser,
+    onEvent: publishEvent
   });
   videoCacheManager = new VideoCacheManager({
     store,
@@ -322,7 +325,9 @@ ipcMain.handle('bili:list-folders', async () => {
   assertBackendReady();
   if (!currentUser?.isLogin) currentUser = await bili.nav();
   if (!currentUser?.isLogin) throw new Error('Not logged in.');
-  return bili.listFolders(currentUser.mid);
+  const folders = await bili.listFolders(currentUser.mid);
+  await collectionSyncService.reconcileFolders(folders, currentUser);
+  return folders;
 });
 
 ipcMain.handle('store:snapshot', async () => {
@@ -348,7 +353,13 @@ ipcMain.handle('store:snapshot', async () => {
 
 ipcMain.handle('collections:set-active', async (_event, collectionId) => {
   assertBackendReady();
-  const collection = store.setActiveCollection(collectionId);
+  const current = store.getCollectionById(collectionId);
+  if (!current) throw new Error(`Collection not found: ${collectionId}`);
+  const reason = collectionBlockReason({ ...current, externalDispatchPaused: false }, { external: true });
+  if (reason) throw new Error(reason);
+  const collection = { ...current, externalDispatchPaused: false, externalActivatedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  store.upsertCollection(collection);
+  store.setActiveCollection(collection.id);
   publishEvent({ type: 'active-collection-changed', collectionId: collection.id, userName: collection.userName, collectionName: collection.name });
   return collection;
 });

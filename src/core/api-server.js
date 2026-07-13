@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { validateSubmission } = require('./validation');
 const { buildAnalytics } = require('./analytics');
+const { collectionBlockReason, collectionStorageName } = require('./collection-state');
 const { isAllowedApiOrigin } = require('./network-policy');
 const { finalizeSubmissionArtifacts, relocateCachedVideo } = require('./submission-artifacts');
 const { abortTaskAttempt, createWorkId } = require('./task-attempt');
@@ -112,10 +113,8 @@ class ApiServer {
         if (req.method === 'GET' && !action) {
           const task = this.store.getTask(taskId);
           if (!task) {
-            const unavailable = this.store.get('unavailableTasks', taskId);
-            return this.json(res, unavailable
-              ? { task: null, code: 'BILIBILI_VIDEO_UNAVAILABLE', unavailable, directive: { action: 'stop', message: 'This video was removed from inventory and will not be reassigned.' } }
-              : { task: null }, unavailable ? 410 : 404);
+            const missing = missingTaskError(this.store, taskId);
+            return this.json(res, apiErrorPayload(missing), Number(missing.statusCode || 404));
           }
           const collection = this.store.getCollectionById(task.collectionId);
           return this.json(res, { task: collection ? this.taskContext(task, collection) : task });
@@ -162,7 +161,7 @@ class ApiServer {
     const base = this.url();
     return {
       product: '星藏家',
-      protocolVersion: '2.4',
+      protocolVersion: '2.5',
       baseUrl: base,
       worker: worker ? this.publicWorker(worker) : null,
       activeCollection: this.store.getActiveCollection(),
@@ -171,6 +170,7 @@ class ApiServer {
         'A long-running agent keeps one workerId, while every successful claim returns a brand-new one-time workId.',
         'Every state-changing task request includes workerId and the workId returned by that specific claim.',
         'Read the desktop-selected active collection, then claim one task.',
+        'Collection synchronization has priority over Agent work. A syncing, deleted, not-yet-synced, or post-sync-paused collection cannot issue tasks.',
         'Use app-managed tool endpoints. Tool calls return HTTP 202 and may remain queued; poll the run until it reaches a terminal status.',
         'The app protects the task lease while one of its tool runs is queued or running. Clean cache and submit final artifacts after tools finish.',
         'If the attempt cannot continue, call the task abort endpoint with workerId, workId, and a concrete reason. The app removes the attempt and the next claim starts from scratch.'
@@ -279,6 +279,8 @@ class ApiServer {
     }
     const collection = this.store.getActiveCollection();
     if (!collection) throw new Error('No active collection. Select and activate one in the desktop task inventory.');
+    const collectionReason = collectionBlockReason(collection, { external: true });
+    if (collectionReason) throw collectionDispatchError(collection, collectionReason);
     if (body.collectionId && body.collectionId !== collection.id) {
       throw new Error('The desktop app owns task targeting. Remove collectionId or activate that collection in the task inventory.');
     }
@@ -292,7 +294,7 @@ class ApiServer {
     const now = new Date();
     const workspace = this.store.getDefaultWorkspace();
     if (!workspace) throw new Error('No default workspace is configured.');
-    const dirs = collectionDirs(workspace.root, collection.userName, collection.name);
+    const dirs = collectionDirs(workspace.root, collection.userName, collectionStorageName(collection));
     const canReuseArtifact = task.artifactDir && (task.cachedVideoId ? fs.existsSync(task.artifactDir) : task.workspaceId === workspace.id);
     const artifactDir = canReuseArtifact
       ? task.artifactDir
@@ -520,6 +522,7 @@ class ApiServer {
           ? '最终产物保存后仍调用 clean-cache；应用会保留缓存库中的合轨视频，只删除音频等过渡缓存。'
           : '最终产物保存后，通过 clean-cache 工具运行 API 删除临时视频和音频缓存。',
         authorization: '本次领取的 workId 是一次性工作凭证。心跳、工具运行/取消、提交和中止都必须同时提交 workerId 与 workId。不要自行生成或复用旧 workId。',
+        inventory: '收藏夹同步优先于 Agent 工作。任务被移出、收藏夹正在同步/未就绪/待重新激活或已在 B站删除时，必须按接口 directive 停止或等待，不得绕过库存状态继续工作。',
         interruption: `如果当前任务因错误、用户要求或其它原因无法继续，必须立即 POST ${this.url()}/api/tasks/${encodeURIComponent(task.id)}/abort 并提交 workerId、workId 与 reason。应用会取消工具、删除本次产物并将任务退回 pending；旧 workId 随即失效，不要自行保留断点或直接修改文件状态。`
       },
       abortUsage: `POST ${this.url()}/api/tasks/${encodeURIComponent(task.id)}/abort`,
@@ -639,11 +642,45 @@ function workIdRequiredError(task) {
 function missingTaskError(store, taskId) {
   const unavailable = store.get('unavailableTasks', String(taskId || ''));
   if (unavailable) return httpError(410, 'This Bilibili video was deleted, removed, or made unavailable. The task was permanently removed from inventory.', {
-    code: 'BILIBILI_VIDEO_UNAVAILABLE',
+      code: 'BILIBILI_VIDEO_UNAVAILABLE',
+      taskId,
+      unavailable: publicTombstone(unavailable),
+      directive: { action: 'stop', message: 'Do not retry this task. Request a new task with the same workerId.' }
+    });
+  const removed = store.get('removedFavoriteTasks', String(taskId || ''));
+  if (removed) return httpError(410, 'This video was removed from the synchronized Bilibili favorites collection. The unfinished task will not be reassigned.', {
+    code: 'REMOVED_FROM_FAVORITES',
     taskId,
-    directive: { action: 'stop', message: 'Do not retry this task. Request a new task with the same workerId.' }
+    removed: publicTombstone(removed),
+    directive: { action: 'claim-new-task', keepWorkerId: true, message: 'Stop this attempt and request a new task with the same workerId.' }
   });
   return httpError(404, `Task not found: ${taskId}`, { code: 'TASK_NOT_FOUND', taskId });
+}
+
+function publicTombstone(value = {}) {
+  return {
+    taskId: value.taskId || value.id || '',
+    collectionId: value.collectionId || '',
+    bvid: value.bvid || '',
+    title: value.title || '',
+    reason: value.reason || '',
+    source: value.source || '',
+    removedAt: value.removedAt || ''
+  };
+}
+
+function collectionDispatchError(collection, reason) {
+  let code = 'COLLECTION_NOT_READY';
+  let status = 423;
+  if (collection.biliDeleted) { code = 'BILIBILI_COLLECTION_DELETED'; status = 410; }
+  else if (collection.syncState === 'syncing') code = 'COLLECTION_SYNCING';
+  else if (collection.syncReady === false || (collection.syncReady === undefined && !collection.lastSyncedAt)) code = 'COLLECTION_NOT_READY';
+  else if (collection.externalDispatchPaused) code = 'COLLECTION_REACTIVATION_REQUIRED';
+  return httpError(status, reason, {
+    code,
+    collectionId: collection.id,
+    directive: { action: 'stop-and-wait-for-user', keepWorkerId: true, message: reason }
+  });
 }
 
 function workAttemptEndedError(task, workId) {

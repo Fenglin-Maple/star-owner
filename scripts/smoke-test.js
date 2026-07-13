@@ -153,6 +153,25 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   const activeResponse = await fetch(`${api.url()}/api/active-collection`);
   const active = await activeResponse.json();
   if (!activeResponse.ok || active.collection?.id !== 'c2') throw new Error('active collection API failed');
+  store.upsertCollection({ id: 'c-sync-guard', mediaId: 'sync-guard', name: 'Sync guard', userId: 'u1', userName: 'smoke-user', syncReady: false, syncState: 'needs-sync', externalDispatchPaused: true });
+  store.setActiveCollection('c-sync-guard');
+  const unsyncedClaimResponse = await fetch(`${api.url()}/api/tasks/claim`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ workerId: registration.workerId })
+  });
+  const unsyncedClaim = await unsyncedClaimResponse.json();
+  if (unsyncedClaimResponse.status !== 423 || unsyncedClaim.code !== 'COLLECTION_NOT_READY') throw new Error('external Agent bypassed an unsynchronized Bilibili collection');
+  store.upsertCollection({ ...store.getCollectionById('c-sync-guard'), syncReady: true, syncState: 'ready', lastSyncedAt: new Date().toISOString(), externalDispatchPaused: true });
+  const syncPausedClaimResponse = await fetch(`${api.url()}/api/tasks/claim`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ workerId: registration.workerId })
+  });
+  const syncPausedClaim = await syncPausedClaimResponse.json();
+  if (syncPausedClaimResponse.status !== 423 || syncPausedClaim.code !== 'COLLECTION_REACTIVATION_REQUIRED') throw new Error('external Agent bypassed post-sync manual reactivation');
+  store.set('removedFavoriteTasks', 'c-sync-guard:BVREMOVED', { id: 'c-sync-guard:BVREMOVED', taskId: 'c-sync-guard:BVREMOVED', bvid: 'BVREMOVED', removedAt: new Date().toISOString() });
+  store.commit();
+  const removedTaskResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent('c-sync-guard:BVREMOVED')}`);
+  const removedTask = await removedTaskResponse.json();
+  if (removedTaskResponse.status !== 410 || removedTask.code !== 'REMOVED_FROM_FAVORITES') throw new Error('removed favorite did not invalidate the old external work context');
+  store.setActiveCollection('c2');
   const claimResponse = await fetch(`${api.url()}/api/tasks/claim`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

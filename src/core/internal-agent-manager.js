@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { finalizeSubmissionArtifacts, relocateCachedVideo } = require('./submission-artifacts');
+const { collectionBlockReason, collectionStorageName } = require('./collection-state');
 const { promoteMindMap } = require('./markdown');
 const { isLoginRequiredMessage, isVideoUnavailableMessage, loginRequiredError } = require('./media-errors');
 const { abortTaskAttempt, createWorkId } = require('./task-attempt');
@@ -45,13 +46,18 @@ class InternalAgentManager {
     return {
       providers: this.ragAssistant.listProviders(),
       sessions: this.listSessions().map((session) => this.publicSession(session)),
-      collections: this.store.listCollections().map((collection) => ({
-        id: collection.id,
-        name: collection.name,
-        userName: collection.userName,
-        internal: collection.userId === INTERNAL_USER_ID || collection.internal === true,
-        ...this.collectionProgress(collection.id)
-      })),
+      collections: this.store.listCollections().map((collection) => {
+        const unavailableReason = collectionBlockReason(collection);
+        return {
+          id: collection.id,
+          name: collection.name,
+          userName: collection.userName,
+          internal: collection.userId === INTERNAL_USER_ID || collection.internal === true,
+          collectionAvailable: !unavailableReason,
+          collectionUnavailableReason: unavailableReason,
+          ...this.collectionProgress(collection.id)
+        };
+      }),
       internalCollections: this.listInternalCollections()
     };
   }
@@ -84,6 +90,7 @@ class InternalAgentManager {
       userId: INTERNAL_USER_ID,
       userName: INTERNAL_USER_NAME,
       name: collectionName,
+      storageName: collectionName,
       label: 'builtin',
       internal: true,
       workspaceId: workspace.id,
@@ -103,6 +110,8 @@ class InternalAgentManager {
     if (!(provider.enabledModels || []).some((model) => model.id === modelId)) throw new Error('请选择已启用的模型。');
     const collection = this.store.getCollectionById(String(input.collectionId || ''));
     if (!collection) throw new Error('请选择工作收藏夹。');
+    const collectionReason = collectionBlockReason(collection);
+    if (collectionReason) throw new Error(collectionReason);
     const worker = this.store.registerWorker({
       tool: 'star-owner-internal',
       model: modelId,
@@ -156,7 +165,7 @@ class InternalAgentManager {
     const collection = this.store.getCollectionById(String(input.collectionId || ''));
     if (!collection || !(collection.userId === INTERNAL_USER_ID || collection.internal === true)) throw new Error('请选择内置用户下的内置收藏夹。');
     const workspace = this.requireWorkspace();
-    const dirs = collectionDirs(workspace.root, INTERNAL_USER_NAME, collection.name);
+    const dirs = collectionDirs(workspace.root, INTERNAL_USER_NAME, collectionStorageName(collection));
     const now = new Date().toISOString();
     const taskId = `${collection.id}:${bvid}:single-${Date.now()}`;
     this.store.upsertTask({
@@ -198,7 +207,7 @@ class InternalAgentManager {
       throw new Error('请选择内置用户下的内置收藏夹。');
     }
     const workspace = this.requireWorkspace();
-    return collectionDirs(collection.workspaceRoot || workspace.root, INTERNAL_USER_NAME, collection.name).root;
+    return collectionDirs(collection.workspaceRoot || workspace.root, INTERNAL_USER_NAME, collectionStorageName(collection)).root;
   }
 
   sessionOutputDirectory(sessionId) {
@@ -212,6 +221,8 @@ class InternalAgentManager {
   async start(sessionId) {
     const session = this.requireSession(sessionId);
     if (this.running.has(session.id)) return this.publicSession(session);
+    const collectionAvailability = this.collectionAvailability(session);
+    if (!collectionAvailability.available) throw new Error(collectionAvailability.reason);
     const modelAvailability = this.modelAvailability(session);
     if (!modelAvailability.available) throw new Error(modelAvailability.reason);
     if (session.status === 'waiting-login') {
@@ -279,6 +290,55 @@ class InternalAgentManager {
     session.currentRunId = '';
     this.saveSession(session);
     return this.publicSession(session);
+  }
+
+  async stopCollectionForSync(collectionId, reason, source = 'collection-sync') {
+    const affected = [];
+    const running = [];
+    for (const session of this.listSessions().filter((item) => item.collectionId === String(collectionId || '') && item.mode !== 'single')) {
+      const message = String(reason || '收藏夹同步已中止该 Agent 工作流。');
+      if (this.running.has(session.id)) {
+        this.forcedStops.set(session.id, {
+          reason: message,
+          source,
+          status: 'stopped',
+          phase: '收藏夹同步已停止工作流，请手动重新开始'
+        });
+        running.push(this.running.get(session.id));
+      }
+      session.acceptNewTasks = false;
+      this.controllers.get(session.id)?.abort();
+      if (session.currentTaskId) {
+        try { this.abortAttempt(session.currentTaskId, session.workerId, message, source); }
+        catch (error) { session.lastError = `同步前任务清理失败：${error.message || String(error)}`; }
+      }
+      try { this.store.updateWorker(session.workerId, { status: 'paused', pauseReason: message, pausedAt: new Date().toISOString() }); } catch {}
+      session.status = 'stopped';
+      session.phase = '收藏夹同步已停止工作流，请手动重新开始';
+      session.currentTaskId = '';
+      session.currentRunId = '';
+      this.saveSession(session);
+      this.log(session, `${message} 同步完成后需要用户手动重新开始工作流。`);
+      affected.push(session.id);
+    }
+    if (running.length) await Promise.allSettled(running);
+    return affected;
+  }
+
+  markCollectionUnavailable(collectionId, reason) {
+    const affected = [];
+    for (const session of this.listSessions().filter((item) => item.collectionId === String(collectionId || '') && item.mode !== 'single')) {
+      session.acceptNewTasks = false;
+      session.status = 'collection-unavailable';
+      session.phase = String(reason || 'B站收藏夹已删除，任务不可用。');
+      session.currentTaskId = '';
+      session.currentRunId = '';
+      try { this.store.updateWorker(session.workerId, { status: 'paused', pauseReason: session.phase, pausedAt: new Date().toISOString() }); } catch {}
+      this.saveSession(session);
+      this.log(session, session.phase);
+      affected.push(session.id);
+    }
+    return affected;
   }
 
   deleteSession(sessionId) {
@@ -477,6 +537,8 @@ class InternalAgentManager {
   claimNextTask(session, excluded) {
     const collection = this.store.getCollectionById(session.collectionId);
     if (!collection) throw new Error('工作收藏夹已不存在。');
+    const collectionReason = collectionBlockReason(collection);
+    if (collectionReason) throw new Error(collectionReason);
     this.reclaimExpired(collection.id);
     const task = this.store.listTasks({ collectionId: collection.id }).find((item) => {
       if (excluded.has(item.id) || item.enabled === false) return false;
@@ -485,7 +547,7 @@ class InternalAgentManager {
     });
     if (!task) return null;
     const workspace = this.requireWorkspace();
-    const dirs = collectionDirs(workspace.root, collection.userName, collection.name);
+    const dirs = collectionDirs(workspace.root, collection.userName, collectionStorageName(collection));
     const canReuse = task.artifactDir && (task.cachedVideoId ? fs.existsSync(task.artifactDir) : task.workspaceId === workspace.id);
     const artifactDir = canReuse ? task.artifactDir : videoArtifactDir(dirs.videos, task, collection, this.store.getFilenameMetadata());
     ensureDir(artifactDir);
@@ -923,10 +985,13 @@ class InternalAgentManager {
   publicSession(session) {
     const task = session.currentTaskId ? this.store.getTask(session.currentTaskId) : null;
     const modelAvailability = this.modelAvailability(session);
+    const collectionAvailability = this.collectionAvailability(session);
     return {
       ...session,
       modelAvailable: modelAvailability.available,
       modelUnavailableReason: modelAvailability.reason,
+      collectionAvailable: collectionAvailability.available,
+      collectionUnavailableReason: collectionAvailability.reason,
       collectionProgress: this.collectionProgress(session.collectionId),
       currentTask: task ? { id: task.id, bvid: task.bvid, title: task.title, duration: task.duration, artifactDir: task.artifactDir } : null
     };
@@ -938,6 +1003,13 @@ class InternalAgentManager {
     const enabled = (provider.enabledModels || []).some((model) => model.id === session.modelId);
     if (!enabled) return { available: false, reason: `AI 模型配置不可用：${provider.name || session.providerId} 中的模型 ${session.modelId} 已被删除或停用。` };
     return { available: true, reason: '' };
+  }
+
+  collectionAvailability(session) {
+    const collection = this.store.getCollectionById(String(session.collectionId || ''));
+    if (!collection) return { available: false, reason: '工作收藏夹已不存在。' };
+    const reason = collectionBlockReason(collection);
+    return { available: !reason, reason };
   }
 
   collectionProgress(collectionId) {

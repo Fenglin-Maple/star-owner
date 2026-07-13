@@ -6,6 +6,7 @@ const { pathToFileURL } = require('url');
 const MarkdownIt = require('markdown-it');
 const pdf = require('pdf-parse');
 const mammoth = require('mammoth');
+const { favoriteStatus } = require('./collection-state');
 const { isPrivateNetworkHost, parseHttpUrl } = require('./network-policy');
 
 const TEXT_EXTENSIONS = new Set([
@@ -508,6 +509,7 @@ class RagAssistant {
       'Use knowledge_search before making claims about selected local libraries. Cite the source title and collection in the answer. Never fabricate missing facts.',
       model.supportsTools ? 'You can inspect selected knowledge without summarization: use knowledge_list_documents to discover document ids, knowledge_read_document to read the exact original Markdown in line ranges, and knowledge_view_images to inspect original local images when vision is enabled.' : '',
       model.supportsTools ? 'Knowledge document metadata includes both the Bilibili publish date and the date when the user added the video to favorites. Preserve the distinction and use these fields when the user asks about chronology or freshness.' : '',
+      model.supportsTools ? 'Knowledge metadata also states whether a completed document is still in Bilibili favorites, was removed from the favorites folder, or belongs to a Bilibili folder that was deleted. Archived documents remain valid knowledge; never describe an archived item as currently favorited.' : '',
       model.supportsTools && model.supportsVision ? 'When an inspected knowledge image is useful to the user, include the exact star-rag-image URI returned by knowledge_view_images in Markdown image syntax so the desktop app can display it. Do not claim that only an index is available.' : '',
       `Your working sandbox is: ${session.sandboxDir}`,
       session.permissionMode === 'full' ? 'The user enabled full filesystem and command access.' : 'You have restricted access. Operations outside the sandbox or command execution require explicit user approval.',
@@ -706,15 +708,17 @@ class RagAssistant {
     for (const task of tasks) {
       const chunks = this.documentChunks(task.outputMarkdown);
       for (const chunk of chunks) {
-        const haystack = `${task.title || ''}\n${task.owner || ''}\n${task.publishedAt || ''}\n${task.favoriteAddedAt || ''}\n${chunk}`.toLowerCase();
+        const collection = collections.get(task.collectionId);
+        const membership = knowledgeFavoriteMetadata(task, collection);
+        const haystack = `${task.title || ''}\n${task.owner || ''}\n${task.publishedAt || ''}\n${task.favoriteAddedAt || ''}\n${membership}\n${chunk}`.toLowerCase();
         const score = terms.reduce((sum, term) => sum + countOccurrences(haystack, term), 0) + (terms.some((term) => String(task.title || '').toLowerCase().includes(term)) ? 6 : 0);
-        if (score > 0 || !terms.length) scored.push({ score, task, chunk, collection: collections.get(task.collectionId) });
+        if (score > 0 || !terms.length) scored.push({ score, task, chunk, collection });
       }
     }
     const wanted = Math.max(1, Math.min(20, Number(limit) || 8));
     const results = scored.sort((a, b) => b.score - a.score).slice(0, wanted);
     if (!results.length) return `No matching passages found across ${tasks.length} selected documents.`;
-    return results.map((item, index) => `[#${index + 1}] Document ID: ${item.task.id}\nUser: ${item.collection?.userName || '-'} | Collection: ${item.collection?.name || '-'} | Title: ${item.task.title || item.task.bvid}\nBVID: ${item.task.bvid || '-'} | UP: ${item.task.owner || '-'}\nPublished at: ${item.task.publishedAt || '-'}\nFavorited at: ${item.task.favoriteAddedAt || '-'}\n${item.chunk}`).join('\n\n---\n\n');
+    return results.map((item, index) => `[#${index + 1}] Document ID: ${item.task.id}\nUser: ${item.collection?.userName || '-'} | Collection: ${item.collection?.name || '-'} | Title: ${item.task.title || item.task.bvid}\nBVID: ${item.task.bvid || '-'} | UP: ${item.task.owner || '-'}\nPublished at: ${item.task.publishedAt || '-'}\nFavorited at: ${item.task.favoriteAddedAt || '-'}\n${knowledgeFavoriteMetadata(item.task, item.collection)}\n${item.chunk}`).join('\n\n---\n\n');
   }
 
   listKnowledgeDocuments(session, query = '', offset = 0, limit = 50) {
@@ -723,7 +727,7 @@ class RagAssistant {
     const all = this.knowledgeTasks(session).filter((task) => {
       if (!terms.length) return true;
       const collection = collections.get(task.collectionId);
-      const value = `${task.id} ${task.bvid || ''} ${task.title || ''} ${task.owner || ''} ${task.publishedAt || ''} ${task.favoriteAddedAt || ''} ${collection?.name || ''}`.toLowerCase();
+      const value = `${task.id} ${task.bvid || ''} ${task.title || ''} ${task.owner || ''} ${task.publishedAt || ''} ${task.favoriteAddedAt || ''} ${collection?.name || ''} ${knowledgeFavoriteMetadata(task, collection)}`.toLowerCase();
       return terms.every((term) => value.includes(term));
     });
     const start = Math.max(0, Number(offset) || 0);
@@ -731,13 +735,14 @@ class RagAssistant {
     const page = all.slice(start, start + count);
     const rows = page.map((task, index) => {
       const collection = collections.get(task.collectionId);
-      return `[${start + index + 1}] Document ID: ${task.id}\nTitle: ${task.title || task.bvid} | BVID: ${task.bvid || '-'} | UP: ${task.owner || '-'}\nUser: ${collection?.userName || '-'} | Collection: ${collection?.name || '-'}\nPublished at: ${task.publishedAt || '-'} | Favorited at: ${task.favoriteAddedAt || '-'}`;
+      return `[${start + index + 1}] Document ID: ${task.id}\nTitle: ${task.title || task.bvid} | BVID: ${task.bvid || '-'} | UP: ${task.owner || '-'}\nUser: ${collection?.userName || '-'} | Collection: ${collection?.name || '-'}\nPublished at: ${task.publishedAt || '-'} | Favorited at: ${task.favoriteAddedAt || '-'}\n${knowledgeFavoriteMetadata(task, collection)}`;
     });
     return `Selected documents: ${all.length}. Showing ${page.length} from offset ${start}.\n\n${rows.join('\n\n') || 'No matching documents.'}`;
   }
 
   readKnowledgeDocument(session, documentId, startLine = 1, lineCount = 300) {
     const task = this.requireKnowledgeDocument(session, documentId);
+    const collection = this.store.getCollectionById(task.collectionId);
     const source = fs.readFileSync(task.outputMarkdown, 'utf8');
     const lines = source.match(/[^\n]*\n|[^\n]+$/g) || [];
     const start = Math.max(1, Number(startLine) || 1);
@@ -754,6 +759,7 @@ class RagAssistant {
       `UP: ${task.owner || '-'}`,
       `Published at: ${task.publishedAt || '-'}`,
       `Favorited at: ${task.favoriteAddedAt || '-'}`,
+      knowledgeFavoriteMetadata(task, collection),
       `Exact original Markdown lines ${start}-${end} of ${lines.length}.`,
       next ? `next_start_line: ${next}` : 'End of document.',
       '\n--- RAW MARKDOWN START ---\n',
@@ -765,6 +771,7 @@ class RagAssistant {
   viewKnowledgeImages(session, model, documentId, imageIndices = []) {
     if (!model.supportsVision) throw new Error('The selected model is not configured for vision input.');
     const task = this.requireKnowledgeDocument(session, documentId);
+    const collection = this.store.getCollectionById(task.collectionId);
     const images = this.knowledgeDocumentImages(task);
     if (!images.length) return 'This Markdown document has no readable local images.';
     const requested = Array.isArray(imageIndices) && imageIndices.length ? imageIndices : images.slice(0, 4).map((_, index) => index + 1);
@@ -775,6 +782,7 @@ class RagAssistant {
       text: [
         `Loaded ${selected.length} original image(s) from document ${task.id} (${task.title || task.bvid}) into the multimodal request.`,
         `Published at: ${task.publishedAt || '-'} | Favorited at: ${task.favoriteAddedAt || '-'}`,
+        knowledgeFavoriteMetadata(task, collection),
         `The document contains ${images.length} readable local image(s).`,
         ...selected.map((item) => `[Image ${item.index}] ${item.alt || item.name}\nDisplay URI: ${item.uri}`),
         'Inspect the pixels directly. To show an image to the user, copy its Display URI exactly into Markdown image syntax: ![description](Display URI)'
@@ -1337,6 +1345,13 @@ function prefixLengthForTokenBudget(text, budgetTokens) {
     else high = middle - 1;
   }
   return Math.max(1, low);
+}
+
+function knowledgeFavoriteMetadata(task, collection) {
+  const status = favoriteStatus(task, collection || {});
+  const statusAt = status.at ? ` | Status changed at: ${status.at}` : '';
+  const collectionState = collection?.biliDeleted ? 'Deleted on Bilibili; completed local artifacts are retained.' : 'Available locally.';
+  return `Favorite membership status: ${status.label} (${status.code})${statusAt}\nCollection remote status: ${collectionState}`;
 }
 
 function queryTerms(query) {

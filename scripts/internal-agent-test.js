@@ -209,6 +209,18 @@ function assert(condition, message) {
   assert(modelRestored.modelAvailable === true && modelRestored.status === 'stopped', 'restored model did not make the Agent restartable');
   assert(manager.listSessions()[0].id === modelSession.id, 'Agent sessions were not ordered by newest creation time');
   assert(Number.isFinite(modelRestored.collectionProgress?.progress) && modelRestored.collectionProgress.enabled >= modelRestored.collectionProgress.done, 'collection progress was not included in Agent state');
+  const biliCollection = store.upsertCollection({
+    id: '100:agent-sync-guard', mediaId: 'agent-sync-guard', userId: '100', userName: '测试用户', name: '同步护栏测试',
+    storageName: '同步护栏测试', syncReady: true, syncState: 'ready', lastSyncedAt: new Date().toISOString()
+  });
+  const guardedSession = manager.createSession({ title: '同步护栏', collectionId: biliCollection.id, providerId: 'provider-test', modelId: 'model-test' });
+  store.upsertCollection({ ...store.getCollectionById(biliCollection.id), syncReady: false, syncState: 'needs-sync' });
+  let syncGuarded = false;
+  try { await manager.start(guardedSession.id); } catch (error) { syncGuarded = error.message.includes('尚未完成任务同步'); }
+  assert(syncGuarded, 'internal Agent restarted before its Bilibili collection completed synchronization');
+  store.upsertCollection({ ...store.getCollectionById(biliCollection.id), syncReady: false, syncState: 'deleted', biliDeleted: true });
+  const guardedPublic = manager.publicSession(manager.listSessions().find((item) => item.id === guardedSession.id));
+  assert(guardedPublic.collectionAvailable === false && guardedPublic.collectionUnavailableReason.includes('B站收藏夹已删除'), 'deleted collection was not exposed as unavailable to the internal Agent UI');
   holdToolRuns = false;
   manager.shutdown();
   fs.rmSync(root, { recursive: true, force: true });

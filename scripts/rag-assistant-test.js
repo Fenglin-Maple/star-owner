@@ -180,6 +180,13 @@ async function startFakeProvider() {
     const exactDocument = assistant.readKnowledgeDocument(assistant.requireSession(session.id), 'rag-task', 1, 20);
     assert(exactDocument.includes('RAG 助手可以检索收藏夹中的 Markdown 内容。'), 'exact original Markdown could not be read');
     assert(exactDocument.includes('Published at: 2026-06-18T08:00:00.000Z') && exactDocument.includes('Favorited at: 2026-06-20T09:30:00.000Z'), 'exact document metadata omitted publish/favorite dates');
+    store.upsertTask({ ...store.getTask('rag-task'), title: '星藏家测试文档（已移出收藏夹）', sourceTitle: '星藏家测试文档', favoriteState: 'removed', removedFromFavorites: true, removedFromFavoritesAt: '2026-07-01T00:00:00.000Z' });
+    store.commit();
+    const archivedDocument = assistant.listKnowledgeDocuments(assistant.requireSession(session.id));
+    assert(archivedDocument.includes('已移出B站收藏夹 (removed)') && archivedDocument.includes('Status changed at: 2026-07-01T00:00:00.000Z'), 'RAG document index omitted removed-favorite status');
+    store.upsertCollection({ ...store.getCollectionById('rag-collection'), name: 'AI 收藏夹（已在B站删除的收藏夹）', biliDeleted: true, biliDeletedAt: '2026-07-02T00:00:00.000Z' });
+    const deletedCollectionDocument = assistant.readKnowledgeDocument(assistant.requireSession(session.id), 'rag-task', 1, 20);
+    assert(deletedCollectionDocument.includes('B站收藏夹已删除 (collection-deleted)') && deletedCollectionDocument.includes('completed local artifacts are retained'), 'RAG exact read omitted deleted-collection archive status');
     const imageReply = await assistant.send(session.id, { content: 'IMAGE_TEST' });
     assert(imageReply.toolEvents[0]?.name === 'knowledge_view_images' && imageReply.toolEvents[0]?.images?.length === 1, 'knowledge image tool did not expose a displayable original image');
     const imageRequest = [...fake.requests].reverse().find((item) => item.messages?.some((message) => Array.isArray(message.content) && message.content.some((part) => part.type === 'image_url')));

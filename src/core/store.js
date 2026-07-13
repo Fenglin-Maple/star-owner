@@ -52,6 +52,28 @@ class Store {
     writeFileRecoverable(this.file, Buffer.from(this.db.export()));
   }
 
+  transaction(callback) {
+    const before = Buffer.from(this.db.export());
+    this.db.run('BEGIN IMMEDIATE TRANSACTION');
+    try {
+      const result = callback();
+      if (result && typeof result.then === 'function') throw new Error('Store.transaction callback must be synchronous.');
+      this.db.run('COMMIT');
+      try {
+        this.save();
+      } catch (error) {
+        this.db.close();
+        this.db = new this.SQL.Database(before);
+        this.save();
+        throw error;
+      }
+      return result;
+    } catch (error) {
+      try { this.db.run('ROLLBACK'); } catch {}
+      throw error;
+    }
+  }
+
   set(scope, id, value) {
     const updatedAt = new Date().toISOString();
     const stmt = this.db.prepare('INSERT OR REPLACE INTO kv(scope, id, data, updated_at) VALUES (?, ?, ?, ?)');

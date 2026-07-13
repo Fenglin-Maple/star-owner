@@ -1231,6 +1231,7 @@ function renderSyncProgress(event = {}) {
   if (!syncProgress) return;
   const progress = Math.max(0, Math.min(1, Number(event.progress || 0)));
   const stages = {
+    resolving: '\u6b63\u5728\u9501\u5b9a\u6536\u85cf\u5939\u5e76\u505c\u6b62\u76f8\u5173 Agent \u5de5\u4f5c\u6d41',
     fetching: '\u6b63\u5728\u8bfb\u53d6\u6536\u85cf\u89c6\u9891',
     indexing: '\u6b63\u5728\u5efa\u7acb\u4efb\u52a1\u7d22\u5f15',
     done: '\u6536\u85cf\u5939\u540c\u6b65\u5b8c\u6210',
@@ -1248,6 +1249,11 @@ function renderSyncProgress(event = {}) {
 function humanizeEvent(type) {
   const labels = {
     'collection-synced': '\u6536\u85cf\u5939\u5df2\u540c\u6b65',
+    'collection-sync-rolled-back': '\u6536\u85cf\u5939\u540c\u6b65\u5df2\u56de\u6eda',
+    'collection-workflows-stopped-for-sync': '\u6536\u85cf\u5939\u76f8\u5173 Agent \u5de5\u4f5c\u6d41\u5df2\u505c\u6b62',
+    'collection-deleted-on-bilibili': 'B\u7ad9\u6536\u85cf\u5939\u5df2\u5220\u9664\uff0c\u672c\u5730\u4ea7\u7269\u5df2\u4fdd\u7559',
+    'collection-renamed-needs-sync': 'B\u7ad9\u6536\u85cf\u5939\u5df2\u6539\u540d\uff0c\u7b49\u5f85\u540c\u6b65',
+    'collection-restored-needs-sync': 'B\u7ad9\u6536\u85cf\u5939\u91cd\u65b0\u51fa\u73b0\uff0c\u7b49\u5f85\u540c\u6b65',
     'task-claimed': '\u4efb\u52a1\u5df2\u9886\u53d6',
     'task-completed': '\u4efb\u52a1\u5df2\u5b8c\u6210',
     'task-failed': '\u4efb\u52a1\u5904\u7406\u5931\u8d25',
@@ -1419,11 +1425,14 @@ function renderActiveCollection(viewedCollection) {
   const button = document.querySelector('#activateCollection');
   const bar = document.querySelector('.task-target-bar');
   if (label) label.textContent = active ? `${active.userName || '-'} / ${active.name}` : TEXT.noActiveCollection;
-  bar?.classList.toggle('has-active-target', Boolean(active));
+  bar?.classList.toggle('has-active-target', Boolean(active && !active.externalDispatchPaused && !active.biliDeleted));
   const isViewedActive = Boolean(active && viewedCollection && active.id === viewedCollection.id);
+  const unavailable = Boolean(viewedCollection && (viewedCollection.biliDeleted || viewedCollection.syncState === 'syncing' || viewedCollection.syncReady === false));
+  const needsReactivation = Boolean(isViewedActive && active.externalDispatchPaused && !unavailable);
   if (button) {
-    button.disabled = !viewedCollection || isViewedActive;
-    button.textContent = isViewedActive ? '\u5916\u90e8Agent\u4efb\u52a1\u8303\u56f4\u5df2\u6fc0\u6d3b\uff08\u89c6\u9891\u603b\u7ed3\uff09' : TEXT.activateCollection;
+    button.disabled = !viewedCollection || unavailable || (isViewedActive && !needsReactivation);
+    button.textContent = needsReactivation ? '\u91cd\u65b0\u6fc0\u6d3b\u5916\u90e8Agent\u4efb\u52a1\u8303\u56f4\uff08\u89c6\u9891\u603b\u7ed3\uff09' : (isViewedActive ? '\u5916\u90e8Agent\u4efb\u52a1\u8303\u56f4\u5df2\u6fc0\u6d3b\uff08\u89c6\u9891\u603b\u7ed3\uff09' : TEXT.activateCollection);
+    button.title = unavailable ? (viewedCollection.biliDeleted ? 'B\u7ad9\u6536\u85cf\u5939\u5df2\u5220\u9664\uff0c\u4e0d\u80fd\u6d3e\u53d1\u4efb\u52a1' : '\u8bf7\u5148\u5b8c\u6210\u8be5\u6536\u85cf\u5939\u7684\u4efb\u52a1\u540c\u6b65') : '';
   }
 }
 
@@ -1848,7 +1857,11 @@ function renderDocumentList() {
     row.type = 'button';
     row.dataset.documentId = task.id;
     const cover = task.displayCover || task.cover || '';
-    row.innerHTML = `${cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy" />` : '<span class="document-cover-placeholder"></span>'}<span class="document-row-copy"><strong>${escapeHtml(task.title || task.bvid)}</strong><small>${escapeHtml(task.bvid)} / ${escapeHtml(task.owner || TEXT.unknownUp)} / ${escapeHtml(formatSeconds(task.duration))}</small><em>\u6536\u85cf ${escapeHtml(formatDateTime(task.favoriteAddedAt))} / \u53d1\u5e03 ${escapeHtml(formatDateTime(task.publishedAt))}</em></span>`;
+    const collection = (lastSnapshot.collections || []).find((item) => item.id === task.collectionId);
+    const favoriteStatus = collection?.biliDeleted || task.favoriteState === 'collection-deleted'
+      ? ' / \u6536\u85cf\u72b6\u6001\uff1aB\u7ad9\u6536\u85cf\u5939\u5df2\u5220\u9664'
+      : (task.removedFromFavorites || task.favoriteState === 'removed' ? ' / \u6536\u85cf\u72b6\u6001\uff1a\u5df2\u79fb\u51fa\u6536\u85cf\u5939' : '');
+    row.innerHTML = `${cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy" />` : '<span class="document-cover-placeholder"></span>'}<span class="document-row-copy"><strong>${escapeHtml(task.title || task.bvid)}</strong><small>${escapeHtml(task.bvid)} / ${escapeHtml(task.owner || TEXT.unknownUp)} / ${escapeHtml(formatSeconds(task.duration))}</small><em>\u6536\u85cf ${escapeHtml(formatDateTime(task.favoriteAddedAt))} / \u53d1\u5e03 ${escapeHtml(formatDateTime(task.publishedAt))}${favoriteStatus}</em></span>`;
     row.addEventListener('click', () => selectDocument(task.id));
     documentList.appendChild(row);
   }
@@ -2545,15 +2558,21 @@ document.querySelector('#syncCollection').addEventListener('click', async () => 
   collectionSyncInFlight = true;
   updateSyncCollectionState();
   try {
-    const collectionName = folderSelect.value;
+    const selectedOption = folderSelect.selectedOptions?.[0];
+    const collectionName = selectedOption?.dataset.folderId || folderSelect.value;
+    const collectionLabel = folderSelect.value;
     const label = labelInput.value.trim() || 'bili';
     renderSyncProgress({ stage: 'fetching', progress: 0, loaded: 0 });
-    collectionOutput.textContent = `\u6b63\u5728\u540c\u6b65 ${collectionName}...`;
+    collectionOutput.textContent = `\u6b63\u5728\u540c\u6b65 ${collectionLabel}...`;
     const result = await window.orchestrator.syncCollection({ collectionName, label });
     collectionOutput.textContent = JSON.stringify(result, null, 2);
     await refreshSnapshot();
     await refreshProfileFolders({ force: true });
-    showToast(TEXT.toastSuccess, `\u5df2\u540c\u6b65 ${collectionName || '-'}\uff1a${result.count || result.tasks || result.taskCount || 0} \u4e2a\u4efb\u52a1`, 'success');
+    const summary = result.summary || {};
+    const detail = result.deleted
+      ? '\u8be5 B\u7ad9\u6536\u85cf\u5939\u5df2\u5220\u9664\uff0c\u672c\u5730\u5df2\u5b8c\u6210\u4ea7\u7269\u4ecd\u4fdd\u7559\u53ef\u7528\u3002'
+      : `\u65b0\u589e ${Number(summary.added || 0)} \u00b7 \u66f4\u65b0 ${Number(summary.updated || 0)} \u00b7 \u5df2\u79fb\u51fa ${Number(summary.removed || 0)} \u00b7 \u4fdd\u7559\u4ea7\u7269 ${Number(summary.archived || 0)}`;
+    showToast(TEXT.toastSuccess, `\u5df2\u540c\u6b65 ${result.collection?.name || collectionLabel || '-'}\uff1a${detail}`, 'success');
   } catch (error) {
     renderSyncProgress({ stage: 'error', progress: 1 });
     collectionOutput.textContent = error.message || String(error);
@@ -2690,7 +2709,8 @@ function updatePromptTemplate() {
 11. Markdown \u5f00\u5934\u5fc5\u987b\u6309\u300c\u5c0f\u7ed3 -> \u601d\u7ef4\u5bfc\u56fe -> \u76ee\u5f55\u300d\u6392\u5217\uff1b\u601d\u7ef4\u5bfc\u56fe\u4f7f\u7528\u53ef\u6e32\u67d3\u7684 Mermaid fenced code block\u3002\u6b63\u6587\u8981\u4fe1\u606f\u5b8c\u6574\uff0c\u4fdd\u7559\u4e8b\u5b9e\u3001\u6b65\u9aa4\u3001\u4ee3\u7801/\u53c2\u6570\u3001\u6848\u4f8b\u3001\u56e0\u679c\u3001\u524d\u63d0\u4e0e\u5c40\u9650\u3002
 12. \u5b9e\u8d28\u7ae0\u8282\u9644 Bilibili \u65f6\u95f4\u8f74\u8d85\u94fe\u63a5\uff1b\u5206 P \u89c6\u9891\u6807\u660e\u6240\u5c5e P\u3002\u6587\u6863\u8fd8\u8981\u6709\u5143\u6570\u636e\u3001\u5173\u952e\u5e27\u3001\u5b57\u5e55\u6bd4\u5bf9\u3001\u70ed\u8bc4\u524d\u4e09\u6761\u5206\u6790\u548c\u5904\u7406\u8bb0\u5f55\uff0c\u7981\u6b62\u5e7b\u89c9\u8865\u5168\u3002
 13. \u786e\u8ba4 Markdown\u3001info.json\u3001\u56fe\u7247\u548c\u8f85\u52a9\u4ea7\u7269\u5b8c\u6574\u540e\uff0c\u901a\u8fc7 clean-cache \u5220\u9664\u4e34\u65f6\u97f3\u89c6\u9891\uff0c\u4e0d\u8981\u5220\u9664\u6700\u7ec8\u6587\u6863\u3001\u56fe\u7247\u3001\u5b57\u5e55\u3001\u8bc4\u8bba\u6216\u5143\u6570\u636e\u3002
-14. POST /api/tasks/<taskId>/submit \u63d0\u4ea4\uff0cbody \u5fc5\u987b\u5e26 workerId\u3001workId \u548c\u4ea7\u7269\u8def\u5f84\u3002\u88ab\u6253\u56de\u65f6\u6309 errors \u4fee\u590d\u5e76\u91cd\u65b0\u63d0\u4ea4\u3002\u5982\u679c\u56e0\u9519\u8bef\u3001\u7528\u6237\u8981\u6c42\u6216\u5176\u5b83\u539f\u56e0\u65e0\u6cd5\u7ee7\u7eed\uff0c\u5fc5\u987b\u7acb\u5373 POST /api/tasks/<taskId>/abort\uff0cbody \u5e26 workerId\u3001workId \u548c\u53ef\u64cd\u4f5c\u7684 reason\u3002\u5e94\u7528\u4f1a\u53d6\u6d88\u5de5\u5177\u3001\u5220\u9664\u672c\u6b21\u7f13\u5b58\u5e76\u5c06\u4efb\u52a1\u9000\u56de pending\uff1b\u65e7 workId \u7acb\u5373\u5931\u6548\uff0c\u4e0b\u6b21\u4ece\u5934\u5f00\u59cb\u3002`;
+14. POST /api/tasks/<taskId>/submit \u63d0\u4ea4\uff0cbody \u5fc5\u987b\u5e26 workerId\u3001workId \u548c\u4ea7\u7269\u8def\u5f84\u3002\u88ab\u6253\u56de\u65f6\u6309 errors \u4fee\u590d\u5e76\u91cd\u65b0\u63d0\u4ea4\u3002\u5982\u679c\u56e0\u9519\u8bef\u3001\u7528\u6237\u8981\u6c42\u6216\u5176\u5b83\u539f\u56e0\u65e0\u6cd5\u7ee7\u7eed\uff0c\u5fc5\u987b\u7acb\u5373 POST /api/tasks/<taskId>/abort\uff0cbody \u5e26 workerId\u3001workId \u548c\u53ef\u64cd\u4f5c\u7684 reason\u3002\u5e94\u7528\u4f1a\u53d6\u6d88\u5de5\u5177\u3001\u5220\u9664\u672c\u6b21\u7f13\u5b58\u5e76\u5c06\u4efb\u52a1\u9000\u56de pending\uff1b\u65e7 workId \u7acb\u5373\u5931\u6548\uff0c\u4e0b\u6b21\u4ece\u5934\u5f00\u59cb\u3002
+15. \u6536\u85cf\u5939\u540c\u6b65\u4f18\u5148\u4e8e Agent \u5de5\u4f5c\u3002\u6536\u5230 REMOVED_FROM_FAVORITES \u65f6\u653e\u5f03\u65e7\u4efb\u52a1\uff1b\u6536\u5230 COLLECTION_SYNCING\u3001COLLECTION_NOT_READY \u6216 COLLECTION_REACTIVATION_REQUIRED \u65f6\u505c\u6b62\u9886\u5355\u5e76\u7b49\u5f85\u7528\u6237\uff1bBILIBILI_COLLECTION_DELETED \u8868\u793a\u8be5\u6536\u85cf\u5939\u4e0d\u518d\u63d0\u4f9b\u4efb\u52a1\u3002`;
 }
 
 function buildApiDocs(apiUrl) {

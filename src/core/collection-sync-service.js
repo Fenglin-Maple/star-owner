@@ -1,143 +1,540 @@
 const fs = require('fs');
 const path = require('path');
+const {
+  collectionSourceName,
+  collectionStorageName,
+  deletedCollectionName,
+  isBiliCollection,
+  removedFavoriteTitle,
+  taskSourceTitle
+} = require('./collection-state');
 const { isVideoUnavailableMessage } = require('./media-errors');
+const { abortTaskAttempt, cleanupAttemptFiles } = require('./task-attempt');
+const { isUnavailableTask } = require('./unavailable-task');
 const { collectionDirs, ensureDir, timestampForFile } = require('./workspace');
-const { isUnavailableTask, removeUnavailableTask } = require('./unavailable-task');
 
 class CollectionSyncService {
-  constructor({ store, bili, getCurrentUser, onEvent }) {
+  constructor({ store, bili, getCurrentUser, toolRunner = null, internalAgentManager = null, onEvent }) {
     this.store = store;
     this.bili = bili;
     this.getCurrentUser = getCurrentUser;
+    this.toolRunner = toolRunner;
+    this.internalAgentManager = internalAgentManager;
     this.onEvent = onEvent || (() => {});
     this.active = new Set();
+    this.recoverInterruptedSyncs();
+    this.recoverTombstoneCleanups();
   }
 
   async sync(input = {}) {
     const currentUser = this.getCurrentUser();
     if (!currentUser?.isLogin) throw new Error('Not logged in to Bilibili in the desktop app.');
-    const identifier = String(input.collectionName || '').trim();
-    if (!identifier) throw new Error('collectionName is required.');
+    const identifier = String(input.collectionName || input.collectionId || '').trim();
+    if (!identifier) throw new Error('collectionName or collectionId is required.');
     const key = `${currentUser.mid}:${identifier}`;
     if (this.active.has(key)) throw new Error('This collection is already being synchronized.');
     this.active.add(key);
-    try { return await this.runSync({ ...input, collectionName: identifier }, currentUser); }
+    try { return await this.runSync({ ...input, identifier }, currentUser); }
     finally { this.active.delete(key); }
   }
 
-  async runSync({ collectionName, label = 'bili' }, currentUser) {
-    const identifier = collectionName;
-    const folders = await this.bili.listFolders(currentUser.mid);
-    const wanted = folders.find((folder) => folder.name === identifier || folder.id === identifier);
-    if (!wanted) throw new Error(`Collection not found: ${identifier}`);
+  async runSync({ identifier, label = 'bili' }, currentUser) {
     const workspace = this.store.getDefaultWorkspace();
     if (!workspace) throw new Error('No default workspace is configured.');
-    const dirs = collectionDirs(workspace.root, currentUser.name, wanted.name);
-    const cookieFile = await this.bili.exportCookies(currentUser.name);
-    const syncId = `sync-${currentUser.mid}-${wanted.id}-${Date.now()}`;
-    const expectedTotal = Number(wanted.mediaCount || 0);
-    this.progress(syncId, wanted.name, { stage: 'fetching', loaded: 0, total: expectedTotal, progress: 0 });
-    const videos = await this.bili.listVideos(wanted.id, (progress) => {
-      const total = progress.total || expectedTotal || null;
-      this.progress(syncId, wanted.name, {
-        stage: progress.done ? 'indexing' : 'fetching',
-        loaded: progress.loaded,
-        total,
-        page: progress.page,
-        progress: total ? Math.min(0.92, progress.loaded / total * 0.92) : Math.min(0.9, progress.page / Math.max(progress.page + 1, 2))
+    let local = this.findLocalCollection(currentUser, identifier);
+    let transactionId = '';
+    let syncId = `sync-${currentUser.mid}-${local?.mediaId || identifier}-${Date.now()}`;
+    try {
+      if (local) {
+        transactionId = this.beginSync(local.id, local, local);
+        await this.stopCollectionWork(local, '用户开始同步该收藏夹，已中止相关 Agent 视频总结工作流。', 'collection-sync');
+      }
+
+      this.progress(syncId, local?.name || identifier, { stage: 'resolving', loaded: 0, total: null, progress: 0.02 });
+      const folders = await this.bili.listFolders(currentUser.mid);
+      await this.reconcileFolders(folders, currentUser, { excludeCollectionIds: local ? [local.id] : [] });
+      const wanted = folders.find((folder) => folder.name === identifier || String(folder.id) === identifier);
+      if (!wanted) {
+        if (!local) throw new Error(`Collection not found: ${identifier}`);
+        const deleted = this.commitDeletedCollection(local.id, transactionId, '同步时在 B站收藏夹列表中未找到该收藏夹。', 'collection-sync');
+        transactionId = '';
+        this.progress(syncId, deleted.collection.name, { stage: 'done', loaded: 0, total: 0, progress: 1 });
+        return deleted;
+      }
+
+      const collectionId = `${currentUser.mid}:${wanted.id}`;
+      local = this.store.getCollectionById(collectionId);
+      const storageName = local ? collectionStorageName(local) : wanted.name;
+      const dirs = collectionDirs(workspace.root, currentUser.name, storageName);
+      const provisional = this.buildCollection({ currentUser, wanted, workspace, dirs, label, current: local, syncState: 'syncing', syncReady: false });
+      if (!transactionId) {
+        transactionId = this.beginSync(collectionId, local, provisional);
+        if (local) await this.stopCollectionWork(local, '用户开始同步该收藏夹，已中止相关 Agent 视频总结工作流。', 'collection-sync');
+      }
+
+      syncId = `sync-${currentUser.mid}-${wanted.id}-${Date.now()}`;
+      const expectedTotal = Number(wanted.mediaCount || 0);
+      this.progress(syncId, wanted.name, { stage: 'fetching', loaded: 0, total: expectedTotal, progress: 0.05 });
+      const videos = await this.bili.listVideos(wanted.id, (progress) => {
+        const total = progress.total || expectedTotal || null;
+        this.progress(syncId, wanted.name, {
+          stage: progress.done ? 'indexing' : 'fetching',
+          loaded: progress.loaded,
+          total,
+          page: progress.page,
+          progress: total ? Math.min(0.92, 0.05 + progress.loaded / total * 0.87) : Math.min(0.9, 0.05 + progress.page / Math.max(progress.page + 1, 2) * 0.85)
+        });
       });
-    });
-    const collection = this.persist({ currentUser, wanted, videos, workspace, dirs, cookieFile, label });
-    this.writeExport(collection, videos);
-    this.progress(syncId, wanted.name, { stage: 'done', loaded: videos.length, total: videos.length, progress: 1 });
-    this.onEvent({ type: 'collection-synced', collection, count: videos.length });
-    return { collection, count: videos.length };
+      const cookieFile = await this.bili.exportCookies(currentUser.name);
+      const result = this.applySnapshot({ currentUser, wanted, videos, workspace, dirs, cookieFile, label, transactionId });
+      transactionId = '';
+      this.writeExportSafe(result.collection, videos);
+      this.progress(syncId, result.collection.name, { stage: 'done', loaded: videos.length, total: videos.length, progress: 1 });
+      this.onEvent({ type: 'collection-synced', collection: result.collection, count: videos.length, summary: result.summary });
+      return result;
+    } catch (error) {
+      if (transactionId) this.rollbackSync(transactionId, error.message || String(error));
+      this.progress(syncId, local?.name || identifier, { stage: 'error', loaded: 0, total: null, progress: 1 });
+      throw error;
+    }
   }
 
-  persist({ currentUser, wanted, videos, workspace, dirs, cookieFile, label }) {
-    const now = new Date().toISOString();
-    const latestFavoriteAt = videos.reduce((latest, video) => String(video.favoriteAddedAt || '') > latest ? String(video.favoriteAddedAt) : latest, String(wanted.updatedAt || ''));
+  async reconcileFolders(folders, currentUser, options = {}) {
+    const excluded = new Set((options.excludeCollectionIds || []).map(String));
+    const remote = new Map((folders || []).map((folder) => [String(folder.id), folder]));
+    const summary = { deleted: 0, renamed: 0, restored: 0 };
+    for (const collection of this.localCollections(currentUser)) {
+      if (excluded.has(collection.id)) continue;
+      if (collection.syncState === 'syncing') continue;
+      const folder = remote.get(String(collection.mediaId || ''));
+      if (!folder) {
+        if (!collection.biliDeleted) {
+          await this.markCollectionDeleted(collection, '读取 B站收藏夹列表时未找到该收藏夹。', 'folder-list');
+          summary.deleted += 1;
+        }
+        continue;
+      }
+      const renamed = collectionSourceName(collection) !== folder.name;
+      if (!renamed && !collection.biliDeleted) continue;
+      const transactionId = this.beginSync(collection.id, collection, collection);
+      try {
+        await this.stopCollectionWork(collection, collection.biliDeleted
+          ? 'B站收藏夹重新出现，需要先完成任务同步再重启 Agent 工作流。'
+          : 'B站收藏夹名称已变更，需要先完成任务同步再重启 Agent 工作流。', 'folder-list');
+        const latest = this.store.getCollectionById(collection.id) || collection;
+        const next = {
+          ...latest,
+          name: folder.name,
+          sourceName: folder.name,
+          storageName: collectionStorageName(collection),
+          biliDeleted: false,
+          biliDeletedAt: '',
+          syncState: 'needs-sync',
+          syncReady: false,
+          externalDispatchPaused: true,
+          remoteVideoCount: Number(folder.mediaCount || 0),
+          remoteUpdatedAt: folder.updatedAt || '',
+          updatedAt: new Date().toISOString()
+        };
+        this.store.transaction(() => {
+          this.store.set('collections', next.id, next);
+          this.store.delete('collectionSyncTransactions', transactionId);
+        });
+        if (collection.biliDeleted) summary.restored += 1;
+        if (renamed) summary.renamed += 1;
+        this.onEvent({ type: collection.biliDeleted ? 'collection-restored-needs-sync' : 'collection-renamed-needs-sync', collectionId: next.id, collectionName: next.name });
+      } catch (error) {
+        this.rollbackSync(transactionId, error.message || String(error));
+        throw error;
+      }
+    }
+    return summary;
+  }
+
+  applySnapshot({ currentUser, wanted, videos, workspace, dirs, cookieFile, label, transactionId }) {
     const collectionId = `${currentUser.mid}:${wanted.id}`;
-    const collection = this.store.upsertCollection({
-      id: collectionId,
-      mediaId: wanted.id,
-      userId: String(currentUser.mid),
-      userName: currentUser.name,
-      name: wanted.name,
-      label,
-      workspaceId: workspace.id,
-      workspaceRoot: workspace.root,
-      collectionRoot: dirs.root,
-      videosDir: dirs.videos,
-      exportDir: dirs.exports,
-      cookieFile,
-      lastSyncedAt: now,
-      videoCount: videos.length,
-      latestFavoriteAt
-    });
-    for (const video of videos) this.persistVideo(collectionId, dirs, video, now);
-    this.store.commit();
-    return collection;
-  }
-
-  persistVideo(collectionId, dirs, video, now) {
-    const key = `${collectionId}:${video.bvid}`;
-    if (isUnavailableTask(this.store, key)) return;
-    if (isVideoUnavailableMessage(video.title || '')) {
-      const existing = this.store.getTask(key);
-      if (existing && existing.status !== 'done') {
-        removeUnavailableTask({ store: this.store, taskId: key, reason: `收藏夹同步返回“${video.title}”。`, source: 'collection-sync' });
-      } else if (!existing) {
-        this.store.set('unavailableTasks', key, {
+    const current = this.store.getCollectionById(collectionId) || {};
+    const now = new Date().toISOString();
+    const remoteIds = new Set();
+    const cleanup = [];
+    const unavailableCleanup = [];
+    const events = [];
+    const summary = { added: 0, updated: 0, restored: 0, removed: 0, archived: 0, unavailable: 0, workflowsStopped: true };
+    let collection;
+    this.store.transaction(() => {
+      for (const video of videos) {
+        const key = `${collectionId}:${video.bvid}`;
+        remoteIds.add(key);
+        const unavailable = isUnavailableTask(this.store, key);
+        const unavailableTitle = isVideoUnavailableMessage(video.title || '');
+        if (unavailable || unavailableTitle) {
+          summary.unavailable += 1;
+          const existing = this.store.getTask(key);
+          if (unavailable && existing && existing.status !== 'done') {
+            const tombstone = this.store.get('unavailableTasks', key) || { id: key, taskId: key, collectionId, bvid: video.bvid, removedAt: now };
+            this.store.set('unavailableTasks', key, { ...tombstone, cleanupPending: true, cleanupTask: cleanupTaskSnapshot(existing) });
+            this.store.delete('tasks', key);
+            this.store.delete('videos', key);
+            unavailableCleanup.push(existing);
+          } else if (unavailableTitle && existing?.status !== 'done') {
+            const tombstone = {
+              id: key,
+              taskId: key,
+              collectionId,
+              bvid: video.bvid,
+              title: video.title,
+              owner: video.owner || existing?.owner || '',
+              reason: `收藏夹同步返回“${video.title}”。`,
+              source: 'collection-sync',
+              removedAt: now,
+              cleanupPending: Boolean(existing),
+              cleanupTask: existing ? cleanupTaskSnapshot(existing) : null
+            };
+            this.store.set('unavailableTasks', key, tombstone);
+            this.store.delete('tasks', key);
+            this.store.delete('videos', key);
+            if (existing) unavailableCleanup.push(existing);
+            events.push({ taskId: key, type: 'video-unavailable', data: { collectionId, reason: tombstone.reason, source: 'collection-sync' } });
+          }
+          continue;
+        }
+        const existing = this.store.getTask(key);
+        const restoredMembership = Boolean(existing?.removedFromFavorites || existing?.favoriteState === 'removed' || existing?.favoriteState === 'collection-deleted');
+        const restoredEnabled = restoredMembership ? existing?.enabledBeforeRemoval !== false : existing?.enabled !== false;
+        if (!existing) summary.added += 1;
+        else if (restoredMembership) summary.restored += 1;
+        else summary.updated += 1;
+        this.store.set('videos', key, { ...(this.store.get('videos', key) || {}), key, collectionId, ...video, favoriteState: 'active', removedFromFavorites: false, removedFromFavoritesAt: '', syncedAt: now });
+        this.store.set('tasks', key, {
+          enabled: restoredEnabled,
+          ...(existing || {}),
           id: key,
-          taskId: key,
           collectionId,
           bvid: video.bvid,
           title: video.title,
-          reason: `收藏夹同步返回“${video.title}”。`,
-          source: 'collection-sync',
-          removedAt: now
+          sourceTitle: video.title,
+          owner: video.owner,
+          duration: video.duration,
+          cover: video.cover,
+          url: video.url,
+          favoriteAddedAt: video.favoriteAddedAt,
+          publishedAt: video.publishedAt,
+          favoriteState: 'active',
+          removedFromFavorites: false,
+          removedFromFavoritesAt: '',
+          enabledBeforeRemoval: undefined,
+          enabled: restoredEnabled,
+          status: existing?.status || 'pending',
+          claimedBy: existing?.claimedBy || '',
+          claimedAt: existing?.claimedAt || '',
+          leaseExpiresAt: existing?.leaseExpiresAt || '',
+          attempts: existing?.attempts || 0,
+          allowedRoot: existing?.allowedRoot || dirs.root,
+          artifactDir: existing?.artifactDir || '',
+          outputMarkdown: existing?.outputMarkdown || '',
+          validatorErrors: existing?.validatorErrors || [],
+          createdAt: existing?.createdAt || now,
+          updatedAt: now
         });
+        this.store.delete('removedFavoriteTasks', key);
       }
-      return;
-    }
-    this.store.upsertVideo({ key, collectionId, ...video, syncedAt: now });
-    const existing = this.store.getTask(key);
-    this.store.upsertTask({
-      id: key,
-      collectionId,
-      bvid: video.bvid,
-      title: video.title,
-      owner: video.owner,
-      duration: video.duration,
-      cover: video.cover,
-      url: video.url,
-      favoriteAddedAt: video.favoriteAddedAt,
-      publishedAt: video.publishedAt,
-      enabled: existing?.enabled !== false,
-      status: existing?.status || 'pending',
-      claimedBy: existing?.claimedBy || '',
-      claimedAt: existing?.claimedAt || '',
-      leaseExpiresAt: existing?.leaseExpiresAt || '',
-      attempts: existing?.attempts || 0,
-      allowedRoot: dirs.videos,
-      artifactDir: existing?.artifactDir || '',
-      outputMarkdown: existing?.outputMarkdown || '',
-      validatorErrors: existing?.validatorErrors || [],
-      createdAt: existing?.createdAt || now,
-      updatedAt: now
+
+      for (const task of this.store.listTasks({ collectionId })) {
+        if (remoteIds.has(task.id)) continue;
+        if (task.status === 'done' && task.outputMarkdown) {
+          const archived = {
+            ...task,
+            sourceTitle: taskSourceTitle(task),
+            title: removedFavoriteTitle(task),
+            favoriteState: 'removed',
+            removedFromFavorites: true,
+            removedFromFavoritesAt: task.removedFromFavoritesAt || now,
+            enabledBeforeRemoval: task.removedFromFavorites ? task.enabledBeforeRemoval !== false : task.enabled !== false,
+            enabled: false,
+            updatedAt: now
+          };
+          this.store.set('tasks', task.id, archived);
+          const video = this.store.get('videos', task.id);
+          if (video) this.store.set('videos', task.id, { ...video, favoriteState: 'removed', removedFromFavorites: true, removedFromFavoritesAt: now, syncedAt: now });
+          summary.archived += 1;
+          events.push({ taskId: task.id, type: 'removed-from-favorites', data: { collectionId, preservedArtifact: true } });
+        } else {
+          this.store.delete('tasks', task.id);
+          this.store.delete('videos', task.id);
+          this.store.set('removedFavoriteTasks', task.id, {
+            id: task.id,
+            taskId: task.id,
+            collectionId,
+            bvid: task.bvid,
+            title: taskSourceTitle(task),
+            reason: '该视频已从 B站收藏夹移出，未完成任务不再派发。',
+            removedAt: now,
+            cleanupPending: true,
+            cleanupTask: cleanupTaskSnapshot(task)
+          });
+          cleanup.push(task);
+          summary.removed += 1;
+          events.push({ taskId: task.id, type: 'removed-from-favorites', data: { collectionId, preservedArtifact: false } });
+        }
+      }
+
+      const latestFavoriteAt = videos.reduce((latest, video) => String(video.favoriteAddedAt || '') > latest ? String(video.favoriteAddedAt) : latest, String(wanted.updatedAt || ''));
+      collection = this.buildCollection({ currentUser, wanted, workspace, dirs, cookieFile, label, current, syncState: 'ready', syncReady: true, now });
+      Object.assign(collection, {
+        videoCount: videos.length - summary.unavailable,
+        remoteVideoCount: videos.length,
+        archivedDocumentCount: summary.archived,
+        latestFavoriteAt,
+        externalDispatchPaused: true,
+        biliDeleted: false,
+        biliDeletedAt: '',
+        lastSyncSummary: summary
+      });
+      this.store.set('collections', collection.id, collection);
+      this.store.delete('collectionSyncTransactions', transactionId);
     });
+    this.cleanupRemovedTasks(cleanup);
+    this.cleanupTombstonedTasks(unavailableCleanup, 'unavailableTasks', 'collection-sync');
+    for (const event of events) this.store.recordTaskEvent(event.taskId, event.type, event.data);
+    return { collection, count: videos.length, summary };
   }
 
-  writeExport(collection, videos) {
-    const exportDir = ensureDir(collection.exportDir || path.join(collection.workspaceRoot, '.star-note', 'exports'));
-    const file = path.join(exportDir, `sync-${timestampForFile()}.json`);
-    fs.writeFileSync(file, `${JSON.stringify({ collection, videos, exportedAt: new Date().toISOString() }, null, 2)}\n`, 'utf8');
+  async markCollectionDeleted(collection, reason, source) {
+    const transactionId = this.beginSync(collection.id, collection, collection);
+    try {
+      await this.stopCollectionWork(collection, 'B站收藏夹已删除，已中止相关 Agent 视频总结工作流。', source);
+      return this.commitDeletedCollection(collection.id, transactionId, reason, source);
+    } catch (error) {
+      this.rollbackSync(transactionId, error.message || String(error));
+      throw error;
+    }
+  }
+
+  commitDeletedCollection(collectionId, transactionId, reason, source) {
+    const current = this.store.getCollectionById(collectionId);
+    if (!current) throw new Error(`Collection not found: ${collectionId}`);
+    const now = new Date().toISOString();
+    const cleanup = [];
+    const events = [];
+    const summary = { added: 0, updated: 0, restored: 0, removed: 0, archived: 0, unavailable: 0, workflowsStopped: true, collectionDeleted: true };
+    let collection;
+    this.store.transaction(() => {
+      for (const task of this.store.listTasks({ collectionId })) {
+        if (task.status === 'done' && task.outputMarkdown) {
+          this.store.set('tasks', task.id, {
+            ...task,
+            sourceTitle: taskSourceTitle(task),
+            title: removedFavoriteTitle(task),
+            favoriteState: 'collection-deleted',
+            removedFromFavorites: true,
+            removedFromFavoritesAt: task.removedFromFavoritesAt || now,
+            enabledBeforeRemoval: task.removedFromFavorites ? task.enabledBeforeRemoval !== false : task.enabled !== false,
+            enabled: false,
+            updatedAt: now
+          });
+          summary.archived += 1;
+          events.push({ taskId: task.id, type: 'collection-deleted-artifact-preserved', data: { collectionId } });
+        } else {
+          this.store.delete('tasks', task.id);
+          this.store.delete('videos', task.id);
+          this.store.set('removedFavoriteTasks', task.id, {
+            id: task.id,
+            taskId: task.id,
+            collectionId,
+            bvid: task.bvid,
+            title: taskSourceTitle(task),
+            reason: 'B站收藏夹已删除，未完成任务不再派发。',
+            removedAt: now,
+            cleanupPending: true,
+            cleanupTask: cleanupTaskSnapshot(task)
+          });
+          cleanup.push(task);
+          summary.removed += 1;
+          events.push({ taskId: task.id, type: 'collection-deleted-task-removed', data: { collectionId } });
+        }
+      }
+      collection = {
+        ...current,
+        name: deletedCollectionName(current),
+        sourceName: collectionSourceName(current),
+        storageName: collectionStorageName(current),
+        biliDeleted: true,
+        biliDeletedAt: now,
+        syncState: 'deleted',
+        syncReady: false,
+        externalDispatchPaused: true,
+        remoteVideoCount: 0,
+        videoCount: summary.archived,
+        archivedDocumentCount: summary.archived,
+        lastSyncSummary: summary,
+        lastSyncError: String(reason || ''),
+        updatedAt: now
+      };
+      this.store.set('collections', collection.id, collection);
+      if (transactionId) this.store.delete('collectionSyncTransactions', transactionId);
+    });
+    this.cleanupRemovedTasks(cleanup);
+    for (const event of events) this.store.recordTaskEvent(event.taskId, event.type, event.data);
+    this.internalAgentManager?.markCollectionUnavailable(collection.id, 'B站收藏夹已删除，任务不可用。');
+    this.onEvent({ type: 'collection-deleted-on-bilibili', collection, reason, source, summary });
+    return { collection, count: 0, deleted: true, summary };
+  }
+
+  async stopCollectionWork(collection, reason, source) {
+    const stoppedSessions = await this.internalAgentManager?.stopCollectionForSync(collection.id, reason, source) || [];
+    let abortedAttempts = 0;
+    for (const task of this.store.listTasks({ collectionId: collection.id })) {
+      if (!['claimed', 'rejected'].includes(task.status) || (!task.workId && !task.claimedBy)) continue;
+      try {
+        const result = abortTaskAttempt({ store: this.store, toolRunner: this.toolRunner, taskId: task.id, workerId: task.claimedBy, reason, source });
+        if (!result.alreadyAborted) {
+          abortedAttempts += 1;
+          this.onEvent({ type: 'task-attempt-aborted', taskId: task.id, collectionId: collection.id, workerId: task.claimedBy, reason, source, cleanup: result.cleanup });
+        }
+      } catch (error) {
+        this.onEvent({ type: 'task-attempt-cleanup-failed', taskId: task.id, collectionId: collection.id, reason: error.message || String(error), source });
+      }
+    }
+    this.onEvent({ type: 'collection-workflows-stopped-for-sync', collectionId: collection.id, collectionName: collection.name, sessions: stoppedSessions.length, attempts: abortedAttempts, reason });
+    return { stoppedSessions: stoppedSessions.length, abortedAttempts };
+  }
+
+  beginSync(collectionId, collectionBefore, provisional) {
+    const transactionId = `collection-sync:${collectionId}`;
+    const now = new Date().toISOString();
+    const syncing = {
+      ...(provisional || collectionBefore || { id: collectionId }),
+      id: collectionId,
+      syncState: 'syncing',
+      syncReady: false,
+      externalDispatchPaused: true,
+      syncStartedAt: now,
+      updatedAt: now
+    };
+    this.store.transaction(() => {
+      this.store.set('collectionSyncTransactions', transactionId, {
+        id: transactionId,
+        collectionId,
+        collectionBefore: collectionBefore || null,
+        startedAt: now
+      });
+      this.store.set('collections', collectionId, syncing);
+    });
+    return transactionId;
+  }
+
+  rollbackSync(transactionId, reason) {
+    const transaction = this.store.get('collectionSyncTransactions', transactionId);
+    if (!transaction) return false;
+    this.store.transaction(() => {
+      if (transaction.collectionBefore) this.store.set('collections', transaction.collectionId, transaction.collectionBefore);
+      else this.store.delete('collections', transaction.collectionId);
+      this.store.delete('collectionSyncTransactions', transactionId);
+    });
+    this.onEvent({ type: 'collection-sync-rolled-back', collectionId: transaction.collectionId, reason: String(reason || '同步中断'), message: '收藏夹同步已回滚到上一次完整状态。' });
+    return true;
+  }
+
+  recoverInterruptedSyncs() {
+    const interrupted = this.store.list('collectionSyncTransactions');
+    for (const transaction of interrupted) this.rollbackSync(transaction.id, '应用上次在收藏夹同步期间退出或崩溃');
+  }
+
+  recoverTombstoneCleanups() {
+    for (const scope of ['removedFavoriteTasks', 'unavailableTasks']) {
+      const pending = this.store.list(scope).filter((item) => item.cleanupPending && item.cleanupTask);
+      if (pending.length) this.cleanupTombstonedTasks(pending.map((item) => item.cleanupTask), scope, 'startup-recovery');
+    }
+  }
+
+  buildCollection({ currentUser, wanted, workspace, dirs, cookieFile = '', label, current = {}, syncState, syncReady, now = new Date().toISOString() }) {
+    current = current || {};
+    return {
+      ...current,
+      id: `${currentUser.mid}:${wanted.id}`,
+      mediaId: String(wanted.id),
+      userId: String(currentUser.mid),
+      userName: currentUser.name,
+      name: wanted.name,
+      sourceName: wanted.name,
+      storageName: current.storageName || collectionStorageName(current.id ? current : { name: wanted.name }),
+      label,
+      workspaceId: workspace.id,
+      workspaceRoot: workspace.root,
+      collectionRoot: current.collectionRoot || dirs.root,
+      videosDir: current.videosDir || dirs.videos,
+      exportDir: current.exportDir || dirs.exports,
+      cookieFile: cookieFile || current.cookieFile || '',
+      lastSyncedAt: syncReady ? now : current.lastSyncedAt || '',
+      syncState,
+      syncReady,
+      remoteUpdatedAt: wanted.updatedAt || '',
+      updatedAt: now
+    };
+  }
+
+  findLocalCollection(currentUser, identifier) {
+    return this.localCollections(currentUser).find((collection) => collection.id === identifier
+      || String(collection.mediaId || '') === identifier
+      || collection.name === identifier
+      || collectionSourceName(collection) === identifier) || null;
+  }
+
+  localCollections(currentUser) {
+    return this.store.listCollections().filter((collection) => isBiliCollection(collection)
+      && String(collection.userId || '') === String(currentUser.mid));
+  }
+
+  cleanupRemovedTasks(tasks, source = 'collection-sync') {
+    return this.cleanupTombstonedTasks(tasks, 'removedFavoriteTasks', source);
+  }
+
+  cleanupTombstonedTasks(tasks, scope, source = 'collection-sync') {
+    for (const task of tasks) {
+      const tombstone = this.store.get(scope, task.id);
+      try {
+        const cleanup = cleanupAttemptFiles(this.store, task);
+        if (tombstone) this.store.set(scope, task.id, { ...tombstone, cleanupPending: false, cleanupCompletedAt: new Date().toISOString(), cleanup });
+        this.onEvent({ type: 'removed-task-cache-cleaned', taskId: task.id, collectionId: task.collectionId, source, cleanup });
+      } catch (error) {
+        if (tombstone) this.store.set(scope, task.id, { ...tombstone, cleanupPending: true, cleanupError: error.message || String(error) });
+        this.onEvent({ type: 'removed-task-cache-cleanup-failed', taskId: task.id, collectionId: task.collectionId, reason: error.message || String(error), source });
+      }
+    }
+    if (tasks.length) this.store.save();
+  }
+
+  writeExportSafe(collection, videos) {
+    try {
+      const exportDir = ensureDir(collection.exportDir || path.join(collection.workspaceRoot, '.star-note', 'exports'));
+      const file = path.join(exportDir, `sync-${timestampForFile()}.json`);
+      fs.writeFileSync(file, `${JSON.stringify({ collection, videos, exportedAt: new Date().toISOString() }, null, 2)}\n`, 'utf8');
+      return file;
+    } catch (error) {
+      this.onEvent({ type: 'collection-sync-export-failed', collectionId: collection.id, reason: error.message || String(error) });
+      return '';
+    }
   }
 
   progress(syncId, collectionName, detail) {
     this.onEvent({ type: 'collection-sync-progress', syncId, collectionName, ...detail });
   }
+}
+
+function cleanupTaskSnapshot(task = {}) {
+  return {
+    id: task.id,
+    collectionId: task.collectionId,
+    bvid: task.bvid,
+    artifactDir: task.artifactDir || '',
+    allowedRoot: task.allowedRoot || '',
+    workspaceRoot: task.workspaceRoot || '',
+    workspaceId: task.workspaceId || '',
+    cachedVideoId: task.cachedVideoId || '',
+    cachedVideoFile: task.cachedVideoFile || '',
+    coverFile: task.coverFile || '',
+    metadataFile: task.metadataFile || ''
+  };
 }
 
 module.exports = { CollectionSyncService };

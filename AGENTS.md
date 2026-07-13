@@ -20,6 +20,7 @@ Star Owner (星藏家) turns a user's Bilibili favorite folders into a managed q
 12. If an error, user instruction, or other condition prevents completion, call `/api/tasks/<taskId>/abort` with `workerId`, `workId`, and a concrete `reason`. Do not leave files as a checkpoint. The application cancels tools, removes this attempt, invalidates `workId`, and returns the task to `pending`.
 13. On `WORK_ATTEMPT_ENDED`, stop using the old `workId` immediately. Keep the same `workerId` and call `/api/tasks/claim`; the next claim starts from scratch with a new `workId`.
 14. `BILIBILI_VIDEO_UNAVAILABLE` is terminal, unlike an ordinary abort. Stop the current work, do not retry or recreate its files, keep the same `workerId`, and claim another task. The application removes the task/video inventory entry, cleans the attempt, records an `unavailableTasks` tombstone, and prevents collection sync from recreating it.
+15. Collection synchronization has priority over all video-summary work. `REMOVED_FROM_FAVORITES` invalidates the old unfinished task but does not delete an already accepted Markdown artifact. `COLLECTION_SYNCING`, `COLLECTION_NOT_READY`, and `COLLECTION_REACTIVATION_REQUIRED` mean stop and wait for the desktop user while retaining the same `workerId`. `BILIBILI_COLLECTION_DELETED` is terminal for that collection; do not request or recreate its tasks.
 
 The canonical Markdown contract is `templates/video-summary-template.md` and is also returned by `GET /api/templates/video-summary`.
 
@@ -32,6 +33,8 @@ The canonical Markdown contract is `templates/video-summary-template.md` and is 
 - Preserve the API-first boundary: Agents do not directly mutate SQLite or application indexes.
 - Treat `network-policy.js`, `desktop-security.js`, and the API origin/body limits as security boundaries; extend their tests when changing them.
 - Keep desktop-owned collection synchronization out of the public Agent API. Reuse `CollectionSyncService` and `submission-artifacts` instead of importing `ApiServer` into other managers.
+- Keep remote favorite-folder names out of path identity. Use `mediaId` for collection identity and `storageName` for an immutable existing disk root. A rename must not split accepted artifacts across directories.
+- A full collection diff is applied only after all remote pages succeed and inside one recoverable Store transaction. Never delete accepted Markdown because a favorite or folder disappeared; archive it with explicit membership metadata for Document Library, Export, and RAG.
 - Use `apply_patch` for scoped source edits and keep unrelated refactors out of focused changes.
 - Run `npm run verify:release` before publishing or opening a release pull request.
 

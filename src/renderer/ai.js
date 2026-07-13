@@ -107,7 +107,8 @@
     const collectionPercent = Math.round(Number(collectionProgress.progress || 0) * 100);
     const active = ['running', 'draining', 'stopping'].includes(session.status);
     const modelUnavailable = session.modelAvailable === false;
-    const canStart = !active && session.status !== 'completed' && !modelUnavailable;
+    const collectionUnavailable = session.collectionAvailable === false;
+    const canStart = !active && session.status !== 'completed' && !modelUnavailable && !collectionUnavailable;
     const logs = (session.logs || []).slice().reverse().map((entry) => `<div class="ai-log-entry"><time>${time(entry.at)}</time><span>${html(entry.message)}</span></div>`).join('') || '<div class="rag-list-empty">暂无工作记录</div>';
     const output = session.lastOutput || '';
     const pending = [...pendingSessionActions].some((key) => key.startsWith(`${session.id}:`));
@@ -116,7 +117,7 @@
         <div class="ai-session-identity"><strong>${html(session.title)}</strong><span>${html(collection ? `${collection.userName} / ${collection.name}` : session.collectionId)} · ${html(providerName(session.providerId))} / ${html(session.modelId)} · ${html(session.workerId)}</span></div>
         <div class="ai-session-actions">
           ${session.mode === 'single' && output ? `<button class="secondary-button compact-button" data-agent-action="open-output"><svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v10H4z"/></svg><span>打开产物</span></button>` : ''}
-          ${modelUnavailable ? `<button class="primary-button compact-button" type="button" disabled title="${esc(session.modelUnavailableReason || 'AI 模型配置不可用')}">模型不可用</button>` : (canStart ? `<button class="primary-button compact-button" data-agent-action="start" ${pending ? 'disabled' : ''}>${startActionLabel(session)}</button>` : '')}
+          ${collectionUnavailable ? `<button class="primary-button compact-button" type="button" disabled title="${esc(session.collectionUnavailableReason || '收藏夹任务不可用')}">收藏夹不可用</button>` : (modelUnavailable ? `<button class="primary-button compact-button" type="button" disabled title="${esc(session.modelUnavailableReason || 'AI 模型配置不可用')}">模型不可用</button>` : (canStart ? `<button class="primary-button compact-button" data-agent-action="start" ${pending ? 'disabled' : ''}>${startActionLabel(session)}</button>` : ''))}
           ${active && session.acceptNewTasks ? `<button class="secondary-button compact-button" data-agent-action="pause" ${pending ? 'disabled' : ''}>完成本单后暂停</button>` : ''}
           ${active ? `<button class="secondary-button compact-button danger-button" data-agent-action="stop" ${pending ? 'disabled' : ''}>${pendingSessionActions.has(`${session.id}:stop`) ? '正在停止…' : '立即停止'}</button>` : ''}
           <button class="icon-action danger-icon" data-agent-action="delete" title="删除会话" ${active || pending ? 'disabled' : ''}><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14"/></svg></button>
@@ -124,6 +125,7 @@
       </header>
       <div class="ai-session-progress">
         ${modelUnavailable ? `<div class="ai-model-unavailable"><strong>AI 模型配置不可用</strong><span>${html(session.modelUnavailableReason || '')}</span></div>` : ''}
+        ${collectionUnavailable ? `<div class="ai-model-unavailable"><strong>收藏夹任务不可用</strong><span>${html(session.collectionUnavailableReason || '')}</span></div>` : ''}
         <div class="ai-collection-overview">
           <div><span>收藏夹总进度</span><strong data-agent-role="collection-summary">${Number(collectionProgress.done || 0)} / ${Number(collectionProgress.enabled || 0)} · ${collectionPercent}%</strong></div>
           <div class="ai-collection-progress-track"><span data-agent-role="collection-progress" style="width:${collectionPercent}%"></span></div>
@@ -225,7 +227,7 @@
     elements.agentTitle.value = '';
     elements.agentRequirements.value = '';
     populateProviderSelect(elements.agentProvider, elements.agentModel, state.providers.find((item) => item.enabledModels?.length)?.id || '', '');
-    elements.agentCollection.innerHTML = '<option value="">选择任务收藏夹</option>' + state.collections.map((item) => `<option value="${esc(item.id)}">${html(item.userName)} / ${html(item.name)} · 待处理 ${item.pending}</option>`).join('');
+    elements.agentCollection.innerHTML = '<option value="">选择任务收藏夹</option>' + state.collections.map((item) => `<option value="${esc(item.id)}" ${item.collectionAvailable === false ? 'disabled' : ''}>${html(item.userName)} / ${html(item.name)} · ${item.collectionAvailable === false ? '任务不可用' : `待处理 ${item.pending}`}</option>`).join('');
   }
 
   function closeCreateModal() { elements.createModal.hidden = true; }
@@ -604,7 +606,7 @@
   });
 
   function providerName(id) { return state.providers.find((item) => item.id === id)?.name || '未配置供应商'; }
-  function statusLabel(status) { return ({ idle: '等待任务', running: '工作中', draining: '即将暂停', paused: '已暂停', blocked: '故障停止', 'waiting-login': '等待登录', stopping: '停止中', stopped: '已停止', completed: '已完成', error: '失败', unavailable: '视频不可用', 'model-unavailable': '模型不可用' })[status] || status || '未知'; }
+  function statusLabel(status) { return ({ idle: '等待任务', running: '工作中', draining: '即将暂停', paused: '已暂停', blocked: '故障停止', 'waiting-login': '等待登录', stopping: '停止中', stopped: '已停止', completed: '已完成', error: '失败', unavailable: '视频不可用', 'model-unavailable': '模型不可用', 'collection-unavailable': '收藏夹不可用' })[status] || status || '未知'; }
   function startActionLabel(session) {
     if (session.mode === 'single') {
       if (session.status === 'waiting-login') return '登录后重试';
