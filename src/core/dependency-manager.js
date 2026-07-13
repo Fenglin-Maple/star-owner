@@ -154,12 +154,17 @@ class DependencyManager {
         if (response.ok) candidates.push(await response.json());
       } catch { /* try the next release source */ }
     }
-    if (!candidates.length) {
-      try {
-        const response = await fetch(`https://api.github.com/repos/${REPOSITORY}/releases?per_page=10`, { headers: githubHeaders(), signal: AbortSignal.timeout(30000) });
-        if (response.ok) candidates.push(...await response.json());
-      } catch { /* handled below */ }
-    }
+    try {
+      const response = await fetch(`https://api.github.com/repos/${REPOSITORY}/releases?per_page=10`, { headers: githubHeaders(), signal: AbortSignal.timeout(30000) });
+      if (response.ok) {
+        const known = new Set(candidates.map((release) => String(release.id || release.tag_name || '')));
+        for (const release of await response.json()) {
+          const key = String(release.id || release.tag_name || '');
+          if (!key || !known.has(key)) candidates.push(release);
+          if (key) known.add(key);
+        }
+      }
+    } catch { /* handled below */ }
     for (const release of candidates) {
       const assets = Array.isArray(release.assets) ? release.assets : [];
       const asset = assets.find((item) => item.name === definition.assetName) || assets.find((item) => definition.assetPattern.test(item.name));

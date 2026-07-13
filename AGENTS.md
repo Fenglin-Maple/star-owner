@@ -50,7 +50,7 @@ The canonical Markdown contract is `templates/video-summary-template.md` and is 
 
 - Dependency archives are GitHub Release assets, not Git-tracked runtime files.
 - Archive entries must remain under `runtime/`; extraction rejects absolute paths and `..` traversal.
-- Required Release assets use `Star-Owner-v<version>-runtime-win-x64.zip`, `Star-Owner-v<version>-model-small.zip`, and `Star-Owner-v<version>-model-medium.zip`, preferably with matching `.sha256` assets.
+- Required dependency assets use `Star-Owner-v<version>-runtime-win-x64.zip`, `Star-Owner-v<version>-model-small.zip`, and `Star-Owner-v<version>-model-medium.zip`, preferably with matching `.sha256` assets. A code-only Release may reuse unchanged assets from one of the ten most recent Releases; keep the filename pattern and resolver regression test intact.
 - Do not change a dependency probe or asset layout without updating `dependency-manager.js`, the release builder, README, DESIGN, and DEPLOYMENT together.
 - Never expose decrypted provider API keys to preload or renderer code.
 - Keep provider requests OpenAI-compatible and capability-gated; unsupported multimodal, reasoning, image, tool, compression, or subagent behavior must degrade honestly.

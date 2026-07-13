@@ -135,7 +135,7 @@ Also verify one internal collection Agent and one single-task run with a disposa
 
 ### Release asset contract for in-app installation
 
-Publish all dependency assets under the same tagged Release as the portable core whenever possible. The app first looks for exact `v<app version>` filenames, then checks latest and recent releases for a compatible filename pattern. Dependency archives must begin with `runtime/`; absolute paths and `..` are rejected. For compatibility with an older Release lacking a dedicated runtime asset, the app may select its portable core archive but extracts only the two validated runtime subtrees.
+Publish all dependency assets under the same tagged Release as the portable core whenever their contents changed. For a code-only update, unchanged multi-gigabyte dependencies may remain on a recent Release: the app first looks for exact `v<app version>` filenames, then always enumerates up to ten recent Releases for a compatible filename pattern. Dependency archives must begin with `runtime/`; absolute paths and `..` are rejected. For compatibility with an older Release lacking a dedicated runtime asset, the app may select its portable core archive but extracts only the two validated runtime subtrees.
 
 ```text
 Star-Owner-v<version>-runtime-win-x64.zip

@@ -50,6 +50,22 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   if (missingDependencies.ready || !missingDependencies.needsPrompt || !missingDependencies.missingRequired.includes('runtime-base') || !missingDependencies.missingRequired.includes('model-small') || !missingDependencies.missingRequired.includes('model-medium')) throw new Error('dependency availability detection failed');
   dependencyManager.acknowledgePrompt(false);
   if (dependencyManager.state().needsPrompt) throw new Error('dependency first-run acknowledgement failed');
+  const originalFetch = global.fetch;
+  const dependencyRequests = [];
+  global.fetch = async (url) => {
+    dependencyRequests.push(String(url));
+    if (String(url).includes('/releases?per_page=10')) {
+      return new Response(JSON.stringify([{ id: 998, tag_name: 'v9.9.8', assets: [{ name: 'Star-Owner-v9.9.8-model-small.zip', browser_download_url: 'https://example.test/model-small.zip', size: 123 }] }]), { status: 200 });
+    }
+    return new Response(JSON.stringify({ id: 999, tag_name: 'v9.9.9', assets: [{ name: 'Star-Owner-v9.9.9-win-x64-core.zip', browser_download_url: 'https://example.test/core.zip', size: 456 }] }), { status: 200 });
+  };
+  try {
+    const modelDefinition = dependencyManager.definitions().find((item) => item.id === 'model-small');
+    const resolvedHistoricalModel = await dependencyManager.resolveReleaseAsset(modelDefinition);
+    if (resolvedHistoricalModel.asset.name !== 'Star-Owner-v9.9.8-model-small.zip' || !dependencyRequests.some((url) => url.includes('/releases?per_page=10'))) throw new Error('dependency resolver did not fall back from a current code-only release to a recent model asset');
+  } finally {
+    global.fetch = originalFetch;
+  }
   const runtimeDefinition = dependencyManager.definitions().find((item) => item.id === 'runtime-base');
   const archiveSource = path.join(dependencyRoot, 'archive-source');
   const portableRoot = path.join(archiveSource, 'Star-Owner-v0.3.0-win-x64-core');

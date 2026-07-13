@@ -521,7 +521,7 @@ Internal users and collections are always present in the Markdown Library and Ex
 
 ## 18. Managed Dependencies
 
-The dependency manager probes only project-relative paths. Required packages are the Windows media/ASR runtime and both built-in multilingual `small` and `medium` models. A missing required package triggers one consent prompt per application version. Downloads are serialized, stream progress to the renderer, resolve exact current-version assets first and compatible recent Release assets second, verify a sibling `.sha256` when provided, reject unsafe archive entries, and extract into the application root. For older Releases without a dedicated runtime asset, the manager can safely extract only `runtime/python` and `runtime/faster-whisper` from the portable core archive.
+The dependency manager probes only project-relative paths. Required packages are the Windows media/ASR runtime and both built-in multilingual `small` and `medium` models. A missing required package triggers one consent prompt per application version. Downloads are serialized, stream progress to the renderer, resolve exact current-version assets first and always enumerate up to ten recent Releases for compatible dependency filenames second, verify a sibling `.sha256` when provided, reject unsafe archive entries, and extract into the application root. This allows a code-only Release to reuse unchanged multi-gigabyte dependency assets safely. For older Releases without a dedicated runtime asset, the manager can extract only `runtime/python` and `runtime/faster-whisper` from the portable core archive.
 
 Release asset contracts:
 
