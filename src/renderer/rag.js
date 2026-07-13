@@ -210,20 +210,38 @@
   function renderKnowledgeMenu(menu, selected, session) {
     const groups = groupBy(state.knowledgeCatalog, (item) => item.userName);
     menu.innerHTML = '';
+    if (state.knowledgeCatalog.length) {
+      const search = document.createElement('label');
+      search.className = 'rag-knowledge-search';
+      search.innerHTML = '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M16 16l5 5"/></svg><input type="search" placeholder="搜索用户或收藏夹" aria-label="搜索知识库" />';
+      search.querySelector('input').addEventListener('input', (event) => filterKnowledgeMenu(menu, event.target.value));
+      menu.appendChild(search);
+    }
     for (const [user, collections] of groups) {
       const heading = document.createElement('div');
       heading.className = 'rag-knowledge-user';
       heading.textContent = user;
+      heading.dataset.knowledgeUser = user;
       menu.appendChild(heading);
       for (const collection of collections) {
         const label = document.createElement('label');
         label.className = 'rag-knowledge-option';
+        label.dataset.knowledgeUser = user;
+        label.dataset.knowledgeSearch = `${user} ${collection.name}`.toLocaleLowerCase();
         label.innerHTML = `<input type="checkbox" value="${escapeAttr(collection.id)}" ${selected.has(collection.id) ? 'checked' : ''} ${!session || streaming ? 'disabled' : ''}><span>${escapeHtml(collection.name)}</span><small>${collection.documentCount} 篇</small>`;
         label.querySelector('input').addEventListener('change', () => updateKnowledgeSelection(menu));
         menu.appendChild(label);
       }
     }
     if (!state.knowledgeCatalog.length) menu.innerHTML = '<div class="rag-list-empty">暂无已完成 Markdown</div>';
+  }
+
+  function filterKnowledgeMenu(menu, value) {
+    const query = String(value || '').trim().toLocaleLowerCase();
+    for (const option of menu.querySelectorAll('.rag-knowledge-option')) option.hidden = Boolean(query) && !option.dataset.knowledgeSearch.includes(query);
+    for (const heading of menu.querySelectorAll('.rag-knowledge-user')) {
+      heading.hidden = ![...menu.querySelectorAll('.rag-knowledge-option')].some((option) => option.dataset.knowledgeUser === heading.dataset.knowledgeUser && !option.hidden);
+    }
   }
 
   async function updateKnowledgeSelection(sourceMenu) {
@@ -312,8 +330,10 @@
       if (message.toolEvents?.length) extras.appendChild(await toolList(message.toolEvents, message.sessionId));
       if (message.attachments?.length) {
         const attachments = document.createElement('div');
-        attachments.className = 'rag-pending-attachments';
-        attachments.innerHTML = message.attachments.map((item) => `<span class="rag-attachment-chip"><span>${escapeHtml(item.name)}</span></span>`).join('');
+        attachments.className = 'rag-message-attachments';
+        attachments.innerHTML = message.attachments.map((item) => isImageAttachment(item)
+          ? `<figure class="rag-message-image"><img src="${escapeAttr(item.previewUrl)}" alt="${escapeAttr(item.name)}" loading="lazy" /><figcaption>${escapeHtml(item.name)}</figcaption></figure>`
+          : `<span class="rag-attachment-chip"><span>${escapeHtml(item.name)}</span></span>`).join('');
         extras.appendChild(attachments);
       }
     }
@@ -364,7 +384,9 @@
   }
 
   function renderPendingAttachments() {
-    elements.pendingAttachments.innerHTML = pendingAttachments.map((item) => `<div class="rag-attachment-chip"><span title="${escapeAttr(item.path)}">${escapeHtml(item.name)}</span><button type="button" data-remove-attachment="${escapeAttr(item.id)}" aria-label="移除">×</button></div>`).join('');
+    elements.pendingAttachments.innerHTML = pendingAttachments.map((item) => isImageAttachment(item)
+      ? `<div class="rag-pending-image"><img src="${escapeAttr(item.previewUrl)}" alt="" /><div><span title="${escapeAttr(item.name)}">${escapeHtml(item.name)}</span><small>${formatBytes(item.size)}</small></div><button type="button" data-remove-attachment="${escapeAttr(item.id)}" aria-label="移除图片">×</button></div>`
+      : `<div class="rag-attachment-chip"><span title="${escapeAttr(item.path || item.name)}">${escapeHtml(item.name)}</span><button type="button" data-remove-attachment="${escapeAttr(item.id)}" aria-label="移除">×</button></div>`).join('');
     for (const button of elements.pendingAttachments.querySelectorAll('[data-remove-attachment]')) button.addEventListener('click', () => {
       pendingAttachments = pendingAttachments.filter((item) => item.id !== button.dataset.removeAttachment);
       renderInspector();
@@ -641,6 +663,19 @@
   elements.sessionSearch.addEventListener('input', renderSessions);
   elements.composer.addEventListener('submit', sendMessage);
   elements.input.addEventListener('input', autoGrowInput);
+  elements.input.addEventListener('paste', async (event) => {
+    const hasImage = [...(event.clipboardData?.items || [])].some((item) => String(item.type || '').startsWith('image/'))
+      || [...(event.clipboardData?.files || [])].some((file) => String(file.type || '').startsWith('image/'));
+    if (!hasImage) return;
+    event.preventDefault();
+    if (!activeSessionId || streaming) return;
+    try {
+      const result = await window.orchestrator.ragImportClipboardImage(activeSessionId);
+      if (result.attachment) pendingAttachments.push(result.attachment);
+      renderInspector();
+      notify('剪贴板图片已加入', '发送前可以预览或移除这张图片。', 'success');
+    } catch (error) { notify('无法粘贴图片', error.message || String(error), 'error'); }
+  });
   elements.input.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); sendMessage(); }
   });
@@ -762,6 +797,8 @@
   function toolLabel(name) { return ({ knowledge_search: '检索知识库', knowledge_list_documents: '列出知识库原文', knowledge_read_document: '读取原始 Markdown', knowledge_view_images: '查看知识库原图', list_files: '列出文件', read_file: '读取文件', write_file: '写入文件', run_command: '执行 CMD', web_search: '联网搜索', browse_url: '读取网页', open_browser: '打开浏览器', spawn_subagent: '调用子 Agent' })[name] || name || '工具'; }
   function toolStatus(status) { return ({ running: '进行中', succeeded: '已完成', failed: '失败' })[status] || status || '进行中'; }
   function formatNumber(value) { return new Intl.NumberFormat('zh-CN', { notation: Number(value) > 999999 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(Number(value || 0)); }
+  function formatBytes(value) { const bytes = Number(value || 0); return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`; }
+  function isImageAttachment(item) { return String(item?.mimeType || '').startsWith('image/') && Boolean(item?.previewUrl); }
   function formatTime(value) { const date = new Date(value || Date.now()); return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(date); }
   function relativeTime(value) { const delta = Date.now() - new Date(value || 0).getTime(); if (!Number.isFinite(delta)) return ''; if (delta < 60000) return '刚刚'; if (delta < 3600000) return `${Math.floor(delta / 60000)} 分钟`; if (delta < 86400000) return `${Math.floor(delta / 3600000)} 小时`; return `${Math.floor(delta / 86400000)} 天`; }
   function escapeHtml(value) { return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;'); }

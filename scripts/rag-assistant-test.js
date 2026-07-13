@@ -164,8 +164,18 @@ async function startFakeProvider() {
     const imageUri = imageReply.toolEvents[0].images[0].uri;
     assert(assistant.resolveKnowledgeImage(session.id, imageUri) === knowledgeImage, 'safe knowledge image URI did not resolve to the original file');
 
-    const fallback = await assistant.send(session.id, { content: 'JSON_FALLBACK' });
+    const clipboardImage = await assistant.importBuffer(session.id, {
+      buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
+      mimeType: 'image/png',
+      name: 'clipboard-test.png'
+    });
+    assert(clipboardImage.previewUrl.startsWith('file:') && fs.existsSync(clipboardImage.path), 'clipboard image was not imported with a local preview');
+    const fallback = await assistant.send(session.id, { content: 'JSON_FALLBACK', attachmentIds: [clipboardImage.id] });
     assert(fallback.content === '普通 JSON 兼容成功。' && fallback.reasoning === '普通 JSON 推理', 'non-SSE JSON fallback failed');
+    const clipboardRequest = [...fake.requests].reverse().find((item) => latestUserText(item.messages || []).includes('JSON_FALLBACK'));
+    assert(clipboardRequest.messages.some((message) => Array.isArray(message.content) && message.content.some((part) => part.type === 'image_url')), 'clipboard image was not sent as multimodal input');
+    const clipboardMessage = assistant.sessionDetail(session.id).messages.find((message) => message.role === 'user' && message.content === 'JSON_FALLBACK');
+    assert(clipboardMessage.attachments[0]?.previewUrl.startsWith('file:'), 'sent clipboard image did not retain a conversation preview');
 
     const historySession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: 'Long context test' });
     for (let index = 0; index < 60; index += 1) {

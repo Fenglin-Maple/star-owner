@@ -624,6 +624,18 @@ ipcMain.handle('rag:attachments-import', async (_event, sessionId) => {
   return { canceled: false, attachments: await ragAssistant.importFiles(sessionId, result.filePaths) };
 });
 
+ipcMain.handle('rag:clipboard-image-import', async (_event, sessionId) => {
+  assertBackendReady();
+  const image = clipboard.readImage();
+  if (image.isEmpty()) throw new Error('剪贴板中没有可读取的图片。');
+  const attachment = await ragAssistant.importBuffer(sessionId, {
+    buffer: image.toPNG(),
+    mimeType: 'image/png',
+    name: `clipboard-${timestampForFile()}.png`
+  });
+  return { attachment };
+});
+
 ipcMain.handle('rag:approval-resolve', async (_event, payload = {}) => {
   const pending = pendingRagApprovals.get(String(payload.id || ''));
   if (!pending) return { resolved: false };

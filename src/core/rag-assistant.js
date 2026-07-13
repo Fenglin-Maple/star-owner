@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
+const { pathToFileURL } = require('url');
 const MarkdownIt = require('markdown-it');
 const pdf = require('pdf-parse');
 const mammoth = require('mammoth');
@@ -234,8 +235,12 @@ class RagAssistant {
 
   sessionDetail(id) {
     const session = this.requireSession(id);
-    const messages = this.store.list('ragMessages').filter((item) => item.sessionId === id).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
     const attachments = this.store.list('ragAttachments').filter((item) => item.sessionId === id).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    const attachmentMap = new Map(attachments.map((item) => [item.id, item]));
+    const messages = this.store.list('ragMessages').filter((item) => item.sessionId === id).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))).map((message) => ({
+      ...message,
+      attachments: (message.attachments || []).map((item) => publicAttachment(attachmentMap.get(item.id) || item))
+    }));
     const model = this.sessionModel(session);
     const contextTokens = estimateTokens(JSON.stringify(messages.slice(session.compressedSummary ? -8 : 0))) + estimateTokens(session.compressedSummary || '');
     return {
@@ -293,6 +298,7 @@ class RagAssistant {
         path: target,
         mimeType: MIME_TYPES[extension] || 'application/octet-stream',
         size: stat.size,
+        previewUrl: (MIME_TYPES[extension] || '').startsWith('image/') ? pathToFileURL(target).href : '',
         extractedText: extractedText.slice(0, 120000),
         createdAt: new Date().toISOString()
       };
@@ -301,6 +307,37 @@ class RagAssistant {
     }
     this.store.save();
     return imported;
+  }
+
+  async importBuffer(sessionId, input = {}) {
+    const session = this.requireSession(sessionId);
+    const mimeType = String(input.mimeType || '').toLowerCase();
+    const extensions = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };
+    const extension = extensions[mimeType];
+    if (!extension) throw new Error('Clipboard image type is not supported.');
+    const buffer = Buffer.isBuffer(input.buffer) ? input.buffer : Buffer.from(input.buffer || '');
+    if (!buffer.length) throw new Error('Clipboard does not contain a readable image.');
+    if (buffer.length > 15 * 1024 * 1024) throw new Error('Clipboard image exceeds 15 MiB.');
+    if (!matchesImageSignature(buffer, mimeType)) throw new Error('Clipboard image data does not match its declared type.');
+    const destination = ensureDir(path.join(session.sandboxDir, 'attachments'));
+    const id = `attachment-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+    const name = safeFilename(String(input.name || `clipboard-image${extension}`));
+    const target = uniqueFile(destination, `${id}-${name.endsWith(extension) ? name : `${name}${extension}`}`);
+    fs.writeFileSync(target, buffer);
+    const record = {
+      id,
+      sessionId,
+      name: path.basename(target).replace(`${id}-`, ''),
+      path: target,
+      mimeType,
+      size: buffer.length,
+      previewUrl: pathToFileURL(target).href,
+      extractedText: '',
+      createdAt: new Date().toISOString()
+    };
+    this.store.set('ragAttachments', id, record);
+    this.store.save();
+    return record;
   }
 
   async send(sessionId, input = {}) {
@@ -876,13 +913,23 @@ function publicProvider(provider) {
 }
 
 function publicAttachment(attachment) {
+  const previewUrl = attachment.previewUrl || (attachment.path && String(attachment.mimeType || '').startsWith('image/') && fs.existsSync(attachment.path) ? pathToFileURL(attachment.path).href : '');
   return {
     id: attachment.id,
     name: attachment.name,
     mimeType: attachment.mimeType,
     size: attachment.size,
+    previewUrl,
     createdAt: attachment.createdAt
   };
+}
+
+function matchesImageSignature(buffer, mimeType) {
+  if (mimeType === 'image/png') return buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  if (mimeType === 'image/jpeg') return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer.at(-2) === 0xff && buffer.at(-1) === 0xd9;
+  if (mimeType === 'image/gif') return ['GIF87a', 'GIF89a'].includes(buffer.subarray(0, 6).toString('ascii'));
+  if (mimeType === 'image/webp') return buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'WEBP';
+  return false;
 }
 
 function normalizeModel(item = {}) {
