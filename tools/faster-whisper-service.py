@@ -72,19 +72,13 @@ def transcribe(model, cli, args, request_id, request):
     output_dir.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
     emit({"event": "progress", "id": request_id, "phase": "audio-loading", "progress": 0})
-    segments, info = model.transcribe(
-        str(source),
-        language=None if request.get("language") == "auto" else request.get("language", "zh"),
-        beam_size=max(1, int(request.get("beamSize", 1))),
-        temperature=0.0,
-        repetition_penalty=1.05,
-        no_repeat_ngram_size=3,
-        vad_filter=True,
-        max_new_tokens=max(32, int(request.get("maxNewTokens", 64))),
-        hallucination_silence_threshold=2.0,
-        word_timestamps=True,
-        condition_on_previous_text=bool(request.get("conditionOnPreviousText", False)),
-    )
+    requested_language = str(request.get("language") or "auto")
+    segments, info = model.transcribe(str(source), **cli.transcription_options(
+        requested_language,
+        request.get("beamSize", 5),
+        request.get("conditionOnPreviousText", True),
+        request.get("maxNewTokens", 448),
+    ))
     total_duration = max(0.0, float(getattr(info, "duration", 0.0) or 0.0))
     emit({"event": "progress", "id": request_id, "phase": "audio-loaded", "progress": 0, "totalSeconds": total_duration})
     recognized = []
@@ -116,11 +110,13 @@ def transcribe(model, cli, args, request_id, request):
     json_file = output_dir / "asr-result.json"
     cli.write_srt(srt_file, materialized)
     cli.write_timestamped_text(text_file, materialized)
+    diagnostics = cli.transcript_diagnostics(materialized, total_duration)
     payload = {
         "model": args.model,
         "source": str(source),
         "language": info.language,
         "languageProbability": info.language_probability,
+        "requestedLanguage": requested_language,
         "duration": total_duration,
         "device": args.device,
         "computeType": args.compute_type,
@@ -128,6 +124,7 @@ def transcribe(model, cli, args, request_id, request):
             {"id": item.id, "start": item.start, "end": item.end, "text": item.text.strip()}
             for item in materialized
         ],
+        "diagnostics": diagnostics,
     }
     json_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {
@@ -137,6 +134,9 @@ def transcribe(model, cli, args, request_id, request):
         "computeType": args.compute_type,
         "duration": total_duration,
         "segments": len(materialized),
+        "language": info.language,
+        "languageProbability": info.language_probability,
+        "diagnostics": diagnostics,
         "elapsedMs": round((time.perf_counter() - started) * 1000),
         "srt": str(srt_file),
         "text": str(text_file),

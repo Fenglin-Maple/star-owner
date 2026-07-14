@@ -65,18 +65,6 @@
                 <button class="nav-item nav-subitem" data-page="tasks" title="任务总览"><svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg><span data-i18n="navTasks"></span></button>
               </div>
             </div>
-            <div class="nav-group" data-nav-group="status">
-              <button class="nav-group-toggle" type="button" aria-expanded="false" title="状态查询">
-                <svg viewBox="0 0 24 24"><path d="M4 19V9M10 19V5M16 19v-7M22 19V3"/></svg>
-                <span>状态查询</span>
-                <svg class="nav-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
-              </button>
-              <div class="nav-submenu">
-                <button class="nav-item nav-subitem" data-page="workers" title="Agent 工作列表"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.87"/></svg><span data-i18n="navWorkers"></span></button>
-                <button class="nav-item nav-subitem" data-page="tools" title="Agent 工具模块"><svg viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5 5L4 17v3h3l5.7-5.7a4 4 0 0 0 5-5l-2.4 2.4-3-3z"/></svg><span data-i18n="navTools"></span></button>
-                <button class="nav-item nav-subitem" data-page="agent-tool-status" title="Agent 工具状态"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 9h8M8 13h5M16 13h1"/></svg><span>Agent 工具状态</span></button>
-              </div>
-            </div>
             <div class="nav-group" data-nav-group="ai">
               <button class="nav-group-toggle" type="button" aria-expanded="false" title="AI">
                 <svg viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="5"/></svg>
@@ -104,10 +92,19 @@
             </div>
           </nav>
           <div class="nav-bottom">
-            <button class="nav-item" data-page="settings" title="settings">
-              <svg viewBox="0 0 24 24"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5zM19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1a7 7 0 0 0-1.8-1L14.4 3h-4l-.4 3.1a7 7 0 0 0-1.8 1l-2.4-1-2 3.4 2 1.5a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a7 7 0 0 0 1.8 1l.4 3.1h4l.4-3.1a7 7 0 0 0 1.8-1l2.4 1 2-3.4-2-1.5c.1-.3.1-.7.1-1z"/></svg>
-              <span data-i18n="navSettings"></span>
-            </button>
+            <div class="nav-group nav-settings-group" data-nav-group="settings">
+              <button class="nav-group-toggle" type="button" aria-expanded="false" title="设置">
+                <svg viewBox="0 0 24 24"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5zM19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1a7 7 0 0 0-1.8-1L14.4 3h-4l-.4 3.1a7 7 0 0 0-1.8 1l-2.4-1-2 3.4 2 1.5a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a7 7 0 0 0 1.8 1l.4 3.1h4l.4-3.1a7 7 0 0 0 1.8-1l2.4 1 2-3.4-2-1.5c.1-.3.1-.7.1-1z"/></svg>
+                <span data-i18n="navSettings"></span>
+                <svg class="nav-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+              </button>
+              <div class="nav-submenu">
+                <button class="nav-item nav-subitem" data-page="settings" title="应用设置"><svg viewBox="0 0 24 24"><path d="M4 7h16M7 3v8M4 17h16M17 13v8"/></svg><span>应用设置</span></button>
+                <button class="nav-item nav-subitem" data-page="workers" title="Agent 工作列表"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.87"/></svg><span data-i18n="navWorkers"></span></button>
+                <button class="nav-item nav-subitem" data-page="tools" title="Agent 工具模块"><svg viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5 5L4 17v3h3l5.7-5.7a4 4 0 0 0 5-5l-2.4 2.4-3-3z"/></svg><span data-i18n="navTools"></span></button>
+                <button class="nav-item nav-subitem" data-page="agent-tool-status" title="Agent 工具状态"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 9h8M8 13h5M16 13h1"/></svg><span>Agent 工具状态</span></button>
+              </div>
+            </div>
             <button class="nav-item" data-page="readme" title="README">
               <svg viewBox="0 0 24 24"><path d="M6 3h9l3 3v15H6zM15 3v4h4M9 11h6M9 15h6M9 7h2"/></svg>
               <span data-i18n="navReadme"></span>
@@ -210,7 +207,6 @@
               </div>
               <div class="form-row">
                 <label><span data-i18n="favoriteFolder"></span><select id="folderSelect"><option value="" data-i18n="readFoldersFirst"></option></select></label>
-                <label><span data-i18n="label"></span><input id="labelInput" value="bili" /></label>
                 <button id="syncCollection" class="primary-button" data-i18n="syncTasks" disabled></button>
               </div>
               <div id="syncProgress" class="sync-progress" aria-live="polite">
@@ -713,6 +709,22 @@
         <header><div><h2 id="singleLoginRequiredTitle">这个视频需要登录</h2><p>星藏家已经先尝试了公开获取，但 Bilibili 要求登录后才能继续。</p></div></header>
         <div class="single-login-body"><div class="single-login-icon"><svg viewBox="0 0 24 24"><path d="M7 10V7a5 5 0 0 1 10 0v3M5 10h14v11H5zM12 14v3"/></svg></div><div><strong id="singleLoginRequiredVideo">当前单视频任务</strong><p id="singleLoginRequiredReason">登录完成后回到“视频总结（单个）”，点击“登录后重试”即可使用新的登录状态重新处理。</p></div></div>
         <footer><button id="singleLoginLater" class="secondary-button" type="button">稍后处理</button><span></span><span></span><button id="singleGoLogin" class="primary-button" type="button">前往 B站登录</button></footer>
+      </section>
+    </div>
+    <div id="singleDuplicateModal" class="rag-modal" hidden>
+      <section class="rag-modal-dialog compact single-duplicate-dialog" role="alertdialog" aria-modal="true" aria-labelledby="singleDuplicateTitle">
+        <header><div><h2 id="singleDuplicateTitle">这个视频已经总结过</h2><p id="singleDuplicateMessage"></p></div></header>
+        <div class="single-duplicate-body"><strong id="singleDuplicateVideo"></strong><span id="singleDuplicateMeta"></span></div>
+        <footer><button id="singleDuplicateCancel" class="secondary-button" type="button">取消</button><span></span><button id="singleDuplicateOpen" class="secondary-button" type="button">打开已有文档</button><button id="singleDuplicateRegenerate" class="primary-button" type="button">重新生成新版本</button></footer>
+      </section>
+    </div>
+    <div id="documentContextMenu" class="document-context-menu" role="menu" hidden>
+      <button id="documentContextDelete" type="button" role="menuitem"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/></svg><span>删除文档与产物</span></button>
+    </div>
+    <div id="documentDeleteModal" class="rag-modal" hidden>
+      <section class="rag-modal-dialog compact cache-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="documentDeleteTitle">
+        <header><div><h2 id="documentDeleteTitle">确认删除视频总结</h2><p id="documentDeleteMessage"></p></div></header>
+        <footer><button id="documentDeleteCancel" class="secondary-button" type="button">取消</button><span></span><span></span><button id="documentDeleteAccept" class="primary-button danger-confirm" type="button">删除文档与产物</button></footer>
       </section>
     </div>
     <div id="cacheLoginRequiredModal" class="rag-modal" hidden>

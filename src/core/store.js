@@ -608,10 +608,10 @@ function defaultTools() {
       category: 'transcript',
       enabled: true,
       order: 40,
-      description: '不管是否存在官方字幕，都运行一次 ASR，生成带真实分段起止时间的 SRT、时间轴文本和 JSON，用于和官方/自动字幕比对及建立视频时间轴链接。',
+      description: '不管是否存在官方字幕，都运行一次多语言自动识别 ASR，生成带真实分段起止时间的 SRT、时间轴文本和 JSON，用于和官方/自动字幕比对及建立视频时间轴链接。',
       apiUsage: 'POST /api/tasks/<taskId>/tools/asr/run',
       internalCommand: 'node tools/video-tool.js asr <videoUrl> --out <artifactDir> --cookies <cookieFile>',
-      agentPrompt: '必须通过工具运行 API 调用，并在 Markdown 的“字幕比对”章节说明采用哪份字幕。优先读取 asr/transcript.srt；也可读取 asr/asr-result.json 的 start/end。asr/asr-transcript.txt 同样包含时间轴，不得猜测内容位置。',
+      agentPrompt: '必须通过工具运行 API 调用，并在 Markdown 的“字幕比对”章节说明采用哪份字幕。默认自动检测中文、英文、日语等语言；优先读取 asr/transcript.srt，也要检查 asr/asr-result.json 的 language、languageProbability、diagnostics 与 start/end。asr/asr-transcript.txt 同样包含时间轴，不得猜测内容位置。',
       outputs: ['asr/transcript.srt', 'asr/asr-transcript.txt', 'asr/asr-result.json'],
       projects: [
         { name: 'faster-whisper', url: 'https://github.com/SYSTRAN/faster-whisper', role: '本地 Whisper ASR' },

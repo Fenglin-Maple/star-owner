@@ -17,6 +17,12 @@ def load_cli():
 
 def main():
     cli = load_cli()
+    defaults = cli.build_parser().parse_args([])
+    assert defaults.language == "auto" and defaults.beam_size == 5
+    options = cli.transcription_options()
+    assert options["language"] is None
+    assert options["beam_size"] == 5 and options["max_new_tokens"] == 448
+    assert options["condition_on_previous_text"] is True
     raw = [SimpleNamespace(
         start=1.2,
         end=5.6,
@@ -57,6 +63,24 @@ def main():
     assert len(paused) == 2
     assert paused[0].start == 30.0 and paused[0].end == 30.8
     assert paused[1].start == 32.3 and paused[1].end == 34.0
+
+    japanese = cli.sentence_segments([SimpleNamespace(
+        start=40.0,
+        end=44.0,
+        text="これは日本語です。次の文です！",
+        words=[
+            SimpleNamespace(start=40.0, end=42.0, word="これは日本語です。"),
+            SimpleNamespace(start=42.2, end=44.0, word="次の文です！"),
+        ],
+    )])
+    assert len(japanese) == 2 and japanese[0].text == "これは日本語です。"
+
+    diagnostics = cli.transcript_diagnostics([
+        SimpleNamespace(start=1.0, end=3.0),
+        SimpleNamespace(start=15.0, end=18.0),
+    ], 30.0)
+    assert diagnostics["speechSeconds"] == 5.0
+    assert diagnostics["largeGapCount"] == 1 and diagnostics["largestGaps"][0]["seconds"] == 12.0
 
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

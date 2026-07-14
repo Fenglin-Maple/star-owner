@@ -307,7 +307,7 @@ class RagAssistant {
   }
 
   knowledgeCatalog() {
-    const tasks = this.store.listTasks().filter((task) => task.status === 'done' && task.outputMarkdown && fs.existsSync(task.outputMarkdown));
+    const tasks = this.store.listTasks().filter(knowledgeEligible);
     const collections = this.store.listCollections();
     const users = new Map(this.store.list('users').map((user) => [String(user.id), user]));
     return collections.map((collection) => {
@@ -830,7 +830,7 @@ class RagAssistant {
     const selected = new Set(session.knowledgeCollectionIds || []);
     if (!selected.size) return 'No knowledge library is selected.';
     const terms = queryTerms(String(query || ''));
-    const tasks = this.store.listTasks().filter((task) => selected.has(task.collectionId) && task.status === 'done' && task.outputMarkdown && fs.existsSync(task.outputMarkdown));
+    const tasks = this.store.listTasks().filter((task) => selected.has(task.collectionId) && knowledgeEligible(task));
     const collections = new Map(this.store.listCollections().map((item) => [item.id, item]));
     const scored = [];
     for (const task of tasks) {
@@ -938,7 +938,7 @@ class RagAssistant {
 
   knowledgeTasks(session) {
     const selected = new Set(session.knowledgeCollectionIds || []);
-    return this.store.listTasks().filter((task) => selected.has(task.collectionId) && task.status === 'done' && task.outputMarkdown && fs.existsSync(task.outputMarkdown));
+    return this.store.listTasks().filter((task) => selected.has(task.collectionId) && knowledgeEligible(task));
   }
 
   requireKnowledgeDocument(session, documentId) {
@@ -1630,6 +1630,13 @@ function knowledgeFavoriteMetadata(task, collection) {
   const statusAt = status.at ? ` | Status changed at: ${status.at}` : '';
   const collectionState = collection?.biliDeleted ? 'Deleted on Bilibili; completed local artifacts are retained.' : 'Available locally.';
   return `Favorite membership status: ${status.label} (${status.code})${statusAt}\nCollection remote status: ${collectionState}`;
+}
+
+function knowledgeEligible(task) {
+  return task.knowledgeActive !== false
+    && task.status === 'done'
+    && Boolean(task.outputMarkdown)
+    && fs.existsSync(task.outputMarkdown);
 }
 
 function queryTerms(query) {

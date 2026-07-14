@@ -10,7 +10,8 @@
     singleVideo: $('#singleVideoInput'), singleCollection: $('#singleCollectionSelect'), singleCreateCollection: $('#singleCreateCollection'), singleOpenCollection: $('#singleOpenCollection'), singleProvider: $('#singleProviderSelect'), singleModel: $('#singleModelSelect'), singleFrames: $('#singleFrames'), singleComments: $('#singleComments'), singleRequirements: $('#singleRequirements'), singleKeepVideoCache: $('#singleKeepVideoCache'), singleStart: $('#singleStart'), singleSession: $('#singleSessionSelect'), singleDetail: $('#singleAgentDetail'),
     modelNew: $('#aiModelNewProvider'), modelProviderList: $('#aiModelProviderList'), modelProviderId: $('#aiModelProviderId'), modelProviderName: $('#aiModelProviderName'), modelProviderType: $('#aiModelProviderType'), modelProviderBaseUrl: $('#aiModelProviderBaseUrl'), modelProviderApiKey: $('#aiModelProviderApiKey'), modelProviderTemperature: $('#aiModelProviderTemperature'), modelProviderMaxTokens: $('#aiModelProviderMaxTokens'), modelProviderHeaders: $('#aiModelProviderHeaders'), modelDelete: $('#aiModelDeleteProvider'), modelSave: $('#aiModelSaveProvider'), modelFetch: $('#aiModelFetchModels'), modelCount: $('#aiModelRemoteCount'), modelRemote: $('#aiModelRemoteModels'),
     dependencyList: $('#dependencyList'), dependencyRefresh: $('#dependencyRefresh'), dependencyModal: $('#dependencyPromptModal'), dependencyMissing: $('#dependencyPromptMissing'), dependencyLater: $('#dependencyPromptLater'), dependencyDownload: $('#dependencyPromptDownload'),
-    loginRequiredModal: $('#singleLoginRequiredModal'), loginRequiredVideo: $('#singleLoginRequiredVideo'), loginRequiredReason: $('#singleLoginRequiredReason'), loginLater: $('#singleLoginLater'), goLogin: $('#singleGoLogin')
+    loginRequiredModal: $('#singleLoginRequiredModal'), loginRequiredVideo: $('#singleLoginRequiredVideo'), loginRequiredReason: $('#singleLoginRequiredReason'), loginLater: $('#singleLoginLater'), goLogin: $('#singleGoLogin'),
+    duplicateModal: $('#singleDuplicateModal'), duplicateMessage: $('#singleDuplicateMessage'), duplicateVideo: $('#singleDuplicateVideo'), duplicateMeta: $('#singleDuplicateMeta'), duplicateCancel: $('#singleDuplicateCancel'), duplicateOpen: $('#singleDuplicateOpen'), duplicateRegenerate: $('#singleDuplicateRegenerate')
   };
 
   let state = { providers: [], sessions: [], collections: [], internalCollections: [] };
@@ -28,6 +29,7 @@
   let modelSaveTimer = null;
   const pendingSessionActions = new Set();
   let agentContextMenu = null;
+  let duplicateDecisionResolver = null;
 
   async function refreshAll({ quiet = false } = {}) {
     const sequence = ++refreshSequence;
@@ -297,7 +299,7 @@
   async function startSingleTask() {
     elements.singleStart.disabled = true;
     try {
-      const session = await window.orchestrator.internalAgentCreateSingle({
+      const payload = {
         video: elements.singleVideo.value,
         collectionId: elements.singleCollection.value,
         providerId: elements.singleProvider.value,
@@ -306,14 +308,52 @@
         taskRequirements: elements.singleRequirements.value,
         taskOptions: { frames: Number(elements.singleFrames.value), commentLimit: Number(elements.singleComments.value) },
         keepVideoCache: Boolean(elements.singleKeepVideoCache.checked)
-      });
+      };
+      const inspection = await window.orchestrator.internalAgentInspectSingle(payload);
+      if (inspection.active) {
+        if (inspection.active.sessionId) {
+          activeSingleId = inspection.active.sessionId;
+          persistActiveIds();
+          await refreshAll({ quiet: true });
+        }
+        notify('这个视频正在处理', inspection.active.sessionTitle || `${inspection.bvid} 已被现有任务领取，请在实时工作区查看。`, 'info');
+        return;
+      }
+      if (inspection.latestCompleted) {
+        const decision = await requestDuplicateDecision(inspection);
+        if (decision === 'open') {
+          await window.orchestrator.openDocument(inspection.latestCompleted.taskId);
+          notify('已打开已有文档', `没有为 ${inspection.bvid} 创建重复任务。`, 'success');
+          return;
+        }
+        if (decision !== 'regenerate') return;
+        payload.duplicateAction = 'regenerate';
+      }
+      const session = await window.orchestrator.internalAgentCreateSingle(payload);
       activeSingleId = session.id;
       persistActiveIds();
       await window.orchestrator.internalAgentStart(session.id);
       await refreshAll({ quiet: true });
-      notify('单任务已开始', '可以切换到其它页面，后台会继续处理。', 'success');
+      notify(session.reusedTask ? '旧任务已从头重建' : '单任务已开始', session.reusedTask ? '旧缓存已清理，本次不会从中断位置继续。' : '可以切换到其它页面，后台会继续处理。', 'success');
     } catch (error) { notify('无法开始单任务', error.message || String(error), 'error'); }
     finally { updateSingleStartState(); }
+  }
+
+  function requestDuplicateDecision(inspection) {
+    const existing = inspection.latestCompleted;
+    if (duplicateDecisionResolver) duplicateDecisionResolver('cancel');
+    elements.duplicateMessage.textContent = `“${inspection.collectionName}”中已经存在完成产物。打开旧文档不会重复消耗模型与 ASR；重新生成会保留旧版本，并让新版本成为 RAG 默认版本。`;
+    elements.duplicateVideo.textContent = existing.title || existing.bvid;
+    elements.duplicateMeta.textContent = `${existing.bvid} · 版本 ${existing.revision || 1} · 完成于 ${formatDate(existing.completedAt)}`;
+    elements.duplicateModal.hidden = false;
+    return new Promise((resolve) => { duplicateDecisionResolver = resolve; });
+  }
+
+  function resolveDuplicateDecision(decision) {
+    elements.duplicateModal.hidden = true;
+    const resolve = duplicateDecisionResolver;
+    duplicateDecisionResolver = null;
+    resolve?.(decision);
   }
 
   function renderModelPage() {
@@ -630,6 +670,10 @@
   elements.singleStart.addEventListener('click', startSingleTask);
   elements.loginLater.addEventListener('click', () => { elements.loginRequiredModal.hidden = true; });
   elements.goLogin.addEventListener('click', () => { elements.loginRequiredModal.hidden = true; window.dispatchEvent(new CustomEvent('star:navigate', { detail: { page: 'login' } })); });
+  elements.duplicateCancel.addEventListener('click', () => resolveDuplicateDecision('cancel'));
+  elements.duplicateOpen.addEventListener('click', () => resolveDuplicateDecision('open'));
+  elements.duplicateRegenerate.addEventListener('click', () => resolveDuplicateDecision('regenerate'));
+  elements.duplicateModal.addEventListener('click', (event) => { if (event.target === elements.duplicateModal) resolveDuplicateDecision('cancel'); });
   elements.singleSession.addEventListener('change', () => { activeSingleId = elements.singleSession.value; persistActiveIds(); renderSinglePage(); });
   elements.modelNew.addEventListener('click', () => { editingProviderId = '__new__'; renderModelPage(); elements.modelProviderName.focus(); });
   elements.modelSave.addEventListener('click', async () => { try { await saveProviderForm(); notify('供应商已保存', '配置已供 RAG 和应用内 Agent 共用。', 'success'); } catch (error) { notify('保存失败', error.message || String(error), 'error'); } });
@@ -680,6 +724,7 @@
   }
   function formatTokens(value) { return new Intl.NumberFormat('zh-CN', { notation: Number(value) > 999999 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(Number(value || 0)); }
   function time(value) { try { return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(value)); } catch { return ''; } }
+  function formatDate(value) { try { return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)); } catch { return value || '-'; } }
   function persistActiveIds() { if (activeAgentId) localStorage.setItem('internalAgentActiveId', activeAgentId); else localStorage.removeItem('internalAgentActiveId'); if (activeSingleId) localStorage.setItem('singleAgentActiveId', activeSingleId); else localStorage.removeItem('singleAgentActiveId'); }
   function html(value) { return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;'); }
   function esc(value) { return html(value); }

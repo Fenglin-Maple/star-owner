@@ -15,6 +15,7 @@ const { DependencyManager } = require('../src/core/dependency-manager');
 const { repairPortablePythonHome } = require('../src/core/portable-runtime');
 
 (async () => {
+  verifyRendererContracts();
   if (assessSubtitle([], 120).reason !== 'SUBTITLE_EMPTY') throw new Error('empty subtitle validation failed');
   if (assessSubtitle([{ from: 0, to: 9 }], 120).reason !== 'SUBTITLE_COVERAGE_TOO_LOW') throw new Error('subtitle coverage validation failed');
   if (assessSubtitle([{ from: 0, to: 60 }, { from: 60, to: 120 }, { from: 120, to: 300 }], 120).reason !== 'SUBTITLE_DURATION_MISMATCH') throw new Error('subtitle duration validation failed');
@@ -527,4 +528,20 @@ function createArchive(archive, sourceRoot, item) {
 function listCorruptJournals(root) {
   const runtime = path.join(root, 'runtime');
   return fs.existsSync(runtime) ? fs.readdirSync(runtime).filter((name) => name.startsWith('.install-transaction.corrupt-')) : [];
+}
+
+function verifyRendererContracts() {
+  const index = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const preload = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  if (!index.includes('id="singleDuplicateModal"') || !index.includes('id="documentDeleteModal"') || !index.includes('id="documentContextMenu"')) {
+    throw new Error('single-video/document lifecycle dialogs are missing from the renderer');
+  }
+  if (!index.includes('data-nav-group="settings"') || !index.includes('data-page="workers"') || !index.includes('data-page="agent-tool-status"')) {
+    throw new Error('status pages are not available from the Settings submenu');
+  }
+  if (index.includes('id="labelInput"') || app.includes('labelInput')) throw new Error('obsolete collection label input is still exposed');
+  if (!preload.includes("ipcRenderer.invoke('documents:delete'") || !preload.includes("ipcRenderer.invoke('internal-agent:single-inspect'")) {
+    throw new Error('document deletion or single-video inspection is missing from the preload bridge');
+  }
 }

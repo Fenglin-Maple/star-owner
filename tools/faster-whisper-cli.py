@@ -58,7 +58,7 @@ def build_parser():
     parser = argparse.ArgumentParser(description="Project-local faster-whisper CLI")
     parser.add_argument("audio", nargs="?", help="Input audio or video file")
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--language", default="zh")
+    parser.add_argument("--language", default="auto")
     parser.add_argument("--output_dir", default=".")
     parser.add_argument("--output_format", choices=["srt", "txt", "all"], default="all")
     parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
@@ -172,6 +172,7 @@ def transcribe(args):
         "source": str(source),
         "language": info.language,
         "languageProbability": info.language_probability,
+        "requestedLanguage": args.language,
         "duration": info.duration,
         "device": device,
         "computeType": compute_type,
@@ -179,6 +180,7 @@ def transcribe(args):
             {"id": segment.id, "start": segment.start, "end": segment.end, "text": segment.text.strip()}
             for segment in materialized
         ],
+        "diagnostics": transcript_diagnostics(materialized, info.duration),
     }
     json_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"ok": True, "srt": str(srt_file), "text": str(text_file), "json": str(json_file), "segments": len(materialized)}, ensure_ascii=False))
@@ -199,14 +201,60 @@ def choose_runtime(requested_device, requested_compute):
 
 def run_model(model_class, model_path, source, args, device, compute_type):
     model = model_class(str(model_path), device=device, compute_type=compute_type)
-    return model.transcribe(
-        str(source),
-        language=None if args.language == "auto" else args.language,
-        beam_size=max(1, args.beam_size),
-        vad_filter=True,
-        word_timestamps=True,
-        condition_on_previous_text=True,
-    )
+    return model.transcribe(str(source), **transcription_options(args.language, args.beam_size, True, 448))
+
+
+def transcription_options(language="auto", beam_size=5, condition_on_previous_text=True, max_new_tokens=448):
+    requested = str(language or "auto").strip().lower()
+    return {
+        "language": None if requested in ("", "auto") else requested,
+        "beam_size": max(1, min(10, int(beam_size or 5))),
+        "temperature": 0.0,
+        "repetition_penalty": 1.05,
+        "no_repeat_ngram_size": 3,
+        "vad_filter": True,
+        "vad_parameters": {
+            "min_speech_duration_ms": 150,
+            "min_silence_duration_ms": 500,
+            "speech_pad_ms": 400,
+        },
+        "max_new_tokens": max(32, min(448, int(max_new_tokens or 448))),
+        "hallucination_silence_threshold": 2.0,
+        "word_timestamps": True,
+        "condition_on_previous_text": bool(condition_on_previous_text),
+    }
+
+
+def transcript_diagnostics(segments, duration):
+    total_duration = max(0.0, float(duration or 0.0))
+    intervals = sorted((max(0.0, float(item.start)), max(0.0, float(item.end))) for item in segments if float(item.end) >= float(item.start))
+    merged = []
+    for start, end in intervals:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    speech_seconds = sum(max(0.0, end - start) for start, end in merged)
+    gaps = []
+    for index in range(1, len(merged)):
+        gap = merged[index][0] - merged[index - 1][1]
+        if gap >= 8.0:
+            gaps.append({"start": round(merged[index - 1][1], 3), "end": round(merged[index][0], 3), "seconds": round(gap, 3)})
+    warnings = []
+    if not intervals:
+        warnings.append("No speech segments were recognized; verify that the source contains audible speech and retry with the correct audio track.")
+    elif total_duration >= 60 and speech_seconds / total_duration < 0.04:
+        warnings.append("Recognized speech occupies less than 4% of the audio. This may be music/silence, a wrong audio track, or incomplete recognition.")
+    return {
+        "sentenceCount": len(segments),
+        "speechSeconds": round(speech_seconds, 3),
+        "speechCoverage": round(speech_seconds / total_duration, 4) if total_duration else 0,
+        "firstSpeechAt": round(intervals[0][0], 3) if intervals else None,
+        "lastSpeechAt": round(intervals[-1][1], 3) if intervals else None,
+        "largeGapCount": len(gaps),
+        "largestGaps": sorted(gaps, key=lambda item: item["seconds"], reverse=True)[:8],
+        "warnings": warnings,
+    }
 
 
 def write_srt(file, segments):

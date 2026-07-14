@@ -28,10 +28,10 @@ async function verifyModel(model, audio, root, requestCount) {
     const pid = service.status().pid;
     const results = [];
     for (let index = 0; index < requestCount; index += 1) {
-      results.push(await service.request({ id: `${model}-${index + 1}`, action: 'transcribe', audio, outputDir: path.join(root, `${model}-${index + 1}`), language: 'zh', beamSize: 1, conditionOnPreviousText: false }));
+      results.push(await service.request({ id: `${model}-${index + 1}`, action: 'transcribe', audio, outputDir: path.join(root, `${model}-${index + 1}`), language: 'auto' }));
       assert.strictEqual(service.status().pid, pid, `${model} requests did not reuse the same service process`);
     }
-    assert(pid && results.every((item) => item.ok), `${model} ASR service request failed`);
+    assert(pid && results.every((item) => item.ok && item.diagnostics && Number.isInteger(item.diagnostics.sentenceCount)), `${model} ASR service request failed`);
     console.log(`persistent ASR ${model} ok, pid=${pid}, requests=${requestCount}`);
   } finally {
     service.stop();

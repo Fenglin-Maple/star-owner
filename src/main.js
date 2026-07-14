@@ -11,6 +11,7 @@ const { collectionBlockReason } = require('./core/collection-state');
 const { CollectionSyncService } = require('./core/collection-sync-service');
 const { DependencyManager } = require('./core/dependency-manager');
 const { secureMainWindow } = require('./core/desktop-security');
+const { deleteCompletedDocument } = require('./core/document-lifecycle');
 const { assertHiddenBrowserUrl, installHiddenBrowserRequestGuard } = require('./core/hidden-browser-policy');
 const { InternalAgentManager } = require('./core/internal-agent-manager');
 const { loadClipboardImage } = require('./core/image-clipboard');
@@ -305,6 +306,14 @@ ipcMain.handle('documents:open', async (_event, taskId) => {
   const error = await shell.openPath(task.outputMarkdown);
   if (error) throw new Error(error);
   return { path: task.outputMarkdown };
+});
+
+ipcMain.handle('documents:delete', async (_event, taskId) => {
+  assertBackendReady();
+  const result = deleteCompletedDocument({ store, taskId, source: 'document-library' });
+  taskDisplayCoverCache.delete(String(taskId || ''));
+  publishEvent({ type: 'document-deleted', ...result });
+  return result;
 });
 
 ipcMain.handle('bili:check-login', async () => {
@@ -762,6 +771,11 @@ ipcMain.handle('internal-agent:session-create', async (_event, payload) => {
 ipcMain.handle('internal-agent:single-create', async (_event, payload) => {
   assertBackendReady();
   return internalAgentManager.createSingleTask(payload || {});
+});
+
+ipcMain.handle('internal-agent:single-inspect', async (_event, payload) => {
+  assertBackendReady();
+  return internalAgentManager.inspectSingleTask(payload || {});
 });
 
 ipcMain.handle('internal-agent:start', async (_event, sessionId) => {

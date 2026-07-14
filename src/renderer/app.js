@@ -28,11 +28,16 @@ const documentDurationMin = document.querySelector('#documentDurationMin');
 const documentDurationMax = document.querySelector('#documentDurationMax');
 const documentList = document.querySelector('#documentList');
 const documentPreview = document.querySelector('#documentPreview');
+const documentContextMenu = document.querySelector('#documentContextMenu');
+const documentContextDelete = document.querySelector('#documentContextDelete');
+const documentDeleteModal = document.querySelector('#documentDeleteModal');
+const documentDeleteMessage = document.querySelector('#documentDeleteMessage');
+const documentDeleteCancel = document.querySelector('#documentDeleteCancel');
+const documentDeleteAccept = document.querySelector('#documentDeleteAccept');
 const apiDocs = document.querySelector('#apiDocs');
 const apiToolAnalytics = document.querySelector('#apiToolAnalytics');
 const settingsOutput = document.querySelector('#settingsOutput');
 const workspaceList = document.querySelector('#workspaceList');
-const labelInput = document.querySelector('#labelInput');
 const themeChoices = document.querySelector('#themeChoices');
 const credentialSelect = document.querySelector('#credentialSelect');
 const credentialUsername = document.querySelector('#credentialUsername');
@@ -110,6 +115,8 @@ let visibleDocuments = [];
 let selectedDocumentId = '';
 let lastDocumentContext = '';
 let documentPreviewRequest = 0;
+let documentContextTaskId = '';
+let documentDeleteTaskId = '';
 let filenameSettingsSaveTimer = null;
 let lastTaskCollectionId = '';
 let snapshotPromise = null;
@@ -1954,9 +1961,67 @@ function renderDocumentList() {
     const favoriteStatus = collection?.biliDeleted || task.favoriteState === 'collection-deleted'
       ? ' / \u6536\u85cf\u72b6\u6001\uff1aB\u7ad9\u6536\u85cf\u5939\u5df2\u5220\u9664'
       : (task.removedFromFavorites || task.favoriteState === 'removed' ? ' / \u6536\u85cf\u72b6\u6001\uff1a\u5df2\u79fb\u51fa\u6536\u85cf\u5939' : '');
-    row.innerHTML = `${cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy" />` : '<span class="document-cover-placeholder"></span>'}<span class="document-row-copy"><strong>${escapeHtml(task.title || task.bvid)}</strong><small>${escapeHtml(task.bvid)} / ${escapeHtml(task.owner || TEXT.unknownUp)} / ${escapeHtml(formatSeconds(task.duration))}</small><em>\u6536\u85cf ${escapeHtml(formatDateTime(task.favoriteAddedAt))} / \u53d1\u5e03 ${escapeHtml(formatDateTime(task.publishedAt))}${favoriteStatus}</em></span>`;
+    const versionStatus = task.singleTask ? ` / \u7248\u672c ${Number(task.revision || 1)}${task.knowledgeActive === false ? '\uff08\u5386\u53f2\uff09' : '\uff08\u5f53\u524d\uff09'}` : '';
+    row.innerHTML = `${cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy" />` : '<span class="document-cover-placeholder"></span>'}<span class="document-row-copy"><strong>${escapeHtml(task.title || task.bvid)}</strong><small>${escapeHtml(task.bvid)} / ${escapeHtml(task.owner || TEXT.unknownUp)} / ${escapeHtml(formatSeconds(task.duration))}${versionStatus}</small><em>\u6536\u85cf ${escapeHtml(formatDateTime(task.favoriteAddedAt))} / \u53d1\u5e03 ${escapeHtml(formatDateTime(task.publishedAt))}${favoriteStatus}</em></span>`;
     row.addEventListener('click', () => selectDocument(task.id));
+    row.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      selectedDocumentId = task.id;
+      renderDocumentList();
+      openDocumentContextMenu(task.id, event.clientX, event.clientY);
+    });
     documentList.appendChild(row);
+  }
+}
+
+function openDocumentContextMenu(taskId, clientX, clientY) {
+  documentContextTaskId = String(taskId || '');
+  documentContextMenu.hidden = false;
+  documentContextMenu.style.left = '0px';
+  documentContextMenu.style.top = '0px';
+  const rect = documentContextMenu.getBoundingClientRect();
+  documentContextMenu.style.left = `${Math.max(8, Math.min(clientX, window.innerWidth - rect.width - 8))}px`;
+  documentContextMenu.style.top = `${Math.max(8, Math.min(clientY, window.innerHeight - rect.height - 8))}px`;
+}
+
+function hideDocumentContextMenu() {
+  documentContextMenu.hidden = true;
+  documentContextTaskId = '';
+}
+
+function requestDocumentDelete(taskId) {
+  const task = (lastSnapshot.tasks || []).find((item) => item.id === taskId);
+  const collection = (lastSnapshot.collections || []).find((item) => item.id === task?.collectionId);
+  if (!task || !collection) return;
+  documentDeleteTaskId = task.id;
+  const remoteGone = collection.biliDeleted || task.removedFromFavorites || ['removed', 'collection-deleted'].includes(task.favoriteState);
+  documentDeleteMessage.textContent = remoteGone
+    ? `将永久删除“${task.title || task.bvid}”的 Markdown 和相关产物。由于视频已移出 B站收藏夹或原收藏夹已删除，这条任务不会恢复。`
+    : `将永久删除“${task.title || task.bvid}”的 Markdown 和相关产物，并把任务按稳定收藏夹 ID 放回“${collection.name}”等待重新派发。`;
+  documentDeleteModal.hidden = false;
+}
+
+function closeDocumentDeleteModal() {
+  documentDeleteModal.hidden = true;
+  documentDeleteTaskId = '';
+  documentDeleteAccept.disabled = false;
+}
+
+async function confirmDocumentDelete() {
+  if (!documentDeleteTaskId || documentDeleteAccept.disabled) return;
+  documentDeleteAccept.disabled = true;
+  try {
+    const result = await window.orchestrator.deleteDocument(documentDeleteTaskId);
+    selectedDocumentId = '';
+    clearDocumentPreview();
+    closeDocumentDeleteModal();
+    await refreshSnapshot();
+    showToast(TEXT.toastSuccess, result.restored
+      ? `文档与产物已删除，任务已回到“${result.collectionName}”待派发。`
+      : '文档与产物已删除；收藏记录或原收藏夹已不存在，因此没有恢复任务。', 'success');
+  } catch (error) {
+    documentDeleteAccept.disabled = false;
+    showToast(TEXT.toastError, error.message || String(error), 'error');
   }
 }
 
@@ -2446,6 +2511,16 @@ document.querySelector('#openDocumentFile')?.addEventListener('click', async () 
     showToast(TEXT.toastError, error.message || String(error), 'error');
   }
 });
+documentContextDelete?.addEventListener('click', () => {
+  const taskId = documentContextTaskId;
+  hideDocumentContextMenu();
+  if (taskId) requestDocumentDelete(taskId);
+});
+documentDeleteCancel?.addEventListener('click', closeDocumentDeleteModal);
+documentDeleteAccept?.addEventListener('click', confirmDocumentDelete);
+documentDeleteModal?.addEventListener('click', (event) => { if (event.target === documentDeleteModal) closeDocumentDeleteModal(); });
+document.addEventListener('pointerdown', (event) => { if (!event.target.closest('#documentContextMenu')) hideDocumentContextMenu(); });
+window.addEventListener('blur', hideDocumentContextMenu);
 documentPreview?.addEventListener('click', (event) => {
   const anchor = event.target.closest('a');
   if (!anchor) return;
@@ -2654,10 +2729,9 @@ document.querySelector('#syncCollection').addEventListener('click', async () => 
     const selectedOption = folderSelect.selectedOptions?.[0];
     const collectionName = selectedOption?.dataset.folderId || folderSelect.value;
     const collectionLabel = folderSelect.value;
-    const label = labelInput.value.trim() || 'bili';
     renderSyncProgress({ stage: 'fetching', progress: 0, loaded: 0 });
     collectionOutput.textContent = `\u6b63\u5728\u540c\u6b65 ${collectionLabel}...`;
-    const result = await window.orchestrator.syncCollection({ collectionName, label });
+    const result = await window.orchestrator.syncCollection({ collectionName, label: 'bili' });
     collectionOutput.textContent = JSON.stringify(result, null, 2);
     await refreshSnapshot();
     await refreshProfileFolders({ force: true });

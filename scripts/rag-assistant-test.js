@@ -130,6 +130,9 @@ async function startFakeProvider() {
     store.upsertUser({ id: 'rag-user', mid: 'rag-user', name: '测试用户' });
     store.upsertCollection({ id: 'rag-collection', name: 'AI 收藏夹', userId: 'rag-user', userName: '测试用户' });
     store.upsertTask({ id: 'rag-task', collectionId: 'rag-collection', bvid: 'BVRAGTEST', title: '星藏家测试文档', owner: '测试 UP', status: 'done', outputMarkdown: markdown, publishedAt: '2026-06-18T08:00:00.000Z', favoriteAddedAt: '2026-06-20T09:30:00.000Z', completedAt: new Date().toISOString() });
+    const historicalMarkdown = path.join(root, 'historical.md');
+    fs.writeFileSync(historicalMarkdown, '# 旧版本\n\n不应默认进入 RAG。\n', 'utf8');
+    store.upsertTask({ id: 'rag-task-old', collectionId: 'rag-collection', bvid: 'BVRAGTEST', title: '星藏家测试文档旧版本', status: 'done', outputMarkdown: historicalMarkdown, singleTask: true, knowledgeActive: false, completedAt: '2026-06-17T08:00:00.000Z' });
     store.set('ragProviders', 'legacy-provider', { id: 'legacy-provider', name: 'Legacy', type: 'openai', baseUrl: fake.url, maxOutputTokens: 8192, enabledModels: [{ id: 'gpt-5.4-mini', contextWindow: 128000 }], remoteModels: [] });
     store.commit();
 
@@ -147,6 +150,7 @@ async function startFakeProvider() {
     });
 
     const migrated = assistant.rawProvider('legacy-provider');
+    assert(assistant.knowledgeCatalog()[0].documentCount === 1, 'superseded single-video document was included in the default RAG catalog');
     assert(migrated.maxOutputTokens === DEFAULT_MAX_OUTPUT_TOKENS && migrated.enabledModels[0].contextWindow === 400000 && migrated.enabledModels[0].maxOutputTokens === 128000, 'legacy token defaults were not migrated');
     assert(normalizeModel({ id: 'unknown-modern-model' }).contextWindow === DEFAULT_CONTEXT_WINDOW, 'modern default context window is incorrect');
     assert(MAX_RAG_TOOL_ROUNDS === 24 && RAG_AUTO_COMPACT_TRIGGER === 0.75, 'RAG tool/auto-compression limits are incorrect');

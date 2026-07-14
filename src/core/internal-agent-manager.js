@@ -5,7 +5,8 @@ const { applySubmissionFinalization, stageSubmissionFinalization } = require('./
 const { collectionBlockReason, collectionStorageName } = require('./collection-state');
 const { promoteMindMap } = require('./markdown');
 const { isLoginRequiredMessage, isVideoUnavailableMessage, loginRequiredError } = require('./media-errors');
-const { abortTaskAttempt, createWorkId } = require('./task-attempt');
+const { abortTaskAttempt, cleanupAttemptFiles, createWorkId } = require('./task-attempt');
+const { activateKnowledgeVersion } = require('./task-versions');
 const { removeUnavailableTask } = require('./unavailable-task');
 const { resolveBvid } = require('./video-cache-manager');
 const { validateSubmission } = require('./validation');
@@ -163,19 +164,54 @@ class InternalAgentManager {
     return this.publicSession(session);
   }
 
-  async createSingleTask(input = {}) {
-    const provider = this.ragAssistant.rawProvider(input.providerId);
-    const modelId = String(input.modelId || '');
-    if (!(provider.enabledModels || []).some((model) => model.id === modelId)) throw new Error('Select an enabled model before creating a single-video task.');
+  async inspectSingleTask(input = {}) {
     const bvid = extractBvid(input.video) || await resolveBvid(input.video);
     if (!bvid) throw new Error('请输入有效的 BV 号或 Bilibili 视频链接。');
     const collection = this.store.getCollectionById(String(input.collectionId || ''));
     if (!collection || !(collection.userId === INTERNAL_USER_ID || collection.internal === true)) throw new Error('请选择内置用户下的内置收藏夹。');
     if (['video-cache', 'document-archive'].includes(collection.collectionKind)) throw new Error('请选择普通内置收藏夹，不能把单视频任务写入缓存库或文档归档库。');
+    this.reclaimExpired(collection.id);
+    const sessions = this.listSessions().filter((session) => session.mode === 'single');
+    const candidates = this.store.listTasks({ collectionId: collection.id })
+      .filter((task) => task.bvid === bvid)
+      .sort((left, right) => String(right.completedAt || right.createdAt || '').localeCompare(String(left.completedAt || left.createdAt || '')));
+    const sessionFor = (task) => sessions.find((session) => session.singleTaskId === task.id);
+    const activeTask = candidates.find((task) => {
+      const session = sessionFor(task);
+      return Boolean(task.workId || task.status === 'claimed' || (session && ['running', 'draining', 'waiting-login', 'stopping'].includes(session.status)));
+    });
+    const completed = candidates.filter((task) => task.status === 'done' && task.outputMarkdown && fs.existsSync(task.outputMarkdown));
+    const recoverable = candidates.find((task) => task.id !== activeTask?.id && !completed.some((item) => item.id === task.id));
+    return {
+      bvid,
+      collectionId: collection.id,
+      collectionName: collection.name,
+      active: activeTask ? singleTaskSummary(activeTask, sessionFor(activeTask)) : null,
+      completed: completed.map((task) => singleTaskSummary(task, sessionFor(task))),
+      latestCompleted: completed[0] ? singleTaskSummary(completed[0], sessionFor(completed[0])) : null,
+      recoverable: recoverable ? singleTaskSummary(recoverable, sessionFor(recoverable)) : null
+    };
+  }
+
+  async createSingleTask(input = {}) {
+    const provider = this.ragAssistant.rawProvider(input.providerId);
+    const modelId = String(input.modelId || '');
+    if (!(provider.enabledModels || []).some((model) => model.id === modelId)) throw new Error('Select an enabled model before creating a single-video task.');
+    const inspection = await this.inspectSingleTask(input);
+    const { bvid } = inspection;
+    const collection = this.store.getCollectionById(inspection.collectionId);
+    const duplicateAction = String(input.duplicateAction || '');
+    if (inspection.active) throw new Error(`这个视频已有任务正在处理，请切换到现有会话：${inspection.active.sessionTitle || inspection.active.bvid}`);
+    if (inspection.latestCompleted && duplicateAction !== 'regenerate') throw new Error('所选内置收藏夹中已经存在这个视频的完成产物，请先选择打开已有文档或重新生成新版本。');
+    if (inspection.recoverable) {
+      return this.reuseSingleTask(inspection.recoverable.taskId, input, provider, modelId);
+    }
     const workspace = this.requireWorkspace();
     const dirs = collectionDirs(workspace.root, INTERNAL_USER_NAME, collectionStorageName(collection));
     const now = new Date().toISOString();
     const taskId = `${collection.id}:${bvid}:single-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+    const previous = inspection.latestCompleted ? this.store.getTask(inspection.latestCompleted.taskId) : null;
+    const revisions = this.store.listTasks({ collectionId: collection.id }).filter((task) => task.bvid === bvid).map((task) => Number(task.revision || 1));
     this.store.upsertTask({
       id: taskId,
       collectionId: collection.id,
@@ -196,6 +232,10 @@ class InternalAgentManager {
       validatorErrors: [],
       internal: true,
       singleTask: true,
+      versionGroupId: previous?.versionGroupId || previous?.id || taskId,
+      revisionOfTaskId: previous?.id || '',
+      revision: revisions.length ? Math.max(...revisions) + 1 : 1,
+      knowledgeActive: true,
       publicAttempt: true,
       cookieFile: '',
       keepVideoCache: Boolean(input.keepVideoCache),
@@ -207,6 +247,81 @@ class InternalAgentManager {
     this.store.upsertCollection(collection);
     this.store.commit();
     return this.createSession({ ...input, mode: 'single', singleTaskId: taskId, collectionId: collection.id, acceptNewTasks: false });
+  }
+
+  reuseSingleTask(taskId, input, provider, modelId) {
+    const task = this.store.getTask(String(taskId || ''));
+    if (!task) throw new Error('可重试的旧任务已经不存在，请重新检查。');
+    cleanupAttemptFiles(this.store, task);
+    const now = new Date().toISOString();
+    this.store.upsertTask({
+      ...task,
+      status: 'pending',
+      enabled: true,
+      workId: '',
+      claimedBy: '',
+      claimedAt: '',
+      leaseExpiresAt: '',
+      completedAt: '',
+      artifactDir: '',
+      outputMarkdown: '',
+      metadataFile: '',
+      coverFile: '',
+      cachedVideoFile: '',
+      workspaceId: '',
+      workspaceRoot: '',
+      allowedRoot: '',
+      validatorErrors: [],
+      failureReason: '',
+      infrastructureError: '',
+      abortReason: '',
+      abortSource: '',
+      abortedAt: '',
+      publicAttempt: true,
+      cookieFile: '',
+      keepVideoCache: Boolean(input.keepVideoCache),
+      knowledgeActive: true,
+      supersededByTaskId: '',
+      updatedAt: now
+    });
+    const existing = this.listSessions().find((session) => session.mode === 'single' && session.singleTaskId === task.id && !this.running.has(session.id));
+    if (!existing) {
+      this.store.commit();
+      const created = this.createSession({ ...input, mode: 'single', singleTaskId: task.id, collectionId: task.collectionId, acceptNewTasks: false });
+      return { ...created, reusedTask: true };
+    }
+    const oldWorker = this.store.getWorker(existing.workerId);
+    if (oldWorker) this.store.updateWorker(oldWorker.id, { status: 'paused', pauseReason: '单视频任务已从头重建并分配新 Worker。' });
+    const worker = this.store.registerWorker({
+      tool: 'star-owner-internal',
+      model: modelId,
+      sessionLabel: String(input.title || existing.title || `单视频总结 · ${task.bvid}`),
+      metadata: { providerId: provider.id, internalAgent: true }
+    });
+    Object.assign(existing, {
+      title: String(input.title || existing.title || `单视频总结 · ${task.bvid}`).trim(),
+      providerId: provider.id,
+      modelId,
+      workerId: worker.id,
+      status: 'idle',
+      acceptNewTasks: false,
+      taskRequirements: String(input.taskRequirements || '').trim(),
+      taskOptions: {
+        frames: clamp(input.taskOptions?.frames, 4, 30, 12),
+        commentLimit: clamp(input.taskOptions?.commentLimit, 0, 3, 3)
+      },
+      currentTaskId: '',
+      currentRunId: '',
+      phase: '已清理旧缓存，等待从头处理',
+      progress: 0,
+      reasoning: '',
+      content: '',
+      updatedAt: now
+    });
+    this.saveSession(existing);
+    this.log(existing, '检测到未完成或产物缺失的同 BV 任务，已清理旧缓存并从头重建。');
+    this.store.commit();
+    return { ...this.publicSession(existing), reusedTask: true };
   }
 
   collectionOutputDirectory(collectionId) {
@@ -862,6 +977,7 @@ class InternalAgentManager {
       { label: '任务与收藏夹', text: JSON.stringify({ bvid: task.bvid, title: task.title, owner: task.owner, duration: task.duration, collection: collection.name }, null, 2) },
       { label: '视频元数据', text: JSON.stringify(materials.info, null, 2) },
       { label: '素材清单', text: JSON.stringify(materials.manifest, null, 2) },
+      { label: 'ASR 识别诊断', text: JSON.stringify(materials.asrMetadata, null, 2) },
       { label: '站内字幕', text: materials.station || '未提供可用站内字幕' },
       { label: '本次 ASR 字幕', text: materials.asr || 'ASR 输出为空' },
       { label: '热评', text: JSON.stringify(materials.comments, null, 2) }
@@ -1024,6 +1140,10 @@ class InternalAgentManager {
     const event = { id: `submission-completed:${completedWorkId || task.id}`, taskId: task.id, type: 'completed', createdAt: now, collectionId: task.collectionId, workerId: session.workerId, agentName: session.workerId, workId: completedWorkId, processingSeconds: secondsBetween(task.claimedAt, now), videoDuration: Number(task.duration || 0), internalAgent: true };
     const staged = stageSubmissionFinalization({ store: this.store, task, collection, validation, filenameMetadata: this.store.getFilenameMetadata(), completedTask, event });
     const { finalized } = applySubmissionFinalization(this.store, staged);
+    if (task.singleTask) {
+      activateKnowledgeVersion(this.store, task.id);
+      this.store.commit();
+    }
     this.emitEvent({ type: 'task-completed', taskId: task.id, collectionId: task.collectionId, workerId: session.workerId, agentName: session.workerId, internalAgent: true });
     return finalized;
   }
@@ -1221,6 +1341,7 @@ function collectMaterials(artifactDir) {
     info: readJson(path.join(artifactDir, 'info.json')),
     manifest: readJson(path.join(artifactDir, 'manifest.json')),
     comments: readJson(path.join(artifactDir, 'comments', 'comments.json')),
+    asrMetadata: readJson(path.join(artifactDir, 'asr', 'asr-result.json')),
     asr,
     station,
     frames
@@ -1271,7 +1392,7 @@ function subtitleTime(seconds) {
 function buildGenerationPrompt({ session, task, collection, materials, template }) {
   const transcriptContext = materials.evidencePack
     ? `极端长视频语义证据包（由相同供应商/模型的独立上下文整理 Agent 分块读取全部原始素材后生成）：\n${materials.evidencePack}\n\n注意：证据包用于替代本次请求中的超长原始字幕，但原始文件仍保存在任务目录。必须覆盖证据包中的全部时间段、事实、步骤、参数、限制、冲突和不确定性。`
-    : `站内字幕：\n${materials.station || '未提供可用站内字幕'}\n\nASR 字幕：\n${materials.asr || 'ASR 输出为空，请在文档中如实说明'}`;
+    : `站内字幕：\n${materials.station || '未提供可用站内字幕'}\n\nASR 识别语言与覆盖诊断：\n${JSON.stringify(materials.asrMetadata || {}, null, 2)}\n\nASR 字幕：\n${materials.asr || 'ASR 输出为空，请在文档中如实说明'}`;
   return `请基于以下真实素材生成一份完整的视频知识 Markdown。
 
 强制要求：
@@ -1455,6 +1576,21 @@ function readJson(file) {
 
 function extractBvid(value) {
   return String(value || '').match(/BV[0-9A-Za-z]{10}/i)?.[0] || '';
+}
+
+function singleTaskSummary(task, session = null) {
+  return {
+    taskId: task.id,
+    bvid: task.bvid,
+    title: task.title || task.bvid,
+    status: task.status,
+    outputMarkdown: task.outputMarkdown || '',
+    completedAt: task.completedAt || '',
+    revision: Number(task.revision || 1),
+    sessionId: session?.id || '',
+    sessionTitle: session?.title || '',
+    sessionStatus: session?.status || ''
+  };
 }
 
 function addUsage(current = {}, next = {}) {

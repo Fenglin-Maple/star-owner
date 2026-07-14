@@ -31,6 +31,8 @@ The Bilibili WebView is sandboxed, has no Node/preload bridge, blocks popups, an
 
 Remote model endpoints must use HTTPS unless they target localhost or a private-network host. Sensitive authorization/cookie headers are rejected from the free-form header JSON and must use the encrypted API Key field. Markdown/RAG rendering keeps raw HTML disabled; remote images are limited to trusted Bilibili HTTPS assets, validated local knowledge images, or bounded raster data URLs. Clipboard image copying verifies both source boundaries and raster signatures.
 
+Document Library deletion runs only in the main process. It resolves every artifact path under the task's registered Workspace root, refuses deletion of the root itself, and never trusts a mutable collection display name as path identity. Ordinary generated artifacts are removed as one managed directory; cache-backed tasks preserve only their registered source video, cover, and cache metadata. Deleting an archived document from a removed favorite or deleted Bilibili collection cannot recreate a dispatchable task.
+
 ## Responsible Disclosure
 
 Do not open a public issue containing cookies, passwords, SMS codes, private video links, account identifiers, logs with secrets, or personal Workspace content. Contact the repository maintainer privately using the security contact configured on the eventual GitHub repository.

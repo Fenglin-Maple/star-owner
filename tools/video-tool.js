@@ -223,7 +223,7 @@ async function runAsr(videoUrl, outDir, args) {
   const audioFile = await prepareAudio(videoUrl, outDir, args);
   const asrDir = path.join(outDir, 'asr');
   fs.mkdirSync(asrDir, { recursive: true });
-  run('faster-whisper', [audioFile, '--model', String(args.model || 'medium'), '--language', String(args.language || 'zh'), '--output_dir', asrDir, '--output_format', 'all']);
+  run('faster-whisper', [audioFile, '--model', String(args.model || 'medium'), '--language', String(args.language || 'auto'), '--output_dir', asrDir, '--output_format', 'all']);
   console.log(asrDir);
 }
 

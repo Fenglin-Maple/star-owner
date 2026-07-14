@@ -418,10 +418,10 @@ class ToolRunner {
           action: 'transcribe',
           audio: audioFile,
           outputDir,
-          language: run.options?.language || 'zh',
-          beamSize: clampNumber(run.options?.beamSize, 1, 10, 1),
-          conditionOnPreviousText: Boolean(run.options?.conditionOnPreviousText),
-          maxNewTokens: clampNumber(run.options?.maxNewTokens, 32, 448, 64)
+          language: run.options?.language || 'auto',
+          beamSize: clampNumber(run.options?.beamSize, 1, 10, 5),
+          conditionOnPreviousText: run.options?.conditionOnPreviousText !== false,
+          maxNewTokens: clampNumber(run.options?.maxNewTokens, 32, 448, 448)
         }, {
           onProgress: (progress) => {
             if (Date.now() - lastProgressWrite < 800 && Number(progress.progress || 0) < 1) return;

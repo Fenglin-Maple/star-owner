@@ -112,6 +112,51 @@ function assert(condition, message) {
   assert(task.outputMarkdown.includes('内置用户') || task.artifactDir.includes('内置用户'), 'internal collection artifact path is incorrect');
   assert(manager.collectionOutputDirectory(collection.id) === collection.collectionRoot, 'single-task collection output directory is incorrect');
   assert(manager.sessionOutputDirectory(finished.id) === task.artifactDir, 'completed session did not resolve its artifact directory');
+  const duplicateInspection = await manager.inspectSingleTask({ video: task.bvid, collectionId: collection.id });
+  assert(duplicateInspection.latestCompleted?.taskId === task.id, 'single-video duplicate inspection did not find the accepted document');
+  let duplicateRejected = false;
+  try { await manager.createSingleTask({ video: task.bvid, collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' }); }
+  catch (error) { duplicateRejected = error.message.includes('已经存在'); }
+  assert(duplicateRejected, 'single-video creation bypassed the completed-document decision');
+  const regeneratedSession = await manager.createSingleTask({ video: task.bvid, collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test', duplicateAction: 'regenerate' });
+  await manager.start(regeneratedSession.id);
+  const regenerated = await waitForSession(manager, regeneratedSession.id);
+  const regeneratedTask = store.getTask(regenerated.singleTaskId);
+  assert(regenerated.status === 'completed' && regeneratedTask.status === 'done', 'single-video regeneration did not complete');
+  assert(regeneratedTask.revision === 2 && regeneratedTask.revisionOfTaskId === task.id && regeneratedTask.artifactDir !== task.artifactDir, 'single-video regeneration did not create a separate version');
+  assert(store.getTask(task.id).knowledgeActive === false && regeneratedTask.knowledgeActive === true, 'RAG-active document version was not switched after regeneration acceptance');
+
+  store.upsertTask({
+    ...regeneratedTask,
+    status: 'pending',
+    outputMarkdown: '',
+    artifactDir: '',
+    completedAt: '',
+    documentDeletedAt: new Date().toISOString()
+  });
+  store.commit();
+  const tasksBeforeDeletedVersionReuse = store.listTasks({ collectionId: collection.id }).length;
+  const reusedDeletedVersion = await manager.createSingleTask({
+    video: task.bvid,
+    collectionId: collection.id,
+    providerId: 'provider-test',
+    modelId: 'model-test',
+    duplicateAction: 'regenerate'
+  });
+  assert(reusedDeletedVersion.singleTaskId === regeneratedTask.id && reusedDeletedVersion.reusedTask === true, 'a deleted latest version was not rebuilt in place');
+  assert(store.listTasks({ collectionId: collection.id }).length === tasksBeforeDeletedVersionReuse, 'rebuilding a deleted latest version created an orphan task version');
+  store.delete('tasks', regeneratedTask.id);
+  store.delete('internalAgentSessions', reusedDeletedVersion.id);
+  store.upsertTask({ ...task, knowledgeActive: true });
+  store.commit();
+
+  const pendingSession = await manager.createSingleTask({ video: 'BVREUSABLE01', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  const tasksBeforeReuse = store.listTasks({ collectionId: collection.id }).length;
+  const reusedSession = await manager.createSingleTask({ video: 'BVREUSABLE01', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  assert(reusedSession.id === pendingSession.id && reusedSession.reusedTask === true && store.listTasks({ collectionId: collection.id }).length === tasksBeforeReuse, 'recoverable single-video task was duplicated instead of rebuilt in place');
+  store.delete('tasks', pendingSession.singleTaskId);
+  store.delete('internalAgentSessions', pendingSession.id);
+  store.commit();
   const switchedWorkspace = store.addWorkspace({ name: 'Agent switched workspace', root: path.join(root, 'workspace-switched') });
   store.setDefaultWorkspace(switchedWorkspace.id);
   const switchedOutput = manager.collectionOutputDirectory(collection.id);
