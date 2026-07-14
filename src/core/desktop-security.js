@@ -33,7 +33,7 @@ function secureMainWindow(window, rendererFile) {
 function isAllowedBilibiliNavigation(value) {
   try {
     const url = parseHttpUrl(value);
-    return isBilibiliHost(url.hostname);
+    return !url.username && !url.password && isBilibiliHost(url.hostname);
   } catch {
     return false;
   }

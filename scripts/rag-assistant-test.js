@@ -51,8 +51,14 @@ async function startFakeProvider() {
     const userText = latestUserText(body.messages || []);
     const toolResult = [...(body.messages || [])].reverse().find((item) => item.role === 'tool');
     if (body.stream === false) {
+      if (userText.includes('COMPACT_DELAY')) await new Promise((resolve) => setTimeout(resolve, 60));
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ choices: [{ message: { content: '保留目标、事实、引用和未完成工作。' } }], usage: { prompt_tokens: 40, completion_tokens: 12, total_tokens: 52 } }));
+      return;
+    }
+    if (userText.includes('PROVIDER_FAILURE')) {
+      response.writeHead(503, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: { message: 'temporary upstream outage' } }));
       return;
     }
     if (userText.includes('JSON_FALLBACK')) {
@@ -162,6 +168,8 @@ async function startFakeProvider() {
     fs.writeFileSync(attachmentFile, '# 附件\n\n附件文字。', 'utf8');
     const attachments = await assistant.importFiles(session.id, [attachmentFile]);
     assert(attachments[0]?.extractedText.includes('附件文字'), 'Markdown attachment extraction failed');
+    const publicSessionAttachment = assistant.sessionDetail(session.id).attachments[0];
+    assert(!publicSessionAttachment.path && !publicSessionAttachment.extractedText && !publicSessionAttachment.managedRoot, 'RAG session state exposed private attachment storage details to the renderer');
 
     const first = await assistant.send(session.id, { content: '请查阅知识库并回答。', attachmentIds: [attachments[0].id] });
     assert(first.content.includes('已找到测试文档'), 'knowledge tool round trip failed');
@@ -180,6 +188,11 @@ async function startFakeProvider() {
     const exactDocument = assistant.readKnowledgeDocument(assistant.requireSession(session.id), 'rag-task', 1, 20);
     assert(exactDocument.includes('RAG 助手可以检索收藏夹中的 Markdown 内容。'), 'exact original Markdown could not be read');
     assert(exactDocument.includes('Published at: 2026-06-18T08:00:00.000Z') && exactDocument.includes('Favorited at: 2026-06-20T09:30:00.000Z'), 'exact document metadata omitted publish/favorite dates');
+    const hugeMarkdown = path.join(root, 'huge-knowledge.md');
+    fs.writeFileSync(hugeMarkdown, `# Huge\n\n${'x'.repeat(90000)}`, 'utf8');
+    store.upsertTask({ id: 'rag-huge-task', collectionId: 'rag-collection', bvid: 'BVRAGHUGE', title: 'Huge knowledge fixture', status: 'done', outputMarkdown: hugeMarkdown, completedAt: new Date().toISOString() });
+    const boundedExact = assistant.readKnowledgeDocument(assistant.requireSession(session.id), 'rag-huge-task', 1, 20);
+    assert(boundedExact.length < 62000 && boundedExact.includes('next_start_column:'), 'exact knowledge reads can still flood one model tool response');
     store.upsertTask({ ...store.getTask('rag-task'), title: '星藏家测试文档（已移出收藏夹）', sourceTitle: '星藏家测试文档', favoriteState: 'removed', removedFromFavorites: true, removedFromFavoritesAt: '2026-07-01T00:00:00.000Z' });
     store.commit();
     const archivedDocument = assistant.listKnowledgeDocuments(assistant.requireSession(session.id));
@@ -213,6 +226,42 @@ async function startFakeProvider() {
     const clipboardMessage = assistant.sessionDetail(session.id).messages.find((message) => message.role === 'user' && message.content === 'JSON_FALLBACK');
     assert(clipboardMessage.attachments[0]?.previewUrl.startsWith('file:'), 'sent clipboard image did not retain a conversation preview');
 
+    const disposableSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: 'Attachment cleanup test' });
+    const disposableSessionImage = await assistant.importBuffer(disposableSession.id, {
+      buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
+      mimeType: 'image/png',
+      name: 'delete-with-session.png'
+    });
+    assistant.updateSession(disposableSession.id, { sandboxDir: path.join(root, 'replacement-sandbox') });
+    assistant.deleteSession(disposableSession.id);
+    assert(!fs.existsSync(disposableSessionImage.path) && !store.get('ragAttachments', disposableSessionImage.id), 'deleting a RAG session after changing sandboxes left its managed attachment copy behind');
+
+    const linkedSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: 'Linked attachment deletion guard' });
+    const linkedImage = await assistant.importBuffer(linkedSession.id, {
+      buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
+      mimeType: 'image/png',
+      name: 'linked-delete.png'
+    });
+    const linkedParent = path.dirname(linkedImage.path);
+    const originalParent = `${linkedParent}-original`;
+    const outsideAttachments = path.join(root, 'outside-attachments');
+    fs.renameSync(linkedParent, originalParent);
+    fs.mkdirSync(outsideAttachments, { recursive: true });
+    const outsideImage = path.join(outsideAttachments, path.basename(linkedImage.path));
+    fs.copyFileSync(path.join(originalParent, path.basename(linkedImage.path)), outsideImage);
+    let linkCreated = false;
+    try {
+      fs.symlinkSync(outsideAttachments, linkedParent, process.platform === 'win32' ? 'junction' : 'dir');
+      linkCreated = true;
+      assistant.deleteSession(linkedSession.id);
+      assert(fs.existsSync(outsideImage), 'session deletion followed a replaced attachments-directory link outside its managed root');
+    } catch (error) {
+      if (!['EPERM', 'EACCES', 'UNKNOWN'].includes(error.code)) throw error;
+      if (store.get('ragSessions', linkedSession.id)) assistant.deleteSession(linkedSession.id);
+    } finally {
+      if (linkCreated && fs.existsSync(linkedParent)) fs.rmSync(linkedParent, { recursive: true, force: true });
+    }
+
     const historySession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: 'Long context test' });
     for (let index = 0; index < 60; index += 1) {
       store.set('ragMessages', `history-${index}`, { id: `history-${index}`, sessionId: historySession.id, role: index % 2 ? 'assistant' : 'user', content: `short history message ${index}`, status: 'complete', createdAt: new Date(Date.now() + index).toISOString() });
@@ -236,16 +285,34 @@ async function startFakeProvider() {
     assert(usageAfterAuto >= usageBeforeAuto + 2, 'automatic compression model calls were not included in usage accounting');
     assert(events.some((item) => item.type === 'context-compaction' && item.phase === 'completed' && item.automatic), 'automatic compression UI event was not emitted');
 
-    const usageBeforeToolRounds = usageAfterAuto;
-    const manyToolRounds = await assistant.send(session.id, { content: 'TOOL_ROUND_LIMIT：连续检索后给出答案。' });
+    const toolRoundSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: 'Tool round accounting test' });
+    const usageBeforeToolRounds = assistant.state(toolRoundSession.id).modelUsage.find((item) => item.providerId === provider.id && item.modelId === 'fake-agent')?.requests || 0;
+    const manyToolRounds = await assistant.send(toolRoundSession.id, { content: 'TOOL_ROUND_LIMIT：连续检索后给出答案。' });
     assert(manyToolRounds.toolEvents.length === 24 && manyToolRounds.content.includes('24 轮'), 'RAG assistant did not allow 24 complete knowledge-tool rounds plus a final answer');
-    const usageAfterToolRounds = assistant.state(session.id).modelUsage.find((item) => item.providerId === provider.id && item.modelId === 'fake-agent')?.requests || 0;
+    const usageAfterToolRounds = assistant.state(toolRoundSession.id).modelUsage.find((item) => item.providerId === provider.id && item.modelId === 'fake-agent')?.requests || 0;
     assert(usageAfterToolRounds === usageBeforeToolRounds + 1, 'multi-round answer usage should be recorded as one conversation turn');
+
+    const providerFailureSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: 'Provider failure classification' });
+    let providerFailure = null;
+    try { await assistant.send(providerFailureSession.id, { content: 'PROVIDER_FAILURE' }); }
+    catch (error) { providerFailure = error; }
+    assert(providerFailure?.code === 'MODEL_PROVIDER_FAILURE' && providerFailure.failureKind === 'infrastructure' && Array.isArray(providerFailure.possibleCauses), 'provider request failure was not classified as infrastructure');
 
     await assistant.send(session.id, { content: '再补一轮测试。' });
     const compacted = await assistant.compact(session.id);
     assert(compacted.compressedSummary.includes('保留目标'), 'context compression failed');
     assert(compacted.tokenUsage.total >= 150, 'token accounting did not accumulate requests');
+
+    const compactLockSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: 'Compaction lock test' });
+    for (let index = 0; index < 4; index += 1) {
+      store.set('ragMessages', `compact-lock-${index}`, { id: `compact-lock-${index}`, sessionId: compactLockSession.id, role: index % 2 ? 'assistant' : 'user', content: `COMPACT_DELAY message ${index}`, status: 'complete', createdAt: new Date(Date.now() + index).toISOString() });
+    }
+    store.save();
+    const firstCompaction = assistant.compact(compactLockSession.id);
+    let concurrentCompactionError = null;
+    try { await assistant.compact(compactLockSession.id); } catch (error) { concurrentCompactionError = error; }
+    assert(/Stop the current response/.test(concurrentCompactionError?.message || ''), 'concurrent manual context compaction was not rejected');
+    await firstCompaction;
 
     const outside = path.join(root, '..', 'outside.txt');
     fs.writeFileSync(outside, 'outside', 'utf8');
@@ -255,9 +322,14 @@ async function startFakeProvider() {
     assert(denied && approvals.length === 1, 'restricted outside-sandbox approval was not enforced');
 
     const state = assistant.state(session.id);
-    assert(state.knowledgeCatalog[0]?.documentCount === 1, 'knowledge catalog classification failed');
+    assert(state.knowledgeCatalog[0]?.documentCount === 2, 'knowledge catalog classification failed');
     assert(state.modelUsage[0]?.requests >= 8, 'per-model request count did not include extended RAG and compression calls');
     assert(events.some((item) => item.type === 'assistant-delta') && events.some((item) => item.type === 'tool'), 'stream events were not emitted');
+    const shutdownController = new AbortController();
+    assistant.controllers.set('shutdown-fixture', shutdownController);
+    assert(assistant.shutdown().cancelled === 1, 'RAG shutdown did not report the active request');
+    assert(shutdownController.signal.aborted === true, 'RAG shutdown left a running provider request or command alive');
+    assistant.controllers.delete('shutdown-fixture');
     console.log('RAG assistant integration test passed.');
   } finally {
     await fake.close();

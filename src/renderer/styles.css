@@ -365,7 +365,7 @@ svg {
 
 .app-title { font-size: 13px; font-weight: 650; }
 .app-title b { margin-left: 3px; color: var(--muted); font-weight: 560; }
-body.theme-claude .app-title { font-family: var(--font-display); font-size: 15px; font-weight: 700; letter-spacing: -0.01em; }
+body.theme-claude .app-title { font-family: var(--font-display); font-size: 15px; font-weight: 700; letter-spacing: 0; }
 
 .user-profile {
   position: relative;
@@ -1045,9 +1045,9 @@ webview { width: 100%; height: 100%; }
 .scheduler-pool-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
 .scheduler-pool-item { min-width: 0; padding: 6px 7px; border: 1px solid color-mix(in srgb, var(--line) 55%, transparent); border-radius: 5px; background: color-mix(in srgb, var(--bg) 28%, transparent); }
 .scheduler-pool-item span, .scheduler-pool-item strong, .scheduler-pool-item em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.scheduler-pool-item span { color: var(--muted); font-size: 8px; }
+.scheduler-pool-item span { color: var(--muted); font-size: 9px; }
 .scheduler-pool-item strong { margin-top: 2px; font: 600 11px var(--font-mono); }
-.scheduler-pool-item em { margin-top: 1px; color: var(--muted); font-size: 8px; font-style: normal; }
+.scheduler-pool-item em { margin-top: 1px; color: var(--muted); font-size: 9px; font-style: normal; }
 .run-resource-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
 .run-resource-grid > div { min-width: 0; padding: 7px 8px; border: 1px solid color-mix(in srgb, var(--line) 55%, transparent); border-radius: 5px; background: color-mix(in srgb, var(--bg) 28%, transparent); }
 .run-resource-grid span, .run-resource-grid strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1241,7 +1241,7 @@ body.theme-day input[type="date"], body.theme-bili input[type="date"], body.them
 .agent-dashboard-kpis span { display: block; color: var(--muted); font-size: 9px; }
 .agent-dashboard-kpis strong { display: block; margin-top: 3px; font: 600 14px var(--font-mono); }
 .agent-dashboard-chart { display: grid; gap: 7px; }
-.agent-performance-row strong em { display: block; margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 8px; font-style: normal; font-weight: 400; }
+.agent-performance-row strong em { display: block; margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 9px; font-style: normal; font-weight: 400; }
 .agent-empty-chart { min-height: 92px; display: grid; place-items: center; align-content: center; text-align: center; }
 .agent-empty-chart > span { width: 160px; height: 24px; margin-bottom: 8px; border-radius: 4px; background: repeating-linear-gradient(90deg, color-mix(in srgb, var(--line) 70%, transparent) 0 18px, transparent 18px 24px); }
 .agent-empty-chart strong { font-size: 12px; }
@@ -1300,14 +1300,14 @@ body.theme-day input[type="date"], body.theme-bili input[type="date"], body.them
 .document-row-copy { min-width: 0; }
 .document-row-copy strong, .document-row-copy small, .document-row-copy em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .document-row-copy strong { font-size: 11px; font-weight: 620; }
-.document-row-copy small { margin-top: 5px; color: var(--muted); font: 8px var(--font-mono); }
-.document-row-copy em { margin-top: 4px; color: var(--muted-2); font-size: 8px; font-style: normal; }
+.document-row-copy small { margin-top: 5px; color: var(--muted); font: 9px var(--font-mono); }
+.document-row-copy em { margin-top: 4px; color: var(--muted-2); font-size: 9px; font-style: normal; }
 .document-preview-toolbar { flex: 0 0 auto; min-width: 0; min-height: 54px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 7px 12px; border-bottom: 1px solid var(--line); }
 .document-preview-toolbar > div { min-width: 0; }
 .document-preview-toolbar strong, .document-preview-toolbar span, .document-preview-toolbar code { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .document-preview-toolbar strong { font-size: 12px; }
 .document-preview-toolbar span { margin-top: 2px; color: var(--muted); font-size: 9px; }
-.document-preview-toolbar code { margin-top: 2px; color: var(--muted-2); font: 8px var(--font-mono); }
+.document-preview-toolbar code { margin-top: 2px; color: var(--muted-2); font: 9px var(--font-mono); }
 .document-preview { flex: 1; min-height: 0; overflow: auto; padding: 18px 24px 30px; }
 .document-preview-empty, .document-preview-loading { min-height: 100%; display: grid; place-content: center; justify-items: center; gap: 7px; color: var(--muted); text-align: center; }
 .document-preview-empty strong, .document-preview-loading strong { color: var(--text); font-size: 12px; }
@@ -1353,7 +1353,7 @@ body.theme-day input[type="date"], body.theme-bili input[type="date"], body.them
 .filename-metadata-grid label span { overflow: hidden; color: var(--text); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .filename-preview { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center; margin-top: 9px; padding: 7px 8px; border: 1px solid color-mix(in srgb, var(--line) 65%, transparent); border-radius: 5px; background: color-mix(in srgb, var(--bg) 35%, transparent); }
 .filename-preview span { color: var(--muted); font-size: 9px; }
-.filename-preview code { overflow: hidden; color: var(--text); font: 8px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.filename-preview code { overflow: hidden; color: var(--text); font: 9px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 
 /* Markdown export */
 #page-export.active { display: grid; grid-template-rows: auto minmax(0, 1fr); }

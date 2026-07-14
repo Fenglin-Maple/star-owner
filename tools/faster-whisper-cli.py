@@ -2,8 +2,10 @@
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -150,20 +152,20 @@ def transcribe(args):
 
     try:
         segments, info = run_model(WhisperModel, target_model, source, args, device, compute_type)
-        materialized = list(segments)
+        materialized = sentence_segments(list(segments))
     except Exception as error:
         if args.device != "auto" or device == "cpu":
             raise
         print(f"CUDA inference failed, retrying on CPU int8: {error}", file=sys.stderr)
         device, compute_type = "cpu", "int8"
         segments, info = run_model(WhisperModel, target_model, source, args, device, compute_type)
-        materialized = list(segments)
+        materialized = sentence_segments(list(segments))
 
     srt_file = output_dir / "transcript.srt"
     text_file = output_dir / "asr-transcript.txt"
     json_file = output_dir / "asr-result.json"
     write_srt(srt_file, materialized)
-    text_file.write_text("\n".join(segment.text.strip() for segment in materialized if segment.text.strip()) + "\n", encoding="utf-8")
+    write_timestamped_text(text_file, materialized)
     payload = {
         "model": args.model,
         "modelPath": str(target_model),
@@ -202,6 +204,7 @@ def run_model(model_class, model_path, source, args, device, compute_type):
         language=None if args.language == "auto" else args.language,
         beam_size=max(1, args.beam_size),
         vad_filter=True,
+        word_timestamps=True,
         condition_on_previous_text=True,
     )
 
@@ -216,6 +219,106 @@ def write_srt(file, segments):
             "",
         ])
     file.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_timestamped_text(file, segments):
+    lines = [
+        f"[{srt_time(segment.start)} --> {srt_time(segment.end)}] {segment.text.strip()}"
+        for segment in segments
+        if segment.text.strip()
+    ]
+    file.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
+
+
+def sentence_segments(segments, offset=0.0, starting_id=0):
+    result = []
+    parts = []
+    sentence_start = None
+    sentence_end = None
+    fallback_start = None
+    fallback_end = None
+    previous_word_end = None
+    for segment in segments:
+        segment_start = getattr(segment, "start", 0)
+        segment_end = getattr(segment, "end", segment_start)
+        words = list(getattr(segment, "words", None) or [])
+        if not words:
+            flush_sentence(result, parts, starting_id, sentence_start, sentence_end, fallback_start, fallback_end, offset)
+            parts = []
+            sentence_start = None
+            sentence_end = None
+            fallback_start = None
+            fallback_end = None
+            previous_word_end = None
+            append_sentence(result, starting_id, segment_start, segment_end, getattr(segment, "text", ""), offset)
+            continue
+        fallback_start = segment_start if fallback_start is None else fallback_start
+        fallback_end = segment_end
+        for word in words:
+            text = str(getattr(word, "word", "") or "")
+            if not text:
+                continue
+            if not parts and fallback_start is None:
+                fallback_start = segment_start
+            fallback_end = segment_end
+            start = getattr(word, "start", None)
+            end = getattr(word, "end", None)
+            if parts and start is not None and previous_word_end is not None and float(start) - float(previous_word_end) >= 1.2:
+                append_sentence(result, starting_id, sentence_start, sentence_end if sentence_end is not None else previous_word_end, "".join(parts), offset)
+                parts = []
+                sentence_start = None
+                sentence_end = None
+                fallback_start = segment_start
+                fallback_end = segment_end
+            if sentence_start is None:
+                sentence_start = start if start is not None else segment_start
+            if end is not None:
+                sentence_end = end
+                previous_word_end = end
+            parts.append(text)
+            if re.search(r"[。！？!?；;]+[”’\"')】》]*\s*$", "".join(parts)):
+                append_sentence(result, starting_id, sentence_start, sentence_end if sentence_end is not None else segment_end, "".join(parts), offset)
+                parts = []
+                sentence_start = None
+                sentence_end = None
+                fallback_start = None
+                fallback_end = None
+                previous_word_end = None
+            elif len("".join(parts)) >= 180 or ((sentence_end or segment_end) - (sentence_start or segment_start)) >= 24:
+                # Keep punctuation-free speech bounded while preserving actual word timestamps.
+                append_sentence(result, starting_id, sentence_start or segment_start, sentence_end or segment_end, "".join(parts), offset)
+                parts = []
+                sentence_start = None
+                sentence_end = None
+                fallback_start = None
+                fallback_end = None
+                previous_word_end = None
+    flush_sentence(result, parts, starting_id, sentence_start, sentence_end, fallback_start, fallback_end, offset)
+    for index, item in enumerate(result, start=starting_id):
+        item.id = index
+    return result
+
+
+def flush_sentence(target, parts, starting_id, sentence_start, sentence_end, fallback_start, fallback_end, offset):
+    if not parts:
+        return
+    append_sentence(
+        target,
+        starting_id,
+        sentence_start if sentence_start is not None else fallback_start,
+        sentence_end if sentence_end is not None else fallback_end,
+        "".join(parts),
+        offset,
+    )
+
+
+def append_sentence(target, starting_id, start, end, text, offset):
+    content = str(text or "").strip()
+    if not content:
+        return
+    safe_start = max(0.0, float(start or 0.0) + float(offset or 0.0))
+    safe_end = max(safe_start, float(end if end is not None else start or 0.0) + float(offset or 0.0))
+    target.append(SimpleNamespace(id=starting_id + len(target), start=safe_start, end=safe_end, text=content))
 
 
 def srt_time(seconds):

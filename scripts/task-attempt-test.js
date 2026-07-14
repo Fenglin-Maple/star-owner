@@ -53,10 +53,23 @@ function assert(condition, message) {
   fs.writeFileSync(path.join(restartArtifact, 'partial.txt'), 'partial');
   store.upsertTask({ id: 'task-restart', collectionId: 'collection-restart', bvid: 'BVRESTART001', status: 'claimed', claimedBy: 'worker-restart', allowedRoot: restartRoot, workspaceRoot: restartRoot, artifactDir: restartArtifact });
   store.createToolRun({ id: 'run-restart', taskId: 'task-restart', collectionId: 'collection-restart', toolId: 'clean-cache', toolName: '清理视频缓存', workerId: 'worker-restart', status: 'queued', artifactDir: restartArtifact, options: {}, timeoutMs: 60_000, createdAt: new Date().toISOString() });
+  const deferredRoot = path.join(root, 'deferred-root');
+  const deferredArtifact = path.join(deferredRoot, 'attempt');
+  fs.mkdirSync(deferredArtifact, { recursive: true });
+  fs.writeFileSync(path.join(deferredArtifact, 'locked-at-first-stop.txt'), 'deferred cleanup');
+  store.set('attemptCleanupQueue', 'task-deferred-cleanup', {
+    id: 'task-deferred-cleanup',
+    taskId: 'task-deferred-cleanup',
+    cleanupTask: { id: 'task-deferred-cleanup', collectionId: 'collection-deferred', artifactDir: deferredArtifact, allowedRoot: deferredRoot },
+    attempts: 1,
+    createdAt: new Date().toISOString()
+  });
+  store.commit();
   const runner = new ToolRunner({ store });
   await runner.initialize({ startGpuService: false });
   assert(store.getTask('task-restart').status === 'pending' && !fs.existsSync(restartArtifact), 'restart recovery did not roll back the interrupted attempt');
   assert(store.getToolRun('run-restart').status === 'cancelled', 'restart recovery resumed an interrupted summary tool run');
+  assert(!fs.existsSync(deferredArtifact) && !store.get('attemptCleanupQueue', 'task-deferred-cleanup'), 'persisted cleanup retry was not completed on startup');
   runner.shutdown();
 
   fs.rmSync(root, { recursive: true, force: true });

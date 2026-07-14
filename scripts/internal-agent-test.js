@@ -50,9 +50,11 @@ function assert(condition, message) {
         forceContextLimitOnce = false;
         throw new Error('maximum context length exceeded');
       }
+      const bvid = body.messages?.at(-1)?.content?.match(/"bvid"\s*:\s*"([^"]+)"/)?.[1] || 'BV1234567890';
+      const markdown = validMarkdown(bvid);
       onDelta({ reasoning: '先核对字幕和关键帧。' });
-      onDelta({ content: validMarkdown() });
-      return { content: validMarkdown(), reasoning: '先核对字幕和关键帧。', usage: { input: 120, output: 240, total: 360 } };
+      onDelta({ content: markdown });
+      return { content: markdown, reasoning: '先核对字幕和关键帧。', usage: { input: 120, output: 240, total: 360 } };
     },
     recordModelUsage: () => ({})
   };
@@ -86,6 +88,11 @@ function assert(condition, message) {
   const cookieFixture = path.join(root, 'login-cookies.txt');
   const manager = new InternalAgentManager({ store, toolRunner, ragAssistant: rag, bili: { exportCookies: async () => { fs.writeFileSync(cookieFixture, 'cookie'); return cookieFixture; } }, getCurrentUser: () => currentUser, emit: (event) => events.push(event) });
   const collection = manager.listInternalCollections()[0];
+  const tasksBeforeInvalidModel = store.listTasks().length;
+  let invalidSingleModelRejected = false;
+  try { await manager.createSingleTask({ video: 'BVINVALID001', collectionId: collection.id, providerId: 'provider-test', modelId: 'missing-model' }); }
+  catch { invalidSingleModelRejected = true; }
+  assert(invalidSingleModelRejected && store.listTasks().length === tasksBeforeInvalidModel, 'invalid single-video model configuration left an orphan task');
   const session = await manager.createSingleTask({
     video: 'https://www.bilibili.com/video/BV1234567890',
     collectionId: collection.id,
@@ -95,7 +102,7 @@ function assert(condition, message) {
     taskOptions: { frames: 8, commentLimit: 3 }
   });
   assert(store.getTask(session.singleTaskId)?.publicAttempt === true && !store.getTask(session.singleTaskId)?.cookieFile, 'single task must try public access first');
-  manager.start(session.id);
+  await Promise.all([manager.start(session.id), manager.start(session.id)]);
   const finished = await waitForSession(manager, session.id);
   assert(finished.status === 'completed', `single session did not complete: ${finished.lastError || finished.status}`);
   assert(finished.completed === 1, 'completed count was not updated');
@@ -105,9 +112,15 @@ function assert(condition, message) {
   assert(task.outputMarkdown.includes('内置用户') || task.artifactDir.includes('内置用户'), 'internal collection artifact path is incorrect');
   assert(manager.collectionOutputDirectory(collection.id) === collection.collectionRoot, 'single-task collection output directory is incorrect');
   assert(manager.sessionOutputDirectory(finished.id) === task.artifactDir, 'completed session did not resolve its artifact directory');
+  const switchedWorkspace = store.addWorkspace({ name: 'Agent switched workspace', root: path.join(root, 'workspace-switched') });
+  store.setDefaultWorkspace(switchedWorkspace.id);
+  const switchedOutput = manager.collectionOutputDirectory(collection.id);
+  assert(switchedOutput.startsWith(path.resolve(switchedWorkspace.root)), 'internal collection output did not follow the newly selected default workspace');
+  store.setDefaultWorkspace(workspace.id);
   assert(store.getWorker(finished.workerId)?.tool === 'star-owner-internal', 'internal worker identity was not registered');
   assert(finished.contextCycle === 1 && finished.contextPercent > 0 && finished.contextCompactions === 0, 'ordinary single task unexpectedly used context fallback');
   assert(completionBodies[0]?.messages?.length === 2 && completionBodies[0].messages[0].role === 'system' && completionBodies[0].messages[1].role === 'user', 'video generation request unexpectedly carried prior task history');
+  assert(completionBodies[0].messages[1].content.includes('00:00:02,000 --> 00:00:04,500') && completionBodies[0].messages[1].content.includes('00:00:01,000 --> 00:00:03,000'), 'internal Agent prompt did not receive sentence-level ASR and station subtitle timestamps');
   assert(events.some((event) => event.type === 'stream') && events.some((event) => event.type === 'session-updated'), 'internal agent events were not emitted');
   assert(isLoginRequiredMessage('This video is only available for registered users. Use --cookies.'), 'login-required classifier missed yt-dlp guidance');
   assert(!isLoginRequiredMessage('network timeout while downloading'), 'ordinary network failure was misclassified as login-required');
@@ -237,13 +250,16 @@ function writeMaterials(directory) {
   fs.mkdirSync(path.join(directory, 'comments'), { recursive: true });
   fs.writeFileSync(path.join(directory, 'info.json'), JSON.stringify({ title: '内置 Agent 测试视频', owner: { name: '测试 UP' }, duration: 120, timestamp: 1767225600, tags: ['AI', 'Test'] }));
   fs.writeFileSync(path.join(directory, 'manifest.json'), JSON.stringify({ outputs: { frames: 'frames/', asr: 'asr/' } }));
-  fs.writeFileSync(path.join(directory, 'frames', 'frame-001.jpg'), 'fake-frame');
-  fs.writeFileSync(path.join(directory, 'asr', 'asr-transcript.txt'), '[00:00] ASR 测试字幕');
-  fs.writeFileSync(path.join(directory, 'subtitles', 'part-1.txt'), '[00:00] 站内测试字幕');
+  fs.writeFileSync(path.join(directory, 'frames', 'frame-001.jpg'), Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+  fs.writeFileSync(path.join(directory, 'asr', 'transcript.srt'), '1\n00:00:02,000 --> 00:00:04,500\nASR 测试字幕。\n');
+  fs.writeFileSync(path.join(directory, 'asr', 'asr-transcript.txt'), '[00:00:02,000 --> 00:00:04,500] ASR 测试字幕。\n');
+  fs.writeFileSync(path.join(directory, 'asr', 'asr-result.json'), JSON.stringify({ segments: [{ id: 0, start: 2, end: 4.5, text: 'ASR 测试字幕。' }] }));
+  fs.writeFileSync(path.join(directory, 'subtitles', 'part-1.srt'), '1\n00:00:01,000 --> 00:00:03,000\n站内测试字幕。\n');
+  fs.writeFileSync(path.join(directory, 'subtitles', 'part-1.txt'), '站内旧版纯文本，不应优先读取。');
   fs.writeFileSync(path.join(directory, 'comments', 'comments.json'), JSON.stringify([{ message: '测试热评' }]));
 }
 
-function validMarkdown() {
+function validMarkdown(bvid = 'BV1234567890') {
   return `# 内置 Agent 测试视频
 
 ## 小结
@@ -266,7 +282,7 @@ mindmap
 
 ## 核心内容
 
-### 测试章节 [00:00](https://www.bilibili.com/video/BV1234567890?t=0)
+### 测试章节 [00:00](https://www.bilibili.com/video/${bvid}?t=0)
 
 完整说明测试视频内容。
 

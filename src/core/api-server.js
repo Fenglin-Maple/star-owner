@@ -5,7 +5,7 @@ const { validateSubmission } = require('./validation');
 const { buildAnalytics } = require('./analytics');
 const { collectionBlockReason, collectionStorageName } = require('./collection-state');
 const { isAllowedApiOrigin } = require('./network-policy');
-const { finalizeSubmissionArtifacts, relocateCachedVideo } = require('./submission-artifacts');
+const { applySubmissionFinalization, stageSubmissionFinalization } = require('./submission-artifacts');
 const { abortTaskAttempt, createWorkId } = require('./task-attempt');
 const { PROJECT_ROOT, collectionDirs, ensureDir, normalizeTags, videoArtifactDir } = require('./workspace');
 
@@ -78,10 +78,10 @@ class ApiServer {
       if (req.method === 'POST' && url.pathname === '/api/workers/register') return this.registerWorker(req, res);
       if (req.method === 'GET' && url.pathname === '/api/workers') return this.json(res, { workers: buildAnalytics(this.store).workers });
       if (req.method === 'GET' && url.pathname === '/api/templates/video-summary') return this.videoSummaryTemplate(res);
-      if (req.method === 'GET' && url.pathname === '/api/collections') return this.json(res, { collections: this.store.listCollections() });
+      if (req.method === 'GET' && url.pathname === '/api/collections') return this.json(res, { collections: this.store.listCollections().map(publicCollection) });
       if (req.method === 'GET' && url.pathname === '/api/active-collection') return this.getActiveCollection(res);
       if (req.method === 'GET' && url.pathname === '/api/stats') return this.listStats(res, url);
-      if (req.method === 'GET' && url.pathname === '/api/workspaces') return this.json(res, { workspaces: this.store.listWorkspaces() });
+      if (req.method === 'GET' && url.pathname === '/api/workspaces') return this.json(res, { workspaces: this.store.listWorkspaces().map(publicWorkspace) });
       if (req.method === 'GET' && url.pathname === '/api/tools') return this.listTools(res, url);
       if (req.method === 'GET' && url.pathname === '/api/tasks') return this.listTasks(res, url);
       if (req.method === 'GET' && url.pathname === '/api/tool-runs') return this.listToolRuns(res, url);
@@ -117,7 +117,12 @@ class ApiServer {
             return this.json(res, apiErrorPayload(missing), Number(missing.statusCode || 404));
           }
           const collection = this.store.getCollectionById(task.collectionId);
-          return this.json(res, { task: collection ? this.taskContext(task, collection) : task });
+          if (task.workId && ['claimed', 'rejected'].includes(task.status)) {
+            const worker = this.requireQueryWorker(url);
+            this.assertTaskWorker(task, worker, url.searchParams.get('workId'));
+            return this.json(res, { task: collection ? this.taskContext(task, collection, worker) : publicTask(task) });
+          }
+          return this.json(res, { task: publicTask(task) });
         }
         if (req.method === 'POST' && action === 'heartbeat') return this.heartbeatTask(req, res, taskId);
         if (req.method === 'POST' && action === 'submit') return this.submitTask(req, res, taskId);
@@ -148,7 +153,7 @@ class ApiServer {
     const collectionId = url.searchParams.get('collectionId') || '';
     const all = this.store.listTasks({ collectionId });
     const limit = boundedLimit(url.searchParams.get('limit'));
-    this.json(res, { tasks: all.slice(0, limit), total: all.length, limit });
+    this.json(res, { tasks: all.slice(0, limit).map(publicTask), total: all.length, limit });
   }
 
   apiManifest(res, url) {
@@ -161,10 +166,10 @@ class ApiServer {
     const base = this.url();
     return {
       product: '星藏家',
-      protocolVersion: '2.5',
+      protocolVersion: '2.8',
       baseUrl: base,
       worker: worker ? this.publicWorker(worker) : null,
-      activeCollection: this.store.getActiveCollection(),
+      activeCollection: publicCollection(this.store.getActiveCollection()),
       requiredFlow: [
         'A new agent session registers once and receives an app-generated workerId.',
         'A long-running agent keeps one workerId, while every successful claim returns a brand-new one-time workId.',
@@ -182,10 +187,10 @@ class ApiServer {
         { method: 'GET', path: '/api/scheduler', purpose: 'Return resource pools, queue depth, GPU memory, ASR service state, and CPU ASR policy.' },
         { method: 'GET', path: '/api/active-collection', purpose: 'Read the collection activated by the desktop user.' },
         { method: 'POST', path: '/api/tasks/claim', purpose: 'Claim one enabled task and create a unique workId for this attempt.', body: { workerId: 'Required app-generated Worker identity.' } },
-        { method: 'GET', path: '/api/tasks/<taskId>', purpose: 'Read task context and enabled tools.' },
+        { method: 'GET', path: '/api/tasks/<taskId>?workerId=<workerId>&workId=<workId>', purpose: 'Read the active task context. Active attempts require both credentials returned by registration and claim.' },
         { method: 'POST', path: '/api/tasks/<taskId>/heartbeat', purpose: 'Extend the 15-minute lease.', body: { workerId: 'Required.', workId: 'Required one-time claim id.' } },
         { method: 'POST', path: '/api/tasks/<taskId>/tools/<toolId>/run', purpose: 'Queue a tool run. Returns HTTP 202 with queue position, reason, pool, and stage.', body: { workerId: 'Required.', workId: 'Required one-time claim id.', options: 'Tool-specific options object.' } },
-        { method: 'GET', path: '/api/tool-runs/<runId>?log=1', purpose: 'Poll queued/running/terminal status, stage, queue metadata, and optional log tail.' },
+        { method: 'GET', path: '/api/tool-runs/<runId>?workerId=<workerId>&workId=<workId>&log=1', purpose: 'Poll an owned run. Runs associated with a work attempt require that attempt\'s workerId and workId.' },
         { method: 'POST', path: '/api/tool-runs/<runId>/cancel', purpose: 'Cancel a tool run owned by the current work attempt.', body: { workerId: 'Required.', workId: 'Required one-time claim id.' } },
         { method: 'GET', path: '/api/templates/video-summary', purpose: 'Return the reference Markdown template.' },
         { method: 'POST', path: '/api/tasks/<taskId>/submit', purpose: 'Validate and submit final artifacts.', body: { workerId: 'Required.', workId: 'Required one-time claim id.', artifactDir: 'Assigned artifact directory.', markdownFile: 'Final Markdown path.', metadataFile: 'info.json path.' } },
@@ -226,23 +231,26 @@ class ApiServer {
     const collection = this.store.getActiveCollection();
     if (!collection) return this.json(res, { collection: null, message: 'NO_ACTIVE_COLLECTION' });
     const stats = buildAnalytics(this.store).collections[collection.id] || null;
-    this.json(res, { collection, stats });
+    this.json(res, { collection: publicCollection(collection), stats });
   }
 
   listToolRuns(res, url) {
     const all = this.store.listToolRuns({ taskId: url.searchParams.get('taskId') || '' });
     const limit = boundedLimit(url.searchParams.get('limit'));
-    this.json(res, { runs: all.slice(0, limit), total: all.length, limit });
+    this.json(res, { runs: all.slice(0, limit).map((run) => publicToolRun(run, this.store, false)), total: all.length, limit });
   }
 
   getToolRun(res, runId, url) {
     const run = this.store.getToolRun(runId);
     if (!run) return this.json(res, { run: null }, 404);
-    const withLog = url.searchParams.get('log') === '1' || url.searchParams.get('log') === 'true';
+    if (run.workId) this.assertRunCredentials(run, url);
+    const authenticatedAttempt = Boolean(run.workId);
+    const withLog = authenticatedAttempt && (url.searchParams.get('log') === '1' || url.searchParams.get('log') === 'true');
     const task = run.workId ? this.store.getTask(run.taskId) : null;
     const active = Boolean(run.workId && task?.workId === run.workId && ['claimed', 'rejected'].includes(task.status));
+    const safeRun = publicToolRun(withLog ? { ...run, logTail: readTail(run.logFile) } : run, this.store, authenticatedAttempt);
     this.json(res, {
-      run: withLog ? { ...run, logTail: readTail(run.logFile) } : run,
+      run: safeRun,
       ...(run.workId ? {
         workAttempt: active
           ? { active: true, workId: run.workId }
@@ -262,7 +270,7 @@ class ApiServer {
     if (existing.workId && existing.workId !== String(body.workId || '')) throw workAttemptEndedError(task, String(body.workId || ''));
     if ((existing.workerId || existing.agentName) !== worker.id) throw new Error('This worker does not own the tool run.');
     const run = this.toolRunner.cancel(runId);
-    this.json(res, { run });
+    this.json(res, { run: publicToolRun(run, this.store, true) });
   }
 
   async claimTask(req, res) {
@@ -277,6 +285,24 @@ class ApiServer {
         worker: this.publicWorker(worker)
       }, 423);
     }
+    reclaimExpired(this.store, '', this.toolRunner);
+    const existingAttempt = this.store.listTasks().find((item) => item.claimedBy === worker.id
+      && item.workId
+      && ['claimed', 'rejected'].includes(item.status));
+    if (existingAttempt) {
+      throw httpError(409, 'This worker already owns an active task attempt. Finish or abort it before claiming another task.', {
+        code: 'WORKER_ALREADY_HAS_TASK',
+        taskId: existingAttempt.id,
+        workId: existingAttempt.workId,
+        taskStatus: existingAttempt.status,
+        directive: {
+          action: 'resume-owned-attempt',
+          method: 'GET',
+          path: `/api/tasks/${encodeURIComponent(existingAttempt.id)}?workerId=${encodeURIComponent(worker.id)}&workId=${encodeURIComponent(existingAttempt.workId)}`,
+          message: 'Continue, submit, or abort the existing workId before claiming another task.'
+        }
+      });
+    }
     const collection = this.store.getActiveCollection();
     if (!collection) throw new Error('No active collection. Select and activate one in the desktop task inventory.');
     const collectionReason = collectionBlockReason(collection, { external: true });
@@ -287,7 +313,6 @@ class ApiServer {
     if (body.collectionName && body.collectionName !== collection.name) {
       throw new Error('The desktop app owns task targeting. Remove collectionName or activate that collection in the task inventory.');
     }
-    reclaimExpired(this.store, collection.id, this.toolRunner);
     const task = this.store.listTasks({ collectionId: collection.id })
       .find((item) => item.enabled !== false && (item.status === 'pending' || item.status === 'failed' || (item.status === 'rejected' && !item.workId && !item.claimedBy)));
     if (!task) return this.json(res, { task: null, message: 'NO_TASK' });
@@ -340,6 +365,21 @@ class ApiServer {
     if (!task) throw missingTaskError(this.store, taskId);
     this.assertTaskWorker(task, worker, body.workId);
     if (task.enabled === false) throw new Error('Task is disabled and cannot run tools.');
+    const activeRuns = this.store.listToolRuns({ taskId }).filter((run) => run.workId === task.workId && ['queued', 'running'].includes(run.status));
+    if (activeRuns.length) {
+      const duplicate = activeRuns.find((run) => run.toolId === toolId) || activeRuns[0];
+      throw httpError(409, 'Another app-managed tool is already queued or running for the current work attempt.', {
+        code: 'TOOL_RUN_ALREADY_ACTIVE',
+        taskId,
+        workId: task.workId,
+        activeRuns: activeRuns.map((run) => ({ id: run.id, toolId: run.toolId, status: run.status, stage: run.stage || '' })),
+        directive: {
+          action: 'poll-tool-run',
+          path: `/api/tool-runs/${encodeURIComponent(duplicate.id)}?workerId=${encodeURIComponent(worker.id)}&workId=${encodeURIComponent(task.workId)}&log=1`,
+          message: 'Poll or cancel the existing run before starting another tool for this workId.'
+        }
+      });
+    }
     const tool = this.store.get('tools', toolId);
     if (!tool) throw new Error(`Tool not found: ${toolId}`);
     const collection = this.store.getCollectionById(task.collectionId);
@@ -350,7 +390,7 @@ class ApiServer {
       workerId: worker.id,
       options: body.options || {}
     });
-    this.json(res, { run }, 202);
+    this.json(res, { run: publicToolRun(run, this.store, true) }, 202);
   }
 
   async heartbeatTask(req, res, taskId) {
@@ -363,7 +403,8 @@ class ApiServer {
     task.updatedAt = new Date().toISOString();
     this.store.upsertTask(task);
     this.store.commit();
-    this.json(res, { task });
+    const collection = this.store.getCollectionById(task.collectionId);
+    this.json(res, { task: collection ? this.taskContext(task, collection, worker) : publicTask(task) });
   }
 
   async submitTask(req, res, taskId) {
@@ -372,6 +413,16 @@ class ApiServer {
     const task = this.store.getTask(taskId);
     if (!task) throw missingTaskError(this.store, taskId);
     this.assertTaskWorker(task, worker, body.workId);
+    const activeRuns = this.store.listToolRuns({ taskId }).filter((run) => run.workId === task.workId && ['queued', 'running'].includes(run.status));
+    if (activeRuns.length) {
+      throw httpError(409, 'Wait for all app-managed tool runs to finish or cancel them before submitting artifacts.', {
+        code: 'TOOL_RUNS_ACTIVE',
+        taskId,
+        workId: task.workId,
+        activeRuns: activeRuns.map((run) => ({ id: run.id, toolId: run.toolId, status: run.status, stage: run.stage || '' })),
+        directive: { action: 'poll-tool-runs', message: 'Submit only after every run for this workId reaches a terminal status.' }
+      });
+    }
     const validation = validateSubmission(task, body);
     const now = new Date().toISOString();
     this.store.recordSubmission(taskId, {
@@ -402,36 +453,39 @@ class ApiServer {
     const collection = this.store.getCollectionById(task.collectionId) || {};
     const metadata = readMetadataFile(validation.metadataFile);
     task.tags = normalizeTags(metadata.tags || task.tags);
-    const finalized = finalizeSubmissionArtifacts({
-      task,
-      collection,
-      validation,
-      filenameMetadata: this.store.getFilenameMetadata()
-    });
     const completedWorkId = task.workId;
-    Object.assign(task, {
+    const completedTask = {
+      ...task,
       status: 'done',
       workId: '',
       completedAt: now,
-      outputMarkdown: finalized.markdownFile,
-      artifactDir: finalized.artifactDir,
-      metadataFile: finalized.metadataFile,
       validatorErrors: [],
       updatedAt: now
-    });
-    relocateCachedVideo(this.store, task, finalized);
-    this.store.upsertTask(task);
-    this.store.commit();
-    this.store.recordTaskEvent(task.id, 'completed', {
+    };
+    const event = {
+      id: `submission-completed:${completedWorkId || task.id}`,
+      taskId: task.id,
+      type: 'completed',
+      createdAt: now,
       collectionId: task.collectionId,
       workerId: worker.id,
       agentName: worker.id,
       workId: completedWorkId,
       processingSeconds: secondsBetween(task.claimedAt, now),
       videoDuration: Number(task.duration || 0)
+    };
+    const staged = stageSubmissionFinalization({
+      store: this.store,
+      task,
+      collection,
+      validation,
+      filenameMetadata: this.store.getFilenameMetadata(),
+      completedTask,
+      event
     });
+    const { task: finalizedTask } = applySubmissionFinalization(this.store, staged);
     this.onEvent({ type: 'task-completed', taskId: task.id, collectionId: task.collectionId, workerId: worker.id, agentName: worker.id });
-    this.json(res, { accepted: true, completedWorkId, task });
+    this.json(res, { accepted: true, completedWorkId, task: publicTask(finalizedTask) });
   }
 
   async failTask(req, res, taskId) {
@@ -448,13 +502,30 @@ class ApiServer {
     if (!reason) throw new Error('reason is required so the application can record why this attempt stopped.');
     const result = abortTaskAttempt({ store: this.store, toolRunner: this.toolRunner, taskId, workerId: worker.id, reason, source });
     this.onEvent({ type: 'task-attempt-aborted', taskId: task.id, collectionId: task.collectionId, workerId: worker.id, agentName: worker.id, reason, source, cleanup: result.cleanup });
-    this.json(res, { aborted: true, endedWorkId: result.endedWorkId, task: result.task, cancelledRuns: result.cancelledRuns, cleanup: result.cleanup });
+    this.json(res, { aborted: true, endedWorkId: result.endedWorkId, task: publicTask(result.task), cancelledRuns: result.cancelledRuns, cleanup: result.cleanup });
   }
 
   requireWorker(body = {}) {
     const workerId = String(body.workerId || '').trim();
     if (!workerId) throw new Error('workerId is required. Register this fresh agent session with POST /api/workers/register.');
     return this.store.touchWorker(workerId);
+  }
+
+  requireQueryWorker(url) {
+    const workerId = String(url.searchParams.get('workerId') || '').trim();
+    if (!workerId) throw httpError(401, 'workerId is required for active work-attempt details.', { code: 'WORKER_ID_REQUIRED' });
+    const worker = this.store.getWorker(workerId);
+    if (!worker) throw httpError(401, `Unknown workerId: ${workerId}.`, { code: 'UNKNOWN_WORKER' });
+    return worker;
+  }
+
+  assertRunCredentials(run, url) {
+    const worker = this.requireQueryWorker(url);
+    const workId = String(url.searchParams.get('workId') || '').trim();
+    if (!workId) throw httpError(401, 'workId is required for this tool run.', { code: 'WORK_ID_REQUIRED' });
+    if (worker.id !== String(run.workerId || run.agentName || '') || workId !== String(run.workId || '')) {
+      throw httpError(403, 'This worker does not own the requested tool run.', { code: 'TOOL_RUN_OWNED_BY_ANOTHER' });
+    }
   }
 
   assertTaskWorker(task, worker, workId) {
@@ -503,7 +574,6 @@ class ApiServer {
       videoUrl: canonicalVideoUrl(task),
       artifactDir: task.artifactDir,
       allowedRoot: task.allowedRoot,
-      cookieFile: collection.cookieFile,
       leaseExpiresAt: task.leaseExpiresAt,
       outputMarkdown: task.outputMarkdown || '',
       completedAt: task.completedAt || '',
@@ -523,6 +593,7 @@ class ApiServer {
           : '最终产物保存后，通过 clean-cache 工具运行 API 删除临时视频和音频缓存。',
         authorization: '本次领取的 workId 是一次性工作凭证。心跳、工具运行/取消、提交和中止都必须同时提交 workerId 与 workId。不要自行生成或复用旧 workId。',
         inventory: '收藏夹同步优先于 Agent 工作。任务被移出、收藏夹正在同步/未就绪/待重新激活或已在 B站删除时，必须按接口 directive 停止或等待，不得绕过库存状态继续工作。',
+        transcriptTimeline: 'ASR 必须提供逐句起止时间。优先读取 asr/transcript.srt；也可读取 asr/asr-result.json 的 segments[].start/end，或包含同等时间轴的 asr/asr-transcript.txt。Markdown 时间轴链接必须依据这些真实时间，不得按文本顺序猜测。',
         interruption: `如果当前任务因错误、用户要求或其它原因无法继续，必须立即 POST ${this.url()}/api/tasks/${encodeURIComponent(task.id)}/abort 并提交 workerId、workId 与 reason。应用会取消工具、删除本次产物并将任务退回 pending；旧 workId 随即失效，不要自行保留断点或直接修改文件状态。`
       },
       abortUsage: `POST ${this.url()}/api/tasks/${encodeURIComponent(task.id)}/abort`,
@@ -541,7 +612,7 @@ class ApiServer {
       enabled: tool.enabled,
       description: tool.description,
       apiUsage: `POST ${this.url()}/api/tasks/${taskPart}/tools/${encodeURIComponent(tool.id)}/run`,
-      statusUsage: `GET ${this.url()}/api/tool-runs/<runId>?log=1`,
+      statusUsage: `GET ${this.url()}/api/tool-runs/<runId>?workerId=<workerId>&workId=<workId>&log=1`,
       cancelUsage: `POST ${this.url()}/api/tool-runs/<runId>/cancel`,
       internalCommand: tool.internalCommand,
       agentPrompt: tool.agentPrompt,
@@ -564,12 +635,12 @@ class ApiServer {
 
 function reclaimExpired(store, collectionId, toolRunner = null) {
   const now = new Date();
-  const protectedTaskIds = new Set(
-    store.listToolRuns().filter((run) => ['queued', 'running'].includes(run.status)).map((run) => run.taskId)
+  const protectedAttempts = new Set(
+    store.listToolRuns().filter((run) => ['queued', 'running'].includes(run.status) && run.workId).map((run) => `${run.taskId}:${run.workId}`)
   );
   for (const task of store.listTasks({ collectionId })) {
     if (['claimed', 'rejected'].includes(task.status) && task.leaseExpiresAt && new Date(task.leaseExpiresAt) <= now) {
-      if (protectedTaskIds.has(task.id)) continue;
+      if (protectedAttempts.has(`${task.id}:${task.workId}`)) continue;
       abortTaskAttempt({ store, toolRunner, taskId: task.id, workerId: task.claimedBy, reason: 'Task lease expired before the Agent completed or aborted the attempt.', source: 'lease-expired' });
     }
   }
@@ -669,6 +740,58 @@ function publicTombstone(value = {}) {
   };
 }
 
+function publicCollection(collection) {
+  if (!collection) return null;
+  const { cookieFile, workspaceRoot, collectionRoot, videosDir, exportDir, cacheRoot, ...safe } = collection;
+  return safe;
+}
+
+function publicTask(task = {}) {
+  const {
+    cookieFile,
+    workId,
+    workspaceRoot,
+    allowedRoot,
+    artifactDir,
+    outputMarkdown,
+    metadataFile,
+    coverFile,
+    cachedVideoFile,
+    ...safe
+  } = task;
+  return safe;
+}
+
+function publicWorkspace(workspace = {}) {
+  return { id: workspace.id, name: workspace.name, isDefault: Boolean(workspace.isDefault), createdAt: workspace.createdAt, updatedAt: workspace.updatedAt };
+}
+
+function publicToolRun(run = {}, store, detailed = false) {
+  const sensitivePaths = [
+    ...store.listCollections().map((collection) => collection.cookieFile),
+    ...store.listTasks().map((task) => task.cookieFile)
+  ].filter(Boolean);
+  const redact = (value) => sensitivePaths.reduce((text, sensitive) => text.split(String(sensitive)).join('<cookie-file>'), String(value || ''));
+  const redactValue = (value) => {
+    if (typeof value === 'string') return redact(value);
+    if (Array.isArray(value)) return value.map(redactValue);
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactValue(item)]));
+    return value;
+  };
+  const safe = {
+    ...run,
+    actualCommand: redact(run.actualCommand),
+    error: redact(run.error),
+    asrResult: redactValue(run.asrResult),
+    ...(Object.prototype.hasOwnProperty.call(run, 'logTail') ? { logTail: redact(run.logTail) } : {})
+  };
+  if (!detailed) {
+    for (const key of ['workId', 'cwd', 'artifactDir', 'logFile', 'actualCommand', 'options', 'logTail', 'asrResult']) delete safe[key];
+    if (safe.error) safe.error = 'Tool run failed; detailed diagnostics are available only to the authenticated work attempt.';
+  }
+  return safe;
+}
+
 function collectionDispatchError(collection, reason) {
   let code = 'COLLECTION_NOT_READY';
   let status = 423;
@@ -705,7 +828,7 @@ function claimNewTaskDirective() {
 
 function apiErrorPayload(error) {
   const payload = { error: error.message || String(error) };
-  for (const key of ['code', 'taskId', 'workId', 'taskStatus', 'directive']) {
+  for (const key of ['code', 'taskId', 'workId', 'taskStatus', 'collectionId', 'directive', 'unavailable', 'removed', 'failureKind', 'possibleCauses', 'resourceReason', 'activeRuns']) {
     if (error[key] !== undefined) payload[key] = error[key];
   }
   return payload;

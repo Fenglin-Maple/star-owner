@@ -15,12 +15,13 @@ const DEFAULT_FILENAME_METADATA = Object.freeze({
 });
 
 function safeName(value, fallback = 'untitled', maxLength = 120) {
-  const cleaned = String(value || '')
+  let cleaned = String(value || '')
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '')
     .replace(/\s+/g, ' ')
     .replace(/[. ]+$/g, '')
     .trim() || fallback;
-  return cleaned.slice(0, Math.max(1, Number(maxLength) || 120));
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(cleaned)) cleaned = `_${cleaned}`;
+  return cleaned.slice(0, Math.max(1, Number(maxLength) || 120)).replace(/[. ]+$/g, '') || fallback;
 }
 
 function ensureDir(dir) {
@@ -133,7 +134,9 @@ function dateForFilename(value) {
 function assertInside(parent, candidate) {
   const resolvedParent = path.resolve(parent);
   const resolvedCandidate = path.resolve(candidate);
-  if (resolvedCandidate !== resolvedParent && !resolvedCandidate.startsWith(`${resolvedParent}${path.sep}`)) {
+  const parentForCompare = process.platform === 'win32' ? resolvedParent.toLowerCase() : resolvedParent;
+  const candidateForCompare = process.platform === 'win32' ? resolvedCandidate.toLowerCase() : resolvedCandidate;
+  if (candidateForCompare !== parentForCompare && !candidateForCompare.startsWith(`${parentForCompare}${path.sep}`)) {
     throw new Error(`Path is outside allowed directory: ${candidate}`);
   }
   return resolvedCandidate;

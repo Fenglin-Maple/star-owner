@@ -192,7 +192,7 @@
 .rag-pending-image > div { min-width: 0; }
 .rag-pending-image span, .rag-pending-image small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rag-pending-image span { color: var(--text); font-size: 9px; }
-.rag-pending-image small { margin-top: 5px; color: var(--muted); font: 8px var(--font-mono); }
+.rag-pending-image small { margin-top: 5px; color: var(--muted); font: 9px var(--font-mono); }
 .rag-pending-image button { width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; color: var(--muted); background: transparent; }
 .rag-pending-image button:hover { color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); }
 .rag-message-attachments { display: flex; flex-wrap: wrap; gap: 7px; margin: 2px 0 9px; }

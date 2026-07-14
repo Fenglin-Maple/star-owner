@@ -34,7 +34,7 @@ $required = @(
   "runtime\vc-runtime\msvcp140_codecvt_ids.dll",
   "runtime\vc-runtime\vcruntime140.dll",
   "runtime\vc-runtime\vcruntime140_1.dll",
-  "runtime\models\small\model.bin"
+  "runtime\models\small\model.bin",
   "runtime\models\medium\model.bin"
 )
 $required | ForEach-Object { Require-Path $_ }
@@ -61,11 +61,19 @@ $scanFiles = $scanFiles | Where-Object {
   $_.Extension -ne ".pyc" -and
   $_.FullName -notmatch "[\\/]__pycache__[\\/]"
 }
-$scanFiles += Get-Item (Join-Path $root "README.md"), (Join-Path $root "DESIGN.md"), (Join-Path $root "DEPLOYMENT.md"), (Join-Path $root "AGENTS.md")
+$scanFiles += @(
+  "README.md", "DESIGN.md", "DEPLOYMENT.md", "AGENTS.md", "SECURITY.md", "CODE_REVIEW.md",
+  "THIRD_PARTY_NOTICES.md", "package.json", "package-lock.json", "runtime-requirements.txt"
+) | ForEach-Object { Get-Item -LiteralPath (Join-Path $root $_) }
 $forbidden = $scanFiles | Select-String -Pattern "[A-Za-z]:\\(Users|AIcode)\\|C:/Users/|D:/AIcode/|AppData\\Local\\Temp" -ErrorAction SilentlyContinue
 if ($forbidden) {
   $details = ($forbidden | ForEach-Object { "$($_.Path):$($_.LineNumber): $($_.Line.Trim())" }) -join [Environment]::NewLine
   throw "Machine-specific absolute paths were found:`n$details"
+}
+
+$lockVersion = & node -e "const p=require('./package.json'); const l=require('./package-lock.json'); if (p.version !== l.version || p.version !== l.packages?.['']?.version) process.exit(2); process.stdout.write(p.version);"
+if ($LASTEXITCODE -ne 0 -or $lockVersion -ne $package.version) {
+  throw "package.json and package-lock.json versions do not match."
 }
 
 $javascript = Get-ChildItem -LiteralPath (Join-Path $root "src"), (Join-Path $root "scripts"), (Join-Path $root "tools") -Recurse -File -Filter "*.js"
@@ -73,6 +81,9 @@ foreach ($file in $javascript) {
   & node --check $file.FullName
   if ($LASTEXITCODE -ne 0) { throw "JavaScript syntax check failed: $($file.FullName)" }
 }
+$python = Join-Path $root "runtime\faster-whisper\Scripts\python.exe"
+& $python -m py_compile (Join-Path $root "tools\faster-whisper-cli.py") (Join-Path $root "tools\faster-whisper-service.py") (Join-Path $root "scripts\asr-format-test.py") (Join-Path $root "scripts\generate-icon.py")
+if ($LASTEXITCODE -ne 0) { throw "Python syntax check failed." }
 
 Push-Location $root
 try {
@@ -96,6 +107,14 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "SQLite persistence test failed." }
   & npm run test:collection-sync
   if ($LASTEXITCODE -ne 0) { throw "Collection sync test failed." }
+  & npm run test:bili-client
+  if ($LASTEXITCODE -ne 0) { throw "Bilibili client test failed." }
+  & npm run test:asr-format
+  if ($LASTEXITCODE -ne 0) { throw "ASR sentence timestamp format test failed." }
+  & npm run test:analytics
+  if ($LASTEXITCODE -ne 0) { throw "Analytics failure accounting test failed." }
+  & npm run test:asr-service
+  if ($LASTEXITCODE -ne 0) { throw "Persistent GPU ASR service test failed." }
   & npm audit --audit-level=high
   if ($LASTEXITCODE -ne 0) { throw "npm audit reported a high-severity issue." }
 } finally {

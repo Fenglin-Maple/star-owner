@@ -19,30 +19,42 @@
   let state = { providers: [], sessions: [], activeSession: null, knowledgeCatalog: [], modelUsage: [] };
   let activeSessionId = localStorage.getItem('ragActiveSessionId') || '';
   let pendingAttachments = [];
-  let streaming = null;
+  const streamingBySession = new Map();
   let currentApproval = null;
+  const approvalQueue = [];
   let editingProviderId = '';
   let remoteModelSaveTimer = null;
   let streamRenderTimer = null;
   let messageRenderQueue = Promise.resolve();
+  let refreshSequence = 0;
+  let renderedMessageSessionId = '';
   let initialized = false;
 
   async function refresh(sessionId = activeSessionId, { quiet = false } = {}) {
+    const sequence = ++refreshSequence;
     try {
-      state = await window.orchestrator.ragState(sessionId || '');
-      if (state.loading) {
+      const nextState = await window.orchestrator.ragState(sessionId || '');
+      if (sequence !== refreshSequence) return;
+      state = nextState;
+      if (nextState.loading) {
         renderAll();
         setTimeout(() => refresh(activeSessionId, { quiet: true }), 500);
         return;
       }
       activeSessionId = state.activeSession?.id || state.sessions[0]?.id || '';
       if (activeSessionId) localStorage.setItem('ragActiveSessionId', activeSessionId);
+      pendingAttachments = unsentAttachments(state.activeSession);
       renderAll();
       initialized = true;
     } catch (error) {
+      if (sequence !== refreshSequence) return;
       if (!quiet) notify('RAG 知识库助手尚未就绪', error.message || String(error), 'error');
       if (!initialized) setTimeout(() => refresh(activeSessionId, { quiet: true }), 1200);
     }
+  }
+
+  function activeStreaming() {
+    return streamingBySession.get(activeSessionId) || null;
   }
 
   function renderAll() {
@@ -58,10 +70,11 @@
     const sessions = state.sessions.filter((session) => !query || `${session.title} ${session.modelId}`.toLowerCase().includes(query));
     elements.sessionList.innerHTML = '';
     for (const session of sessions) {
+      const generating = streamingBySession.has(session.id);
       const button = document.createElement('button');
       button.type = 'button';
-      button.className = `rag-session-item${session.id === activeSessionId ? ' active' : ''}`;
-      button.innerHTML = `<strong>${escapeHtml(session.title || '新对话')}</strong><span><em>${escapeHtml(session.modelId || '未选择模型')}</em><time>${relativeTime(session.updatedAt)}</time></span>`;
+      button.className = `rag-session-item${session.id === activeSessionId ? ' active' : ''}${generating ? ' generating' : ''}`;
+      button.innerHTML = `<strong>${escapeHtml(session.title || '新对话')}</strong><span><em>${generating ? '生成中 · ' : ''}${escapeHtml(session.modelId || '未选择模型')}</em><time>${relativeTime(session.updatedAt)}</time></span>`;
       button.addEventListener('click', () => selectSession(session.id));
       button.addEventListener('contextmenu', (event) => openSessionContextMenu(event, session.id));
       elements.sessionList.appendChild(button);
@@ -78,14 +91,20 @@
   async function selectSession(id) {
     closeKnowledgeMenus();
     activeSessionId = id;
-    pendingAttachments = [];
     localStorage.setItem('ragActiveSessionId', id);
     await refresh(id, { quiet: true });
+  }
+
+  function unsentAttachments(session) {
+    if (!session) return [];
+    const sent = new Set((session.messages || []).flatMap((message) => (message.attachments || []).map((attachment) => attachment.id)));
+    return (session.attachments || []).filter((attachment) => !sent.has(attachment.id));
   }
 
   function renderInspector() {
     const session = state.activeSession;
     const enabled = Boolean(session);
+    const streaming = activeStreaming();
     elements.input.disabled = !enabled || streaming;
     elements.attach.disabled = !enabled || streaming;
     elements.send.disabled = !enabled || streaming || (!elements.input.value.trim() && !pendingAttachments.length);
@@ -120,9 +139,11 @@
     const stats = state.modelUsage.find((item) => item.providerId === session?.providerId && item.modelId === session?.modelId);
     elements.sessionRequests.textContent = `${formatNumber(stats?.requests || 0)} 次请求`;
     renderPendingAttachments();
+    setGenerating(Boolean(streaming), streaming ? '模型正在处理此会话' : '');
   }
 
   function renderProviderAndModelSelects(session) {
+    const streaming = activeStreaming();
     const provider = state.providers.find((item) => item.id === session?.providerId);
     const providerOptions = '<option value="">选择供应商</option>' + state.providers.map((item) => `<option value="${escapeAttr(item.id)}">${escapeHtml(item.name)}</option>`).join('');
     const modelOptions = '<option value="">选择模型</option>' + (provider?.enabledModels || []).map((model) => `<option value="${escapeAttr(model.id)}">${escapeHtml(model.name || model.id)}</option>`).join('');
@@ -139,7 +160,7 @@
   }
 
   function openSessionSettingsModal() {
-    if (!state.activeSession || streaming) return;
+    if (!state.activeSession || activeStreaming()) return;
     hideSessionContextMenu();
     elements.sessionSettingsModal.hidden = false;
     requestAnimationFrame(() => elements.sessionTitleInput.focus());
@@ -171,13 +192,17 @@
   }
 
   async function deleteActiveSession() {
-    if (!activeSessionId || streaming) return;
-    await window.orchestrator.ragDeleteSession(activeSessionId);
-    activeSessionId = '';
-    localStorage.removeItem('ragActiveSessionId');
-    closeSessionSettingsModal();
-    hideSessionContextMenu();
-    await refresh('', { quiet: true });
+    if (!activeSessionId || activeStreaming()) return;
+    try {
+      await window.orchestrator.ragDeleteSession(activeSessionId);
+      activeSessionId = '';
+      localStorage.removeItem('ragActiveSessionId');
+      closeSessionSettingsModal();
+      hideSessionContextMenu();
+      await refresh('', { quiet: true });
+    } catch (error) {
+      notify('删除会话失败', error.message || String(error), 'error');
+    }
   }
 
   function renderCapabilities(model) {
@@ -192,6 +217,7 @@
   }
 
   function renderKnowledge(session) {
+    const streaming = activeStreaming();
     const selected = new Set(session?.knowledgeCollectionIds || []);
     renderKnowledgeMenu(elements.knowledgeMenu, selected, session);
     renderKnowledgeMenu(elements.headKnowledgeMenu, selected, session);
@@ -211,6 +237,7 @@
   }
 
   function renderKnowledgeMenu(menu, selected, session) {
+    const streaming = activeStreaming();
     const groups = groupBy(state.knowledgeCatalog, (item) => item.userName);
     menu.innerHTML = '';
     if (state.knowledgeCatalog.length) {
@@ -287,17 +314,24 @@
   async function renderMessages() {
     const session = state.activeSession;
     const sessionId = session?.id || '';
+    const streaming = streamingBySession.get(sessionId) || null;
     if (!session?.messages?.length && !streaming) {
       elements.messages.innerHTML = '<div class="rag-empty-state"><svg viewBox="0 0 24 24"><path d="M4 5h16v12H8l-4 4zM8 9h8M8 13h5"/></svg><strong>让知识库真正参与对话</strong><span>配置供应商、选择模型和收藏夹知识库后，可进行跨文档查阅、整理与分析。</span></div>';
       return;
     }
+    const switchedSession = renderedMessageSessionId !== sessionId;
+    const previousScrollTop = elements.messages.scrollTop;
+    const wasNearBottom = elements.messages.scrollHeight - elements.messages.clientHeight - previousScrollTop < 96;
     const messages = [...(session?.messages || [])];
     if (streaming && !streaming.pending && streaming.sessionId === session?.id && !messages.some((item) => item.id === streaming.id)) messages.push(streaming);
     const fragment = document.createDocumentFragment();
     for (const message of messages) fragment.appendChild(await createMessageElement(message));
     if ((state.activeSession?.id || '') !== sessionId) return;
     elements.messages.replaceChildren(fragment);
-    elements.messages.scrollTop = elements.messages.scrollHeight;
+    renderedMessageSessionId = sessionId;
+    elements.messages.scrollTop = switchedSession || wasNearBottom
+      ? elements.messages.scrollHeight
+      : Math.min(previousScrollTop, Math.max(0, elements.messages.scrollHeight - elements.messages.clientHeight));
   }
 
   function queueMessageRender() {
@@ -420,7 +454,9 @@
     streamRenderTimer = setTimeout(async () => {
       streamRenderTimer = null;
       await messageRenderQueue;
+      const streaming = activeStreaming();
       if (!streaming) return;
+      const wasNearBottom = elements.messages.scrollHeight - elements.messages.clientHeight - elements.messages.scrollTop < 96;
       let article = elements.messages.querySelector(`[data-message-id="${cssEscape(streaming.id)}"]`);
       if (!article) {
         elements.messages.querySelector('.rag-empty-state')?.remove();
@@ -429,7 +465,7 @@
       } else {
         await fillMessage(article, streaming);
       }
-      elements.messages.scrollTop = elements.messages.scrollHeight;
+      if (wasNearBottom) elements.messages.scrollTop = elements.messages.scrollHeight;
     }, 45);
   }
 
@@ -473,23 +509,34 @@
 
   async function sendMessage(event) {
     event?.preventDefault();
-    if (!activeSessionId || streaming) return;
+    if (!activeSessionId || activeStreaming()) return;
+    const sessionId = activeSessionId;
     const content = elements.input.value.trim();
     if (!content && !pendingAttachments.length) return;
+    const existingMessageIds = new Set((state.activeSession?.messages || []).map((message) => message.id));
+    const draftAttachments = [...pendingAttachments];
     const attachmentIds = pendingAttachments.map((item) => item.id);
     elements.input.value = '';
     autoGrowInput();
     pendingAttachments = [];
-    streaming = { id: `pending-${Date.now()}`, sessionId: activeSessionId, role: 'assistant', content: '', reasoning: '', toolEvents: [], status: 'streaming', pending: true, createdAt: new Date().toISOString() };
+    streamingBySession.set(sessionId, { id: `pending-${Date.now()}`, sessionId, role: 'assistant', content: '', reasoning: '', toolEvents: [], status: 'streaming', pending: true, createdAt: new Date().toISOString() });
     setGenerating(true, '正在连接模型');
     renderPendingAttachments();
     try {
-      await window.orchestrator.ragSend({ sessionId: activeSessionId, content, attachmentIds });
+      await window.orchestrator.ragSend({ sessionId, content, attachmentIds });
     } catch (error) {
       notify('生成失败', error.message || String(error), 'error');
-      streaming = null;
-      setGenerating(false);
+      streamingBySession.delete(sessionId);
+      if (activeSessionId === sessionId) setGenerating(false);
       await refresh(activeSessionId, { quiet: true });
+      const persisted = state.activeSession?.id === sessionId
+        && (state.activeSession.messages || []).some((message) => message.role === 'user' && !existingMessageIds.has(message.id));
+      if (!persisted && activeSessionId === sessionId) {
+        elements.input.value = content;
+        pendingAttachments = draftAttachments;
+        autoGrowInput();
+        renderPendingAttachments();
+      }
     }
   }
 
@@ -583,7 +630,9 @@
 
   function scheduleModelSave() {
     if (remoteModelSaveTimer) clearTimeout(remoteModelSaveTimer);
-    remoteModelSaveTimer = setTimeout(saveEnabledModels, 240);
+    remoteModelSaveTimer = setTimeout(() => {
+      saveEnabledModels().catch((error) => notify('模型配置自动保存失败', error.message || String(error), 'error'));
+    }, 240);
   }
 
   async function saveEnabledModels() {
@@ -645,6 +694,11 @@
   }
 
   function showApproval(approval) {
+    if (!approval?.id) return;
+    if (currentApproval) {
+      if (currentApproval.id !== approval.id && !approvalQueue.some((item) => item.id === approval.id)) approvalQueue.push(approval);
+      return;
+    }
     currentApproval = approval;
     elements.approvalAction.textContent = approval.action || '受限操作';
     elements.approvalTarget.textContent = approval.target || '-';
@@ -657,37 +711,56 @@
     const id = currentApproval.id;
     currentApproval = null;
     elements.approvalModal.hidden = true;
-    await window.orchestrator.ragResolveApproval({ id, approved, fullAccess });
+    try {
+      await window.orchestrator.ragResolveApproval({ id, approved, fullAccess });
+    } catch (error) {
+      notify('权限响应失败', error.message || String(error), 'error');
+    } finally {
+      const next = approvalQueue.shift();
+      if (next) showApproval(next);
+    }
   }
 
   function handleEvent(event) {
     if (!event) return;
     if (event.type === 'approval-request') return showApproval(event.approval);
-    if (event.sessionId && event.sessionId !== activeSessionId) {
-      if (event.type === 'assistant-complete' || event.type === 'assistant-error') refresh(activeSessionId, { quiet: true });
-      return;
-    }
+    const eventSessionId = String(event.sessionId || '');
+    const active = !eventSessionId || eventSessionId === activeSessionId;
     if (event.type === 'message') {
-      if (state.activeSession && !state.activeSession.messages.some((item) => item.id === event.message.id)) state.activeSession.messages.push(event.message);
-      queueMessageRender();
+      if (active && state.activeSession && !state.activeSession.messages.some((item) => item.id === event.message.id)) {
+        state.activeSession.messages.push(event.message);
+        queueMessageRender();
+      }
     } else if (event.type === 'assistant-start') {
-      const previousId = streaming?.id;
-      if (previousId && previousId !== event.messageId) elements.messages.querySelector(`[data-message-id="${cssEscape(previousId)}"]`)?.remove();
-      streaming = { id: event.messageId, sessionId: event.sessionId, role: 'assistant', content: '', reasoning: '', toolEvents: [], status: 'streaming', pending: false, createdAt: new Date().toISOString() };
-      setGenerating(true, '模型正在思考');
-      scheduleStreamRender();
-    } else if (event.type === 'assistant-delta' && streaming) {
+      const previousId = streamingBySession.get(eventSessionId)?.id;
+      if (active && previousId && previousId !== event.messageId) elements.messages.querySelector(`[data-message-id="${cssEscape(previousId)}"]`)?.remove();
+      streamingBySession.set(eventSessionId, { id: event.messageId, sessionId: eventSessionId, role: 'assistant', content: '', reasoning: '', toolEvents: [], status: 'streaming', pending: false, createdAt: new Date().toISOString() });
+      renderSessions();
+      if (active) {
+        setGenerating(true, '模型正在思考');
+        scheduleStreamRender();
+      }
+    } else if (event.type === 'assistant-delta') {
+      const streaming = streamingBySession.get(eventSessionId);
+      if (!streaming) return;
       if (event.content) streaming.content += event.content;
       if (event.reasoning) streaming.reasoning += event.reasoning;
-      setGenerating(true, event.reasoning && !streaming.content ? '正在接收模型推理' : '正在流式输出');
-      scheduleStreamRender();
-    } else if (event.type === 'tool' && streaming) {
+      if (active) {
+        setGenerating(true, event.reasoning && !streaming.content ? '正在接收模型推理' : '正在流式输出');
+        scheduleStreamRender();
+      }
+    } else if (event.type === 'tool') {
+      const streaming = streamingBySession.get(eventSessionId);
+      if (!streaming) return;
       const index = streaming.toolEvents.findIndex((item) => item.id === event.tool.id);
       if (index >= 0) streaming.toolEvents[index] = event.tool;
       else streaming.toolEvents.push(event.tool);
-      setGenerating(true, `正在调用 ${toolLabel(event.tool.name)}`);
-      scheduleStreamRender();
+      if (active) {
+        setGenerating(true, `正在调用 ${toolLabel(event.tool.name)}`);
+        scheduleStreamRender();
+      }
     } else if (event.type === 'context-compaction') {
+      if (!active) return;
       if (event.phase === 'started') {
         setGenerating(true, `上下文达到 ${event.contextPercent || '-'}%，正在自动压缩`);
       } else if (event.phase === 'completed') {
@@ -697,13 +770,17 @@
         notify('已自动压缩上下文', `触发阈值 ${event.thresholdPercent || 75}%，当前提问保留原文。`, 'info');
       }
     } else if (event.type === 'assistant-complete') {
-      streaming = null;
-      setGenerating(false);
+      streamingBySession.delete(eventSessionId);
+      if (active) setGenerating(false);
+      renderSessions();
       refresh(activeSessionId, { quiet: true });
     } else if (event.type === 'assistant-error') {
-      streaming = null;
-      setGenerating(false);
-      notify('模型调用结束', event.error || '生成失败', event.message?.status === 'cancelled' ? 'info' : 'error');
+      streamingBySession.delete(eventSessionId);
+      if (active) {
+        setGenerating(false);
+        notify('模型调用结束', event.error || '生成失败', event.message?.status === 'cancelled' ? 'info' : 'error');
+      }
+      renderSessions();
       refresh(activeSessionId, { quiet: true });
     } else if (event.type === 'session-updated') {
       refresh(activeSessionId, { quiet: true });
@@ -713,7 +790,7 @@
   function autoGrowInput() {
     elements.input.style.height = 'auto';
     elements.input.style.height = `${Math.min(130, Math.max(34, elements.input.scrollHeight))}px`;
-    elements.send.disabled = !state.activeSession || streaming || (!elements.input.value.trim() && !pendingAttachments.length);
+    elements.send.disabled = !state.activeSession || Boolean(activeStreaming()) || (!elements.input.value.trim() && !pendingAttachments.length);
   }
 
   function notify(title, message, type = 'info') {
@@ -735,7 +812,7 @@
       || [...(event.clipboardData?.files || [])].some((file) => String(file.type || '').startsWith('image/'));
     if (!hasImage) return;
     event.preventDefault();
-    if (!activeSessionId || streaming) return;
+    if (!activeSessionId || activeStreaming()) return;
     try {
       const result = await window.orchestrator.ragImportClipboardImage(activeSessionId);
       if (result.attachment) pendingAttachments.push(result.attachment);
@@ -746,7 +823,19 @@
   elements.input.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); sendMessage(); }
   });
-  elements.stop.addEventListener('click', () => window.orchestrator.ragStop(activeSessionId));
+  elements.stop.addEventListener('click', async () => {
+    const sessionId = activeSessionId;
+    if (!sessionId || elements.stop.disabled) return;
+    elements.stop.disabled = true;
+    setGenerating(true, '正在停止当前回答');
+    try {
+      await window.orchestrator.ragStop(sessionId);
+    } catch (error) {
+      notify('停止失败', error.message || String(error), 'error');
+    } finally {
+      elements.stop.disabled = false;
+    }
+  });
   elements.attach.addEventListener('click', async () => {
     try {
       const result = await window.orchestrator.ragImportAttachments(activeSessionId);
@@ -810,12 +899,20 @@
     closeSessionSettingsModal();
   });
   elements.chooseSandbox.addEventListener('click', async () => {
-    const result = await window.orchestrator.ragChooseSandbox();
-    if (!result.canceled) await updateSession({ sandboxDir: result.path }, { quiet: false });
+    try {
+      const result = await window.orchestrator.ragChooseSandbox();
+      if (!result.canceled) await updateSession({ sandboxDir: result.path }, { quiet: false });
+    } catch (error) {
+      notify('无法选择沙盒', error.message || String(error), 'error');
+    }
   });
   elements.createSandbox.addEventListener('click', async () => {
-    const result = await window.orchestrator.ragCreateSandbox();
-    await updateSession({ sandboxDir: result.path }, { quiet: false });
+    try {
+      const result = await window.orchestrator.ragCreateSandbox();
+      await updateSession({ sandboxDir: result.path }, { quiet: false });
+    } catch (error) {
+      notify('无法创建沙盒', error.message || String(error), 'error');
+    }
   });
   for (const button of document.querySelectorAll('[data-rag-permission]')) button.addEventListener('click', () => updateSession({ permissionMode: button.dataset.ragPermission }, { quiet: false }));
   elements.compact.addEventListener('click', async () => {

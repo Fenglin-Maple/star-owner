@@ -140,6 +140,9 @@
 .dependency-state.failed { color: var(--red); }
 .dependency-progress { height: 4px; overflow: hidden; border-radius: 99px; background: color-mix(in srgb, var(--bg) 65%, transparent); }
 .dependency-progress span { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--accent); transition: width .2s ease; }
+.dependency-recovery-warning { padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--line)); border-radius: 6px; background: color-mix(in srgb, var(--warning) 9%, transparent); }
+.dependency-recovery-warning strong { color: var(--warning); font-size: 11px; }
+.dependency-recovery-warning p { margin: 4px 0 0; color: var(--muted); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
 .dependency-item > button { align-self: center; min-width: 78px; }
 .dependency-prompt-body { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 12px; padding: 18px; }
 .dependency-prompt-icon { width: 48px; height: 48px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line)); border-radius: 7px; color: var(--accent); background: var(--accent-soft); }

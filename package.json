@@ -1,7 +1,7 @@
 {
   "name": "star-owner",
   "productName": "星藏家",
-  "version": "0.9.7",
+  "version": "0.9.8",
   "private": true,
   "license": "GPL-3.0-or-later",
   "description": "星藏家：Bilibili 收藏视频 Markdown 多 Agent 本地编排工作台。",
@@ -18,6 +18,9 @@
     "test:image-clipboard": "node scripts/image-clipboard-test.js",
     "test:persistence": "node scripts/persistence-test.js",
     "test:collection-sync": "node scripts/collection-sync-test.js",
+    "test:bili-client": "node scripts/bili-client-test.js",
+    "test:asr-format": "node scripts/asr-format-test-runner.js",
+    "test:analytics": "node scripts/analytics-test.js",
     "test:scheduler": "node scripts/resource-scheduler-test.js",
     "test:asr-service": "node scripts/asr-service-test.js",
     "setup:asr": "powershell -ExecutionPolicy Bypass -File scripts/setup-faster-whisper.ps1",

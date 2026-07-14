@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const {
   collectionSourceName,
   collectionStorageName,
@@ -31,8 +32,8 @@ class CollectionSyncService {
     if (!currentUser?.isLogin) throw new Error('Not logged in to Bilibili in the desktop app.');
     const identifier = String(input.collectionName || input.collectionId || '').trim();
     if (!identifier) throw new Error('collectionName or collectionId is required.');
-    const key = `${currentUser.mid}:${identifier}`;
-    if (this.active.has(key)) throw new Error('This collection is already being synchronized.');
+    const key = 'bilibili-session';
+    if (this.active.has(key)) throw new Error('This Bilibili account already has a collection synchronization in progress.');
     this.active.add(key);
     try { return await this.runSync({ ...input, identifier }, currentUser); }
     finally { this.active.delete(key); }
@@ -52,14 +53,26 @@ class CollectionSyncService {
 
       this.progress(syncId, local?.name || identifier, { stage: 'resolving', loaded: 0, total: null, progress: 0.02 });
       const folders = await this.bili.listFolders(currentUser.mid);
+      this.assertCurrentUser(currentUser);
       await this.reconcileFolders(folders, currentUser, { excludeCollectionIds: local ? [local.id] : [] });
-      const wanted = folders.find((folder) => folder.name === identifier || String(folder.id) === identifier);
+      const wanted = resolveRemoteFolder(folders, identifier, local?.mediaId);
       if (!wanted) {
         if (!local) throw new Error(`Collection not found: ${identifier}`);
         const deleted = this.commitDeletedCollection(local.id, transactionId, '同步时在 B站收藏夹列表中未找到该收藏夹。', 'collection-sync');
         transactionId = '';
         this.progress(syncId, deleted.collection.name, { stage: 'done', loaded: 0, total: 0, progress: 1 });
         return deleted;
+      }
+
+      if (local?.mediaId && String(local.mediaId) !== String(wanted.id)) {
+        this.commitDeletedCollection(
+          local.id,
+          transactionId,
+          `原收藏夹 ID ${local.mediaId} 已不存在；B站当前同名收藏夹使用新 ID ${wanted.id}，旧产物已归档并将新收藏夹作为独立库存同步。`,
+          'collection-replaced-by-same-name'
+        );
+        transactionId = '';
+        local = null;
       }
 
       const collectionId = `${currentUser.mid}:${wanted.id}`;
@@ -85,7 +98,9 @@ class CollectionSyncService {
           progress: total ? Math.min(0.92, 0.05 + progress.loaded / total * 0.87) : Math.min(0.9, 0.05 + progress.page / Math.max(progress.page + 1, 2) * 0.85)
         });
       });
+      this.assertCurrentUser(currentUser);
       const cookieFile = await this.bili.exportCookies(currentUser.name);
+      this.assertCurrentUser(currentUser);
       const result = this.applySnapshot({ currentUser, wanted, videos, workspace, dirs, cookieFile, label, transactionId });
       transactionId = '';
       this.writeExportSafe(result.collection, videos);
@@ -151,6 +166,13 @@ class CollectionSyncService {
     return summary;
   }
 
+  assertCurrentUser(expected) {
+    const current = this.getCurrentUser();
+    if (!current?.isLogin || String(current.mid || '') !== String(expected?.mid || '')) {
+      throw new Error('Bilibili account changed while collection synchronization was running. The previous collection state was restored.');
+    }
+  }
+
   applySnapshot({ currentUser, wanted, videos, workspace, dirs, cookieFile, label, transactionId }) {
     const collectionId = `${currentUser.mid}:${wanted.id}`;
     const current = this.store.getCollectionById(collectionId) || {};
@@ -163,7 +185,8 @@ class CollectionSyncService {
     let collection;
     this.store.transaction(() => {
       for (const video of videos) {
-        const key = `${collectionId}:${video.bvid}`;
+        const mediaKey = stableVideoKey(video);
+        const key = `${collectionId}:${mediaKey}`;
         remoteIds.add(key);
         const unavailable = isUnavailableTask(this.store, key);
         const unavailableTitle = isVideoUnavailableMessage(video.title || '');
@@ -395,6 +418,10 @@ class CollectionSyncService {
         this.onEvent({ type: 'task-attempt-cleanup-failed', taskId: task.id, collectionId: collection.id, reason: error.message || String(error), source });
       }
     }
+    const remaining = this.store.listTasks({ collectionId: collection.id }).filter((task) => ['claimed', 'rejected'].includes(task.status) && (task.workId || task.claimedBy));
+    if (remaining.length) {
+      throw new Error(`Collection synchronization could not stop ${remaining.length} active task attempt(s). No remote inventory changes were applied.`);
+    }
     this.onEvent({ type: 'collection-workflows-stopped-for-sync', collectionId: collection.id, collectionName: collection.name, sessions: stoppedSessions.length, attempts: abortedAttempts, reason });
     return { stoppedSessions: stoppedSessions.length, abortedAttempts };
   }
@@ -474,10 +501,12 @@ class CollectionSyncService {
   }
 
   findLocalCollection(currentUser, identifier) {
-    return this.localCollections(currentUser).find((collection) => collection.id === identifier
-      || String(collection.mediaId || '') === identifier
-      || collection.name === identifier
-      || collectionSourceName(collection) === identifier) || null;
+    const collections = this.localCollections(currentUser);
+    const exact = collections.find((collection) => collection.id === identifier || String(collection.mediaId || '') === identifier);
+    if (exact) return exact;
+    const named = collections.filter((collection) => collection.name === identifier || collectionSourceName(collection) === identifier);
+    if (named.length > 1) throw new Error(`Collection name is ambiguous; select it by mediaId: ${identifier}`);
+    return named[0] || null;
   }
 
   localCollections(currentUser) {
@@ -535,6 +564,26 @@ function cleanupTaskSnapshot(task = {}) {
     coverFile: task.coverFile || '',
     metadataFile: task.metadataFile || ''
   };
+}
+
+function stableVideoKey(video = {}) {
+  if (video.bvid) return video.bvid;
+  if (video.aid) return `aid-${video.aid}`;
+  const identity = [video.title, video.owner, video.publishedAt, video.duration, video.url].map((item) => String(item || '')).join('|');
+  return `missing-${crypto.createHash('sha256').update(identity).digest('hex').slice(0, 16)}`;
+}
+
+function resolveRemoteFolder(folders, identifier, stableMediaId = '') {
+  const stable = String(stableMediaId || '');
+  if (stable) {
+    const match = (folders || []).find((folder) => String(folder.id) === stable);
+    if (match) return match;
+  }
+  const exact = (folders || []).find((folder) => String(folder.id) === String(identifier || ''));
+  if (exact) return exact;
+  const named = (folders || []).filter((folder) => folder.name === identifier);
+  if (named.length > 1) throw new Error(`Bilibili has multiple collections named "${identifier}"; select one by mediaId.`);
+  return named[0] || null;
 }
 
 module.exports = { CollectionSyncService };

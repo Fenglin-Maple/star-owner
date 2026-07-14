@@ -21,6 +21,7 @@
   let editingProviderId = '';
   let collectionModalSource = 'single';
   let refreshTimer = null;
+  let refreshSequence = 0;
   let streamRenderTimer = null;
   let streamStructuralRender = false;
   let initialized = false;
@@ -29,10 +30,16 @@
   let agentContextMenu = null;
 
   async function refreshAll({ quiet = false } = {}) {
+    const sequence = ++refreshSequence;
     try {
-      state = await window.orchestrator.internalAgentState();
-      modelState = await window.orchestrator.ragState('');
-      dependencyState = await window.orchestrator.dependencyState();
+      const [nextState, nextDependencyState] = await Promise.all([
+        window.orchestrator.internalAgentState(),
+        window.orchestrator.dependencyState()
+      ]);
+      if (sequence !== refreshSequence) return;
+      state = nextState;
+      modelState = { providers: nextState.providers || [] };
+      dependencyState = nextDependencyState;
       if (!activeAgentId || !state.sessions.some((item) => item.id === activeAgentId && item.mode === 'queue')) activeAgentId = state.sessions.find((item) => item.mode === 'queue')?.id || '';
       if (!activeSingleId || !state.sessions.some((item) => item.id === activeSingleId && item.mode === 'single')) activeSingleId = state.sessions.find((item) => item.mode === 'single')?.id || '';
       persistActiveIds();
@@ -54,6 +61,7 @@
   }
 
   function renderAgentPage() {
+    const scrollState = captureAgentScrollState();
     const sessions = state.sessions
       .filter((item) => item.mode === 'queue')
       .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || String(b.id || '').localeCompare(String(a.id || '')));
@@ -76,6 +84,7 @@
       });
     }
     renderSessionDetail(elements.agentDetail, sessions.find((item) => item.id === activeAgentId));
+    restoreAgentScrollState(scrollState);
   }
 
   function renderSinglePage() {
@@ -144,7 +153,7 @@
   async function handleSessionAction(session, button) {
     const action = button.dataset.agentAction;
     const pendingKey = `${session.id}:${action}`;
-    if (pendingSessionActions.has(pendingKey)) return;
+    if ([...pendingSessionActions].some((key) => key.startsWith(`${session.id}:`))) return;
     if (action === 'delete' && button.dataset.confirm !== '1') {
       button.dataset.confirm = '1';
       button.title = '再次点击确认删除';
@@ -192,9 +201,20 @@
     const bounds = agentContextMenu.getBoundingClientRect();
     agentContextMenu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - bounds.width - 8))}px`;
     agentContextMenu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - bounds.height - 8))}px`;
-    agentContextMenu.querySelector('button').addEventListener('click', async () => {
+    agentContextMenu.querySelector('button').addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      if (button.dataset.confirm !== '1') {
+        button.dataset.confirm = '1';
+        button.querySelector('span').textContent = '再次点击确认删除';
+        notify('再次点击确认删除', '只删除会话记录，不删除已经归档的视频知识文档。', 'info');
+        setTimeout(() => {
+          if (!button.isConnected) return;
+          button.dataset.confirm = '';
+          button.querySelector('span').textContent = '删除这个工作流';
+        }, 2600);
+        return;
+      }
       closeAgentContextMenu();
-      if (!window.confirm(`删除工作流“${session.title}”？\n\n只删除会话记录，不删除已经归档的视频知识文档。`)) return;
       const pendingKey = `${session.id}:delete`;
       if (pendingSessionActions.has(pendingKey)) return;
       pendingSessionActions.add(pendingKey);
@@ -351,7 +371,9 @@
 
   function scheduleModelSave() {
     clearTimeout(modelSaveTimer);
-    modelSaveTimer = setTimeout(saveEnabledModels, 260);
+    modelSaveTimer = setTimeout(() => {
+      saveEnabledModels().catch((error) => notify('模型配置自动保存失败', error.message || String(error), 'error'));
+    }, 260);
   }
 
   async function saveEnabledModels() {
@@ -391,7 +413,10 @@
 
   function renderDependencies() {
     if (!dependencyState) return;
-    elements.dependencyList.innerHTML = dependencyState.packages.map((item) => `<div class="dependency-item"><div class="dependency-main"><div><strong>${html(item.name)}</strong><span class="dependency-state ${esc(item.status)}">${dependencyStatus(item)}</span></div><p>${html(item.message || item.description)}</p><div class="dependency-progress"><span style="width:${Math.round(Number(item.progress || 0) * 100)}%"></span></div></div><button class="secondary-button compact-button" type="button" data-download-dependency="${esc(item.id)}" ${['downloading', 'installing', 'verifying', 'resolving'].includes(item.status) ? 'disabled' : ''}>${item.available ? '重新下载' : '下载'}</button></div>`).join('');
+    const recoveryWarning = dependencyState.recovery?.warning
+      ? `<div class="dependency-recovery-warning"><strong>依赖恢复记录已隔离</strong><p>${html(dependencyState.recovery.warning)}</p></div>`
+      : '';
+    elements.dependencyList.innerHTML = recoveryWarning + dependencyState.packages.map((item) => `<div class="dependency-item"><div class="dependency-main"><div><strong>${html(item.name)}</strong><span class="dependency-state ${esc(item.status)}">${dependencyStatus(item)}</span></div><p>${html(item.message || item.description)}</p><div class="dependency-progress"><span style="width:${Math.round(Number(item.progress || 0) * 100)}%"></span></div></div><button class="secondary-button compact-button" type="button" data-download-dependency="${esc(item.id)}" ${['downloading', 'waiting-install', 'installing', 'verifying', 'resolving'].includes(item.status) ? 'disabled' : ''}>${item.available ? '重新下载' : '下载'}</button></div>`).join('');
     for (const button of elements.dependencyList.querySelectorAll('[data-download-dependency]')) button.addEventListener('click', () => downloadDependency(button.dataset.downloadDependency, button));
   }
 
@@ -457,6 +482,27 @@
         patchSinglePage();
       }
     }, 90);
+  }
+
+  function captureAgentScrollState() {
+    const stream = elements.agentDetail.querySelector('.ai-stream-scroll');
+    const logs = elements.agentDetail.querySelector('.ai-log-scroll');
+    return {
+      sessionId: elements.agentDetail.querySelector('[data-agent-session-view]')?.dataset.agentSessionView || '',
+      list: elements.agentList.scrollTop,
+      stream: stream?.scrollTop || 0,
+      logs: logs?.scrollTop || 0
+    };
+  }
+
+  function restoreAgentScrollState(scrollState) {
+    if (!scrollState) return;
+    elements.agentList.scrollTop = scrollState.list;
+    if (scrollState.sessionId !== activeAgentId) return;
+    const stream = elements.agentDetail.querySelector('.ai-stream-scroll');
+    const logs = elements.agentDetail.querySelector('.ai-log-scroll');
+    if (stream) stream.scrollTop = scrollState.stream;
+    if (logs) logs.scrollTop = scrollState.logs;
   }
 
   function patchAgentPage() {
@@ -589,9 +635,23 @@
   elements.modelSave.addEventListener('click', async () => { try { await saveProviderForm(); notify('供应商已保存', '配置已供 RAG 和应用内 Agent 共用。', 'success'); } catch (error) { notify('保存失败', error.message || String(error), 'error'); } });
   elements.modelFetch.addEventListener('click', fetchModels);
   elements.modelDelete.addEventListener('click', () => deleteProvider(elements.modelDelete));
-  elements.dependencyRefresh.addEventListener('click', async () => { dependencyState = await window.orchestrator.dependencyState(); renderDependencies(); });
-  elements.dependencyLater.addEventListener('click', async () => { await window.orchestrator.dependencyAcknowledge({ download: false }); elements.dependencyModal.hidden = true; });
-  elements.dependencyDownload.addEventListener('click', async () => { await window.orchestrator.dependencyAcknowledge({ download: true }); elements.dependencyModal.hidden = true; notify('依赖下载已加入后台队列', '可在设置的项目依赖包区域查看实时进度。', 'info'); });
+  elements.dependencyRefresh.addEventListener('click', async () => {
+    try { dependencyState = await window.orchestrator.dependencyState(); renderDependencies(); }
+    catch (error) { notify('依赖状态刷新失败', error.message || String(error), 'error'); }
+  });
+  elements.dependencyLater.addEventListener('click', async () => {
+    try { await window.orchestrator.dependencyAcknowledge({ download: false }); elements.dependencyModal.hidden = true; }
+    catch (error) { notify('无法保存依赖提示状态', error.message || String(error), 'error'); }
+  });
+  elements.dependencyDownload.addEventListener('click', async () => {
+    try {
+      await window.orchestrator.dependencyAcknowledge({ download: true });
+      elements.dependencyModal.hidden = true;
+      notify('依赖下载已加入后台队列', '可在设置的项目依赖包区域查看实时进度。', 'info');
+    } catch (error) {
+      notify('无法启动依赖下载', error.message || String(error), 'error');
+    }
+  });
   document.querySelector('[data-page="internal-agents"]')?.addEventListener('click', () => refreshAll({ quiet: initialized }));
   document.querySelector('[data-page="single-agent"]')?.addEventListener('click', () => refreshAll({ quiet: initialized }));
   document.querySelector('[data-page="ai-models"]')?.addEventListener('click', () => refreshAll({ quiet: initialized }));
@@ -614,7 +674,10 @@
     }
     return session.status === 'idle' ? '开始接单' : '重新开始接单';
   }
-  function dependencyStatus(item) { return item.available ? '可用' : ({ resolving: '查询中', downloading: `${Math.round(item.progress * 100)}%`, verifying: '校验中', installing: '安装中', failed: '失败', missing: item.required ? '必需缺失' : '可选未装' })[item.status] || item.status; }
+  function dependencyStatus(item) {
+    const active = { resolving: '查询中', downloading: `${Math.round(item.progress * 100)}%`, verifying: '校验中', 'waiting-install': '等待工具空闲', installing: '安装中' };
+    return active[item.status] || (item.available ? '可用' : ({ failed: '失败', missing: item.required ? '必需缺失' : '可选未装' })[item.status] || item.status);
+  }
   function formatTokens(value) { return new Intl.NumberFormat('zh-CN', { notation: Number(value) > 999999 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(Number(value || 0)); }
   function time(value) { try { return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(value)); } catch { return ''; } }
   function persistActiveIds() { if (activeAgentId) localStorage.setItem('internalAgentActiveId', activeAgentId); else localStorage.removeItem('internalAgentActiveId'); if (activeSingleId) localStorage.setItem('singleAgentActiveId', activeSingleId); else localStorage.removeItem('singleAgentActiveId'); }

@@ -250,6 +250,13 @@ class Store {
     return this.list('videoCacheJobs').sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
   }
 
+  deleteVideoCacheJobsForCollection(collectionId) {
+    const jobs = this.listVideoCacheJobs().filter((item) => item.collectionId === String(collectionId || ''));
+    for (const job of jobs) this.delete('videoCacheJobs', job.id);
+    if (jobs.length) this.save();
+    return jobs;
+  }
+
   deleteVideoCacheCollection(id) {
     const collection = this.getCollectionById(id);
     if (!collection) return null;
@@ -483,6 +490,15 @@ class Store {
     const workspace = this.get('workspaces', id);
     if (!workspace) return null;
     if (workspace.isDefault) throw new Error('Default workspace cannot be removed. Set another default first.');
+    const referencedCollection = this.listCollections().find((item) => item.workspaceId === workspace.id);
+    const referencedTask = this.listTasks().find((item) => item.workspaceId === workspace.id);
+    const referencedCache = this.listVideoCaches().find((item) => item.workspaceId === workspace.id || isPathInside(workspace.root, item.artifactDir));
+    const referencedCacheJob = this.listVideoCacheJobs().find((item) => isPathInside(workspace.root, item.outputRoot));
+    const workspaceRoot = path.resolve(workspace.root);
+    const referencedSession = this.list('ragSessions').find((item) => isPathInside(workspaceRoot, item.sandboxDir));
+    if (referencedCollection || referencedTask || referencedCache || referencedCacheJob || referencedSession) {
+      throw new Error('Workspace is still referenced by a collection, task, document, cache, or RAG sandbox and cannot be removed.');
+    }
     this.db.run('DELETE FROM kv WHERE scope = ? AND id = ?', ['workspaces', String(id)]);
     this.save();
     return workspace;
@@ -525,6 +541,12 @@ class Store {
   }
 }
 
+function isPathInside(root, candidate) {
+  if (!candidate) return false;
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
 function defaultTools() {
   return [
     {
@@ -554,8 +576,8 @@ function defaultTools() {
       description: '一次性准备总结素材：元数据、站内字幕、合轨视频、关键帧、ASR 字幕、热评前三条和 manifest。',
       apiUsage: 'POST /api/tasks/<taskId>/tools/material-bundle/run',
       internalCommand: 'node tools/video-tool.js bundle <videoUrl> --out <artifactDir> --cookies <cookieFile> --frames 12 --asr --comments --comment-limit 3',
-      agentPrompt: '通过工具运行 API 优先调用本模块。失败时查看 run.log，再拆分调用其它模块。',
-      outputs: ['manifest.json', 'info.json', 'subtitles/', 'merged.mp4', 'frames/', 'asr/', 'comments/comments.json'],
+      agentPrompt: '通过工具运行 API 优先调用本模块。ASR 完成后优先读取 asr/transcript.srt 或 asr/asr-result.json 的真实起止时间，不要根据纯文本顺序猜测视频位置。失败时查看 run.log，再拆分调用其它模块。',
+      outputs: ['manifest.json', 'info.json', 'subtitles/', 'merged.mp4', 'frames/', 'asr/transcript.srt', 'asr/asr-transcript.txt', 'asr/asr-result.json', 'comments/comments.json'],
       projects: [
         { name: 'yt-dlp', url: 'https://github.com/yt-dlp/yt-dlp', role: '下载视频/字幕/元数据' },
         { name: 'FFmpeg', url: 'https://ffmpeg.org/', github: 'https://github.com/FFmpeg/FFmpeg', role: '合轨、抽帧、音频处理' },
@@ -586,11 +608,11 @@ function defaultTools() {
       category: 'transcript',
       enabled: true,
       order: 40,
-      description: '不管是否存在官方字幕，都运行一次 ASR 生成自己的字幕，用于和官方/自动字幕比对。',
+      description: '不管是否存在官方字幕，都运行一次 ASR，生成带真实分段起止时间的 SRT、时间轴文本和 JSON，用于和官方/自动字幕比对及建立视频时间轴链接。',
       apiUsage: 'POST /api/tasks/<taskId>/tools/asr/run',
       internalCommand: 'node tools/video-tool.js asr <videoUrl> --out <artifactDir> --cookies <cookieFile>',
-      agentPrompt: '必须通过工具运行 API 调用，并在 Markdown 的“字幕比对”章节说明采用哪份字幕。',
-      outputs: ['asr/*.srt', 'asr/asr-transcript.txt'],
+      agentPrompt: '必须通过工具运行 API 调用，并在 Markdown 的“字幕比对”章节说明采用哪份字幕。优先读取 asr/transcript.srt；也可读取 asr/asr-result.json 的 start/end。asr/asr-transcript.txt 同样包含时间轴，不得猜测内容位置。',
+      outputs: ['asr/transcript.srt', 'asr/asr-transcript.txt', 'asr/asr-result.json'],
       projects: [
         { name: 'faster-whisper', url: 'https://github.com/SYSTRAN/faster-whisper', role: '本地 Whisper ASR' },
         { name: 'FFmpeg', url: 'https://ffmpeg.org/', github: 'https://github.com/FFmpeg/FFmpeg', role: '音频抽取' }

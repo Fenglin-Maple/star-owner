@@ -77,7 +77,7 @@ function printHealth(action) {
 }
 
 function printHelp() {
-  console.log(`Star Owner video-tool
+  console.log(`星藏家 video-tool
 
 用法:
   node tools/video-tool.js info <视频链接或BV号> --out <目录> [--cookies <cookie.txt>]
@@ -137,7 +137,7 @@ async function writeSubtitles(videoUrl, outDir, args) {
     for (const entry of entries) {
       const language = safeFilePart(entry.lan || entry.lan_doc || `subtitle-${entry.id}`);
       const stem = `p${String(page.page || 1).padStart(2, '0')}-${language}`;
-      const subtitleUrl = String(entry.subtitle_url || '').startsWith('//') ? `https:${entry.subtitle_url}` : entry.subtitle_url;
+      const subtitleUrl = assertBilibiliResourceUrl(String(entry.subtitle_url || '').startsWith('//') ? `https:${entry.subtitle_url}` : entry.subtitle_url).toString();
       const payload = await fetchPlainJson(subtitleUrl, args);
       const body = Array.isArray(payload.body) ? payload.body : [];
       const videoDuration = Number(page.duration || ((info.pages || []).length === 1 ? info.duration : 0)) || null;
@@ -223,7 +223,7 @@ async function runAsr(videoUrl, outDir, args) {
   const audioFile = await prepareAudio(videoUrl, outDir, args);
   const asrDir = path.join(outDir, 'asr');
   fs.mkdirSync(asrDir, { recursive: true });
-  run('faster-whisper', [audioFile, '--model', 'medium', '--language', 'zh', '--output_dir', asrDir, '--output_format', 'all']);
+  run('faster-whisper', [audioFile, '--model', String(args.model || 'medium'), '--language', String(args.language || 'zh'), '--output_dir', asrDir, '--output_format', 'all']);
   console.log(asrDir);
 }
 
@@ -304,6 +304,10 @@ async function buildBundle(videoUrl, outDir, args) {
     try {
       await runAsr(videoUrl, outDir, args);
       manifest.outputs.asr = 'asr/';
+      manifest.outputs.asrSrt = 'asr/transcript.srt';
+      manifest.outputs.asrTimedText = 'asr/asr-transcript.txt';
+      manifest.outputs.asrSegments = 'asr/asr-result.json';
+      manifest.outputs.asrHasTimestamps = true;
     } catch (error) {
       manifest.warnings.push(`asr failed: ${error.message || String(error)}`);
     }
@@ -319,8 +323,14 @@ function extractFrames(outDir, count) {
   const merged = findFirst(outDir, /^merged\.(mp4|mkv|webm)$/i);
   if (!merged) throw new Error('未找到合轨视频，无法抽帧。');
   const framesDir = path.join(outDir, 'frames');
+  fs.rmSync(framesDir, { recursive: true, force: true });
   fs.mkdirSync(framesDir, { recursive: true });
-  run('ffmpeg', ['-y', '-i', merged, '-vf', 'fps=1/30', '-frames:v', String(count), path.join(framesDir, 'frame-%03d.jpg')]);
+  let info = {};
+  try { info = JSON.parse(fs.readFileSync(path.join(outDir, 'info.json'), 'utf8')); } catch {}
+  const wanted = Math.max(1, Math.min(60, Math.round(Number(count) || 12)));
+  const duration = Math.max(0, Number(info.duration || 0));
+  const interval = duration > 0 ? Math.max(0.5, duration / (wanted + 1)) : 30;
+  run('ffmpeg', ['-y', '-i', merged, '-vf', `fps=1/${interval.toFixed(3)}`, '-frames:v', String(wanted), path.join(framesDir, 'frame-%03d.jpg')]);
 }
 
 function cleanCache(target, args = {}) {
@@ -396,7 +406,7 @@ async function fetchJson(url, args) {
 
 async function fetchPlainJson(url, args) {
   if (!url) throw new Error('Missing JSON resource URL.');
-  const response = await fetch(url, { headers: requestHeaders(args), signal: AbortSignal.timeout(30000) });
+  const response = await fetch(url, { headers: requestHeaders(args, 'application/json, text/plain, */*', url), signal: AbortSignal.timeout(30000) });
   const text = await response.text();
   let json;
   try {
@@ -408,14 +418,18 @@ async function fetchPlainJson(url, args) {
   return json;
 }
 
-function requestHeaders(args, accept = 'application/json, text/plain, */*') {
+function requestHeaders(args, accept = 'application/json, text/plain, */*', requestUrl = 'https://api.bilibili.com') {
   const headers = {
     referer: 'https://www.bilibili.com/',
     accept,
     'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
     'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
   };
-  const cookie = args.cookies ? readNetscapeCookies(path.resolve(args.cookies)) : '';
+  let host = '';
+  try { host = new URL(requestUrl).hostname.toLowerCase().replace(/\.$/, ''); } catch {}
+  const cookie = host === 'bilibili.com' || host.endsWith('.bilibili.com')
+    ? (args.cookies ? readNetscapeCookies(path.resolve(args.cookies)) : '')
+    : '';
   if (cookie) headers.cookie = cookie;
   return headers;
 }
@@ -426,7 +440,7 @@ async function downloadCover(source, outDir, args) {
   let response;
   for (let redirects = 0; redirects <= 4; redirects += 1) {
     response = await fetch(url.toString(), {
-      headers: requestHeaders(args, 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'),
+      headers: requestHeaders(args, 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8', url.toString()),
       redirect: 'manual',
       signal: AbortSignal.timeout(30000)
     });
@@ -441,23 +455,75 @@ async function downloadCover(source, outDir, args) {
   if (declaredLength > maximumBytes) throw new Error('Bilibili cover exceeds 12 MiB.');
   const type = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
   if (type && !type.startsWith('image/')) throw new Error(`Unexpected Bilibili cover type: ${type}.`);
-  const content = Buffer.from(await response.arrayBuffer());
+  const content = await readLimitedResponse(response, maximumBytes);
   if (!content.length || content.length > maximumBytes) throw new Error('Bilibili cover is empty or too large.');
-  const extension = ({ 'image/png': '.png', 'image/webp': '.webp', 'image/avif': '.avif' })[type] || '.jpg';
+  const detected = detectRasterImage(content);
+  if (!detected) throw new Error('Bilibili cover bytes are not a supported raster image.');
+  if (type && type !== detected.mimeType && !(type === 'image/jpg' && detected.mimeType === 'image/jpeg')) {
+    throw new Error(`Bilibili cover bytes do not match the declared type ${type}.`);
+  }
+  const extension = detected.extension;
   const file = path.join(outDir, `cover${extension}`);
   fs.writeFileSync(file, content);
   return file;
 }
 
+function detectRasterImage(buffer) {
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return { mimeType: 'image/png', extension: '.png' };
+  }
+  if (buffer.length >= 4 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer.at(-2) === 0xff && buffer.at(-1) === 0xd9) {
+    return { mimeType: 'image/jpeg', extension: '.jpg' };
+  }
+  if (buffer.length >= 6 && ['GIF87a', 'GIF89a'].includes(buffer.subarray(0, 6).toString('ascii'))) {
+    return { mimeType: 'image/gif', extension: '.gif' };
+  }
+  if (buffer.length >= 12 && buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'WEBP') {
+    return { mimeType: 'image/webp', extension: '.webp' };
+  }
+  if (buffer.length >= 12 && buffer.subarray(4, 8).toString('ascii') === 'ftyp' && /avi[fs]/.test(buffer.subarray(8, Math.min(buffer.length, 40)).toString('ascii'))) {
+    return { mimeType: 'image/avif', extension: '.avif' };
+  }
+  return null;
+}
+
 function assertBilibiliImageUrl(value) {
-  const normalized = String(value || '').replace(/^http:\/\//i, 'https://');
+  return assertBilibiliResourceUrl(value);
+}
+
+function assertBilibiliResourceUrl(value) {
+  const source = String(value || '').trim();
+  const normalized = source.startsWith('//') ? `https:${source}` : source.replace(/^http:\/\//i, 'https://');
   const url = new URL(normalized);
   const host = url.hostname.toLowerCase().replace(/\.$/, '');
   const allowed = ['hdslb.com', 'biliimg.com', 'bilibili.com'];
-  if (url.protocol !== 'https:' || !allowed.some((domain) => host === domain || host.endsWith(`.${domain}`))) {
-    throw new Error(`Unsupported Bilibili cover host: ${host || '-'}.`);
+  if (url.protocol !== 'https:' || url.username || url.password || !allowed.some((domain) => host === domain || host.endsWith(`.${domain}`))) {
+    throw new Error(`Unsupported Bilibili resource host: ${host || '-'}.`);
   }
   return url;
+}
+
+async function readLimitedResponse(response, maximumBytes) {
+  if (!response.body?.getReader) {
+    const content = Buffer.from(await response.arrayBuffer());
+    if (!content.length || content.length > maximumBytes) throw new Error('Bilibili cover is empty or too large.');
+    return content;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maximumBytes) {
+      await reader.cancel();
+      throw new Error('Bilibili cover is too large.');
+    }
+    chunks.push(Buffer.from(value));
+  }
+  if (!total) throw new Error('Bilibili cover is empty.');
+  return Buffer.concat(chunks, total);
 }
 
 function writeSubtitleSrt(file, body) {
@@ -518,13 +584,12 @@ function parseArgs(rest) {
 }
 
 function normalizeVideoUrl(target) {
-  if (/^https?:\/\//i.test(target)) return target;
   const bvid = extractBvid(target);
   return `https://www.bilibili.com/video/${bvid}`;
 }
 
 function extractBvid(value) {
-  const match = String(value).match(/BV[a-zA-Z0-9]+/);
+  const match = String(value).match(/BV[a-zA-Z0-9]{10}/i);
   if (!match) throw new Error(`无法从输入中解析 BV 号：${value}`);
   return match[0];
 }
@@ -535,7 +600,10 @@ function readNetscapeCookies(file) {
     .split(/\r?\n/)
     .filter((line) => line && !line.startsWith('#'))
     .map((line) => line.split('\t'))
-    .filter((parts) => parts.length >= 7 && parts[0].includes('bilibili.com'))
+    .filter((parts) => {
+      const domain = String(parts[0] || '').toLowerCase().replace(/^\./, '');
+      return parts.length >= 7 && (domain === 'bilibili.com' || domain.endsWith('.bilibili.com'));
+    })
     .map((parts) => `${parts[5]}=${parts[6]}`)
     .join('; ');
 }
@@ -585,9 +653,7 @@ function dependencyStatus(command) {
 function resolveCommand(command) {
   const local = LOCAL_BINARIES[command];
   if (local && fs.existsSync(local)) return local;
-  const probe = spawnSync(process.platform === 'win32' ? 'where.exe' : 'which', [command], { encoding: 'utf8', windowsHide: true });
-  if (probe.status !== 0) return '';
-  return String(probe.stdout || '').split(/\r?\n/).map((item) => item.trim()).find(Boolean) || command;
+  return '';
 }
 
 function run(command, args) {
@@ -614,4 +680,4 @@ function* walk(root) {
   }
 }
 
-module.exports = { assessSubtitle, resolveCommand };
+module.exports = { assessSubtitle, normalizeVideoUrl, resolveCommand };

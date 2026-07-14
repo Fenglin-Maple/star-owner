@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { execFile } = require('child_process');
+const dns = require('dns');
+const { execFile, spawnSync } = require('child_process');
 const { pathToFileURL } = require('url');
 const MarkdownIt = require('markdown-it');
 const pdf = require('pdf-parse');
@@ -28,6 +29,13 @@ const DEFAULT_CONTEXT_WINDOW = 1000000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 128000;
 const RAG_AUTO_COMPACT_TRIGGER = 0.75;
 const MAX_RAG_TOOL_ROUNDS = 24;
+const MAX_RAG_TOOL_CALLS = 24;
+const MAX_KNOWLEDGE_READ_CHARACTERS = 60000;
+const MAX_TOOL_CONTEXT_CHARACTERS = 60000;
+const PROVIDER_REQUEST_TIMEOUT_MS = 60 * 60 * 1000;
+const MAX_ATTACHMENT_BYTES = 250 * 1024 * 1024;
+const MAX_EXTRACTABLE_DOCUMENT_BYTES = 64 * 1024 * 1024;
+const MAX_DOCUMENT_CACHE_ENTRIES = 128;
 const knowledgeMarkdownParser = new MarkdownIt({ html: false, linkify: false, typographer: false });
 
 class RagAssistant {
@@ -44,6 +52,12 @@ class RagAssistant {
     this.documentCache = new Map();
     this.sandboxRoot = ensureDir(path.join(workspaceRoot, '.star-note', 'rag-sandboxes'));
     this.migrateTokenConfiguration();
+  }
+
+  setWorkspaceRoot(workspaceRoot) {
+    this.workspaceRoot = path.resolve(workspaceRoot);
+    this.sandboxRoot = ensureDir(path.join(this.workspaceRoot, '.star-note', 'rag-sandboxes'));
+    return this.sandboxRoot;
   }
 
   state(sessionId = '') {
@@ -164,14 +178,38 @@ class RagAssistant {
   migrateTokenConfiguration() {
     let changed = false;
     for (const provider of this.store.list('ragProviders')) {
-      if (Number(provider.tokenConfigVersion || 0) >= TOKEN_CONFIG_VERSION) continue;
-      if (!provider.maxOutputTokens || Number(provider.maxOutputTokens) === 8192) provider.maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
-      provider.enabledModels = (provider.enabledModels || []).map(migrateLegacyModel);
-      provider.remoteModels = (provider.remoteModels || []).map(migrateLegacyModel);
-      provider.tokenConfigVersion = TOKEN_CONFIG_VERSION;
-      provider.updatedAt = new Date().toISOString();
-      this.store.set('ragProviders', provider.id, provider);
-      changed = true;
+      let providerChanged = false;
+      if (Number(provider.tokenConfigVersion || 0) < TOKEN_CONFIG_VERSION) {
+        if (!provider.maxOutputTokens || Number(provider.maxOutputTokens) === 8192) provider.maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
+        provider.enabledModels = (provider.enabledModels || []).map(migrateLegacyModel);
+        provider.remoteModels = (provider.remoteModels || []).map(migrateLegacyModel);
+        provider.tokenConfigVersion = TOKEN_CONFIG_VERSION;
+        providerChanged = true;
+      }
+      const safeHeaders = {};
+      for (const [name, rawValue] of Object.entries(provider.extraHeaders || {})) {
+        const lower = String(name).trim().toLowerCase();
+        if (/^(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|x-auth-token|x-access-token|x-goog-api-key)$/.test(lower)) {
+          if (!provider.encryptedApiKey && lower !== 'cookie' && lower !== 'set-cookie' && lower !== 'proxy-authorization') {
+            const secret = String(rawValue || '').replace(/^bearer\s+/i, '').trim();
+            if (secret) provider.encryptedApiKey = this.encryptSecret(secret);
+          }
+          providerChanged = true;
+          continue;
+        }
+        safeHeaders[name] = rawValue;
+      }
+      try {
+        provider.extraHeaders = normalizeHeaders(safeHeaders);
+      } catch {
+        provider.extraHeaders = {};
+        providerChanged = true;
+      }
+      if (providerChanged) {
+        provider.updatedAt = new Date().toISOString();
+        this.store.set('ragProviders', provider.id, provider);
+        changed = true;
+      }
     }
     if (changed) this.store.save();
   }
@@ -206,6 +244,7 @@ class RagAssistant {
 
   updateSession(id, patch = {}) {
     const session = this.requireSession(id);
+    if (this.controllers.has(session.id)) throw new Error('Stop the current response before changing this session.');
     const next = { ...session };
     if (patch.title !== undefined) next.title = String(patch.title || '新对话').trim();
     if (patch.providerId !== undefined) next.providerId = this.rawProvider(patch.providerId).id;
@@ -222,9 +261,13 @@ class RagAssistant {
 
   deleteSession(id) {
     const session = this.requireSession(id);
-    this.cancel(id);
+    if (this.controllers.has(session.id)) throw new Error('Stop the current response before deleting this session.');
     for (const message of this.store.list('ragMessages').filter((item) => item.sessionId === id)) this.store.delete('ragMessages', message.id);
-    for (const attachment of this.store.list('ragAttachments').filter((item) => item.sessionId === id)) this.store.delete('ragAttachments', attachment.id);
+    const attachments = this.store.list('ragAttachments').filter((item) => item.sessionId === id);
+    for (const attachment of attachments) {
+      removeManagedAttachmentFile(session, attachment);
+      this.store.delete('ragAttachments', attachment.id);
+    }
     this.store.delete('ragSessions', id);
     this.store.save();
     return { deleted: true, id: session.id };
@@ -249,7 +292,7 @@ class RagAssistant {
     return {
       ...session,
       messages,
-      attachments,
+      attachments: attachments.map(publicAttachment),
       modelCapabilities: model,
       contextTokens: context.inputTokens,
       contextWindow: model.contextWindow,
@@ -284,30 +327,47 @@ class RagAssistant {
 
   async importFiles(sessionId, filePaths) {
     const session = this.requireSession(sessionId);
-    const destination = ensureDir(path.join(session.sandboxDir, 'attachments'));
+    const destination = managedAttachmentsRoot(session);
     const imported = [];
-    for (const source of filePaths || []) {
-      const stat = fs.statSync(source);
-      if (!stat.isFile()) continue;
-      const id = `attachment-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
-      const name = safeFilename(path.basename(source));
-      const target = uniqueFile(destination, `${id}-${name}`);
-      fs.copyFileSync(source, target);
-      const extractedText = await extractText(target);
-      const extension = path.extname(target).toLowerCase();
-      const record = {
-        id,
-        sessionId,
-        name,
-        path: target,
-        mimeType: MIME_TYPES[extension] || 'application/octet-stream',
-        size: stat.size,
-        previewUrl: (MIME_TYPES[extension] || '').startsWith('image/') ? pathToFileURL(target).href : '',
-        extractedText: extractedText.slice(0, 120000),
-        createdAt: new Date().toISOString()
-      };
-      this.store.set('ragAttachments', id, record);
-      imported.push(record);
+    const createdFiles = [];
+    try {
+      for (const source of filePaths || []) {
+        const stat = fs.statSync(source);
+        if (!stat.isFile()) continue;
+        if (stat.size > MAX_ATTACHMENT_BYTES) throw new Error(`Attachment exceeds 250 MiB: ${path.basename(source)}`);
+        const id = `attachment-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+        const name = safeFilename(path.basename(source));
+        const target = uniqueFile(destination, `${id}-${name}`);
+        fs.copyFileSync(source, target);
+        createdFiles.push(target);
+        const extractedText = await extractText(target);
+        const extension = path.extname(target).toLowerCase();
+        const mimeType = MIME_TYPES[extension] || 'application/octet-stream';
+        if (mimeType.startsWith('image/') && !matchesImageSignature(fs.readFileSync(target), mimeType)) {
+          throw new Error(`Attachment image content does not match its extension: ${path.basename(source)}`);
+        }
+        const record = {
+          id,
+          sessionId,
+          name,
+          path: target,
+          managedRoot: realPath(destination),
+          mimeType,
+          size: stat.size,
+          previewUrl: (MIME_TYPES[extension] || '').startsWith('image/') ? pathToFileURL(target).href : '',
+          extractedText: extractedText.slice(0, 120000),
+          managed: true,
+          createdAt: new Date().toISOString()
+        };
+        this.store.set('ragAttachments', id, record);
+        imported.push(record);
+      }
+    } catch (error) {
+      for (const record of imported) {
+        this.store.delete('ragAttachments', record.id);
+      }
+      for (const file of createdFiles) if (fs.existsSync(file)) fs.rmSync(file, { force: true });
+      throw error;
     }
     this.store.save();
     return imported;
@@ -323,7 +383,7 @@ class RagAssistant {
     if (!buffer.length) throw new Error('Clipboard does not contain a readable image.');
     if (buffer.length > 15 * 1024 * 1024) throw new Error('Clipboard image exceeds 15 MiB.');
     if (!matchesImageSignature(buffer, mimeType)) throw new Error('Clipboard image data does not match its declared type.');
-    const destination = ensureDir(path.join(session.sandboxDir, 'attachments'));
+    const destination = managedAttachmentsRoot(session);
     const id = `attachment-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
     const name = safeFilename(String(input.name || `clipboard-image${extension}`));
     const target = uniqueFile(destination, `${id}-${name.endsWith(extension) ? name : `${name}${extension}`}`);
@@ -333,10 +393,12 @@ class RagAssistant {
       sessionId,
       name: path.basename(target).replace(`${id}-`, ''),
       path: target,
+      managedRoot: realPath(destination),
       mimeType,
       size: buffer.length,
       previewUrl: pathToFileURL(target).href,
       extractedText: '',
+      managed: true,
       createdAt: new Date().toISOString()
     };
     this.store.set('ragAttachments', id, record);
@@ -351,8 +413,7 @@ class RagAssistant {
     const inMessage = this.store.list('ragMessages').some((message) => message.sessionId === session.id
       && (message.attachments || []).some((item) => item.id === attachment.id));
     if (inMessage) throw new Error('已经发送的附件不能从会话历史中单独删除。');
-    const attachmentsRoot = path.join(session.sandboxDir, 'attachments');
-    if (attachment.path && isInside(attachmentsRoot, attachment.path)) fs.rmSync(attachment.path, { force: true });
+    removeManagedAttachmentFile(session, attachment);
     this.store.delete('ragAttachments', attachment.id);
     this.store.save();
     return { removed: true, id: attachment.id };
@@ -368,6 +429,7 @@ class RagAssistant {
     const attachmentIds = uniqueStrings(input.attachmentIds || []);
     if (!content && !attachmentIds.length) throw new Error('Message or attachment is required.');
     const attachments = attachmentIds.map((id) => this.store.get('ragAttachments', id)).filter((item) => item?.sessionId === sessionId);
+    if (attachments.length !== attachmentIds.length) throw new Error('One or more attachments are missing or belong to another session. Reattach them before sending.');
     const userMessage = this.saveMessage({ sessionId, role: 'user', content, attachments: attachments.map(publicAttachment), status: 'complete' });
     if (session.title === '新对话' && content) {
       session.title = content.replace(/\s+/g, ' ').slice(0, 36);
@@ -414,10 +476,16 @@ class RagAssistant {
     return { cancelled: Boolean(controller) };
   }
 
+  shutdown() {
+    const cancelled = this.controllers.size;
+    for (const controller of this.controllers.values()) controller.abort();
+    return { cancelled };
+  }
+
   async runConversation(session, userMessage, assistantId, signal) {
     const provider = this.rawProvider(session.providerId);
     const model = this.sessionModel(session);
-    const history = this.buildHistory(session, model, userMessage.id);
+    const history = await this.hydrateHistoryAttachments(this.buildHistory(session, model, userMessage.id), model);
     const userApiMessage = await this.userApiMessage(userMessage, model);
     let apiMessages = [...history, userApiMessage];
     if (!model.supportsTools && session.knowledgeCollectionIds.length) {
@@ -431,12 +499,15 @@ class RagAssistant {
     const toolEvents = [];
     let finished = false;
     let toolRounds = 0;
+    let toolCallsUsed = 0;
+    const toolContextLimit = toolContextCharacterLimit(model);
     while (toolRounds <= MAX_RAG_TOOL_ROUNDS) {
+      const availableTools = toolCallsUsed < MAX_RAG_TOOL_CALLS ? tools : [];
       const result = await this.streamCompletion(provider, {
         model: session.modelId,
         messages: apiMessages,
-        tools: tools.length ? tools : undefined,
-        tool_choice: tools.length ? 'auto' : undefined,
+        tools: availableTools.length ? availableTools : undefined,
+        tool_choice: availableTools.length ? 'auto' : undefined,
         temperature: provider.temperature,
         max_tokens: this.outputTokenLimit(provider, model)
       }, signal, (delta) => {
@@ -453,6 +524,11 @@ class RagAssistant {
       toolRounds += 1;
       apiMessages.push({ role: 'assistant', content: result.content || null, tool_calls: result.toolCalls.map(toApiToolCall) });
       for (const call of result.toolCalls) {
+        if (toolCallsUsed >= MAX_RAG_TOOL_CALLS) {
+          apiMessages.push({ role: 'tool', tool_call_id: call.id, content: `ERROR: This response reached the ${MAX_RAG_TOOL_CALLS}-tool-call safety limit.` });
+          continue;
+        }
+        toolCallsUsed += 1;
         const event = { id: call.id, name: call.name, status: 'running', arguments: call.arguments, startedAt: new Date().toISOString() };
         toolEvents.push(event);
         this.emit({ type: 'tool', sessionId: session.id, messageId: assistantId, tool: event });
@@ -462,7 +538,7 @@ class RagAssistant {
           event.output = truncate(outcome.text, 30000);
           if (outcome.images.length) event.images = outcome.images;
           event.finishedAt = new Date().toISOString();
-          apiMessages.push({ role: 'tool', tool_call_id: call.id, content: truncate(outcome.text, 200000) });
+          apiMessages.push({ role: 'tool', tool_call_id: call.id, content: truncate(outcome.text, toolContextLimit) });
           if (outcome.visionParts.length) {
             apiMessages.push({
               role: 'user',
@@ -477,8 +553,11 @@ class RagAssistant {
         }
         this.emit({ type: 'tool', sessionId: session.id, messageId: assistantId, tool: event });
       }
+      if (toolCallsUsed >= MAX_RAG_TOOL_CALLS) {
+        apiMessages.push({ role: 'system', content: `The ${MAX_RAG_TOOL_CALLS}-tool-call budget is exhausted. Answer now from the evidence already collected; do not request more tools.` });
+      }
     }
-    if (!finished && toolEvents.length) throw new Error(`The model exceeded the ${MAX_RAG_TOOL_ROUNDS}-round tool-call limit. Refine the request and try again.`);
+    if (!finished && toolEvents.length) throw new Error(`The model exceeded the ${MAX_RAG_TOOL_CALLS}-tool-call limit. Refine the request and try again.`);
     if (!content.trim() && !reasoning.trim()) throw new Error('The model returned an empty response. Check the model and provider compatibility settings.');
     return { content, reasoning, usage, toolEvents };
   }
@@ -500,7 +579,24 @@ class RagAssistant {
       recent.unshift(message);
       used += tokens;
     }
-    return [{ role: 'system', content: system }, ...recent.map((message) => ({ role: message.role, content: message.content || '' }))];
+    return [{ role: 'system', content: system }, ...recent.map((message) => ({
+      role: message.role,
+      content: message.content || '',
+      attachmentIds: message.role === 'user' ? (message.attachments || []).map((item) => item.id).filter(Boolean) : []
+    }))];
+  }
+
+  async hydrateHistoryAttachments(messages, model) {
+    const hydrated = [];
+    for (const message of messages) {
+      if (message.role !== 'user' || !message.attachmentIds?.length) {
+        hydrated.push({ role: message.role, content: message.content });
+        continue;
+      }
+      const attachments = message.attachmentIds.map((id) => this.store.get('ragAttachments', id)).filter(Boolean);
+      hydrated.push(await this.userApiMessage({ content: message.content, attachments }, model));
+    }
+    return hydrated;
   }
 
   systemPrompt(session, model) {
@@ -535,7 +631,10 @@ class RagAssistant {
     const messages = messagesInput || this.store.list('ragMessages').filter((item) => item.sessionId === session.id && ['user', 'assistant'].includes(item.role) && item.status === 'complete');
     const activeMessages = this.activeHistoryMessages(session, messages);
     const systemTokens = estimateTokens(this.systemPrompt(session, model));
-    const messageTokens = activeMessages.reduce((sum, message) => sum + estimateTokens(message.content || '') + 8, 0);
+    const messageTokens = activeMessages.reduce((sum, message) => {
+      const attachments = (message.attachments || []).map((item) => this.store.get('ragAttachments', item.id)).filter(Boolean);
+      return sum + estimateTokens(message.content || '') + estimateAttachmentTokens(attachments, model) + 8;
+    }, 0);
     const inputTokens = systemTokens + messageTokens + Math.max(0, Number(extraTokens || 0));
     const contextWindow = positiveInteger(model.contextWindow, null, DEFAULT_CONTEXT_WINDOW);
     const provider = session.providerId ? this.store.get('ragProviders', session.providerId) : null;
@@ -571,7 +670,7 @@ class RagAssistant {
     const parts = [];
     for (const attachment of message.attachments || []) {
       if (attachment.extractedText) {
-        textParts.push(`\n\n[Attachment: ${attachment.name}]\n${attachment.extractedText.slice(0, 30000)}`);
+        textParts.push(`\n\n[Attachment: ${attachment.name}; local path: ${attachment.path}]\n${attachment.extractedText.slice(0, 30000)}\n[The text above is an extracted prefix. Use read_file on the local path when exact additional text is needed.]`);
       } else if (model.supportsVision && attachment.mimeType.startsWith('image/') && attachment.size <= 15 * 1024 * 1024) {
         parts.push({ type: 'image_url', image_url: { url: `data:${attachment.mimeType};base64,${fs.readFileSync(attachment.path).toString('base64')}` } });
         textParts.push(`\n[Image attachment: ${attachment.name}]`);
@@ -584,6 +683,16 @@ class RagAssistant {
     }
     if (!parts.length) return { role: 'user', content: textParts.join('') };
     return { role: 'user', content: [{ type: 'text', text: textParts.join('') }, ...parts] };
+  }
+
+  conversationTranscript(message) {
+    const attachmentNotes = (message.attachments || []).map((item) => {
+      const attachment = this.store.get('ragAttachments', item.id);
+      if (!attachment) return `[Attachment no longer available: ${item.name || item.id}]`;
+      if (attachment.extractedText) return `[Attachment: ${attachment.name}]\n${attachment.extractedText.slice(0, 30000)}`;
+      return `[Attachment: ${attachment.name}; type=${attachment.mimeType}; size=${attachment.size} bytes]`;
+    });
+    return [`[${String(message.role || '').toUpperCase()} | ${message.createdAt || '-'} | ${message.id}]`, message.content || '', ...attachmentNotes].filter(Boolean).join('\n');
   }
 
   toolDefinitions(session, model) {
@@ -599,7 +708,7 @@ class RagAssistant {
     if (session.knowledgeCollectionIds.length) {
       tools.unshift(
         tool('knowledge_list_documents', 'List original Markdown documents in the selected libraries. Returns stable document ids for exact reading and image inspection.', { query: { type: 'string' }, offset: { type: 'integer' }, limit: { type: 'integer' } }),
-        tool('knowledge_read_document', 'Read an exact, unsummarized line range from one original Markdown document. Call again with next_start_line until complete.', { document_id: { type: 'string' }, start_line: { type: 'integer' }, line_count: { type: 'integer' } }, ['document_id']),
+        tool('knowledge_read_document', 'Read an exact, unsummarized range from one original Markdown document. Continue with both next_start_line and next_start_column until End of document.', { document_id: { type: 'string' }, start_line: { type: 'integer' }, start_column: { type: 'integer' }, line_count: { type: 'integer' } }, ['document_id']),
         tool('knowledge_search', 'Search selected local Markdown knowledge libraries. Results include document ids; use knowledge_read_document when exact wording or complete context matters.', { query: { type: 'string' }, limit: { type: 'integer' } }, ['query'])
       );
       if (model.supportsVision) tools.unshift(tool('knowledge_view_images', 'Load original local images from a selected Markdown document into this multimodal conversation. Returns safe image URIs that can be embedded in the answer.', { document_id: { type: 'string' }, image_indices: { type: 'array', items: { type: 'integer' }, maxItems: 4 } }, ['document_id']));
@@ -612,7 +721,7 @@ class RagAssistant {
     const args = parseJson(call.arguments || '{}', `Invalid arguments for ${call.name}.`);
     if (call.name === 'knowledge_search') return this.searchKnowledge(session, args.query, args.limit);
     if (call.name === 'knowledge_list_documents') return this.listKnowledgeDocuments(session, args.query, args.offset, args.limit);
-    if (call.name === 'knowledge_read_document') return this.readKnowledgeDocument(session, args.document_id, args.start_line, args.line_count);
+    if (call.name === 'knowledge_read_document') return this.readKnowledgeDocument(session, args.document_id, args.start_line, args.line_count, args.start_column, toolContextCharacterLimit(model));
     if (call.name === 'knowledge_view_images') return this.viewKnowledgeImages(session, model, args.document_id, args.image_indices);
     if (call.name === 'list_files') {
       const target = await this.authorizePath(session, args.path || '.', 'list directory');
@@ -620,7 +729,7 @@ class RagAssistant {
     }
     if (call.name === 'read_file') {
       const target = await this.authorizePath(session, args.path, 'read file');
-      return truncate(fs.readFileSync(target, 'utf8'), 80000);
+      return readUtf8Prefix(target, 80000);
     }
     if (call.name === 'write_file') {
       const target = await this.authorizePath(session, args.path, 'write file');
@@ -632,7 +741,9 @@ class RagAssistant {
     if (call.name === 'web_search') return this.browseHidden(`https://www.bing.com/search?q=${encodeURIComponent(String(args.query || ''))}`);
     if (call.name === 'browse_url') return this.browseUrl(session, args.url);
     if (call.name === 'open_browser') {
-      const url = parseHttpUrl(args.url).toString();
+      const parsed = parseHttpUrl(args.url);
+      if (parsed.username || parsed.password) throw new Error('Browser URLs cannot contain embedded account credentials.');
+      const url = parsed.toString();
       if (session.permissionMode !== 'full') await this.approve(session, { action: 'open default browser', target: url, detail: 'The model wants to open a page in your default browser.' });
       await this.openExternal(url);
       return `Opened ${url}`;
@@ -678,24 +789,41 @@ class RagAssistant {
     if (session.permissionMode !== 'full') await this.approve(session, { action: 'run CMD command', target: String(command), detail: `Working directory: ${workingDirectory}` });
     return new Promise((resolve, reject) => {
       let aborted = false;
-      const child = execFile('cmd.exe', ['/d', '/s', '/c', String(command)], { cwd: workingDirectory, windowsHide: true, timeout: 120000, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
-        if (aborted) return reject(abortError());
-        if (error) return reject(new Error(`${error.message}\n${stderr || stdout}`.trim()));
-        resolve(truncate(`${stdout}${stderr ? `\n[stderr]\n${stderr}` : ''}`, 60000));
-      });
-      signal?.addEventListener('abort', () => {
+      let timedOut = false;
+      let timer;
+      const onAbort = () => {
         aborted = true;
-        child.kill();
-      }, { once: true });
+        killProcessTree(child);
+      };
+      const finish = (callback) => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        callback();
+      };
+      const child = execFile('cmd.exe', ['/d', '/s', '/c', String(command)], { cwd: workingDirectory, windowsHide: true, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
+        if (aborted) return finish(() => reject(abortError()));
+        if (timedOut) return finish(() => reject(new Error('Command timed out after 120 seconds.')));
+        if (error) return finish(() => reject(new Error(`${error.message}\n${stderr || stdout}`.trim())));
+        finish(() => resolve(truncate(`${stdout}${stderr ? `\n[stderr]\n${stderr}` : ''}`, 60000)));
+      });
+      timer = setTimeout(() => {
+        timedOut = true;
+        killProcessTree(child);
+      }, 120000);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
     });
   }
 
   async browseUrl(session, value) {
     const url = parseHttpUrl(value).toString();
     const host = new URL(url).hostname;
-    const privateAddress = isPrivateNetworkHost(host);
+    const privateAddress = await resolvesToPrivateHost(host);
     if (session.permissionMode !== 'full' && privateAddress) await this.approve(session, { action: 'browse private or local address', target: url, detail: 'This address may access a local service or private network.' });
-    return this.browseHidden(url, { allowPrivate: privateAddress });
+    return this.browseHidden(url, {
+      allowPrivate: privateAddress,
+      allowedPrivateHosts: privateAddress && session.permissionMode !== 'full' ? [host] : undefined
+    });
   }
 
   async searchKnowledge(session, query, limit = 8) {
@@ -740,18 +868,34 @@ class RagAssistant {
     return `Selected documents: ${all.length}. Showing ${page.length} from offset ${start}.\n\n${rows.join('\n\n') || 'No matching documents.'}`;
   }
 
-  readKnowledgeDocument(session, documentId, startLine = 1, lineCount = 300) {
+  readKnowledgeDocument(session, documentId, startLine = 1, lineCount = 300, startColumn = 0, maximumCharactersInput = MAX_KNOWLEDGE_READ_CHARACTERS) {
     const task = this.requireKnowledgeDocument(session, documentId);
     const collection = this.store.getCollectionById(task.collectionId);
     const source = fs.readFileSync(task.outputMarkdown, 'utf8');
     const lines = source.match(/[^\n]*\n|[^\n]+$/g) || [];
     const start = Math.max(1, Number(startLine) || 1);
+    const column = Math.max(0, Number(startColumn) || 0);
     const wanted = Math.max(1, Math.min(2000, Number(lineCount) || 300));
-    let selected = lines.slice(start - 1, start - 1 + wanted).join('');
-    if (selected.length > 200000) selected = selected.slice(0, 200000);
-    const consumedLines = (selected.match(/\n/g) || []).length + (selected && !selected.endsWith('\n') ? 1 : 0);
-    const end = Math.min(lines.length, start - 1 + consumedLines);
-    const next = end < lines.length ? end + 1 : null;
+    const maximumCharacters = Math.max(2000, Math.min(MAX_KNOWLEDGE_READ_CHARACTERS, Number(maximumCharactersInput) || MAX_KNOWLEDGE_READ_CHARACTERS));
+    let selected = '';
+    let lineIndex = start - 1;
+    let currentColumn = column;
+    const lastLineExclusive = Math.min(lines.length, start - 1 + wanted);
+    while (lineIndex < lastLineExclusive && selected.length < maximumCharacters) {
+      const line = lines[lineIndex] || '';
+      const remaining = line.slice(currentColumn);
+      const capacity = maximumCharacters - selected.length;
+      if (remaining.length > capacity) {
+        selected += remaining.slice(0, capacity);
+        currentColumn += capacity;
+        break;
+      }
+      selected += remaining;
+      lineIndex += 1;
+      currentColumn = 0;
+    }
+    const next = lineIndex < lines.length ? { line: lineIndex + 1, column: currentColumn } : null;
+    const endLine = Math.min(lines.length, Math.max(start, lineIndex + (currentColumn ? 1 : 0)));
     return [
       `Document ID: ${task.id}`,
       `Title: ${task.title || task.bvid}`,
@@ -760,8 +904,8 @@ class RagAssistant {
       `Published at: ${task.publishedAt || '-'}`,
       `Favorited at: ${task.favoriteAddedAt || '-'}`,
       knowledgeFavoriteMetadata(task, collection),
-      `Exact original Markdown lines ${start}-${end} of ${lines.length}.`,
-      next ? `next_start_line: ${next}` : 'End of document.',
+      `Exact original Markdown range starts at line ${start}, column ${column}; returned through line ${endLine} of ${lines.length}.`,
+      next ? `next_start_line: ${next.line}\nnext_start_column: ${next.column}` : 'End of document.',
       '\n--- RAW MARKDOWN START ---\n',
       selected,
       '\n--- RAW MARKDOWN END ---'
@@ -821,10 +965,12 @@ class RagAssistant {
       const target = path.resolve(root, decoded);
       const extension = path.extname(target).toLowerCase();
       const mimeType = MIME_TYPES[extension] || '';
-      if (!isInside(root, target) || !mimeType.startsWith('image/') || !fs.existsSync(target) || seen.has(target)) continue;
+      const identity = process.platform === 'win32' ? target.toLowerCase() : target;
+      if (!isInside(root, target) || !mimeType.startsWith('image/') || !fs.existsSync(target) || seen.has(identity)) continue;
       const stat = fs.statSync(target);
       if (!stat.isFile() || stat.size > 15 * 1024 * 1024 || !isInside(realPath(root), realPath(target))) continue;
-      seen.add(target);
+      if (!matchesImageSignature(fs.readFileSync(target), mimeType)) continue;
+      seen.add(identity);
       images.push({ path: target, name: path.basename(target), alt: item.alt, mimeType, size: stat.size });
     }
     return images;
@@ -842,22 +988,34 @@ class RagAssistant {
   documentChunks(file) {
     const stat = fs.statSync(file);
     const cached = this.documentCache.get(file);
-    if (cached?.mtimeMs === stat.mtimeMs) return cached.chunks;
-    const text = fs.readFileSync(file, 'utf8').replace(/^---[\s\S]*?---\s*/m, '');
+    if (cached?.mtimeMs === stat.mtimeMs && cached?.size === stat.size) {
+      this.documentCache.delete(file);
+      this.documentCache.set(file, cached);
+      return cached.chunks;
+    }
+    const text = fs.readFileSync(file, 'utf8').replace(/^---\r?\n[\s\S]*?\r?\n---\s*/, '');
     const chunks = [];
     const sections = text.split(/(?=^#{1,3}\s+)/m);
     for (const section of sections) {
       for (let offset = 0; offset < section.length; offset += 1600) chunks.push(section.slice(offset, offset + 1900));
     }
-    this.documentCache.set(file, { mtimeMs: stat.mtimeMs, chunks: chunks.filter((item) => item.trim()) });
+    this.documentCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, chunks: chunks.filter((item) => item.trim()) });
+    while (this.documentCache.size > MAX_DOCUMENT_CACHE_ENTRIES) this.documentCache.delete(this.documentCache.keys().next().value);
     return this.documentCache.get(file).chunks;
   }
 
   async compact(sessionId) {
     const session = this.requireSession(sessionId);
+    if (this.controllers.has(session.id)) throw new Error('Stop the current response before compressing this session.');
     const model = this.sessionModel(session);
     if (!model.supportsCompression) throw new Error('Context compression is disabled for this model.');
-    return this.compactContext(session, { automatic: false });
+    const controller = new AbortController();
+    this.controllers.set(session.id, controller);
+    try {
+      return await this.compactContext(session, { automatic: false, signal: controller.signal });
+    } finally {
+      this.controllers.delete(session.id);
+    }
   }
 
   async compactContext(sessionInput, options = {}) {
@@ -871,7 +1029,7 @@ class RagAssistant {
     if (!session.compressedSummary && activeMessages.length < (options.automatic ? 1 : 4)) throw new Error('There is not enough conversation history to compress.');
     const transcript = [
       session.compressedSummary ? `[PREVIOUS DURABLE SUMMARY]\n${session.compressedSummary}` : '',
-      ...activeMessages.map((item) => `[${String(item.role || '').toUpperCase()} | ${item.createdAt || '-'} | ${item.id}]\n${item.content || ''}`)
+      ...activeMessages.map((item) => this.conversationTranscript(item))
     ].filter(Boolean).join('\n\n---\n\n');
     if (!transcript.trim()) throw new Error('There is no compressible conversation context.');
     const summary = await this.summarizeConversationContext(session, provider, model, transcript, options.signal);
@@ -938,19 +1096,27 @@ class RagAssistant {
   }
 
   async streamCompletion(provider, body, signal, onDelta) {
+    try {
+      return await this.streamCompletionRequest(provider, body, signal, onDelta);
+    } catch (error) {
+      throw normalizeProviderError(error, signal);
+    }
+  }
+
+  async streamCompletionRequest(provider, body, signal, onDelta) {
     const url = this.providerEndpoint(provider, 'chat/completions');
     const requestBody = { ...body, stream: true, stream_options: { include_usage: true } };
-    let response = await fetch(url, { method: 'POST', headers: this.providerHeaders(provider), body: JSON.stringify(requestBody), signal });
+    let response = await providerFetch(url, { method: 'POST', headers: this.providerHeaders(provider), body: JSON.stringify(requestBody) }, signal);
     if (!response.ok) {
       const errorText = await response.text();
       if (/stream_options/i.test(errorText)) {
         delete requestBody.stream_options;
-        response = await fetch(url, { method: 'POST', headers: this.providerHeaders(provider), body: JSON.stringify(requestBody), signal });
+        response = await providerFetch(url, { method: 'POST', headers: this.providerHeaders(provider), body: JSON.stringify(requestBody) }, signal);
       } else {
-        throw new Error(`Model request failed (${response.status}): ${errorText.slice(0, 1600)}`);
+        throw providerHttpError(response.status, errorText);
       }
     }
-    if (!response.ok) throw new Error(`Model request failed (${response.status}): ${(await response.text()).slice(0, 1600)}`);
+    if (!response.ok) throw providerHttpError(response.status, await response.text());
     const contentType = String(response.headers.get('content-type') || '').toLowerCase();
     if (contentType.includes('application/json')) {
       const payload = parseJson(await response.text(), 'Model provider returned invalid JSON data.');
@@ -1015,12 +1181,16 @@ class RagAssistant {
   }
 
   async complete(provider, body, signal) {
-    const response = await fetch(this.providerEndpoint(provider, 'chat/completions'), { method: 'POST', headers: this.providerHeaders(provider), body: JSON.stringify({ ...body, stream: false }), signal });
-    const text = await response.text();
-    if (!response.ok) throw new Error(`Model request failed (${response.status}): ${text.slice(0, 1600)}`);
-    const payload = parseJson(text, 'Model provider returned non-JSON data.');
-    const message = payload.choices?.[0]?.message || {};
-    return { content: normalizeContent(message.content), reasoning: normalizeContent(message.reasoning_content ?? message.reasoning ?? message.thinking), usage: normalizeUsage(payload.usage || {}) };
+    try {
+      const response = await providerFetch(this.providerEndpoint(provider, 'chat/completions'), { method: 'POST', headers: this.providerHeaders(provider), body: JSON.stringify({ ...body, stream: false }) }, signal);
+      const text = await response.text();
+      if (!response.ok) throw providerHttpError(response.status, text);
+      const payload = parseJson(text, 'Model provider returned non-JSON data.');
+      const message = payload.choices?.[0]?.message || {};
+      return { content: normalizeContent(message.content), reasoning: normalizeContent(message.reasoning_content ?? message.reasoning ?? message.thinking), usage: normalizeUsage(payload.usage || {}) };
+    } catch (error) {
+      throw normalizeProviderError(error, signal);
+    }
   }
 
   saveMessage(input) {
@@ -1129,14 +1299,99 @@ function normalizeBaseUrl(value) {
   if (!text) return '';
   const url = new URL(text);
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Base URL must use HTTP or HTTPS.');
+  if (url.username || url.password) throw new Error('Base URL cannot contain embedded credentials.');
+  if (url.search || url.hash) throw new Error('Base URL cannot contain a query string or fragment.');
+  if (url.protocol === 'http:' && !isPrivateNetworkHost(url.hostname)) {
+    throw new Error('Public model endpoints must use HTTPS. Plain HTTP is allowed only for localhost or private-network endpoints.');
+  }
   return text;
+}
+
+async function providerFetch(url, options, signal) {
+  const timeout = AbortSignal.timeout(PROVIDER_REQUEST_TIMEOUT_MS);
+  const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  return fetch(url, { ...options, signal: requestSignal });
+}
+
+function providerHttpError(status, body) {
+  const detail = String(body || '').slice(0, 1600);
+  const error = new Error(`Model request failed (${status}): ${detail}`);
+  error.code = 'MODEL_PROVIDER_FAILURE';
+  error.failureKind = 'infrastructure';
+  error.possibleCauses = status === 401 || status === 403
+    ? ['模型供应商 API Key 无效、过期或权限不足', '供应商 Base URL 与密钥不匹配']
+    : status === 429
+      ? ['模型供应商额度、速率或并发限制已触发', '稍后恢复 Agent，或检查供应商账户额度']
+      : ['模型供应商接口不可用或接口规范不兼容', 'Base URL、模型名或模型参数配置错误'];
+  return error;
+}
+
+function normalizeProviderError(error, signal) {
+  if (signal?.aborted) return abortError();
+  if (error?.failureKind === 'infrastructure') return error;
+  const wrapped = new Error(`模型供应商请求无法完成：${error?.message || String(error)}`);
+  wrapped.code = 'MODEL_PROVIDER_FAILURE';
+  wrapped.failureKind = 'infrastructure';
+  wrapped.possibleCauses = [
+    error?.name === 'TimeoutError' ? '模型供应商在一小时内未返回结果' : '网络连接、供应商服务或兼容接口响应异常',
+    '检查 AI 模型配置中的 Base URL、API Key、模型名和上下文/输出上限'
+  ];
+  wrapped.cause = error;
+  return wrapped;
+}
+
+function removeManagedAttachmentFile(session, attachment) {
+  if (!attachment?.path) return false;
+  const target = path.resolve(attachment.path);
+  const expectedPrefix = `${String(attachment.id || '')}-`;
+  if (attachment.managed === false || !expectedPrefix || !path.basename(target).startsWith(expectedPrefix) || path.basename(path.dirname(target)).toLowerCase() !== 'attachments' || !fs.existsSync(target)) return false;
+  try {
+    const parent = path.dirname(target);
+    const parentStat = fs.lstatSync(parent);
+    if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) return false;
+    const stat = fs.lstatSync(target);
+    if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    const resolvedParent = realPath(parent);
+    const resolvedTarget = realPath(target);
+    const managedRoot = attachment.managedRoot ? path.resolve(attachment.managedRoot) : resolvedParent;
+    if (!samePath(resolvedParent, managedRoot) || !isInside(managedRoot, resolvedTarget)) return false;
+    fs.rmSync(target, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function managedAttachmentsRoot(session) {
+  const sandbox = ensureDir(path.resolve(session.sandboxDir));
+  const destination = ensureDir(path.join(sandbox, 'attachments'));
+  const destinationStat = fs.lstatSync(destination);
+  if (!destinationStat.isDirectory() || destinationStat.isSymbolicLink()) {
+    throw new Error('The attachments path must be a regular directory, not a link.');
+  }
+  if (!isInside(fs.realpathSync(sandbox), fs.realpathSync(destination))) {
+    throw new Error('The attachments directory resolves outside the session sandbox. Remove the link or choose another sandbox.');
+  }
+  return destination;
 }
 
 function normalizeHeaders(value) {
   if (!value) return {};
   const parsed = typeof value === 'string' ? parseJson(value, 'Extra headers must be valid JSON.') : value;
   if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('Extra headers must be a JSON object.');
-  return Object.fromEntries(Object.entries(parsed).map(([key, item]) => [String(key), String(item)]));
+  const entries = Object.entries(parsed);
+  if (entries.length > 64) throw new Error('Extra headers cannot contain more than 64 fields.');
+  return Object.fromEntries(entries.map(([key, item]) => {
+    const name = String(key).trim();
+    const lower = name.toLowerCase();
+    if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(name)) throw new Error(`Invalid extra header name: ${name || '(empty)'}`);
+    if (/^(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|x-auth-token|x-access-token|x-goog-api-key)$/i.test(lower)) {
+      throw new Error(`Sensitive header ${name} is not allowed in extra headers. Store credentials in the encrypted API Key field.`);
+    }
+    const text = String(item);
+    if (/\r|\n/.test(text)) throw new Error(`Extra header ${name} contains an invalid line break.`);
+    return [name, text];
+  }));
 }
 
 function normalizeUsage(usage = {}) {
@@ -1159,6 +1414,12 @@ function estimateUsage(messages, output) {
 
 function estimateTokens(value) {
   return Math.max(0, Math.ceil(String(value || '').length / 3.5));
+}
+
+function toolContextCharacterLimit(model = {}) {
+  const contextWindow = positiveInteger(model.contextWindow, null, DEFAULT_CONTEXT_WINDOW);
+  const sharedBudget = Math.floor(contextWindow * 0.35 * 3.5 / MAX_RAG_TOOL_CALLS);
+  return Math.max(4000, Math.min(MAX_TOOL_CONTEXT_CHARACTERS, sharedBudget));
 }
 
 function normalizeContent(value) {
@@ -1267,6 +1528,22 @@ function isInside(root, target) {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
+function samePath(left, right) {
+  const a = path.resolve(left);
+  const b = path.resolve(right);
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+async function resolvesToPrivateHost(hostname) {
+  if (isPrivateNetworkHost(hostname)) return true;
+  try {
+    const addresses = await dns.promises.lookup(hostname, { all: true, verbatim: true });
+    return addresses.some((item) => isPrivateNetworkHost(item.address));
+  } catch {
+    return false;
+  }
+}
+
 function safeFilename(value) {
   return String(value || 'attachment').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 120);
 }
@@ -1282,7 +1559,8 @@ function uniqueFile(directory, name) {
 
 async function extractText(file) {
   const extension = path.extname(file).toLowerCase();
-  if (TEXT_EXTENSIONS.has(extension)) return fs.readFileSync(file, 'utf8');
+  if (TEXT_EXTENSIONS.has(extension)) return readUtf8Prefix(file, 120000);
+  if (fs.statSync(file).size > MAX_EXTRACTABLE_DOCUMENT_BYTES) return '';
   if (extension === '.pdf') return (await pdf(fs.readFileSync(file))).text || '';
   if (extension === '.docx') return (await mammoth.extractRawText({ path: file })).value || '';
   return '';
@@ -1372,6 +1650,31 @@ function countOccurrences(text, term) {
 function truncate(value, limit) {
   const text = String(value || '');
   return text.length > limit ? `${text.slice(0, limit)}\n...[truncated]` : text;
+}
+
+function readUtf8Prefix(file, maximumCharacters) {
+  const stat = fs.statSync(file);
+  if (!stat.isFile()) throw new Error(`Not a regular file: ${file}`);
+  const maximumBytes = Math.max(4096, Number(maximumCharacters || 80000) * 4);
+  const length = Math.min(stat.size, maximumBytes);
+  const descriptor = fs.openSync(file, 'r');
+  try {
+    const buffer = Buffer.alloc(length);
+    const bytesRead = fs.readSync(descriptor, buffer, 0, length, 0);
+    const text = buffer.subarray(0, bytesRead).toString('utf8');
+    return text.length > maximumCharacters ? `${text.slice(0, maximumCharacters)}\n...[truncated]` : text;
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function killProcessTree(child) {
+  if (!child || child.killed) return;
+  if (process.platform === 'win32' && child.pid) {
+    const result = spawnSync('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
+    if (result.status === 0) return;
+  }
+  try { child.kill('SIGTERM'); } catch {}
 }
 
 module.exports = { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, MAX_RAG_TOOL_ROUNDS, RAG_AUTO_COMPACT_TRIGGER, RagAssistant, normalizeModel, splitTextByTokenBudget };

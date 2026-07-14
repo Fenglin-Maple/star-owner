@@ -1,15 +1,17 @@
 const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, safeStorage, session, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { pathToFileURL } = require('url');
 const MarkdownIt = require('markdown-it');
 const { buildAnalytics } = require('./core/analytics');
 const { ApiServer } = require('./core/api-server');
-const { BiliClient } = require('./core/bili');
+const { BiliClient, assertBilibiliImageUrl, isBilibiliCookieDomain, normalizeBilibiliAssetUrl } = require('./core/bili');
 const { collectionBlockReason } = require('./core/collection-state');
 const { CollectionSyncService } = require('./core/collection-sync-service');
 const { DependencyManager } = require('./core/dependency-manager');
 const { secureMainWindow } = require('./core/desktop-security');
+const { assertHiddenBrowserUrl, installHiddenBrowserRequestGuard } = require('./core/hidden-browser-policy');
 const { InternalAgentManager } = require('./core/internal-agent-manager');
 const { loadClipboardImage } = require('./core/image-clipboard');
 const { promoteMindMap, wrapMarkdownTables } = require('./core/markdown');
@@ -17,6 +19,7 @@ const { isPrivateNetworkHost } = require('./core/network-policy');
 const { repairPortablePythonHome } = require('./core/portable-runtime');
 const { RagAssistant } = require('./core/rag-assistant');
 const { Store } = require('./core/store');
+const { recoverPendingSubmissionFinalizations } = require('./core/submission-artifacts');
 const { ToolRunner } = require('./core/tool-runner');
 const { VideoCacheManager } = require('./core/video-cache-manager');
 const { initWorkspace, timestampForFile, videoArtifactName, WORKSPACE_ROOT } = require('./core/workspace');
@@ -48,9 +51,15 @@ let dependencyManager = null;
 let videoCacheManager = null;
 let collectionSyncService = null;
 let currentUser = null;
+let biliAccountGeneration = 0;
+let biliRefreshGeneration = -1;
+let biliRefreshPromise = null;
 let backendReady = false;
 let toolHealth = [];
+let bootstrapStarted = false;
+const VOLATILE_ACTIVITY_TYPES = new Set(['collection-sync-progress', 'asr-progress', 'asr-service-log', 'video-cache-job-updated', 'video-cache-queue-updated']);
 const pendingRagApprovals = new Map();
+const taskDisplayCoverCache = new Map();
 let bootstrapState = {
   phase: 'starting',
   progress: 0.04,
@@ -83,10 +92,17 @@ function createWindow() {
     mainWindow.center();
     mainWindow.show();
   });
-  mainWindow.loadFile(RENDERER_FILE);
+  mainWindow.loadFile(RENDERER_FILE).catch((error) => console.error(`[renderer-load] ${error.message || String(error)}`));
   mainWindow.webContents.once('did-finish-load', () => {
     sendBootstrap();
     sendRuntime();
+    if (!bootstrapStarted) {
+      bootstrapStarted = true;
+      bootstrap().catch((error) => {
+        backendReady = false;
+        emitBootstrap(error.message || String(error), 1, 'error');
+      });
+    }
   });
   mainWindow.webContents.on('console-message', (details) => {
     if (details.level === 'error') console.error(`[renderer] ${details.message} (${details.sourceId}:${details.lineNumber})`);
@@ -105,6 +121,10 @@ async function bootstrap() {
   initWorkspace();
   emitBootstrap('Opening SQLite database...', 0.32);
   store = await Store.open();
+  const recoveredSubmissions = recoverPendingSubmissionFinalizations(store);
+  for (const result of recoveredSubmissions) {
+    if (!result.ok) console.warn(`[submission-recovery] ${result.taskId}: ${result.error}`);
+  }
   ragAssistant = new RagAssistant({
     store,
     workspaceRoot: store.getDefaultWorkspace()?.root || WORKSPACE_ROOT,
@@ -113,7 +133,7 @@ async function bootstrap() {
     emit: (event) => mainWindow?.webContents.send('rag:event', event),
     requestApproval: requestRagApproval,
     browseHidden,
-    openExternal: (url) => shell.openExternal(url)
+    openExternal: (url) => openExternalUrl(url)
   });
   emitBootstrap('Preparing Bilibili session...', 0.52);
   bili = new BiliClient(biliSession);
@@ -151,6 +171,7 @@ async function bootstrap() {
     projectRoot: path.resolve(__dirname, '..'),
     version: PACKAGE_VERSION,
     emit: publishDependencyEvent,
+    acquireInstall: (packageId, onWait) => toolRunner.acquireMaintenance(`dependency package ${packageId}`, onWait),
     onInstalled: async (packageId) => {
       if (packageId === 'model-small' || packageId === 'model-medium' || packageId === 'runtime-base') {
         try { await toolRunner.ensureGpuAsr(); } catch (error) { publishEvent({ type: 'asr-reload-required', error: error.message }); }
@@ -198,12 +219,6 @@ async function bootstrap() {
 
 app.whenReady().then(() => {
   createWindow();
-  mainWindow.webContents.once('did-finish-load', () => {
-    bootstrap().catch((error) => {
-      backendReady = false;
-      emitBootstrap(error.message || String(error), 1, 'error');
-    });
-  });
 });
 
 app.on('window-all-closed', () => {
@@ -213,10 +228,14 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   apiServer?.stop();
+  ragAssistant?.shutdown();
   internalAgentManager?.shutdown();
   videoCacheManager?.shutdown();
   toolRunner?.shutdown();
-  for (const pending of pendingRagApprovals.values()) pending.resolve({ approved: false });
+  for (const pending of pendingRagApprovals.values()) {
+    clearTimeout(pending.timer);
+    pending.resolve({ approved: false });
+  }
   pendingRagApprovals.clear();
 });
 
@@ -224,7 +243,7 @@ ipcMain.handle('app:get-runtime', async () => ({
   apiUrl: apiServer?.url(),
   workspaceRoot: store?.getDefaultWorkspace()?.root || WORKSPACE_ROOT,
   defaultWorkspace: store?.getDefaultWorkspace() || null,
-  currentUser,
+  currentUser: publicCurrentUser(currentUser),
   toolHealth,
   scheduler: toolRunner?.getState() || null,
   filenameMetadata: store?.getFilenameMetadata() || null,
@@ -246,10 +265,8 @@ ipcMain.handle('docs:open-readme', async () => {
 });
 
 ipcMain.handle('app:open-external', async (_event, value) => {
-  const url = new URL(String(value || ''));
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Only HTTP(S) links can be opened externally.');
-  await shell.openExternal(url.toString());
-  return { url: url.toString() };
+  const url = await openExternalUrl(value);
+  return { url };
 });
 
 ipcMain.handle('docs:open-project-path', async (_event, value) => {
@@ -257,9 +274,13 @@ ipcMain.handle('docs:open-project-path', async (_event, value) => {
   const target = path.resolve(projectRoot, String(value || ''));
   if (target !== projectRoot && !target.startsWith(`${projectRoot}${path.sep}`)) throw new Error('Document path is outside the project.');
   if (!fs.existsSync(target)) throw new Error(`Document does not exist: ${value}`);
-  const error = await shell.openPath(target);
+  const realProjectRoot = fs.realpathSync(projectRoot);
+  const realTarget = fs.realpathSync(target);
+  const relative = path.relative(realProjectRoot, realTarget);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('Document path resolves outside the project.');
+  const error = await shell.openPath(realTarget);
   if (error) throw new Error(error);
-  return { path: target };
+  return { path: realTarget };
 });
 
 ipcMain.handle('documents:read', async (_event, taskId) => {
@@ -288,24 +309,16 @@ ipcMain.handle('documents:open', async (_event, taskId) => {
 
 ipcMain.handle('bili:check-login', async () => {
   assertBackendReady();
-  const previousLogin = Boolean(currentUser?.isLogin);
-  const info = await bili.nav();
-  currentUser = info;
-  if (info.isLogin) {
-    const user = store.upsertUser({ id: String(info.mid), mid: String(info.mid), name: info.name, face: info.face });
-    const cookieFile = await bili.exportCookies(info.name || String(info.mid));
-    currentUser = { ...info, id: user.id, cookieFile };
-  }
-  if (info.isLogin || previousLogin !== Boolean(info.isLogin)) sendRuntime();
-  return currentUser;
+  return publicCurrentUser(await refreshBilibiliUser());
 });
 
 ipcMain.handle('bili:prepare-account-switch', async () => {
   assertBackendReady();
+  biliAccountGeneration += 1;
   const biliPartition = biliSession();
   const cookies = await biliPartition.cookies.get({});
   for (const cookie of cookies) {
-    if (!String(cookie.domain || '').includes('bilibili.com')) continue;
+    if (!isBilibiliCookieDomain(cookie.domain)) continue;
     const host = String(cookie.domain).replace(/^\./, '');
     const protocol = cookie.secure ? 'https' : 'http';
     await biliPartition.cookies.remove(`${protocol}://${host}${cookie.path || '/'}`, cookie.name);
@@ -318,30 +331,67 @@ ipcMain.handle('bili:prepare-account-switch', async () => {
   }
   currentUser = null;
   sendRuntime();
-  return { ok: true, removedCookies: cookies.filter((cookie) => String(cookie.domain || '').includes('bilibili.com')).length };
+  return { ok: true, removedCookies: cookies.filter((cookie) => isBilibiliCookieDomain(cookie.domain)).length };
 });
 
 ipcMain.handle('bili:list-folders', async () => {
   assertBackendReady();
-  if (!currentUser?.isLogin) currentUser = await bili.nav();
+  if (!currentUser?.isLogin || !currentUser.id || !currentUser.cookieFile) await refreshBilibiliUser();
   if (!currentUser?.isLogin) throw new Error('Not logged in.');
-  const folders = await bili.listFolders(currentUser.mid);
-  await collectionSyncService.reconcileFolders(folders, currentUser);
+  const generation = biliAccountGeneration;
+  const user = { ...currentUser };
+  const folders = await bili.listFolders(user.mid);
+  if (generation !== biliAccountGeneration || String(currentUser?.mid || '') !== String(user.mid || '')) {
+    throw new Error('Bilibili account changed while favorites were loading. Retry for the current account.');
+  }
+  await collectionSyncService.reconcileFolders(folders, user);
   return folders;
 });
+
+function refreshBilibiliUser() {
+  const generation = biliAccountGeneration;
+  if (biliRefreshPromise && biliRefreshGeneration === generation) return biliRefreshPromise;
+  biliRefreshGeneration = generation;
+  const operation = (async () => {
+    const previousLogin = Boolean(currentUser?.isLogin);
+    const info = await bili.nav();
+    if (generation !== biliAccountGeneration) return currentUser;
+    if (!info.isLogin) {
+      currentUser = info;
+    } else {
+      const previousUser = store.get('users', String(info.mid)) || {};
+      const cookieFile = await bili.exportCookies(info.name || String(info.mid));
+      if (generation !== biliAccountGeneration) return currentUser;
+      let faceDataUrl = String(previousUser.faceDataUrl || '');
+      try { faceDataUrl = await bili.fetchImageDataUrl(info.face); } catch (error) { console.warn(`[bili-avatar] ${error.message || String(error)}`); }
+      if (generation !== biliAccountGeneration) return currentUser;
+      const user = store.upsertUser({ id: String(info.mid), mid: String(info.mid), name: info.name, face: info.face, faceDataUrl });
+      currentUser = { ...info, id: user.id, cookieFile, faceDataUrl };
+    }
+    if (info.isLogin || previousLogin !== Boolean(info.isLogin)) sendRuntime();
+    return currentUser;
+  })().finally(() => {
+    if (biliRefreshPromise === operation) {
+      biliRefreshPromise = null;
+      biliRefreshGeneration = -1;
+    }
+  });
+  biliRefreshPromise = operation;
+  return operation;
+}
 
 ipcMain.handle('store:snapshot', async () => {
   if (!store) return { users: [], collections: [], tasks: [], tools: [], toolRuns: [], workspaces: [], videoCache: { collections: [], videos: [], jobs: [] }, analytics: { collections: {}, tools: [] }, activities: [] };
   return {
     users: store.list('users'),
-    collections: store.listCollections(),
-    tasks: buildTaskSnapshot(store),
+    collections: store.listCollections().map(rendererCollection),
+    tasks: buildTaskSnapshot(store).map(rendererTask),
     tools: store.listTools(),
     toolRuns: store.listToolRuns(),
     workspaces: store.listWorkspaces(),
     workers: store.listWorkers(),
     internalAgentSessions: internalAgentManager?.state().sessions || [],
-    activeCollection: store.getActiveCollection(),
+    activeCollection: rendererCollection(store.getActiveCollection()),
     videoCache: videoCacheManager?.state() || { collections: [], videos: [], jobs: [] },
     analytics: buildAnalytics(store),
     scheduler: toolRunner?.getState() || null,
@@ -355,6 +405,7 @@ ipcMain.handle('collections:set-active', async (_event, collectionId) => {
   assertBackendReady();
   const current = store.getCollectionById(collectionId);
   if (!current) throw new Error(`Collection not found: ${collectionId}`);
+  if (current.collectionKind === 'document-archive') throw new Error('该收藏夹仅保留已完成文档，不能激活为外部 Agent 视频总结任务范围。');
   const reason = collectionBlockReason({ ...current, externalDispatchPaused: false }, { external: true });
   if (reason) throw new Error(reason);
   const collection = { ...current, externalDispatchPaused: false, externalActivatedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
@@ -368,7 +419,7 @@ ipcMain.handle('tasks:set-enabled', async (_event, payload) => {
   assertBackendReady();
   const tasks = store.updateTasksEnabled(payload?.taskIds || [], Boolean(payload?.enabled));
   publishEvent({ type: 'tasks-enabled-changed', taskIds: tasks.map((task) => task.id), enabled: Boolean(payload?.enabled) });
-  return { updated: tasks.length, tasks };
+  return { updated: tasks.length, taskIds: tasks.map((task) => task.id) };
 });
 
 ipcMain.handle('video-cache:state', async () => videoCacheManager?.state() || { collections: [], videos: [], jobs: [] });
@@ -453,6 +504,7 @@ ipcMain.handle('workspaces:add', async (_event, payload = {}) => {
 ipcMain.handle('workspaces:set-default', async (_event, id) => {
   assertBackendReady();
   const workspace = store.setDefaultWorkspace(id);
+  ragAssistant?.setWorkspaceRoot(workspace.root);
   publishEvent({ type: 'workspace-default-changed', workspaceId: workspace.id, root: workspace.root });
   sendRuntime();
   return workspace;
@@ -497,12 +549,6 @@ ipcMain.handle('credentials:save', async (_event, payload) => {
   const selectedRecord = selectedId ? store.get('credentials', selectedId) : null;
   const existingRecord = store.get('credentials', normalizedId);
   const id = normalizedId;
-  if (selectedRecord && selectedId !== id) {
-    store.db.run('DELETE FROM kv WHERE scope = ? AND id = ?', ['credentials', selectedId]);
-  }
-  if (existingRecord && selectedRecord && existingRecord.id !== selectedRecord.id) {
-    store.db.run('DELETE FROM kv WHERE scope = ? AND id = ?', ['credentials', existingRecord.id]);
-  }
   const encryptedPassword = encryptSecret(password);
   const record = {
     id,
@@ -511,8 +557,13 @@ ipcMain.handle('credentials:save', async (_event, payload) => {
     encryptedPassword,
     updatedAt: new Date().toISOString()
   };
-  store.set('credentials', id, record);
-  store.commit();
+  store.transaction(() => {
+    if (selectedRecord && selectedId !== id) store.delete('credentials', selectedId);
+    if (existingRecord && selectedRecord && existingRecord.id !== selectedRecord.id) {
+      store.delete('credentials', existingRecord.id);
+    }
+    store.set('credentials', id, record);
+  });
   return { id, username: record.username, note: record.note, updatedAt: record.updatedAt };
 });
 
@@ -531,8 +582,7 @@ ipcMain.handle('credentials:get', async (_event, id) => {
 ipcMain.handle('credentials:delete', async (_event, id) => {
   assertBackendReady();
   if (!id) return { ok: true };
-  store.db.run('DELETE FROM kv WHERE scope = ? AND id = ?', ['credentials', String(id)]);
-  store.commit();
+  store.transaction(() => store.delete('credentials', String(id)));
   return { ok: true };
 });
 
@@ -766,7 +816,15 @@ function encryptSecret(value) {
 function decryptSecret(secret) {
   if (!secret) return '';
   if (secret.mode === 'safeStorage') return safeStorage.decryptString(Buffer.from(secret.value, 'base64'));
-  return secret.value || '';
+  throw new Error('检测到旧版未加密密钥记录。为保护账户安全，请删除该记录并重新输入。');
+}
+
+async function openExternalUrl(value) {
+  const url = new URL(String(value || ''));
+  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Only HTTP(S) links can be opened externally.');
+  if (url.username || url.password) throw new Error('External links cannot contain embedded account credentials.');
+  await shell.openExternal(url.toString());
+  return url.toString();
 }
 
 function requestRagApproval(request) {
@@ -782,14 +840,28 @@ function requestRagApproval(request) {
 }
 
 async function browseHidden(value, options = {}) {
-  const url = new URL(String(value || ''));
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Hidden browser only supports HTTP(S).');
+  const partition = `rag-hidden-browser-${crypto.randomUUID()}`;
+  const isolatedSession = session.fromPartition(partition, { cache: false });
+  const resolve = async (hostname) => {
+    const result = await isolatedSession.resolveHost(hostname);
+    return (result.endpoints || []).map((item) => item.address);
+  };
+  const policy = {
+    allowPrivate: Boolean(options.allowPrivate),
+    allowedPrivateHosts: Array.isArray(options.allowedPrivateHosts) ? options.allowedPrivateHosts : undefined,
+    resolve
+  };
+  const url = await assertHiddenBrowserUrl(value, policy);
+  installHiddenBrowserRequestGuard(isolatedSession.webRequest, policy);
+  isolatedSession.setPermissionCheckHandler(() => false);
+  isolatedSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+  isolatedSession.on('will-download', (event) => event.preventDefault());
   const browser = new BrowserWindow({
     show: false,
     width: 1180,
     height: 820,
     webPreferences: {
-      partition: 'persist:rag-hidden-browser',
+      partition,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -797,9 +869,10 @@ async function browseHidden(value, options = {}) {
     }
   });
   browser.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  const blockPrivateNavigation = (event) => {
+  const blockPrivateNavigation = (event, details) => {
     try {
-      const candidate = new URL(event.url || '');
+      const target = typeof details === 'string' ? details : details?.url;
+      const candidate = new URL(target || event?.url || '');
       if (!options.allowPrivate && isPrivateNetworkHost(candidate.hostname)) event.preventDefault();
     } catch {
       event.preventDefault();
@@ -807,10 +880,13 @@ async function browseHidden(value, options = {}) {
   };
   browser.webContents.on('will-navigate', blockPrivateNavigation);
   browser.webContents.on('will-redirect', blockPrivateNavigation);
+  let timeout = null;
   try {
     await Promise.race([
       browser.loadURL(url.toString()),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Hidden browser timed out.')), 25000))
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('Hidden browser timed out.')), 25000);
+      })
     ]);
     const result = await browser.webContents.executeJavaScript(`(() => {
       const title = document.title || '';
@@ -820,6 +896,7 @@ async function browseHidden(value, options = {}) {
     })()`, true);
     return JSON.stringify(result, null, 2);
   } finally {
+    if (timeout) clearTimeout(timeout);
     if (!browser.isDestroyed()) browser.destroy();
   }
 }
@@ -844,7 +921,7 @@ function sendRuntime() {
     apiUrl: apiServer?.url(),
     workspaceRoot: store?.getDefaultWorkspace()?.root || WORKSPACE_ROOT,
     defaultWorkspace: store?.getDefaultWorkspace() || null,
-    currentUser,
+    currentUser: publicCurrentUser(currentUser),
     toolHealth,
     scheduler: toolRunner?.getState() || null,
     filenameMetadata: store?.getFilenameMetadata() || null,
@@ -857,24 +934,52 @@ function sendRuntime() {
 
 function publishEvent(event) {
   const record = { createdAt: new Date().toISOString(), ...event };
-  if (store && event.type !== 'collection-sync-progress') store.recordActivity(record);
+  if (store && !VOLATILE_ACTIVITY_TYPES.has(event.type)) {
+    const { cacheState, ...activity } = record;
+    store.recordActivity(activity);
+  }
   mainWindow?.webContents.send('app:event', record);
 }
 
 function buildTaskSnapshot(activeStore) {
-  return activeStore.listTasks().map((task) => task.status === 'done'
+  const tasks = activeStore.listTasks();
+  const liveIds = new Set(tasks.map((task) => task.id));
+  for (const id of taskDisplayCoverCache.keys()) {
+    if (!liveIds.has(id)) taskDisplayCoverCache.delete(id);
+  }
+  return tasks.map((task) => task.status === 'done'
     ? { ...task, displayCover: resolveTaskDisplayCover(task) }
     : task);
 }
 
+function publicCurrentUser(user) {
+  if (!user) return null;
+  const { cookieFile, ...safe } = user;
+  return safe;
+}
+
+function rendererCollection(collection) {
+  if (!collection) return null;
+  const { cookieFile, ...safe } = collection;
+  return safe;
+}
+
+function rendererTask(task) {
+  if (!task) return null;
+  const { cookieFile, workId, cover, ...safe } = task;
+  let publicCover = '';
+  try { publicCover = assertBilibiliImageUrl(normalizeBilibiliAssetUrl(cover || '')); } catch {}
+  return { ...safe, cover: publicCover };
+}
+
 function resolveTaskDisplayCover(task) {
+  const cacheKey = [task.updatedAt, task.artifactDir, task.outputMarkdown, task.coverFile, task.cover].map((item) => String(item || '')).join('|');
+  const cached = taskDisplayCoverCache.get(task.id);
+  if (cached?.key === cacheKey && (!cached.localFile || fs.existsSync(cached.localFile))) return cached.value;
   const artifactDir = path.resolve(task.artifactDir || path.dirname(task.outputMarkdown || '.'));
   let info = {};
   try { info = JSON.parse(fs.readFileSync(path.join(artifactDir, 'info.json'), 'utf8')); } catch {}
-  const localCandidates = [task.coverFile, info.coverFile].filter(Boolean).map((value) => {
-    const text = String(value);
-    return path.isAbsolute(text) ? text : path.join(artifactDir, text);
-  });
+  const localCandidates = [task.coverFile, info.coverFile].filter(Boolean).map((value) => path.isAbsolute(String(value)) ? String(value) : path.join(artifactDir, String(value)));
   try {
     for (const name of fs.readdirSync(artifactDir)) {
       if (/^(cover|thumbnail|poster)\.(jpe?g|png|webp|avif)$/i.test(name)) localCandidates.push(path.join(artifactDir, name));
@@ -885,14 +990,17 @@ function resolveTaskDisplayCover(task) {
       if (frame) localCandidates.push(path.join(framesDir, frame));
     }
   } catch {}
-  const local = localCandidates.find((file) => {
-    try { return fs.statSync(file).isFile(); } catch { return false; }
-  });
-  if (local) return pathToFileURL(local).href;
-  const remote = String(task.cover || info.pic || info.thumbnail || '');
-  if (remote.startsWith('//')) return `https:${remote}`;
-  if (remote.startsWith('http://')) return `https://${remote.slice('http://'.length)}`;
-  return /^https:\/\//i.test(remote) ? remote : '';
+  const local = localCandidates.map((file) => safeLocalDisplayAsset(artifactDir, file)).find(Boolean);
+  if (local) {
+    const value = pathToFileURL(local).href;
+    taskDisplayCoverCache.set(task.id, { key: cacheKey, value, localFile: local });
+    return value;
+  }
+  const remote = normalizeBilibiliAssetUrl(task.cover || info.pic || info.thumbnail || '');
+  let value = '';
+  try { value = assertBilibiliImageUrl(remote); } catch {}
+  taskDisplayCoverCache.set(task.id, { key: cacheKey, value, localFile: '' });
+  return value;
 }
 
 function publishInternalAgentEvent(event) {
@@ -901,6 +1009,16 @@ function publishInternalAgentEvent(event) {
     store.recordActivity({ ...record, type: `internal-agent-${event.type}` });
   }
   mainWindow?.webContents.send('internal-agent:event', record);
+  if (['task-completed', 'task-attempt-aborted', 'video-unavailable'].includes(event.type)) {
+    mainWindow?.webContents.send('app:event', {
+      createdAt: record.createdAt,
+      type: 'snapshot-invalidated',
+      reason: event.type,
+      taskId: event.taskId || '',
+      collectionId: event.collectionId || '',
+      internalAgent: true
+    });
+  }
 }
 
 function publishDependencyEvent(event) {
@@ -926,27 +1044,76 @@ function exportMarkdownTasks(directory, taskIds, filenameMetadata) {
     const base = videoArtifactName(task, collection, filenameMetadata);
     const filename = uniqueMarkdownName(base, targetRoot, usedNames);
     const targetFile = path.join(targetRoot, filename);
-    fs.copyFileSync(task.outputMarkdown, targetFile);
-    exported.push({
-      taskId: task.id,
-      bvid: task.bvid,
-      title: task.title,
-      owner: task.owner,
-      userName: collection.userName || '',
-      collectionName: collection.name || '',
-      publishedAt: task.publishedAt || '',
-      favoriteAddedAt: task.favoriteAddedAt || '',
-      tags: task.tags || [],
-      videoUrl: task.url || '',
-      sourceMarkdown: task.outputMarkdown,
-      exportedFile: targetFile,
-      filename
-    });
+    try {
+      const copied = copyMarkdownForExport(task.outputMarkdown, targetFile, targetRoot);
+      exported.push({
+        taskId: task.id,
+        bvid: task.bvid,
+        title: task.title,
+        owner: task.owner,
+        userName: collection.userName || '',
+        collectionName: collection.name || '',
+        publishedAt: task.publishedAt || '',
+        favoriteAddedAt: task.favoriteAddedAt || '',
+        tags: task.tags || [],
+        videoUrl: task.url || '',
+        sourceMarkdown: task.outputMarkdown,
+        exportedFile: targetFile,
+        filename,
+        assets: copied.assets
+      });
+    } catch (error) {
+      skipped.push({ taskId, reason: error.message || String(error) });
+    }
   }
 
-  const manifestFile = path.join(targetRoot, `star-owner-rag-manifest-${timestampForFile()}.json`);
+  const manifestFile = uniqueExportManifest(targetRoot);
   fs.writeFileSync(manifestFile, `${JSON.stringify({ exportedAt: new Date().toISOString(), filenameMetadata, exported, skipped }, null, 2)}\n`, 'utf8');
   return { directory: targetRoot, manifestFile, exported, skipped };
+}
+
+function copyMarkdownForExport(sourceFile, targetFile, targetRoot) {
+  const sourceRoot = path.dirname(sourceFile);
+  const source = fs.readFileSync(sourceFile, 'utf8');
+  const assetFolderName = path.basename(targetFile, path.extname(targetFile));
+  const assetRoot = path.join(targetRoot, '.star-owner-assets', assetFolderName);
+  const used = new Set();
+  const assets = [];
+  const rewritten = source.replace(/(!\[[^\]]*]\()([^)]+)(\))/g, (match, opening, rawReference, closing) => {
+    const reference = String(rawReference || '').trim().replace(/^<|>$/g, '');
+    if (!reference || /^[a-z][a-z0-9+.-]*:/i.test(reference) || reference.startsWith('#')) return match;
+    let decoded;
+    try { decoded = decodeURIComponent(reference.split('#')[0].split('?')[0]); } catch { return match; }
+    const local = safeLocalDisplayAsset(sourceRoot, path.resolve(sourceRoot, decoded));
+    if (!local) return match;
+    fs.mkdirSync(assetRoot, { recursive: true });
+    const targetName = uniqueAssetName(path.basename(local), assetRoot, used);
+    const target = path.join(assetRoot, targetName);
+    fs.copyFileSync(local, target);
+    const relative = path.relative(targetRoot, target).split(path.sep).join('/');
+    assets.push({ source: local, exported: target, relative });
+    return `${opening}<${relative}>${closing}`;
+  });
+  fs.writeFileSync(targetFile, rewritten, 'utf8');
+  return { assets };
+}
+
+function uniqueAssetName(name, directory, used) {
+  const extension = path.extname(name);
+  const base = path.basename(name, extension);
+  let index = 1;
+  let candidate = name;
+  while (used.has(candidate.toLowerCase()) || fs.existsSync(path.join(directory, candidate))) candidate = `${base}-${++index}${extension}`;
+  used.add(candidate.toLowerCase());
+  return candidate;
+}
+
+function uniqueExportManifest(directory) {
+  const stem = `star-owner-rag-manifest-${timestampForFile()}`;
+  let candidate = path.join(directory, `${stem}.json`);
+  let index = 2;
+  while (fs.existsSync(candidate)) candidate = path.join(directory, `${stem}-${index++}.json`);
+  return candidate;
 }
 
 function uniqueMarkdownName(base, directory, usedNames) {
@@ -966,12 +1133,22 @@ function renderMarkdownPreview(markdown, sourceFile) {
   renderer.renderer.rules.image = (tokens, index, options, env, self) => {
     const token = tokens[index];
     const src = token.attrGet('src') || '';
-    if (src && !/^[a-z][a-z0-9+.-]*:/i.test(src) && !src.startsWith('#')) {
+    if (/^https?:/i.test(src)) {
+      try {
+        const remote = new URL(src);
+        if (remote.protocol !== 'https:' || remote.username || remote.password || !isTrustedBilibiliImageHost(remote.hostname)) throw new Error('unsupported remote image host');
+        token.attrSet('src', remote.toString());
+      } catch {
+        token.attrSet('src', '');
+        token.attrSet('alt', `${token.attrGet('alt') || '图片'}（远程来源不受支持）`);
+      }
+    } else if (src && !/^[a-z][a-z0-9+.-]*:/i.test(src) && !src.startsWith('#')) {
       try {
         const decoded = decodeURIComponent(src.split('#')[0].split('?')[0]);
         const resolved = path.resolve(path.dirname(sourceFile), decoded);
         const root = path.resolve(path.dirname(sourceFile));
-        if (resolved === root || resolved.startsWith(`${root}${path.sep}`)) token.attrSet('src', pathToFileURL(resolved).href);
+        const local = safeLocalDisplayAsset(root, resolved);
+        if (local) token.attrSet('src', pathToFileURL(local).href);
       } catch {
         // Keep the original source so the preview shows a normal broken-image state.
       }
@@ -986,6 +1163,11 @@ function renderMarkdownPreview(markdown, sourceFile) {
   const withoutFrontMatter = String(markdown || '').replace(/^---\s*\r?\n[\s\S]*?\r?\n---\s*\r?\n/, '');
   const content = promoteMindMap(withoutFrontMatter);
   return renderer.render(content);
+}
+
+function isTrustedBilibiliImageHost(value) {
+  const host = String(value || '').toLowerCase().replace(/\.$/, '');
+  return ['hdslb.com', 'biliimg.com', 'bilibili.com'].some((domain) => host === domain || host.endsWith(`.${domain}`));
 }
 
 function renderRagMarkdown(markdown, sessionId) {
@@ -1004,8 +1186,39 @@ function renderRagMarkdown(markdown, sessionId) {
         token.attrSet('src', '');
         token.attrSet('alt', `${token.attrGet('alt') || '知识库图片'}（不可用）`);
       }
+    } else if (/^https?:\/\//i.test(src)) {
+      try {
+        token.attrSet('src', assertBilibiliImageUrl(src));
+      } catch {
+        token.attrSet('src', '');
+        token.attrSet('alt', `${token.attrGet('alt') || '图片'}（远程来源不受支持）`);
+      }
+    } else if (/^data:/i.test(src)) {
+      const supported = /^data:image\/(?:avif|gif|jpe?g|png|webp);base64,[a-z0-9+/=\s]+$/i.test(src)
+        && src.length <= 20 * 1024 * 1024;
+      if (!supported) {
+        token.attrSet('src', '');
+        token.attrSet('alt', `${token.attrGet('alt') || '图片'}（Data URL 不受支持或过大）`);
+      }
+    } else if (src) {
+      token.attrSet('src', '');
+      token.attrSet('alt', `${token.attrGet('alt') || '图片'}（来源不受支持）`);
     }
     return defaultImage(tokens, index, options, env, self);
   };
   return renderer.render(String(markdown || ''));
+}
+
+function safeLocalDisplayAsset(root, candidate) {
+  try {
+    const resolvedRoot = fs.realpathSync(path.resolve(root));
+    const resolvedFile = fs.realpathSync(path.resolve(candidate));
+    const rootForCompare = process.platform === 'win32' ? resolvedRoot.toLowerCase() : resolvedRoot;
+    const fileForCompare = process.platform === 'win32' ? resolvedFile.toLowerCase() : resolvedFile;
+    if (fileForCompare !== rootForCompare && !fileForCompare.startsWith(`${rootForCompare}${path.sep}`)) return '';
+    const stat = fs.lstatSync(resolvedFile);
+    return stat.isFile() && !stat.isSymbolicLink() ? resolvedFile : '';
+  } catch {
+    return '';
+  }
 }

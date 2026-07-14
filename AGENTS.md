@@ -12,7 +12,7 @@ Star Owner (星藏家) turns a user's Bilibili favorite folders into a managed q
 4. External HTTP API Agents work only on the collection activated in the desktop Task Overview page and claim one task at a time. Internal application-managed Agent sessions instead use the collection selected when that session was created; the external active target does not redirect them.
 5. Create files only inside the returned `artifactDir`.
 6. Invoke media, metadata, subtitle, ASR, comment, and cleanup tools through the application API. Do not run internal scripts directly.
-7. Always run ASR, compare it with usable station subtitles, and use frames/multimodal reasoning when needed.
+7. Always run ASR and use its sentence-level timeline. Prefer `asr/transcript.srt`; `asr/asr-result.json` exposes the same `segments[].start/end`, and `asr/asr-transcript.txt` is also timestamped. Build Bilibili links from those real times, never from guessed plain-text position. Compare the ASR with every usable station SRT and use frames/multimodal reasoning when needed.
 8. Write the opening sections in this exact order: `小结`, `思维导图`, `目录`. The mind map must be a valid Mermaid fenced code block.
 9. Include comprehensive body content, Bilibili timestamp links, selected keyframes, subtitle comparison, up to three hot-comment analyses, limitations, and processing provenance.
 10. Clean temporary video/audio through the application tool API before submission. For a task with `cachedVideoId`/`reuseCachedMedia`, still call cleanup; the application preserves the registered merged video automatically.
@@ -42,6 +42,7 @@ The canonical Markdown contract is `templates/video-summary-template.md` and is 
 
 - Treat the RAG assistant as an analysis client for accepted Markdown, not as a replacement for the external Worker submission protocol.
 - Application-managed video Agents are a separate feature from RAG. They use the same Worker store, ToolRunner, leases, validation, cleanup, artifact finalization, and analytics as external Workers, but their orchestration is owned by `src/core/internal-agent-manager.js`.
+- Internal task completion, rollback, and unavailable-video transitions must invalidate the renderer's shared task snapshot as well as update the AI session view. Snapshot invalidation that arrives during an in-flight read must schedule a second read; otherwise Document Library can remain stale until restart.
 - Internal Agent stop is an immediate, idempotent rollback: one stop request aborts the provider/tool work, removes attempt files, invalidates the current `workId`, returns an ordinary task to `pending`, and leaves the persistent Worker paused until the user starts it again.
 - Single-task mode creates an ordinary task under `内置用户` and a selected internal collection. Its only accepted output is the canonical default-Workspace artifact under that collection; there is no arbitrary external-destination copy.
 - Application-managed queue Agents retain one Worker ID but start a fresh model request context for every claimed video. Each video still gets a new `workId`; never carry a previous video's messages into a new task. Ordinary videos use their complete current-task material directly. Only when the estimated request reaches 82% of the configured model window, or the provider reports a context-limit error, may the manager use the same provider/model in independent requests to read every source chunk and build a hierarchical evidence pack. This semantic fallback must not character-truncate the original material, must preserve timeline/fact/step/parameter/code/constraint/conflict/uncertainty evidence, and must keep the original Worker ID and current `workId`.
@@ -55,7 +56,7 @@ The canonical Markdown contract is `templates/video-summary-template.md` and is 
 
 - Dependency archives are GitHub Release assets, not Git-tracked runtime files.
 - Archive entries must remain under `runtime/`; extraction rejects absolute paths and `..` traversal.
-- Required dependency assets use `Star-Owner-v<version>-runtime-win-x64.zip`, `Star-Owner-v<version>-model-small.zip`, and `Star-Owner-v<version>-model-medium.zip`, preferably with matching `.sha256` assets. A code-only Release may reuse unchanged assets from one of the ten most recent Releases; keep the filename pattern and resolver regression test intact.
+- Required dependency assets use `Star-Owner-v<version>-runtime-win-x64.zip`, `Star-Owner-v<version>-model-small.zip`, and `Star-Owner-v<version>-model-medium.zip`; every archive must have a matching `.sha256` asset. A code-only Release may reuse unchanged assets from one of the ten most recent Releases; keep the filename pattern and resolver regression test intact.
 - Do not change a dependency probe or asset layout without updating `dependency-manager.js`, the release builder, README, DESIGN, and DEPLOYMENT together.
 - Never expose decrypted provider API keys to preload or renderer code.
 - Keep provider requests OpenAI-compatible and capability-gated; unsupported multimodal, reasoning, image, tool, compression, or subagent behavior must degrade honestly.
@@ -77,8 +78,11 @@ npm run test:security
 npm run test:image-clipboard
 npm run test:persistence
 npm run test:collection-sync
+npm run test:bili-client
+npm run test:asr-format
+npm run test:analytics
 npm run test:asr-service
 npm audit --audit-level=high
 ```
 
-The ASR service test loads the GPU model; stop another GPU ASR instance first on memory-constrained systems.
+The ASR service test is a release gate and loads both GPU models; stop another GPU ASR instance first on memory-constrained systems.

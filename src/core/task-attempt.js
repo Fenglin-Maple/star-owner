@@ -31,7 +31,18 @@ function abortTaskAttempt({ store, toolRunner = null, taskId, workerId = '', rea
     }
   }
 
-  const cleanup = cleanupAttemptFiles(store, task);
+  const cleanupTask = cleanupTaskSnapshot(task);
+  let cleanup;
+  try {
+    cleanup = cleanupAttemptFiles(store, task);
+  } catch (error) {
+    cleanup = {
+      mode: 'cleanup-failed',
+      error: String(error?.message || error),
+      deleted: [],
+      preserved: []
+    };
+  }
   const cache = task.cachedVideoId ? store.getVideoCache(task.cachedVideoId) : null;
   const endedWorkId = task.workId || '';
   const now = new Date().toISOString();
@@ -58,6 +69,12 @@ function abortTaskAttempt({ store, toolRunner = null, taskId, workerId = '', rea
     abortedAt: now,
     updatedAt: now
   });
+  if (cleanup.mode === 'cleanup-failed') {
+    queueAttemptCleanup(store, cleanupTask, cleanup.error, source);
+    toolRunner?.scheduleCleanupRecovery?.();
+  } else {
+    store.delete('attemptCleanupQueue', task.id);
+  }
   store.upsertTask(task);
   store.commit();
   store.recordTaskEvent(task.id, 'attempt-aborted', {
@@ -70,6 +87,63 @@ function abortTaskAttempt({ store, toolRunner = null, taskId, workerId = '', rea
     cleanup
   });
   return { task, endedWorkId, cancelledRuns, cleanup, alreadyAborted: false };
+}
+
+function queueAttemptCleanup(store, task, error = '', source = 'unknown') {
+  const snapshot = cleanupTaskSnapshot(task);
+  if (!snapshot.id || !snapshot.artifactDir) return null;
+  const current = store.get('attemptCleanupQueue', snapshot.id) || {};
+  const record = {
+    ...current,
+    id: snapshot.id,
+    taskId: snapshot.id,
+    collectionId: snapshot.collectionId,
+    cleanupTask: snapshot,
+    source: String(source || current.source || 'unknown'),
+    error: String(error || current.error || ''),
+    attempts: Number(current.attempts || 0),
+    createdAt: current.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  store.set('attemptCleanupQueue', record.id, record);
+  return record;
+}
+
+function recoverPendingAttemptCleanups(store) {
+  const results = [];
+  for (const record of store.list('attemptCleanupQueue')) {
+    try {
+      const cleanup = cleanupAttemptFiles(store, record.cleanupTask || {});
+      store.delete('attemptCleanupQueue', record.id);
+      results.push({ id: record.id, ok: true, cleanup });
+    } catch (error) {
+      store.set('attemptCleanupQueue', record.id, {
+        ...record,
+        error: error.message || String(error),
+        attempts: Number(record.attempts || 0) + 1,
+        updatedAt: new Date().toISOString()
+      });
+      results.push({ id: record.id, ok: false, error: error.message || String(error) });
+    }
+  }
+  if (results.length) store.commit();
+  return results;
+}
+
+function cleanupTaskSnapshot(task = {}) {
+  return {
+    id: task.id || '',
+    collectionId: task.collectionId || '',
+    bvid: task.bvid || '',
+    artifactDir: task.artifactDir || '',
+    allowedRoot: task.allowedRoot || '',
+    workspaceRoot: task.workspaceRoot || '',
+    workspaceId: task.workspaceId || '',
+    cachedVideoId: task.cachedVideoId || '',
+    cachedVideoFile: task.cachedVideoFile || '',
+    coverFile: task.coverFile || '',
+    metadataFile: task.metadataFile || ''
+  };
 }
 
 function createWorkId() {
@@ -134,4 +208,4 @@ function removePath(target) {
   fs.rmSync(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
 }
 
-module.exports = { abortTaskAttempt, cleanupAttemptFiles, createWorkId };
+module.exports = { abortTaskAttempt, cleanupAttemptFiles, cleanupTaskSnapshot, createWorkId, queueAttemptCleanup, recoverPendingAttemptCleanups };

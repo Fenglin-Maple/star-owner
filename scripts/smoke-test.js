@@ -6,7 +6,7 @@ const { Store } = require('../src/core/store');
 const { ToolRunner } = require('../src/core/tool-runner');
 const { buildAnalytics } = require('../src/core/analytics');
 const { ApiServer } = require('../src/core/api-server');
-const { finalizeSubmissionArtifacts } = require('../src/core/submission-artifacts');
+const { applySubmissionArtifactPlan, finalizeSubmissionArtifacts, recoverPendingSubmissionFinalizations, stageSubmissionFinalization } = require('../src/core/submission-artifacts');
 const { videoArtifactName } = require('../src/core/workspace');
 const { assessSubtitle } = require('../tools/video-tool');
 const { validateSubmission } = require('../src/core/validation');
@@ -50,6 +50,14 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   if (missingDependencies.ready || !missingDependencies.needsPrompt || !missingDependencies.missingRequired.includes('runtime-base') || !missingDependencies.missingRequired.includes('model-small') || !missingDependencies.missingRequired.includes('model-medium')) throw new Error('dependency availability detection failed');
   dependencyManager.acknowledgePrompt(false);
   if (dependencyManager.state().needsPrompt) throw new Error('dependency first-run acknowledgement failed');
+  const originalDownloadNow = dependencyManager.downloadNow.bind(dependencyManager);
+  let duplicateDownloadCalls = 0;
+  dependencyManager.downloadNow = async (id) => { duplicateDownloadCalls += 1; await new Promise((resolve) => setTimeout(resolve, 20)); return { id }; };
+  const duplicateDownloads = [dependencyManager.download('model-small'), dependencyManager.download('model-small')];
+  if (duplicateDownloads[0] !== duplicateDownloads[1]) throw new Error('duplicate dependency requests did not share one pending operation');
+  await Promise.all(duplicateDownloads);
+  if (duplicateDownloadCalls !== 1) throw new Error('duplicate dependency request downloaded the same package more than once');
+  dependencyManager.downloadNow = originalDownloadNow;
   const originalFetch = global.fetch;
   const dependencyRequests = [];
   global.fetch = async (url) => {
@@ -82,6 +90,29 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   if (!rejectedCoreAsRuntime) throw new Error('ordinary dependency extraction accepted non-runtime core paths');
   await dependencyManager.extractArchive(legacyArchive, runtimeDefinition, true);
   if (!fs.existsSync(path.join(dependencyRoot, runtimeDefinition.probes[0])) || !fs.existsSync(path.join(dependencyRoot, runtimeDefinition.probes[1]))) throw new Error('legacy core runtime fallback extraction failed');
+  const interruptedTarget = path.join(dependencyRoot, 'runtime', 'models', 'small');
+  const interruptedBackup = path.join(dependencyRoot, 'runtime', '.install-backup-model-small-test', 'runtime', 'models', 'small');
+  const interruptedStaging = path.join(dependencyRoot, 'runtime', '.install-staging-model-small-test');
+  fs.mkdirSync(interruptedTarget, { recursive: true });
+  fs.mkdirSync(interruptedBackup, { recursive: true });
+  fs.mkdirSync(interruptedStaging, { recursive: true });
+  fs.writeFileSync(path.join(interruptedTarget, 'model.bin'), 'incomplete-new-model');
+  fs.writeFileSync(path.join(interruptedBackup, 'model.bin'), 'known-good-old-model');
+  fs.writeFileSync(path.join(dependencyRoot, 'runtime', '.install-transaction.json'), JSON.stringify({
+    id: 'model-small',
+    stagingRoot: interruptedStaging,
+    backupRoot: path.join(dependencyRoot, 'runtime', '.install-backup-model-small-test'),
+    entries: [{ target: interruptedTarget, backup: interruptedBackup, hadOriginal: true }]
+  }));
+  new DependencyManager({ store, projectRoot: dependencyRoot, version: '9.9.9' });
+  if (fs.readFileSync(path.join(interruptedTarget, 'model.bin'), 'utf8') !== 'known-good-old-model' || fs.existsSync(path.join(dependencyRoot, 'runtime', '.install-transaction.json'))) {
+    throw new Error('interrupted dependency installation did not roll back to the previous runtime');
+  }
+  const corruptJournal = path.join(dependencyRoot, 'runtime', '.install-transaction.json');
+  fs.writeFileSync(corruptJournal, '{not valid json', 'utf8');
+  const recoveredFromCorruption = new DependencyManager({ store, projectRoot: dependencyRoot, version: '9.9.9' });
+  if (!recoveredFromCorruption.state().recovery?.warning || fs.existsSync(corruptJournal)) throw new Error('corrupt dependency recovery journal still blocked startup');
+  if (!listCorruptJournals(dependencyRoot).length) throw new Error('corrupt dependency recovery journal was not quarantined');
   if (fs.existsSync(path.join(dependencyRoot, 'src', 'must-not-extract.txt'))) throw new Error('legacy core fallback extracted application files');
   const defaultFilenameMetadata = store.getFilenameMetadata();
   if (Object.values(defaultFilenameMetadata).some((enabled) => enabled !== true)) throw new Error('filename metadata defaults failed');
@@ -110,9 +141,9 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   store.setDefaultWorkspace(extraWorkspace.id);
   if (store.getDefaultWorkspace()?.id !== extraWorkspace.id) throw new Error('workspace selection failed');
 
-  store.upsertCollection({ id: 'c2', name: 'Claim smoke', userId: 'u1', userName: 'smoke-user' });
+  store.upsertCollection({ id: 'c2', name: 'Claim smoke', userId: 'u1', userName: 'smoke-user', cookieFile: path.join(WORKSPACE_ROOT, 'private-cookie.txt') });
   store.upsertTask({ id: 'c2:BVDISABLED', collectionId: 'c2', bvid: 'BVDISABLED', title: 'Disabled', status: 'pending', enabled: false, favoriteAddedAt: '2999-01-01T00:00:00.000Z' });
-  store.upsertTask({ id: 'c2:BVENABLED', collectionId: 'c2', bvid: 'BVENABLED', title: 'Enabled', status: 'pending', enabled: true, favoriteAddedAt: '2025-01-01T00:00:00.000Z' });
+  store.upsertTask({ id: 'c2:BVENABLED', collectionId: 'c2', bvid: 'BVENABLED', title: 'Enabled', status: 'pending', enabled: true, favoriteAddedAt: '2025-01-01T00:00:00.000Z', cookieFile: path.join(WORKSPACE_ROOT, 'private-task-cookie.txt') });
   store.commit();
   store.setActiveCollection('c2');
   if (store.getActiveCollection()?.id !== 'c2') throw new Error('active collection persistence failed');
@@ -140,6 +171,13 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   const manifestResponse = await fetch(`${api.url()}/api/manifest?workerId=${registration.workerId}`);
   const manifest = await manifestResponse.json();
   if (!manifestResponse.ok || manifest.worker?.workerId !== registration.workerId || !manifest.endpoints?.length) throw new Error('API manifest failed');
+  if (manifest.protocolVersion !== '2.8' || manifest.activeCollection?.cookieFile) throw new Error('API manifest exposed a cookie path or stale protocol contract');
+  const collectionsResponse = await fetch(`${api.url()}/api/collections`);
+  const collectionsPayload = await collectionsResponse.json();
+  if (!collectionsResponse.ok || collectionsPayload.collections.some((item) => Object.prototype.hasOwnProperty.call(item, 'cookieFile'))) throw new Error('collection API exposed a cookie path');
+  const tasksResponse = await fetch(`${api.url()}/api/tasks?collectionId=c2`);
+  const tasksPayload = await tasksResponse.json();
+  if (!tasksResponse.ok || tasksPayload.tasks.some((item) => Object.prototype.hasOwnProperty.call(item, 'cookieFile'))) throw new Error('task list API exposed a cookie path');
   const templateResponse = await fetch(`${api.url()}/api/templates/video-summary`);
   const template = await templateResponse.json();
   if (!templateResponse.ok || !template.template?.includes('## 字幕比对')) throw new Error('Markdown template API failed');
@@ -179,9 +217,43 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   });
   const claim = await claimResponse.json();
   if (!claimResponse.ok || claim.task?.bvid !== 'BVENABLED') throw new Error('disabled task was claimable');
+  if (Object.prototype.hasOwnProperty.call(claim.task, 'cookieFile')) throw new Error('claimed task exposed a cookie path');
   if (!claim.task.workId?.startsWith('work-')) throw new Error('claim did not return a one-time workId');
   if (!claim.task.abortUsage || !claim.task.requirements?.interruption?.includes('/abort')) throw new Error('claim context omitted attempt-abort instructions');
   const firstWorkId = claim.task.workId;
+  const unauthenticatedTaskResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(claim.task.id)}`);
+  if (unauthenticatedTaskResponse.status !== 401) throw new Error('active task details were readable without workerId/workId credentials');
+  const publicTasks = await (await fetch(`${api.url()}/api/tasks`)).json();
+  const publicClaimedTask = publicTasks.tasks.find((item) => item.id === claim.task.id);
+  if (publicClaimedTask?.workId || publicClaimedTask?.artifactDir || publicClaimedTask?.workspaceRoot || publicClaimedTask?.cookieFile) {
+    throw new Error('public task inventory exposed work credentials or local paths');
+  }
+  store.createToolRun({
+    id: 'conflicting-active-run',
+    taskId: claim.task.id,
+    collectionId: claim.task.collectionId,
+    toolId: 'material-bundle',
+    toolName: '素材流水线',
+    workerId: registration.workerId,
+    workId: firstWorkId,
+    status: 'running',
+    artifactDir: claim.task.artifactDir,
+    createdAt: new Date().toISOString()
+  });
+  const conflictingToolResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(claim.task.id)}/tools/bili-subtitles/run`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ workerId: registration.workerId, workId: firstWorkId })
+  });
+  const conflictingTool = await conflictingToolResponse.json();
+  if (conflictingToolResponse.status !== 409 || conflictingTool.code !== 'TOOL_RUN_ALREADY_ACTIVE' || conflictingTool.activeRuns?.[0]?.id !== 'conflicting-active-run') {
+    throw new Error('a second tool was allowed to write the same active work-attempt directory');
+  }
+  if (!conflictingTool.directive?.path?.includes(`workerId=${encodeURIComponent(registration.workerId)}`)
+    || !conflictingTool.directive?.path?.includes(`workId=${encodeURIComponent(firstWorkId)}`)) {
+    throw new Error('duplicate tool guidance omitted the credentials required by its polling endpoint');
+  }
+  store.updateToolRun('conflicting-active-run', { status: 'cancelled', finishedAt: new Date().toISOString() });
   const missingWorkIdResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(claim.task.id)}/heartbeat`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -219,7 +291,9 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   });
   const staleHeartbeat = await staleHeartbeatResponse.json();
   if (staleHeartbeatResponse.status !== 409 || staleHeartbeat.code !== 'WORK_ATTEMPT_ENDED' || staleHeartbeat.directive?.action !== 'claim-new-task' || staleHeartbeat.directive?.keepWorkerId !== true) throw new Error('stale workId did not receive claim-new-task guidance');
-  const endedRunResponse = await fetch(`${api.url()}/api/tool-runs/abort-run`);
+  const unauthenticatedRunResponse = await fetch(`${api.url()}/api/tool-runs/abort-run?log=1`);
+  if (unauthenticatedRunResponse.status !== 401) throw new Error('tool run details and logs were readable without work credentials');
+  const endedRunResponse = await fetch(`${api.url()}/api/tool-runs/abort-run?workerId=${encodeURIComponent(registration.workerId)}&workId=${encodeURIComponent(firstWorkId)}`);
   const endedRun = await endedRunResponse.json();
   if (endedRun.workAttempt?.active !== false || endedRun.workAttempt?.code !== 'WORK_ATTEMPT_ENDED') throw new Error('tool polling did not expose ended work attempt');
   const reclaimResponse = await fetch(`${api.url()}/api/tasks/claim`, {
@@ -248,7 +322,25 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
     body: JSON.stringify({ workerId: registration.workerId })
   });
   const rejectedClaim = await rejectedClaimResponse.json();
-  if (!rejectedClaimResponse.ok || rejectedClaim.message !== 'NO_TASK') throw new Error('another claim stole a rejected active work attempt');
+  if (rejectedClaimResponse.status !== 409 || rejectedClaim.code !== 'WORKER_ALREADY_HAS_TASK' || rejectedClaim.workId !== reclaimed.task.workId) {
+    throw new Error('worker was not directed back to its rejected active work attempt');
+  }
+  if (!rejectedClaim.directive?.path?.includes(`workerId=${encodeURIComponent(registration.workerId)}`)
+    || !rejectedClaim.directive?.path?.includes(`workId=${encodeURIComponent(reclaimed.task.workId)}`)) {
+    throw new Error('existing-attempt guidance omitted the credentials required to reopen the task');
+  }
+  const rejectedStats = buildAnalytics(store);
+  const rejectedWorkerStats = rejectedStats.workers.find((item) => item.workerId === registration.workerId);
+  if (rejectedWorkerStats?.activeTasks !== 1 || rejectedStats.collections.c2?.claimed !== 1 || rejectedStats.collections.c2?.failed !== 0) {
+    throw new Error('active rejected work attempt was reported as inactive or terminally failed');
+  }
+  store.set('unavailableTasks', 'missing-unavailable-task', { id: 'missing-unavailable-task', taskId: 'missing-unavailable-task', collectionId: 'c1', bvid: 'BVUNAVAILABLE1', title: 'Removed video', reason: 'Uploader removed this video.', source: 'smoke', removedAt: new Date().toISOString() });
+  store.commit();
+  const unavailableResponse = await fetch(`${api.url()}/api/tasks/missing-unavailable-task`);
+  const unavailablePayload = await unavailableResponse.json();
+  if (unavailableResponse.status !== 410 || unavailablePayload.unavailable?.reason !== 'Uploader removed this video.' || unavailablePayload.directive?.action !== 'stop') {
+    throw new Error('unavailable-task API response dropped tombstone details');
+  }
   const secondAbortResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(reclaimed.task.id)}/abort`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -271,8 +363,12 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
 
   store.recordTaskEvent('c1:BVTEST', 'claimed', { workerId: registration.workerId });
   store.recordTaskEvent('c1:BVTEST', 'completed', { workerId: registration.workerId, processingSeconds: 60, videoDuration: 120 });
+  store.recordTaskEvent('removed-history', 'claimed', { collectionId: 'c1', workerId: 'historical-worker' });
+  store.recordTaskEvent('removed-history', 'completed', { collectionId: 'c1', workerId: 'historical-worker', processingSeconds: 30, videoDuration: 60 });
   const stats = buildAnalytics(store).collections.c1;
-  if (stats.agents[0]?.workerId !== registration.workerId || stats.agents[0]?.weightedTimeRatio !== 0.5) throw new Error('per-worker weighted analytics failed');
+  const registeredStats = stats.agents.find((item) => item.workerId === registration.workerId);
+  if (registeredStats?.weightedTimeRatio !== 0.5) throw new Error('per-worker weighted analytics failed');
+  if (!stats.agents.some((item) => item.workerId === 'historical-worker' && item.completed === 1 && item.weightedTimeRatio === 0.5)) throw new Error('removed task history disappeared from collection analytics');
 
   const tools = store.listTools();
   if (!tools.some((tool) => tool.id === 'asr' && tool.enabled)) throw new Error('tool registry smoke failed');
@@ -304,16 +400,47 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   });
   if (!fs.existsSync(finalized.markdownFile) || !fs.existsSync(finalized.metadataFile) || !fs.existsSync(path.join(finalized.artifactDir, 'frames', 'frame.jpg'))) throw new Error('artifact finalization lost files');
   if (path.basename(finalized.markdownFile, '.md') !== path.basename(finalized.artifactDir)) throw new Error('artifact directory and Markdown names diverged');
+  const crashRoot = path.join(WORKSPACE_ROOT, 'smoke-finalization-recovery');
+  const crashDraft = path.join(crashRoot, 'draft');
+  fs.mkdirSync(crashDraft, { recursive: true });
+  const crashMarkdown = path.join(crashDraft, 'draft.md');
+  const crashMetadata = path.join(crashDraft, 'info.json');
+  fs.writeFileSync(crashMarkdown, '# recoverable completion');
+  fs.writeFileSync(crashMetadata, '{}');
+  const crashTask = { id: 'crash-final-task', collectionId: 'c1', bvid: 'BVCRASH00001', title: 'Crash recovery', owner: 'UP', status: 'claimed', workId: 'work-crash-final', claimedBy: registration.workerId, claimedAt: new Date().toISOString(), allowedRoot: crashRoot, artifactDir: crashDraft };
+  store.upsertTask(crashTask);
+  store.commit();
+  const crashTime = new Date().toISOString();
+  const stagedFinalization = stageSubmissionFinalization({
+    store,
+    task: crashTask,
+    collection: { id: 'c1', name: 'Collection' },
+    validation: { artifactDir: crashDraft, markdownFile: crashMarkdown, metadataFile: crashMetadata },
+    filenameMetadata: defaultFilenameMetadata,
+    completedTask: { ...crashTask, status: 'done', workId: '', completedAt: crashTime, updatedAt: crashTime },
+    event: { id: 'submission-completed:work-crash-final', taskId: crashTask.id, type: 'completed', createdAt: crashTime, collectionId: 'c1', workerId: registration.workerId, workId: 'work-crash-final' }
+  });
+  applySubmissionArtifactPlan(stagedFinalization.plan);
+  if (!store.get('submissionFinalizations', stagedFinalization.id) || store.getTask(crashTask.id)?.status !== 'claimed') throw new Error('submission recovery fixture did not preserve the crash window');
+  const recoveredFinalizations = recoverPendingSubmissionFinalizations(store);
+  const recoveredTask = store.getTask(crashTask.id);
+  if (!recoveredFinalizations[0]?.ok || recoveredTask?.status !== 'done' || !fs.existsSync(recoveredTask.outputMarkdown) || store.get('submissionFinalizations', stagedFinalization.id)) {
+    throw new Error('crash-safe submission finalization did not recover file and database state');
+  }
   const validationRoot = path.join(WORKSPACE_ROOT, 'smoke-validation-root');
   fs.mkdirSync(validationRoot, { recursive: true });
   const metadataFile = path.join(validationRoot, 'info.json');
   const validMarkdown = path.join(validationRoot, 'valid.md');
   const invalidMarkdown = path.join(validationRoot, 'invalid.md');
-  const opening = '## 小结\n\nSummary\n\n## 思维导图\n\n```mermaid\nmindmap\n  root((Test))\n```\n\n## 目录\n\n- Contents\n\n## 字幕比对\n\nASR 选择说明\n\n## 评论分析\n\nNone\n\n## 处理记录\n\nDone\n';
+  const opening = '## 小结\n\nSummary\n\n## 思维导图\n\n```mermaid\nmindmap\n  root((Test))\n```\n\n## 目录\n\n- Contents\n\n## 正文\n\n### Test [00:01](https://www.bilibili.com/video/BV1234567890?t=1)\n\n## 字幕比对\n\nASR 选择说明\n\n## 评论分析\n\nNone\n\n## 处理记录\n\nDone\n';
+  fs.mkdirSync(path.join(validationRoot, 'asr'), { recursive: true });
+  fs.writeFileSync(path.join(validationRoot, 'asr', 'transcript.srt'), '1\n00:00:01,000 --> 00:00:02,000\nTest sentence.\n');
+  fs.writeFileSync(path.join(validationRoot, 'asr', 'asr-transcript.txt'), '[00:00:01,000 --> 00:00:02,000] Test sentence.\n');
+  fs.writeFileSync(path.join(validationRoot, 'asr', 'asr-result.json'), JSON.stringify({ segments: [{ id: 0, start: 1, end: 2, text: 'Test sentence.' }] }));
   fs.writeFileSync(metadataFile, '{}');
   fs.writeFileSync(validMarkdown, opening);
   fs.writeFileSync(invalidMarkdown, opening.replace('## 思维导图\n\n```mermaid\nmindmap\n  root((Test))\n```\n\n## 目录', '## 目录\n\n## 思维导图\n\nNo diagram'));
-  const validationTask = { allowedRoot: validationRoot };
+  const validationTask = { allowedRoot: validationRoot, artifactDir: validationRoot };
   if (!validateSubmission(validationTask, { artifactDir: validationRoot, markdownFile: validMarkdown, metadataFile }).ok) throw new Error('valid Mermaid opening was rejected');
   if (validateSubmission(validationTask, { artifactDir: validationRoot, markdownFile: invalidMarkdown, metadataFile }).ok) throw new Error('invalid Mermaid opening was accepted');
   const recoveryArtifactDir = path.join(WORKSPACE_ROOT, 'smoke-recovery-artifact');
@@ -395,4 +522,9 @@ function waitForRun(store, runId) {
 function createArchive(archive, sourceRoot, item) {
   const result = spawnSync('tar.exe', ['-a', '-c', '-f', archive, '-C', sourceRoot, item], { windowsHide: true, encoding: 'utf8' });
   if (result.status !== 0) throw new Error(`Could not create dependency fixture: ${result.stderr || result.stdout}`);
+}
+
+function listCorruptJournals(root) {
+  const runtime = path.join(root, 'runtime');
+  return fs.existsSync(runtime) ? fs.readdirSync(runtime).filter((name) => name.startsWith('.install-transaction.corrupt-')) : [];
 }

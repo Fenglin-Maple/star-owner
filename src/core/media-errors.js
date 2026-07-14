@@ -25,6 +25,7 @@ function isVideoUnavailableMessage(value) {
     '"code":-404',
     "'code': -404",
     'error code: -404',
+    'bilibili api -404',
     'code=62002',
     'code=62004',
     '已失效视频',

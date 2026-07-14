@@ -63,6 +63,7 @@
 .cache-job-card > em.running, .cache-job-card > em.queued { color: var(--accent); }
 .cache-job-card > em.completed { color: var(--green); }
 .cache-job-card > em.failed, .cache-job-card > em.waiting-login { color: var(--red); }
+.cache-job-card > em.skipped { color: var(--warning); }
 .cache-job-meta { display: flex; gap: 8px; min-width: 0; color: var(--muted); font-size: 10px; }
 .cache-job-progress { grid-column: 1 / -1; }
 .cache-job-progress > div:first-child { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 5px; color: var(--muted); font-size: 10px; }

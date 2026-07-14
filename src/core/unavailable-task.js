@@ -1,4 +1,4 @@
-const { cleanupAttemptFiles } = require('./task-attempt');
+const { cleanupAttemptFiles, cleanupTaskSnapshot, queueAttemptCleanup } = require('./task-attempt');
 
 function removeUnavailableTask({ store, toolRunner = null, taskId, reason, source = 'video-unavailable', excludeRunId = '' }) {
   const id = String(taskId || '');
@@ -21,7 +21,11 @@ function removeUnavailableTask({ store, toolRunner = null, taskId, reason, sourc
 
   let cleanup = null;
   try { cleanup = cleanupAttemptFiles(store, task); }
-  catch (error) { cleanup = { mode: 'cleanup-failed', error: error.message || String(error), deleted: [], preserved: [] }; }
+  catch (error) {
+    cleanup = { mode: 'cleanup-failed', error: error.message || String(error), deleted: [], preserved: [] };
+    queueAttemptCleanup(store, cleanupTaskSnapshot(task), cleanup.error, source);
+    toolRunner?.scheduleCleanupRecovery?.();
+  }
 
   const now = new Date().toISOString();
   const tombstone = {

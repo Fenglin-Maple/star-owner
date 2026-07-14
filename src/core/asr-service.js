@@ -162,12 +162,18 @@ class AsrService {
     this.currentRequestId = requestId;
     return new Promise((resolve, reject) => {
       this.pending.set(requestId, { resolve, reject, onProgress });
-      this.child.stdin.write(`${JSON.stringify(payload)}\n`, (error) => {
-        if (!error) return;
+      const failWrite = (error) => {
         this.pending.delete(requestId);
         this.currentRequestId = '';
         reject(error);
-      });
+      };
+      try {
+        this.child.stdin.write(`${JSON.stringify(payload)}\n`, (error) => {
+          if (error) failWrite(error);
+        });
+      } catch (error) {
+        failWrite(error);
+      }
     });
   }
 
@@ -224,13 +230,16 @@ function serviceEnvironment() {
   const sitePackages = process.platform === 'win32'
     ? path.join(venv, 'Lib', 'site-packages')
     : path.join(venv, 'lib', 'python3', 'site-packages');
+  const executablePaths = [vcRuntime, path.join(venv, process.platform === 'win32' ? 'Scripts' : 'bin')]
+    .filter((item) => item && fs.existsSync(item));
+  if (process.env.PATH) executablePaths.push(process.env.PATH);
   return {
     ...process.env,
     VIRTUAL_ENV: venv,
     PYTHONUTF8: '1',
     PYTHONIOENCODING: 'utf-8',
     PYTHONPATH: [sitePackages, process.env.PYTHONPATH || ''].filter(Boolean).join(path.delimiter),
-    PATH: [vcRuntime, path.join(venv, process.platform === 'win32' ? 'Scripts' : 'bin'), process.env.PATH || ''].filter((item) => item && fs.existsSync(item)).join(path.delimiter)
+    PATH: executablePaths.join(path.delimiter)
   };
 }
 

@@ -84,13 +84,16 @@ let folders = [];
 let profileFolders = [];
 let profileFoldersUpdatedAt = 0;
 let profileFoldersLoading = false;
+let profileFoldersLoadingUserId = '';
+let profileFoldersRequestSerial = 0;
 let currentUser = null;
 let lastSnapshot = { users: [], collections: [], tasks: [], tools: [], toolRuns: [], workers: [], workspaces: [], activeCollection: null, analytics: { collections: {}, workers: [], tools: [] }, activities: [] };
 let loginEndpointReady = false;
 let loginProbeTimer = null;
 let loginWatchTimer = null;
 let loginWatchDeadline = 0;
-let loginSyncInFlight = false;
+let loginSyncInFlightGeneration = -1;
+let accountGeneration = 0;
 let smsChallenge = null;
 let lastLoggedInMid = '';
 let initialLoginCheckDone = false;
@@ -111,6 +114,7 @@ let filenameSettingsSaveTimer = null;
 let lastTaskCollectionId = '';
 let snapshotPromise = null;
 let snapshotRefreshTimer = null;
+let snapshotRevision = 0;
 let lastUiInteractionAt = 0;
 let transientActivity = null;
 let profileCloseTimer = null;
@@ -123,6 +127,12 @@ let schedulerUpdateInFlight = false;
 let bootstrapDismissed = false;
 let bootstrapHideTimer = null;
 let backendSnapshotLoaded = false;
+const SNAPSHOT_IGNORED_EVENTS = new Set([
+  'asr-progress',
+  'asr-service-log',
+  'video-cache-job-updated',
+  'video-cache-queue-updated'
+]);
 
 const TEXT = {
   navOverview: '\u542f\u52a8\u9875',
@@ -534,16 +544,27 @@ async function oneClickLogin() {
 }
 
 function ensureLoginPage(forceReload = false) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const target = 'https://passport.bilibili.com/login';
     const src = biliView.getURL?.() || '';
     if (!forceReload && src.includes('passport.bilibili.com')) return resolve();
-    const done = () => {
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
       biliView.removeEventListener('dom-ready', done);
-      setTimeout(resolve, 500);
+      clearTimeout(timer);
+      if (error) reject(error);
+      else setTimeout(resolve, 500);
     };
+    const done = () => finish();
+    const timer = setTimeout(() => finish(new Error('Bilibili 登录页加载超时，请检查网络后重试。')), 20000);
     biliView.addEventListener('dom-ready', done);
-    biliView.loadURL(target);
+    try {
+      Promise.resolve(biliView.loadURL(target)).catch(finish);
+    } catch (error) {
+      finish(error);
+    }
   });
 }
 
@@ -631,7 +652,11 @@ async function switchToCredential(id) {
     showToast(TEXT.toastInfo, TEXT.loginSessionKept, 'info');
     return;
   }
-  accountSwitchInFlight = true;
+    accountSwitchInFlight = true;
+    accountGeneration += 1;
+    profileFoldersRequestSerial += 1;
+    profileFoldersLoading = false;
+    profileFoldersLoadingUserId = '';
   credentialSelect.disabled = true;
   pendingCredentialId = id;
   try {
@@ -659,6 +684,7 @@ async function switchToCredential(id) {
     showToast(TEXT.toastError, error.message || String(error), 'error');
   } finally {
     credentialSelect.disabled = false;
+    accountSwitchInFlight = false;
   }
 }
 
@@ -889,10 +915,21 @@ async function performSmsAction(action, code = '') {
 }
 
 async function synchronizeLogin({ manual = false } = {}) {
-  if (!runtime.backendReady || loginSyncInFlight) return currentUser;
-  loginSyncInFlight = true;
+  let generation = accountGeneration;
+  if (!runtime.backendReady || loginSyncInFlightGeneration === generation) return currentUser;
+  loginSyncInFlightGeneration = generation;
   try {
     const info = await window.orchestrator.checkLogin();
+    if (generation !== accountGeneration) return currentUser;
+    const discoveredMid = String(info?.mid || info?.id || '');
+    if (info?.isLogin && lastLoggedInMid && lastLoggedInMid !== discoveredMid) {
+      accountGeneration += 1;
+      generation = accountGeneration;
+      loginSyncInFlightGeneration = generation;
+      profileFoldersRequestSerial += 1;
+      profileFoldersLoading = false;
+      profileFoldersLoadingUserId = '';
+    }
     currentUser = info;
     if (info?.isLogin) {
       const mid = String(info.mid || info.id || '');
@@ -911,12 +948,18 @@ async function synchronizeLogin({ manual = false } = {}) {
       stopLoginWatch();
       renderProfile(lastSnapshot);
       await refreshSnapshot();
+      if (generation !== accountGeneration) return currentUser;
       await refreshProfileFolders({ force: newlyDetected });
+      if (generation !== accountGeneration) return currentUser;
       loginOutput.textContent = JSON.stringify(info, null, 2);
       if (newlyDetected || manual) {
         showToast(TEXT.toastSuccess, `\u5df2\u767b\u5f55\uff1a${info.name || info.mid}\uff0ccookie \u5df2\u540c\u6b65`, 'success');
       }
-      if ((biliView.getURL?.() || '').includes('passport.bilibili.com')) biliView.loadURL('https://www.bilibili.com');
+      if ((biliView.getURL?.() || '').includes('passport.bilibili.com')) {
+        Promise.resolve(biliView.loadURL('https://www.bilibili.com')).catch((error) => {
+          loginOutput.textContent = `登录已同步，但 Bilibili 首页加载失败：${error.message || String(error)}`;
+        });
+      }
     } else {
       setFolderInventory([]);
       if (manual) showToast(TEXT.toastInfo, '\u5c1a\u672a\u767b\u5f55', 'info');
@@ -927,7 +970,7 @@ async function synchronizeLogin({ manual = false } = {}) {
     if (manual) showToast(TEXT.toastError, error.message || String(error), 'error');
     return currentUser;
   } finally {
-    loginSyncInFlight = false;
+    if (loginSyncInFlightGeneration === generation) loginSyncInFlightGeneration = -1;
   }
 }
 
@@ -1058,6 +1101,7 @@ function log(message) {
 
 async function refreshSnapshot() {
   if (snapshotPromise) return snapshotPromise;
+  const revisionAtStart = snapshotRevision;
   snapshotPromise = window.orchestrator.snapshot().then((snap) => {
     const uiState = captureRefreshUiState();
     lastSnapshot = snap;
@@ -1086,8 +1130,20 @@ async function refreshSnapshot() {
     return snap;
   }).finally(() => {
     snapshotPromise = null;
+    if (snapshotRevision !== revisionAtStart) {
+      queueMicrotask(() => refreshSnapshot().catch((error) => showToast(TEXT.toastError, error.message || String(error), 'error')));
+    }
   });
   return snapshotPromise;
+}
+
+function invalidateSnapshot(delay = 0) {
+  snapshotRevision += 1;
+  if (snapshotRefreshTimer) clearTimeout(snapshotRefreshTimer);
+  snapshotRefreshTimer = setTimeout(() => {
+    snapshotRefreshTimer = null;
+    refreshSnapshot().catch((error) => showToast(TEXT.toastError, error.message || String(error), 'error'));
+  }, Math.max(0, Number(delay) || 0));
 }
 
 function captureRefreshUiState() {
@@ -1308,8 +1364,10 @@ function populateFolderSelect(items = profileFolders, selectedIdentity = '') {
     option.textContent = `${folder.name} (${Number(folder.mediaCount ?? folder.videoCount ?? 0)})`;
     folderSelect.appendChild(option);
   }
-  const wanted = [...folderSelect.options].find((option) => option.value === previous || option.dataset.folderId === previous);
-  folderSelect.value = wanted?.value || folderSelect.options[0]?.value || '';
+  const options = [...folderSelect.options];
+  const wantedIndex = options.findIndex((option) => option.dataset.folderId === previous);
+  const fallbackIndex = wantedIndex >= 0 ? wantedIndex : options.findIndex((option) => option.value === previous);
+  folderSelect.selectedIndex = fallbackIndex >= 0 ? fallbackIndex : 0;
   updateSyncCollectionState();
 }
 
@@ -1339,8 +1397,9 @@ function renderProfile(snap) {
   profile?.classList.toggle('logged-in', loggedIn);
   if (!loggedIn) profile?.classList.remove('profile-open');
   userName.textContent = loggedIn ? user.name : TEXT.noLogin;
-  if (user?.face) {
-    userAvatar.src = user.face;
+  const face = user?.faceDataUrl || secureRemoteImageUrl(user?.face);
+  if (face) {
+    userAvatar.src = face;
     userAvatar.style.display = 'block';
   } else {
     userAvatar.removeAttribute('src');
@@ -1355,7 +1414,7 @@ function renderProfile(snap) {
   const syncedByMediaId = new Map(synced.map((item) => [String(item.mediaId || ''), item]));
   const collections = (profileFolders.length
     ? profileFolders.map((folder) => {
-        const local = syncedByMediaId.get(String(folder.id)) || {};
+        const local = syncedByMediaId.get(folderIdentity(folder)) || {};
         const latest = [folder.updatedAt, local.latestFavoriteAt, local.lastSyncedAt].filter(Boolean).sort().at(-1) || '';
         return { ...local, ...folder, latestFavoriteAt: latest };
       })
@@ -1386,19 +1445,42 @@ function renderProfile(snap) {
   }
 }
 
+function secureRemoteImageUrl(value) {
+  const source = String(value || '').trim();
+  if (/^data:image\/(?:avif|gif|jpe?g|png|webp);base64,[a-z0-9+/=\s]+$/i.test(source)) return source;
+  const normalized = source.startsWith('//') ? `https:${source}` : source.replace(/^http:\/\//i, 'https://');
+  try {
+    const url = new URL(normalized);
+    const host = url.hostname.toLowerCase().replace(/\.$/, '');
+    const trusted = ['hdslb.com', 'biliimg.com', 'bilibili.com'].some((domain) => host === domain || host.endsWith(`.${domain}`));
+    return url.protocol === 'https:' && !url.username && !url.password && trusted ? url.toString() : '';
+  } catch {
+    return '';
+  }
+}
+
 async function refreshProfileFolders({ force = false } = {}) {
-  if (!currentUser?.isLogin || !runtime.backendReady || profileFoldersLoading) return profileFolders;
+  if (!currentUser?.isLogin || !runtime.backendReady) return profileFolders;
+  const generation = accountGeneration;
+  const userId = String(currentUser.mid || currentUser.id || '');
+  if (profileFoldersLoading && profileFoldersLoadingUserId === userId) return profileFolders;
   if (!force && profileFolders.length && Date.now() - profileFoldersUpdatedAt < 5 * 60 * 1000) return profileFolders;
+  const requestSerial = ++profileFoldersRequestSerial;
   profileFoldersLoading = true;
+  profileFoldersLoadingUserId = userId;
   renderProfile(lastSnapshot);
   try {
     const nextFolders = await window.orchestrator.listFolders();
+    if (requestSerial !== profileFoldersRequestSerial || generation !== accountGeneration || String(currentUser?.mid || currentUser?.id || '') !== userId) return profileFolders;
     setFolderInventory(nextFolders, folderSelect?.value);
   } catch {
-    profileFoldersUpdatedAt = Date.now();
+    if (requestSerial === profileFoldersRequestSerial && generation === accountGeneration) profileFoldersUpdatedAt = Date.now();
   } finally {
-    profileFoldersLoading = false;
-    renderProfile(lastSnapshot);
+    if (requestSerial === profileFoldersRequestSerial) {
+      profileFoldersLoading = false;
+      profileFoldersLoadingUserId = '';
+      renderProfile(lastSnapshot);
+    }
   }
   return profileFolders;
 }
@@ -1592,7 +1674,7 @@ function renderTools(tools) {
   for (const tool of tools) {
     const projects = (tool.projects || []).map((project) => {
       const url = project.github || project.url;
-      const link = url ? `<a href="${escapeHtml(url)}" target="_blank">${escapeHtml(project.name)}</a>` : escapeHtml(project.name);
+      const link = url ? `<a href="#" data-external-url="${escapeHtml(url)}">${escapeHtml(project.name)}</a>` : escapeHtml(project.name);
       return `<li>${link}<span>${escapeHtml(project.role || '')}</span></li>`;
     }).join('');
     const outputs = (tool.outputs || []).map((item) => `<span>${escapeHtml(item)}</span>`).join('');
@@ -1602,7 +1684,7 @@ function renderTools(tools) {
       title: tool.name,
       subtitle: tool.description,
       right: `<span class="state-text">${tool.enabled ? TEXT.open : TEXT.closed}</span><label class="switch"><input type="checkbox" ${tool.enabled ? 'checked' : ''} data-tool-id="${escapeHtml(tool.id)}" /><span></span></label>`,
-      detail: `<div class="tool-detail"><div><h4>${TEXT.agentUsage}</h4><pre>POST ${escapeHtml(runtime.apiUrl || 'http://127.0.0.1:17391')}/api/tasks/&lt;taskId&gt;/tools/${escapeHtml(tool.id)}/run\n{\n  "workerId": "&lt;workerId&gt;",\n  "workId": "&lt;workId from claim&gt;",\n  "options": {}\n}</pre></div><div><h4>${TEXT.pollStatus}</h4><pre>GET ${escapeHtml(runtime.apiUrl || 'http://127.0.0.1:17391')}/api/tool-runs/&lt;runId&gt;?log=1</pre></div><div><h4>${TEXT.internalCommand}</h4><pre>${escapeHtml(tool.internalCommand || tool.command || '')}</pre></div><div><h4>${TEXT.agentPrompt}</h4><p>${escapeHtml(tool.agentPrompt)}</p></div><div><h4>${TEXT.output}</h4><div class="chip-row">${outputs}</div></div><div><h4>${TEXT.projects}</h4><ul class="project-list">${projects}</ul></div></div>`
+      detail: `<div class="tool-detail"><div><h4>${TEXT.agentUsage}</h4><pre>POST ${escapeHtml(runtime.apiUrl || 'http://127.0.0.1:17391')}/api/tasks/&lt;taskId&gt;/tools/${escapeHtml(tool.id)}/run\n{\n  "workerId": "&lt;workerId&gt;",\n  "workId": "&lt;workId from claim&gt;",\n  "options": {}\n}</pre></div><div><h4>${TEXT.pollStatus}</h4><pre>GET ${escapeHtml(runtime.apiUrl || 'http://127.0.0.1:17391')}/api/tool-runs/&lt;runId&gt;?workerId=&lt;workerId&gt;&amp;workId=&lt;workId&gt;&amp;log=1</pre></div><div><h4>${TEXT.internalCommand}</h4><pre>${escapeHtml(tool.internalCommand || tool.command || '')}</pre></div><div><h4>${TEXT.agentPrompt}</h4><p>${escapeHtml(tool.agentPrompt)}</p></div><div><h4>${TEXT.output}</h4><div class="chip-row">${outputs}</div></div><div><h4>${TEXT.projects}</h4><ul class="project-list">${projects}</ul></div></div>`
     });
     row.querySelector('input[type="checkbox"]').addEventListener('change', async (event) => {
       const enabled = event.target.checked;
@@ -1621,6 +1703,17 @@ function renderTools(tools) {
     toolList.appendChild(row);
   }
 }
+
+toolList?.addEventListener('click', async (event) => {
+  const link = event.target.closest('[data-external-url]');
+  if (!link) return;
+  event.preventDefault();
+  try {
+    await window.orchestrator.openExternal(link.dataset.externalUrl);
+  } catch (error) {
+    showToast(TEXT.toastError, error.message || String(error), 'error');
+  }
+});
 
 function renderRuns(runs) {
   runList.innerHTML = '';
@@ -1856,7 +1949,7 @@ function renderDocumentList() {
     row.className = `document-row${task.id === selectedDocumentId ? ' active' : ''}`;
     row.type = 'button';
     row.dataset.documentId = task.id;
-    const cover = task.displayCover || task.cover || '';
+    const cover = task.displayCover || '';
     const collection = (lastSnapshot.collections || []).find((item) => item.id === task.collectionId);
     const favoriteStatus = collection?.biliDeleted || task.favoriteState === 'collection-deleted'
       ? ' / \u6536\u85cf\u72b6\u6001\uff1aB\u7ad9\u6536\u85cf\u5939\u5df2\u5220\u9664'
@@ -2618,14 +2711,24 @@ async function handleRuntime(data = {}) {
     toolHealth = data.toolHealth;
     renderToolHealth(toolHealth);
   }
-  if (Object.prototype.hasOwnProperty.call(data, 'currentUser')) currentUser = data.currentUser;
-  if (currentUser?.isLogin) {
-    lastLoggedInMid = String(currentUser.mid || currentUser.id || '');
+  if (Object.prototype.hasOwnProperty.call(data, 'currentUser')) {
+    const previousMid = String(currentUser?.mid || currentUser?.id || '');
+    const nextMid = String(data.currentUser?.mid || data.currentUser?.id || '');
+    if (previousMid && nextMid && previousMid !== nextMid) {
+      accountGeneration += 1;
+      profileFoldersRequestSerial += 1;
+      profileFolders = [];
+      profileFoldersUpdatedAt = 0;
+      profileFoldersLoading = false;
+      profileFoldersLoadingUserId = '';
+    }
+    currentUser = data.currentUser;
+    if (currentUser?.isLogin) lastLoggedInMid = String(currentUser.mid || currentUser.id || '');
     renderProfile(lastSnapshot);
   }
   renderBootstrap(data.bootstrap || runtime.bootstrap || {});
   apiBadge.textContent = data.backendReady ? (data.apiUrl || 'API ready') : `${Math.round(Number(data.bootstrap?.progress || 0) * 100)}%`;
-  apiDocs.textContent = buildApiDocs(data.apiUrl || 'http://127.0.0.1:17391');
+  apiDocs.textContent = secureAgentApiText(buildApiDocs(data.apiUrl || 'http://127.0.0.1:17391'));
   updatePromptTemplate();
   if (!data.backendReady) return;
   if (!backendSnapshotLoaded) {
@@ -2654,10 +2757,10 @@ window.orchestrator.onEvent((event) => {
     renderSyncProgress(event);
     return;
   }
-  log(event.type || JSON.stringify(event));
-  if (snapshotRefreshTimer) clearTimeout(snapshotRefreshTimer);
+  if (SNAPSHOT_IGNORED_EVENTS.has(event.type)) return;
+  if (event.type !== 'snapshot-invalidated') log(event.type || JSON.stringify(event));
   const interactionDelay = Math.max(0, 450 - (Date.now() - lastUiInteractionAt));
-  snapshotRefreshTimer = setTimeout(() => refreshSnapshot(), Math.max(320, interactionDelay));
+  invalidateSnapshot(event.type === 'snapshot-invalidated' ? 40 : Math.max(320, interactionDelay));
 });
 
 document.addEventListener('pointerdown', () => { lastUiInteractionAt = Date.now(); }, true);
@@ -2703,7 +2806,7 @@ function updatePromptTemplate() {
 5. POST ${apiUrl}/api/tasks/claim\uff0cbody \u4e3a {"workerId":"<workerId>"}\u3002\u540c\u4e00 Agent \u53ef\u4ee5\u4fdd\u6301 workerId \u8fde\u7eed\u5de5\u4f5c\uff0c\u4f46\u6bcf\u6b21\u6210\u529f\u9886\u53d6\u90fd\u4f1a\u8fd4\u56de\u5168\u65b0 workId\u3002\u8fd4\u56de NO_TASK \u65f6\u6b63\u5e38\u7ed3\u675f\uff1b\u8fd4\u56de WORKER_PAUSED \u65f6\uff0c\u9075\u5faa\u300c\u6765\u81ea\u7528\u6237\u7684\u4fe1\u606f\uff0c\u4f60\u9700\u8981\u6682\u505c\u5de5\u4f5c\u300d\uff0c\u4e0d\u518d\u7ee7\u7eed\u7533\u8bf7\u65b0\u4efb\u52a1\u3002
 6. \u9605\u8bfb claim \u8fd4\u56de\u7684 workId\u3001\u89c6\u9891\u4fe1\u606f\u3001requirements\u3001tools\u3001artifactDir \u548c leaseExpiresAt\u3002\u5de5\u5177\u6392\u961f/\u8fd0\u884c\u671f\u95f4\u5e94\u7528\u4f1a\u81ea\u52a8\u4fdd\u62a4\u79df\u7ea6\uff1b\u5176\u5b83\u957f\u65f6\u5de5\u4f5c\u4ecd\u8981\u6bcf 15 \u5206\u949f\u5185 POST /api/tasks/<taskId>/heartbeat\uff0cbody \u540c\u65f6\u5e26 workerId \u548c workId\u3002
 7. \u901a\u8fc7 POST /api/tasks/<taskId>/tools/material-bundle/run \u51c6\u5907\u7d20\u6750\uff0cbody \u5305\u542b workerId\u3001workId \u548c options\u3002\u63a5\u53e3\u4f1a\u7acb\u5373\u8fd4\u56de HTTP 202\uff1bqueued \u662f\u6b63\u5e38\u72b6\u6001\uff0c\u6309 queuePosition\u3001queueReason\u3001estimatedWaitMs \u7b49\u5f85\uff0c\u4e0d\u8981\u91cd\u590d\u63d0\u4ea4\u540c\u4e00\u5de5\u5177\u3002\u7528 GET /api/tool-runs/<runId>?log=1 \u8ddf\u8e2a\u5230\u7ec8\u6001\uff1b\u5982\u679c\u8fd4\u56de WORK_ATTEMPT_ENDED\uff0c\u7acb\u5373\u505c\u6b62\u4f7f\u7528\u65e7 workId \u5e76\u91cd\u65b0\u9886\u53d6\u3002
-8. \u65e0\u8bba B \u7ad9\u662f\u5426\u63d0\u4f9b\u5b57\u5e55\uff0c\u90fd\u5fc5\u987b\u8fd0\u884c\u4e00\u6b21 ASR\uff0c\u5e76\u6bd4\u5bf9\u5b8c\u6574\u6027\u3001\u65f6\u95f4\u8f74\u3001\u4e13\u6709\u540d\u8bcd\u548c\u8bed\u4e49\u3002\u65e0\u6cd5\u5224\u65ad\u65f6\u7528\u5173\u952e\u5e27\u548c\u591a\u6a21\u6001\u80fd\u529b\u6838\u5bf9\u3002
+8. \u65e0\u8bba B \u7ad9\u662f\u5426\u63d0\u4f9b\u5b57\u5e55\uff0c\u90fd\u5fc5\u987b\u8fd0\u884c\u4e00\u6b21 ASR\uff0c\u5e76\u6bd4\u5bf9\u5b8c\u6574\u6027\u3001\u65f6\u95f4\u8f74\u3001\u4e13\u6709\u540d\u8bcd\u548c\u8bed\u4e49\u3002\u4f18\u5148\u8bfb\u53d6 asr/transcript.srt \u6216 asr/asr-result.json \u4e2d\u6bcf\u4e2a\u53e5\u6bb5\u7684\u771f\u5b9e\u8d77\u6b62\u65f6\u95f4\uff0cMarkdown \u65f6\u95f4\u8f74\u94fe\u63a5\u4e0d\u5f97\u6839\u636e\u7eaf\u6587\u672c\u987a\u5e8f\u731c\u6d4b\u3002\u65e0\u6cd5\u5224\u65ad\u5b57\u5e55\u8bed\u4e49\u65f6\u518d\u7528\u5173\u952e\u5e27\u548c\u591a\u6a21\u6001\u80fd\u529b\u6838\u5bf9\u3002
 9. \u9009\u62e9\u6709\u4fe1\u606f\u91cf\u7684\u5173\u952e\u5e27\uff0c\u4f8b\u5982\u67b6\u6784\u56fe\u3001\u64cd\u4f5c\u754c\u9762\u3001\u6570\u636e\u56fe\u8868\u3001\u4ee3\u7801\u6216\u7ed3\u679c\uff0c\u4e0d\u8981\u653e\u7f6e\u91cd\u590d\u3001\u6a21\u7cca\u6216\u65e0\u610f\u4e49\u622a\u56fe\u3002
 10. GET ${apiUrl}/api/templates/video-summary \u53d6\u5f97\u53c2\u8003 Markdown \u6a21\u677f\u3002\u5c3d\u91cf\u9075\u5faa\u6a21\u677f\u7ed3\u6784\uff0c\u4f46\u6839\u636e\u89c6\u9891\u5185\u5bb9\u5408\u7406\u589e\u51cf\u4e8c\u7ea7/\u4e09\u7ea7\u7ae0\u8282\u3002
 11. Markdown \u5f00\u5934\u5fc5\u987b\u6309\u300c\u5c0f\u7ed3 -> \u601d\u7ef4\u5bfc\u56fe -> \u76ee\u5f55\u300d\u6392\u5217\uff1b\u601d\u7ef4\u5bfc\u56fe\u4f7f\u7528\u53ef\u6e32\u67d3\u7684 Mermaid fenced code block\u3002\u6b63\u6587\u8981\u4fe1\u606f\u5b8c\u6574\uff0c\u4fdd\u7559\u4e8b\u5b9e\u3001\u6b65\u9aa4\u3001\u4ee3\u7801/\u53c2\u6570\u3001\u6848\u4f8b\u3001\u56e0\u679c\u3001\u524d\u63d0\u4e0e\u5c40\u9650\u3002
@@ -2711,8 +2814,11 @@ function updatePromptTemplate() {
 13. \u786e\u8ba4 Markdown\u3001info.json\u3001\u56fe\u7247\u548c\u8f85\u52a9\u4ea7\u7269\u5b8c\u6574\u540e\uff0c\u901a\u8fc7 clean-cache \u5220\u9664\u4e34\u65f6\u97f3\u89c6\u9891\uff0c\u4e0d\u8981\u5220\u9664\u6700\u7ec8\u6587\u6863\u3001\u56fe\u7247\u3001\u5b57\u5e55\u3001\u8bc4\u8bba\u6216\u5143\u6570\u636e\u3002
 14. POST /api/tasks/<taskId>/submit \u63d0\u4ea4\uff0cbody \u5fc5\u987b\u5e26 workerId\u3001workId \u548c\u4ea7\u7269\u8def\u5f84\u3002\u88ab\u6253\u56de\u65f6\u6309 errors \u4fee\u590d\u5e76\u91cd\u65b0\u63d0\u4ea4\u3002\u5982\u679c\u56e0\u9519\u8bef\u3001\u7528\u6237\u8981\u6c42\u6216\u5176\u5b83\u539f\u56e0\u65e0\u6cd5\u7ee7\u7eed\uff0c\u5fc5\u987b\u7acb\u5373 POST /api/tasks/<taskId>/abort\uff0cbody \u5e26 workerId\u3001workId \u548c\u53ef\u64cd\u4f5c\u7684 reason\u3002\u5e94\u7528\u4f1a\u53d6\u6d88\u5de5\u5177\u3001\u5220\u9664\u672c\u6b21\u7f13\u5b58\u5e76\u5c06\u4efb\u52a1\u9000\u56de pending\uff1b\u65e7 workId \u7acb\u5373\u5931\u6548\uff0c\u4e0b\u6b21\u4ece\u5934\u5f00\u59cb\u3002
 15. \u6536\u85cf\u5939\u540c\u6b65\u4f18\u5148\u4e8e Agent \u5de5\u4f5c\u3002\u6536\u5230 REMOVED_FROM_FAVORITES \u65f6\u653e\u5f03\u65e7\u4efb\u52a1\uff1b\u6536\u5230 COLLECTION_SYNCING\u3001COLLECTION_NOT_READY \u6216 COLLECTION_REACTIVATION_REQUIRED \u65f6\u505c\u6b62\u9886\u5355\u5e76\u7b49\u5f85\u7528\u6237\uff1bBILIBILI_COLLECTION_DELETED \u8868\u793a\u8be5\u6536\u85cf\u5939\u4e0d\u518d\u63d0\u4f9b\u4efb\u52a1\u3002`;
+  agentPromptTemplate.textContent = secureAgentApiText(agentPromptTemplate.textContent);
 }
 
+function secureAgentApiText(value) { return String(value || ''); }
+
 function buildApiDocs(apiUrl) {
-  return `Base URL: ${apiUrl}\n\n1. Discover the complete protocol\nGET ${apiUrl}/api/manifest\n\n2. Register this fresh agent session\nPOST ${apiUrl}/api/workers/register\n{\n  "tool": "codex",\n  "model": "<actual-model>",\n  "sessionLabel": "optional note"\n}\n\nSave the returned workerId. Do not invent one.\n\n3. Read the desktop-selected target\nGET ${apiUrl}/api/active-collection\n\n4. Claim one task\nPOST ${apiUrl}/api/tasks/claim\n{\n  "workerId": "<workerId>"\n}\n\nSave task.workId from the claim response. It is unique to this claim and must not be invented or reused after interruption.\n\n5. Run an app-managed tool\nPOST ${apiUrl}/api/tasks/<taskId>/tools/material-bundle/run\n{\n  "workerId": "<workerId>",\n  "workId": "<workId from claim>",\n  "options": {\n    "frames": 12,\n    "commentLimit": 3,\n    "timeoutMs": 7200000\n  }\n}\n\nThe app returns HTTP 202. queued is normal; do not submit a duplicate run.\n\n6. Poll until a terminal status\nGET ${apiUrl}/api/tool-runs/<runId>?log=1\n\nInspect queuePosition, queueReason, estimatedWaitMs, resourcePool, resourceLane, stage, and workAttempt. WORK_ATTEMPT_ENDED means this workId is invalid; stop and claim a new task with the same workerId.\nResource overview: GET ${apiUrl}/api/scheduler\n\n7. Read the Markdown template\nGET ${apiUrl}/api/templates/video-summary\n\n8. Heartbeat, submit, or abort\nPOST ${apiUrl}/api/tasks/<taskId>/heartbeat\nPOST ${apiUrl}/api/tasks/<taskId>/submit\nPOST ${apiUrl}/api/tasks/<taskId>/abort\n{\n  "workerId": "<workerId>",\n  "workId": "<workId from claim>",\n  "reason": "<why this attempt cannot continue>"\n}\n\nEvery state-changing task request includes both workerId and workId. Abort cancels app tools, removes this attempt's files, invalidates workId, and returns the task to pending. The next claim starts from scratch with a new workId. A paused worker receives WORKER_PAUSED and must stop requesting new work.`;
+  return `Base URL: ${apiUrl}\n\n1. Discover the complete protocol\nGET ${apiUrl}/api/manifest\n\n2. Register this fresh agent session\nPOST ${apiUrl}/api/workers/register\n{\n  "tool": "codex",\n  "model": "<actual-model>",\n  "sessionLabel": "optional note"\n}\n\nSave the returned workerId. Do not invent one.\n\n3. Read the desktop-selected target\nGET ${apiUrl}/api/active-collection\n\n4. Claim one task\nPOST ${apiUrl}/api/tasks/claim\n{\n  "workerId": "<workerId>"\n}\n\nSave task.workId from the claim response. It is unique to this claim and must not be invented or reused after interruption.\n\n5. Run an app-managed tool\nPOST ${apiUrl}/api/tasks/<taskId>/tools/material-bundle/run\n{\n  "workerId": "<workerId>",\n  "workId": "<workId from claim>",\n  "options": {\n    "frames": 12,\n    "commentLimit": 3,\n    "timeoutMs": 7200000\n  }\n}\n\nThe app returns HTTP 202. queued is normal; do not submit a duplicate run.\n\n6. Poll until a terminal status\nGET ${apiUrl}/api/tool-runs/<runId>?workerId=<workerId>&workId=<workId>&log=1\n\nInspect queuePosition, queueReason, estimatedWaitMs, resourcePool, resourceLane, stage, and workAttempt. WORK_ATTEMPT_ENDED means this workId is invalid; stop and claim a new task with the same workerId.\nResource overview: GET ${apiUrl}/api/scheduler\n\n7. Read the Markdown template\nGET ${apiUrl}/api/templates/video-summary\n\n8. Heartbeat, submit, or abort\nPOST ${apiUrl}/api/tasks/<taskId>/heartbeat\nPOST ${apiUrl}/api/tasks/<taskId>/submit\nPOST ${apiUrl}/api/tasks/<taskId>/abort\n{\n  "workerId": "<workerId>",\n  "workId": "<workId from claim>",\n  "reason": "<why this attempt cannot continue>"\n}\n\nEvery state-changing task request includes both workerId and workId. Abort cancels app tools, removes this attempt's files, invalidates workId, and returns the task to pending. The next claim starts from scratch with a new workId. A paused worker receives WORKER_PAUSED and must stop requesting new work.`;
 }

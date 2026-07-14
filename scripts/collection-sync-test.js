@@ -84,7 +84,11 @@ function video(bvid, title, favoriteAddedAt) {
   assert(archived?.status === 'done' && archived.removedFromFavorites === true && archived.title.endsWith('（已移出收藏夹）') && archived.outputMarkdown === markdown, 'completed Markdown artifact was not preserved and marked after favorite removal');
   assert(store.getTask('100:7:BVNEW1234567')?.status === 'pending', 'new favorite did not become a pending task');
 
-  folders = [{ id: '7', name: 'AIcode Renamed', mediaCount: 1, updatedAt: '2026-07-05T00:00:00.000Z' }];
+  folders = [{ id: '7', name: 'AIcode Renamed Direct', mediaCount: 1, updatedAt: '2026-07-05T00:00:00.000Z' }];
+  const directRename = await service.sync({ collectionName: 'AIcode' });
+  assert(directRename.collection.name === 'AIcode Renamed Direct' && directRename.collection.storageName === 'AIcode', 'syncing by a stale pre-rename display name treated the stable mediaId as a deleted folder');
+
+  folders = [{ id: '7', name: 'AIcode Renamed', mediaCount: 1, updatedAt: '2026-07-05T01:00:00.000Z' }];
   const folderDiff = await service.reconcileFolders(folders, { mid: '100', name: '测试用户' });
   const renamedNeedsSync = store.getCollectionById('100:7');
   assert(folderDiff.renamed === 1 && renamedNeedsSync.name === 'AIcode Renamed' && renamedNeedsSync.syncReady === false, 'folder rename was not detected as requiring a full sync');
@@ -119,6 +123,13 @@ function video(bvid, title, favoriteAddedAt) {
   assert(!store.getTask('100:7:BVNEW1234567') && store.get('removedFavoriteTasks', '100:7:BVNEW1234567'), 'unfinished task from a deleted folder remained dispatchable');
   assert(unavailableSessions.some((item) => item.collectionId === '100:7'), 'Agent workflows were not marked unavailable after folder deletion');
   assert(stopped.length >= 5, 'collection changes did not stop related Agent workflows');
+
+  folders = [{ id: '8', name: 'AIcode Renamed', mediaCount: 1, updatedAt: '2026-07-07T00:00:00.000Z' }];
+  videos = [video('BVREPLACED01', 'Replacement folder video', '2026-07-07T01:00:00.000Z')];
+  const replacement = await service.sync({ collectionName: 'AIcode Renamed' });
+  assert(replacement.collection.id === '100:8' && replacement.collection.syncState === 'ready', 'same-name replacement folder was not synchronized as a new stable collection id');
+  assert(store.getCollectionById('100:7').biliDeleted === true && store.getCollectionById('100:7').syncState === 'deleted', 'same-name replacement left the old deleted collection stuck in syncing state');
+  assert(store.getTask('100:8:BVREPLACED01')?.status === 'pending', 'replacement collection did not receive its new task inventory');
 
   const interruptedId = 'collection-sync:100:7';
   store.set('collectionSyncTransactions', interruptedId, { id: interruptedId, collectionId: '100:7', collectionBefore: deletedCollection, startedAt: new Date().toISOString() });

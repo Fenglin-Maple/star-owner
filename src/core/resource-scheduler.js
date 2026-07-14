@@ -91,6 +91,7 @@ class ResourceScheduler {
     const pool = this.requirePool(poolName);
     if (pool.dispatching) return;
     pool.dispatching = true;
+    const fatalGates = [];
     try {
       for (const lane of pool.lanes) {
         if (!pool.queue.length) break;
@@ -105,11 +106,15 @@ class ResourceScheduler {
         try { gate = lane.gate ? await lane.gate() : gate; } catch (error) { gate = { ready: false, reason: 'RESOURCE_CHECK_FAILED', message: error.message }; }
         lane.checking = false;
         lane.lastGate = { ...gate, checkedAt: new Date().toISOString() };
+        if (!lane.enabled) {
+          this.scheduleRetry(pool, 200);
+          continue;
+        }
         if (!gate.ready) {
           pool.waitReason = gate.reason || 'RESOURCE_WAIT';
           for (const item of pool.queue) item.waitReason = pool.waitReason;
           if (gate.fatal) {
-            this.rejectQueued(pool, gate);
+            fatalGates.push(gate);
             continue;
           }
           this.scheduleRetry(pool, Number(gate.retryAfterMs || 2000));
@@ -119,6 +124,13 @@ class ResourceScheduler {
         if (!entry) break;
         pool.waitReason = '';
         this.startEntry(pool, lane, entry);
+      }
+      if (pool.queue.length && fatalGates.length) {
+        const enabledLanes = pool.lanes.filter((lane) => lane.enabled);
+        const allEnabledLanesFatal = enabledLanes.length > 0
+          && enabledLanes.every((lane) => !lane.busy && !lane.checking && lane.lastGate?.fatal);
+        if (allEnabledLanesFatal) this.rejectQueued(pool, fatalGates[0]);
+        else this.scheduleRetry(pool, 500);
       }
     } finally {
       pool.dispatching = false;
@@ -142,8 +154,19 @@ class ResourceScheduler {
     entry.startedMs = Date.now();
     pool.lastStartedAt = Date.now();
     pool.lastWorkerId = entry.workerId || '';
-    entry.onStart?.({ pool: pool.name, lane: lane.id });
-    this.onState(this.snapshot());
+    try {
+      entry.onStart?.({ pool: pool.name, lane: lane.id });
+      this.onState(this.snapshot());
+    } catch (error) {
+      lane.busy = false;
+      lane.currentJobId = '';
+      entry.state = 'failed';
+      this.jobs.delete(entry.id);
+      entry.reject(error);
+      this.refreshQueue(pool);
+      this.scheduleRetry(pool, 200);
+      return;
+    }
     Promise.resolve()
       .then(() => entry.execute(lane))
       .then((result) => entry.resolve(result), (error) => entry.reject(error))
@@ -165,16 +188,21 @@ class ResourceScheduler {
     const enabledLanes = Math.max(1, activeLanes.length);
     const averageMs = pool.durations.length ? pool.durations.reduce((sum, value) => sum + value, 0) / pool.durations.length : 0;
     pool.queue.forEach((entry, index) => {
-      if (allBusy && !entry.waitReason) entry.waitReason = activeLanes.length ? 'RESOURCE_BUSY' : 'RESOURCE_DISABLED';
-      entry.onQueued?.({
-        pool: pool.name,
-        position: index + 1,
-        queued: pool.queue.length,
-        reason: entry.waitReason || pool.waitReason || 'RESOURCE_BUSY',
-        estimatedWaitMs: averageMs ? Math.ceil((index + 1) / enabledLanes) * averageMs : null
-      });
+      if (!activeLanes.length) entry.waitReason = 'RESOURCE_DISABLED';
+      else if (allBusy && (!entry.waitReason || entry.waitReason === 'RESOURCE_DISABLED')) entry.waitReason = 'RESOURCE_BUSY';
+      try {
+        entry.onQueued?.({
+          pool: pool.name,
+          position: index + 1,
+          queued: pool.queue.length,
+          reason: entry.waitReason || pool.waitReason || 'RESOURCE_BUSY',
+          estimatedWaitMs: averageMs ? Math.ceil((index + 1) / enabledLanes) * averageMs : null
+        });
+      } catch {
+        // Queue observability must not stop resource dispatch.
+      }
     });
-    this.onState(this.snapshot());
+    try { this.onState(this.snapshot()); } catch { /* state observers are non-critical */ }
   }
 
   scheduleRetry(pool, delayMs) {

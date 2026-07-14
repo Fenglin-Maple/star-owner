@@ -32,6 +32,8 @@ async function expectReject(promise, pattern, message) {
   try {
     const dataImage = await loadClipboardImage(`data:image/png;base64,${png.toString('base64')}`);
     assert(dataImage.buffer.equals(png) && dataImage.sourceType === 'data', 'Data URL image was not decoded');
+    await expectReject(loadClipboardImage(`data:image/jpeg;base64,${png.toString('base64')}`), /声明格式/, 'mismatched Data URL image type was accepted');
+    await expectReject(loadClipboardImage(`data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64')}`), /只支持/, 'SVG clipboard image was accepted');
 
     const localImage = await loadClipboardImage(pathToFileURL(trustedImage).href, { trustedRoots: [trusted] });
     assert(localImage.buffer.equals(png) && localImage.sourceType === 'file', 'trusted Workspace image was not loaded');
@@ -43,6 +45,10 @@ async function expectReject(promise, pattern, message) {
       fetchImpl: async () => new Response(png, { status: 200, headers: { 'content-type': 'image/png', 'content-length': String(png.length) } })
     });
     assert(remoteImage.buffer.equals(png) && remoteImage.sourceType === 'remote', 'public remote image was not loaded');
+    await expectReject(loadClipboardImage('https://images.example.test/disguised.jpg', {
+      lookup: publicLookup,
+      fetchImpl: async () => new Response(png, { status: 200, headers: { 'content-type': 'image/jpeg' } })
+    }), /声明格式/, 'remote image with a mismatched MIME type was accepted');
     await expectReject(loadClipboardImage('http://127.0.0.1/private.png', { lookup: publicLookup, fetchImpl: async () => new Response(png) }), /私有网络/, 'private-network image was accepted');
     await expectReject(loadClipboardImage('https://images.example.test/huge.png', {
       lookup: publicLookup,

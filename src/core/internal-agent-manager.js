@@ -1,17 +1,19 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { finalizeSubmissionArtifacts, relocateCachedVideo } = require('./submission-artifacts');
+const { applySubmissionFinalization, stageSubmissionFinalization } = require('./submission-artifacts');
 const { collectionBlockReason, collectionStorageName } = require('./collection-state');
 const { promoteMindMap } = require('./markdown');
 const { isLoginRequiredMessage, isVideoUnavailableMessage, loginRequiredError } = require('./media-errors');
 const { abortTaskAttempt, createWorkId } = require('./task-attempt');
 const { removeUnavailableTask } = require('./unavailable-task');
+const { resolveBvid } = require('./video-cache-manager');
 const { validateSubmission } = require('./validation');
 const {
   collectionDirs,
   ensureDir,
   normalizeTags,
+  assertInside,
   videoArtifactDir
 } = require('./workspace');
 
@@ -36,6 +38,7 @@ class InternalAgentManager {
     this.emitEvent = emit || (() => {});
     this.controllers = new Map();
     this.running = new Map();
+    this.startLocks = new Map();
     this.forcedStops = new Map();
     this.ensureInternalUser();
     this.recoverInterruptedSessions();
@@ -47,7 +50,7 @@ class InternalAgentManager {
       providers: this.ragAssistant.listProviders(),
       sessions: this.listSessions().map((session) => this.publicSession(session)),
       collections: this.store.listCollections().map((collection) => {
-        const unavailableReason = collectionBlockReason(collection);
+        const unavailableReason = agentCollectionBlockReason(collection);
         return {
           id: collection.id,
           name: collection.name,
@@ -74,7 +77,8 @@ class InternalAgentManager {
   }
 
   listInternalCollections() {
-    return this.store.listCollections().filter((collection) => (collection.userId === INTERNAL_USER_ID || collection.internal === true) && collection.collectionKind !== 'video-cache');
+    return this.store.listCollections().filter((collection) => (collection.userId === INTERNAL_USER_ID || collection.internal === true)
+      && !['video-cache', 'document-archive'].includes(collection.collectionKind));
   }
 
   createInternalCollection(name) {
@@ -110,7 +114,7 @@ class InternalAgentManager {
     if (!(provider.enabledModels || []).some((model) => model.id === modelId)) throw new Error('请选择已启用的模型。');
     const collection = this.store.getCollectionById(String(input.collectionId || ''));
     if (!collection) throw new Error('请选择工作收藏夹。');
-    const collectionReason = collectionBlockReason(collection);
+    const collectionReason = agentCollectionBlockReason(collection);
     if (collectionReason) throw new Error(collectionReason);
     const worker = this.store.registerWorker({
       tool: 'star-owner-internal',
@@ -160,14 +164,18 @@ class InternalAgentManager {
   }
 
   async createSingleTask(input = {}) {
-    const bvid = extractBvid(input.video);
+    const provider = this.ragAssistant.rawProvider(input.providerId);
+    const modelId = String(input.modelId || '');
+    if (!(provider.enabledModels || []).some((model) => model.id === modelId)) throw new Error('Select an enabled model before creating a single-video task.');
+    const bvid = extractBvid(input.video) || await resolveBvid(input.video);
     if (!bvid) throw new Error('请输入有效的 BV 号或 Bilibili 视频链接。');
     const collection = this.store.getCollectionById(String(input.collectionId || ''));
     if (!collection || !(collection.userId === INTERNAL_USER_ID || collection.internal === true)) throw new Error('请选择内置用户下的内置收藏夹。');
+    if (['video-cache', 'document-archive'].includes(collection.collectionKind)) throw new Error('请选择普通内置收藏夹，不能把单视频任务写入缓存库或文档归档库。');
     const workspace = this.requireWorkspace();
     const dirs = collectionDirs(workspace.root, INTERNAL_USER_NAME, collectionStorageName(collection));
     const now = new Date().toISOString();
-    const taskId = `${collection.id}:${bvid}:single-${Date.now()}`;
+    const taskId = `${collection.id}:${bvid}:single-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
     this.store.upsertTask({
       id: taskId,
       collectionId: collection.id,
@@ -207,7 +215,7 @@ class InternalAgentManager {
       throw new Error('请选择内置用户下的内置收藏夹。');
     }
     const workspace = this.requireWorkspace();
-    return collectionDirs(collection.workspaceRoot || workspace.root, INTERNAL_USER_NAME, collectionStorageName(collection)).root;
+    return collectionDirs(workspace.root, INTERNAL_USER_NAME, collectionStorageName(collection)).root;
   }
 
   sessionOutputDirectory(sessionId) {
@@ -219,8 +227,22 @@ class InternalAgentManager {
   }
 
   async start(sessionId) {
-    const session = this.requireSession(sessionId);
-    if (this.running.has(session.id)) return this.publicSession(session);
+    const id = String(sessionId || '');
+    if (this.startLocks.has(id)) return this.startLocks.get(id);
+    const operation = this.startUnlocked(id).finally(() => this.startLocks.delete(id));
+    this.startLocks.set(id, operation);
+    return operation;
+  }
+
+  async startUnlocked(sessionId) {
+    let session = this.requireSession(sessionId);
+    this.forcedStops.delete(session.id);
+    if (this.running.has(session.id)) {
+      const controller = this.controllers.get(session.id);
+      if (!controller?.signal.aborted) return this.publicSession(session);
+      await this.running.get(session.id);
+      session = this.requireSession(sessionId);
+    }
     const collectionAvailability = this.collectionAvailability(session);
     if (!collectionAvailability.available) throw new Error(collectionAvailability.reason);
     const modelAvailability = this.modelAvailability(session);
@@ -233,7 +255,19 @@ class InternalAgentManager {
       }
       const task = this.store.getTask(session.singleTaskId);
       if (!task) throw new Error('等待登录的单视频任务已不存在。');
-      task.cookieFile = await this.bili.exportCookies(user.name || String(user.mid));
+      const startupController = new AbortController();
+      this.controllers.set(session.id, startupController);
+      try {
+        task.cookieFile = await this.bili.exportCookies(user.name || String(user.mid));
+      } catch (error) {
+        if (this.controllers.get(session.id) === startupController) this.controllers.delete(session.id);
+        throw error;
+      }
+      if (startupController.signal.aborted) {
+        if (this.controllers.get(session.id) === startupController) this.controllers.delete(session.id);
+        return this.publicSession(this.requireSession(session.id));
+      }
+      if (this.controllers.get(session.id) === startupController) this.controllers.delete(session.id);
       task.publicAttempt = false;
       task.updatedAt = new Date().toISOString();
       this.store.upsertTask(task);
@@ -250,10 +284,13 @@ class InternalAgentManager {
     this.saveSession(session);
     const controller = new AbortController();
     this.controllers.set(session.id, controller);
-    const promise = this.runLoop(session.id, controller.signal).finally(() => {
-      this.controllers.delete(session.id);
-      this.running.delete(session.id);
-    });
+    const promise = this.runLoop(session.id, controller.signal)
+      .catch((error) => this.handleLoopFailure(session.id, error))
+      .finally(() => {
+        this.controllers.delete(session.id);
+        this.running.delete(session.id);
+        this.forcedStops.delete(session.id);
+      });
     this.running.set(session.id, promise);
     return this.publicSession(session);
   }
@@ -344,6 +381,19 @@ class InternalAgentManager {
   deleteSession(sessionId) {
     const session = this.requireSession(sessionId);
     if (this.running.has(session.id)) throw new Error('请先停止正在工作的 Agent 会话。');
+    if (session.mode === 'single' && session.singleTaskId) {
+      const task = this.store.getTask(session.singleTaskId);
+      if (task && task.status !== 'done') {
+        if (['claimed', 'rejected'].includes(task.status) && (task.workId || task.claimedBy)) {
+          this.abortAttempt(task.id, session.workerId, '用户删除了未完成的单视频工作流。', 'single-session-delete');
+        }
+        this.store.delete('tasks', task.id);
+        this.store.delete('videos', task.id);
+        const collection = this.store.getCollectionById(task.collectionId);
+        if (collection) this.store.set('collections', collection.id, { ...collection, videoCount: this.store.listTasks({ collectionId: collection.id }).length, updatedAt: new Date().toISOString() });
+      }
+    }
+    try { this.store.updateWorker(session.workerId, { status: 'paused', pauseReason: '对应的应用内 Agent 工作流已被用户删除。' }); } catch {}
     this.store.delete('internalAgentSessions', session.id);
     this.store.save();
     return { deleted: true, id: session.id };
@@ -437,7 +487,11 @@ class InternalAgentManager {
           const forced = this.forcedStops.get(session.id);
           this.forcedStops.delete(session.id);
           const reason = forced?.reason || '用户或应用停止了 Agent 工作。';
-          this.abortAttempt(task.id, latest.workerId, reason, forced?.source || 'internal-agent-stop');
+          try {
+            this.abortAttempt(task.id, latest.workerId, reason, forced?.source || 'internal-agent-stop');
+          } catch (cleanupError) {
+            latest.lastError = `任务已停止，但缓存清理将在启动恢复时重试：${cleanupError.message || String(cleanupError)}`;
+          }
           latest.acceptNewTasks = false;
           latest.lastError = forced?.reason || latest.lastError;
           latest.currentTaskId = '';
@@ -537,7 +591,7 @@ class InternalAgentManager {
   claimNextTask(session, excluded) {
     const collection = this.store.getCollectionById(session.collectionId);
     if (!collection) throw new Error('工作收藏夹已不存在。');
-    const collectionReason = collectionBlockReason(collection);
+    const collectionReason = agentCollectionBlockReason(collection);
     if (collectionReason) throw new Error(collectionReason);
     this.reclaimExpired(collection.id);
     const task = this.store.listTasks({ collectionId: collection.id }).find((item) => {
@@ -592,10 +646,19 @@ class InternalAgentManager {
   }
 
   async processTask(session, task, signal) {
+    const stopLeaseHeartbeat = this.startTaskLeaseHeartbeat(task);
+    try {
     const collection = this.store.getCollectionById(task.collectionId) || {};
     const toolCollection = task.singleTask ? { ...collection, cookieFile: task.publicAttempt ? '' : (task.cookieFile || '') } : collection;
     this.setProgress(session, '准备视频素材', 0.09);
-    const bundle = this.startTool(session, task, toolCollection, 'material-bundle', { frames: session.taskOptions?.frames || 12, commentLimit: session.taskOptions?.commentLimit ?? 3, timeoutMs: 7_200_000 });
+    const commentLimit = Number(session.taskOptions?.commentLimit ?? 3);
+    const bundle = this.startTool(session, task, toolCollection, 'material-bundle', {
+      frames: session.taskOptions?.frames || 12,
+      comments: commentLimit > 0,
+      skipComments: commentLimit <= 0,
+      commentLimit: Math.max(0, commentLimit),
+      timeoutMs: 7_200_000
+    });
     await this.waitForRun(session, task, bundle.id, signal, 0.1, 0.52);
     this.refreshTaskMetadata(task);
     this.setProgress(session, '模型正在整理完整 Markdown', 0.56);
@@ -617,6 +680,9 @@ class InternalAgentManager {
     latest.updatedAt = new Date().toISOString();
     this.saveSession(latest);
     this.log(latest, `完成 ${task.bvid}，产物已通过应用校验。`);
+    } finally {
+      stopLeaseHeartbeat();
+    }
   }
 
   startTool(session, task, collection, toolId, options) {
@@ -650,12 +716,59 @@ class InternalAgentManager {
         }
         return run;
       }
-      task.leaseExpiresAt = new Date(Date.now() + LEASE_MS).toISOString();
-      task.updatedAt = new Date().toISOString();
-      this.store.upsertTask(task);
-      this.store.commit();
       await delay(650, signal);
     }
+  }
+
+  startTaskLeaseHeartbeat(task) {
+    const workId = String(task.workId || '');
+    const workerId = String(task.claimedBy || '');
+    const refresh = () => {
+      try {
+        const latest = this.store.getTask(task.id);
+        if (!latest || latest.workId !== workId || latest.claimedBy !== workerId || !['claimed', 'rejected'].includes(latest.status)) return;
+        const now = new Date();
+        latest.leaseExpiresAt = new Date(now.getTime() + LEASE_MS).toISOString();
+        latest.updatedAt = now.toISOString();
+        this.store.upsertTask(latest);
+        this.store.commit();
+      } catch (error) {
+        console.error(`[internal-agent-lease] ${task.id}: ${error.message || String(error)}`);
+      }
+    };
+    const timer = setInterval(refresh, 60 * 1000);
+    timer.unref?.();
+    return () => clearInterval(timer);
+  }
+
+  handleLoopFailure(sessionId, error) {
+    let session;
+    try { session = this.requireSession(sessionId); }
+    catch { return; }
+    const forced = this.forcedStops.get(sessionId);
+    const reason = forced?.reason || error?.message || String(error);
+    if (session.currentTaskId) {
+      try {
+        this.abortAttempt(session.currentTaskId, session.workerId, reason, forced?.source || 'internal-agent-loop-failure');
+      } catch (cleanupError) {
+        session.lastError = `${reason}\n任务缓存清理将在启动恢复时重试：${cleanupError.message || String(cleanupError)}`;
+      }
+    }
+    try {
+      this.store.updateWorker(session.workerId, {
+        status: 'paused',
+        pauseReason: reason,
+        pausedAt: new Date().toISOString()
+      });
+    } catch {}
+    session.acceptNewTasks = false;
+    session.status = forced?.status || (this.collectionAvailability(session).available ? 'error' : 'collection-unavailable');
+    session.phase = forced?.phase || 'Agent 工作循环异常停止，当前任务已回滚';
+    session.lastError = session.lastError || reason;
+    session.currentTaskId = '';
+    session.currentRunId = '';
+    try { this.saveSession(session); } catch {}
+    try { this.log(session, `Agent 工作循环已安全停止：${reason}`); } catch {}
   }
 
   async generateMarkdown(session, task, collection, signal) {
@@ -736,7 +849,7 @@ class InternalAgentManager {
       previous = normalizeGeneratedMarkdown(injectFrameGallery(stripMarkdownFence(result.content || ''), originalMaterials.frames), task, originalMaterials);
       const draft = path.join(task.artifactDir, `agent-draft-${attempt + 1}.md`);
       fs.writeFileSync(draft, `${previous.trim()}\n`, 'utf8');
-      const validation = validateSubmission(task, { artifactDir: task.artifactDir, markdownFile: draft, metadataFile: path.join(task.artifactDir, 'info.json') });
+      const validation = validateSubmission(task, { artifactDir: task.artifactDir, markdownFile: draft, metadataFile: path.join(task.artifactDir, 'info.json') }, { requireMediaCleanup: false });
       if (validation.ok) return previous;
       errors = validation.errors;
       this.log(session, `第 ${attempt + 1} 稿未通过校验：${errors.join('；')}`);
@@ -879,10 +992,18 @@ class InternalAgentManager {
     task.title = String(info.title || task.title || task.bvid);
     task.owner = String(info.owner?.name || info.uploader || info.owner || task.owner || '');
     task.duration = Number(info.duration || task.duration || 0);
-    task.publishedAt = info.timestamp ? new Date(Number(info.timestamp) * 1000).toISOString() : (info.upload_date || task.publishedAt || '');
+    const published = Number(info.pubdate || info.timestamp || info.ctime || 0);
+    task.publishedAt = published ? new Date(published * 1000).toISOString() : (info.upload_date || task.publishedAt || '');
     task.cover = info.pic || info.thumbnail || task.cover || '';
-    const localCover = info.coverFile ? path.resolve(task.artifactDir, info.coverFile) : '';
-    task.coverFile = localCover && fs.existsSync(localCover) ? localCover : (task.coverFile || '');
+    let localCover = '';
+    try {
+      const candidate = info.coverFile ? assertInside(task.artifactDir, path.resolve(task.artifactDir, info.coverFile)) : '';
+      const stat = candidate ? fs.lstatSync(candidate) : null;
+      if (stat?.isFile() && !stat.isSymbolicLink()) localCover = candidate;
+    } catch {
+      localCover = '';
+    }
+    task.coverFile = localCover || task.coverFile || '';
     task.tags = normalizeTags(info.tags || task.tags);
     task.updatedAt = new Date().toISOString();
     this.store.upsertTask(task);
@@ -898,13 +1019,11 @@ class InternalAgentManager {
     const collection = this.store.getCollectionById(task.collectionId) || {};
     const metadata = readJson(metadataFile);
     task.tags = normalizeTags(metadata.tags || task.tags);
-    const finalized = finalizeSubmissionArtifacts({ task, collection, validation, filenameMetadata: this.store.getFilenameMetadata() });
     const completedWorkId = task.workId;
-    Object.assign(task, { status: 'done', workId: '', completedAt: now, outputMarkdown: finalized.markdownFile, artifactDir: finalized.artifactDir, metadataFile: finalized.metadataFile, validatorErrors: [], updatedAt: now });
-    relocateCachedVideo(this.store, task, finalized);
-    this.store.upsertTask(task);
-    this.store.commit();
-    this.store.recordTaskEvent(task.id, 'completed', { collectionId: task.collectionId, workerId: session.workerId, agentName: session.workerId, workId: completedWorkId, processingSeconds: secondsBetween(task.claimedAt, now), videoDuration: Number(task.duration || 0), internalAgent: true });
+    const completedTask = { ...task, status: 'done', workId: '', completedAt: now, validatorErrors: [], updatedAt: now };
+    const event = { id: `submission-completed:${completedWorkId || task.id}`, taskId: task.id, type: 'completed', createdAt: now, collectionId: task.collectionId, workerId: session.workerId, agentName: session.workerId, workId: completedWorkId, processingSeconds: secondsBetween(task.claimedAt, now), videoDuration: Number(task.duration || 0), internalAgent: true };
+    const staged = stageSubmissionFinalization({ store: this.store, task, collection, validation, filenameMetadata: this.store.getFilenameMetadata(), completedTask, event });
+    const { finalized } = applySubmissionFinalization(this.store, staged);
     this.emitEvent({ type: 'task-completed', taskId: task.id, collectionId: task.collectionId, workerId: session.workerId, agentName: session.workerId, internalAgent: true });
     return finalized;
   }
@@ -916,9 +1035,9 @@ class InternalAgentManager {
   }
 
   reclaimExpired(collectionId) {
-    const active = new Set(this.store.listToolRuns().filter((run) => ['queued', 'running'].includes(run.status)).map((run) => run.taskId));
+    const active = new Set(this.store.listToolRuns().filter((run) => ['queued', 'running'].includes(run.status) && run.workId).map((run) => `${run.taskId}:${run.workId}`));
     for (const task of this.store.listTasks({ collectionId })) {
-      if (!['claimed', 'rejected'].includes(task.status) || !task.leaseExpiresAt || Date.parse(task.leaseExpiresAt) > Date.now() || active.has(task.id)) continue;
+      if (!['claimed', 'rejected'].includes(task.status) || !task.leaseExpiresAt || Date.parse(task.leaseExpiresAt) > Date.now() || active.has(`${task.id}:${task.workId}`)) continue;
       this.abortAttempt(task.id, task.claimedBy, '任务租约已超时，内置 Agent 未完成或未正常中止本次工作。', 'lease-expired');
     }
   }
@@ -1008,7 +1127,7 @@ class InternalAgentManager {
   collectionAvailability(session) {
     const collection = this.store.getCollectionById(String(session.collectionId || ''));
     if (!collection) return { available: false, reason: '工作收藏夹已不存在。' };
-    const reason = collectionBlockReason(collection);
+    const reason = agentCollectionBlockReason(collection);
     return { available: !reason, reason };
   }
 
@@ -1016,8 +1135,8 @@ class InternalAgentManager {
     const tasks = this.store.listTasks({ collectionId: String(collectionId || '') });
     const enabledTasks = tasks.filter((task) => task.enabled !== false);
     const done = enabledTasks.filter((task) => task.status === 'done').length;
-    const claimed = enabledTasks.filter((task) => task.status === 'claimed').length;
-    const failed = enabledTasks.filter((task) => ['failed', 'rejected'].includes(task.status)).length;
+    const claimed = enabledTasks.filter((task) => task.status === 'claimed' || (task.status === 'rejected' && task.workId && task.claimedBy)).length;
+    const failed = enabledTasks.filter((task) => task.status === 'failed' || (task.status === 'rejected' && (!task.workId || !task.claimedBy))).length;
     const pending = enabledTasks.filter((task) => task.status === 'pending').length;
     return {
       tasks: tasks.length,
@@ -1096,16 +1215,57 @@ class InternalAgentManager {
 
 function collectMaterials(artifactDir) {
   const frames = listFiles(path.join(artifactDir, 'frames'), '.jpg').map((file) => `frames/${path.basename(file)}`);
-  const asr = readText(path.join(artifactDir, 'asr', 'asr-transcript.txt'));
-  const stationFile = listFiles(path.join(artifactDir, 'subtitles'), '.txt')[0];
+  const asr = readTimedAsr(path.join(artifactDir, 'asr'));
+  const station = readTimedStationSubtitles(path.join(artifactDir, 'subtitles'));
   return {
     info: readJson(path.join(artifactDir, 'info.json')),
     manifest: readJson(path.join(artifactDir, 'manifest.json')),
     comments: readJson(path.join(artifactDir, 'comments', 'comments.json')),
     asr,
-    station: stationFile ? readText(stationFile) : '',
+    station,
     frames
   };
+}
+
+function agentCollectionBlockReason(collection) {
+  if (collection?.collectionKind === 'document-archive') return '该收藏夹仅保留已完成文档，不能继续派发视频总结任务。';
+  return collectionBlockReason(collection);
+}
+
+function readTimedAsr(directory) {
+  const srt = readText(path.join(directory, 'transcript.srt'));
+  if (srt.trim()) return `ASR 时间轴字幕（SRT）：\n${srt}`;
+  const result = readJson(path.join(directory, 'asr-result.json'));
+  if (Array.isArray(result.segments) && result.segments.length) {
+    return `ASR 时间轴字幕（分段 JSON 回退）：\n${formatTimedSegments(result.segments)}`;
+  }
+  const text = readText(path.join(directory, 'asr-transcript.txt'));
+  return text.trim() ? `ASR 时间轴字幕（文本格式回退）：\n${text}` : '';
+}
+
+function readTimedStationSubtitles(directory) {
+  const srtFiles = listFiles(directory, '.srt');
+  if (srtFiles.length) {
+    return srtFiles.map((file) => `站内时间轴字幕 ${path.basename(file)}：\n${readText(file)}`).join('\n\n');
+  }
+  return listFiles(directory, '.txt').map((file) => `站内字幕 ${path.basename(file)}：\n${readText(file)}`).join('\n\n');
+}
+
+function formatTimedSegments(segments) {
+  return segments.map((segment) => {
+    const start = subtitleTime(segment.start);
+    const end = subtitleTime(segment.end);
+    return `[${start} --> ${end}] ${String(segment.text || '').trim()}`;
+  }).filter((line) => !line.endsWith('] ')).join('\n');
+}
+
+function subtitleTime(seconds) {
+  const totalMs = Math.max(0, Math.round(Number(seconds || 0) * 1000));
+  const hours = Math.floor(totalMs / 3_600_000);
+  const minutes = Math.floor((totalMs % 3_600_000) / 60_000);
+  const secs = Math.floor((totalMs % 60_000) / 1000);
+  const milliseconds = totalMs % 1000;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')},${String(milliseconds).padStart(3, '0')}`;
 }
 
 function buildGenerationPrompt({ session, task, collection, materials, template }) {
@@ -1117,8 +1277,8 @@ function buildGenerationPrompt({ session, task, collection, materials, template 
 强制要求：
 1. 开头章节严格为“小结 -> 思维导图 -> 目录”，思维导图使用有效 Mermaid mindmap。
 2. 正文完整覆盖视频的新闻、技术、经验、步骤、参数、限制和时效性，不能只做简短摘要。
-3. 章节标题加入 Bilibili 时间轴链接：https://www.bilibili.com/video/${task.bvid}?t=<秒数>。
-4. 必须比较站内字幕与本次 ASR；无论有无站内字幕，本次 ASR 都已经执行。
+3. 章节标题加入 Bilibili 时间轴链接：https://www.bilibili.com/video/${task.bvid}?t=<秒数>。优先依据 ASR/站内 SRT 的起止时间换算秒数，不得根据文字顺序猜测时间位置。
+4. 必须比较站内字幕与本次 ASR；无论有无站内字幕，本次 ASR 都已经执行。时间轴字幕中的“HH:MM:SS,mmm --> HH:MM:SS,mmm”是可直接使用的真实分段时间。
 5. 从给出的关键帧中选择适合正文的图片，使用相对路径 frames/xxx.jpg，并解释图片价值。
 6. 评论分析只处理可获取的热评前三条。
 7. 处理记录写明 Worker ID、模型、工具、字幕选择、关键帧依据和缓存清理。
@@ -1263,7 +1423,7 @@ function normalizeGeneratedMarkdown(markdown, task, materials) {
 }
 
 function normalizeCommentItems(value) {
-  const list = Array.isArray(value) ? value : (value?.comments || value?.replies || value?.data?.replies || []);
+  const list = Array.isArray(value) ? value : (value?.items || value?.comments || value?.replies || value?.data?.replies || []);
   return list.map((item) => String(item?.message || item?.content?.message || item?.text || item || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
 }
 
@@ -1317,8 +1477,13 @@ function secondsBetween(start, end) {
 
 function delay(ms, signal) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener('abort', () => { clearTimeout(timer); reject(abortError()); }, { once: true });
+    if (signal?.aborted) return reject(abortError());
+    const onAbort = () => { clearTimeout(timer); reject(abortError()); };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
 

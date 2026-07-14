@@ -15,10 +15,14 @@
   let visibleVideos = [];
   let confirmAction = null;
   let refreshTimer = null;
+  let refreshSequence = 0;
 
   async function refresh({ quiet = false } = {}) {
+    const sequence = ++refreshSequence;
     try {
-      state = await window.orchestrator.videoCacheState();
+      const nextState = await window.orchestrator.videoCacheState();
+      if (sequence !== refreshSequence) return;
+      state = nextState;
       render();
     } catch (error) {
       if (!quiet) toast('视频缓存尚未就绪', error.message || String(error), 'error');
@@ -43,11 +47,12 @@
   }
 
   function renderQueue() {
+    const previousScrollTop = elements.jobs.scrollTop;
     const jobs = state.jobs || [];
     const queued = jobs.filter((item) => item.status === 'queued').length;
     const running = jobs.filter((item) => item.status === 'running').length;
     const completed = jobs.filter((item) => item.status === 'completed').length;
-    const failed = jobs.filter((item) => ['failed', 'waiting-login'].includes(item.status)).length;
+    const failed = jobs.filter((item) => ['failed', 'waiting-login', 'skipped'].includes(item.status)).length;
     elements.metricQueued.textContent = String(queued);
     elements.metricRunning.textContent = String(running);
     elements.metricDone.textContent = String(completed);
@@ -56,6 +61,7 @@
     elements.headline.parentElement.classList.toggle('busy', Boolean(running || queued));
     elements.queueSummary.textContent = jobs.length ? `最近 ${jobs.length} 条记录 · 并发上限 ${state.maxConcurrent || 3}` : '暂无任务';
     elements.jobs.innerHTML = jobs.length ? jobs.map(jobCard).join('') : '<div class="cache-empty"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg><strong>下载队列为空</strong><span>提交后可离开本页，任务会在后台继续。</span></div>';
+    elements.jobs.scrollTop = previousScrollTop;
   }
 
   function jobCard(job) {
@@ -68,6 +74,7 @@
   }
 
   function renderLibrary() {
+    const previousScrollTop = elements.list.scrollTop;
     const collectionId = elements.libraryCollection.value;
     const query = elements.librarySearch.value.trim().toLowerCase();
     const allForCollection = state.videos.filter((item) => !collectionId || item.collectionId === collectionId);
@@ -103,6 +110,11 @@
         if (event.target.closest('input, a, button')) return;
         selectVideo(item.dataset.cacheVideo);
       });
+      item.addEventListener('keydown', (event) => {
+        if (!['Enter', ' '].includes(event.key) || event.target.closest('input, a, button')) return;
+        event.preventDefault();
+        selectVideo(item.dataset.cacheVideo);
+      });
       item.querySelector('input')?.addEventListener('change', (event) => {
         event.target.checked ? selected.add(item.dataset.cacheVideo) : selected.delete(item.dataset.cacheVideo);
         renderLibrary();
@@ -128,6 +140,7 @@
         }
       });
     }
+    elements.list.scrollTop = previousScrollTop;
     if (activeVideoId && !state.videos.some((item) => item.id === activeVideoId)) clearPlayer();
   }
 
@@ -181,7 +194,8 @@
       state = result.state;
       elements.inputs.value = '';
       render();
-      toast('已加入下载队列', `${result.jobs.length} 个视频将按资源情况并行处理。`, 'success');
+      const ignored = result.invalidInputs?.length ? `，另有 ${result.invalidInputs.length} 项不是可识别的 Bilibili 输入，已忽略` : '';
+      toast('已加入下载队列', `${result.jobs.length} 个视频将按资源情况并行处理${ignored}。`, 'success');
     } catch (error) { toast('无法提交缓存任务', error.message || String(error), 'error'); }
     finally { elements.submit.disabled = false; }
   }
@@ -221,7 +235,10 @@
   }
 
   function scheduleRefresh(nextState) {
-    if (nextState) state = nextState;
+    if (nextState) {
+      refreshSequence += 1;
+      state = nextState;
+    }
     if (refreshTimer) return;
     refreshTimer = setTimeout(() => { refreshTimer = null; nextState ? render() : refresh({ quiet: true }); }, 100);
   }
@@ -237,8 +254,8 @@
   elements.filterToggle.addEventListener('click', () => { const open = elements.advanced.hidden; elements.advanced.hidden = !open; elements.filterToggle.setAttribute('aria-expanded', String(open)); });
   elements.selectVisible.addEventListener('click', () => { visibleVideos.forEach((item) => selected.add(item.id)); renderLibrary(); });
   elements.invertVisible.addEventListener('click', () => { visibleVideos.forEach((item) => selected.has(item.id) ? selected.delete(item.id) : selected.add(item.id)); renderLibrary(); });
-  elements.deleteSelected.addEventListener('click', () => askConfirmation({ title: `删除 ${selected.size} 个缓存视频`, message: '视频文件、元数据和对应的未完成总结任务都会一并删除，此操作无法撤销。', action: async () => { const ids = [...selected]; await window.orchestrator.videoCacheDeleteVideos(ids); selected.clear(); clearPlayer(); toast('缓存视频已删除', `${ids.length} 条记录已移除。`, 'success'); } }));
-  elements.deleteCollection.addEventListener('click', () => { const collection = state.collections.find((item) => item.id === elements.libraryCollection.value); if (!collection || collection.protected) return; askConfirmation({ title: `删除“${collection.name}”`, message: '该缓存收藏夹下登记的视频缓存文件会全部删除。默认收藏夹仍会保留。', action: async () => { await window.orchestrator.videoCacheDeleteCollection(collection.id); clearPlayer(); toast('缓存收藏夹已删除', collection.name, 'success'); } }); });
+  elements.deleteSelected.addEventListener('click', () => askConfirmation({ title: `删除 ${selected.size} 个缓存视频`, message: '视频缓存和对应的未完成总结任务会一并删除；已经验收的 Markdown 文档与元数据会保留。', action: async () => { const ids = [...selected]; const result = await window.orchestrator.videoCacheDeleteVideos(ids); selected.clear(); clearPlayer(); toast('缓存视频已删除', result.preservedDocuments?.length ? `已移除 ${ids.length} 条缓存，并保留 ${result.preservedDocuments.length} 篇已完成文档。` : `${ids.length} 条记录已移除。`, 'success'); } }));
+  elements.deleteCollection.addEventListener('click', () => { const collection = state.collections.find((item) => item.id === elements.libraryCollection.value); if (!collection || collection.protected) return; askConfirmation({ title: `删除“${collection.name}”`, message: '该收藏夹下的视频缓存会全部删除；已有 Markdown 会转为普通文档收藏夹继续保留。', action: async () => { await window.orchestrator.videoCacheDeleteCollection(collection.id); clearPlayer(); toast('缓存收藏夹已删除', `${collection.name} 的已完成文档仍可在文档库使用。`, 'success'); } }); });
   elements.confirmCancel.addEventListener('click', closeConfirmation);
   elements.confirmAccept.addEventListener('click', runConfirmedAction);
   elements.loginLater.addEventListener('click', () => { elements.loginModal.hidden = true; });
@@ -281,7 +298,7 @@
   }, 1200);
   window.addEventListener('beforeunload', () => clearInterval(liveTimer), { once: true });
 
-  function statusLabel(value) { return ({ queued: '等待', running: '下载中', completed: '已完成', failed: '失败', 'waiting-login': '需登录' })[value] || value; }
+  function statusLabel(value) { return ({ queued: '等待', running: '下载中', completed: '已完成', failed: '失败', skipped: '视频不可用', 'waiting-login': '需登录' })[value] || value; }
   function duration(value) { const seconds = Math.max(0, Math.round(Number(value || 0))); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`; }
   function formatDate(value) { const date = new Date(value || ''); return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
   function shortError(value) { return String(value || '').replace(/\s+/g, ' ').slice(0, 220); }

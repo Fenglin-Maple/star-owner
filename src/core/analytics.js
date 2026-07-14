@@ -4,12 +4,13 @@ function buildAnalytics(store) {
   const toolRuns = store.listToolRuns();
   const workers = store.listWorkers();
   const workerMap = new Map(workers.map((worker) => [worker.id, worker]));
-  const eventsByTask = groupBy(taskEvents, (event) => event.taskId);
+  const taskMap = new Map(tasks.map((task) => [task.id, task]));
   const collections = {};
 
   for (const collection of store.listCollections()) {
     const collectionTasks = tasks.filter((task) => task.collectionId === collection.id);
-    collections[collection.id] = buildCollectionStats(collectionTasks, eventsByTask, workerMap);
+    const collectionEvents = taskEvents.filter((event) => String(event.collectionId || taskMap.get(event.taskId)?.collectionId || '') === String(collection.id));
+    collections[collection.id] = buildCollectionStats(collectionTasks, collectionEvents, workerMap);
   }
 
   return {
@@ -20,33 +21,34 @@ function buildAnalytics(store) {
   };
 }
 
-function buildCollectionStats(tasks, eventsByTask, workerMap) {
+function buildCollectionStats(tasks, taskEvents, workerMap) {
   const enabled = tasks.filter((task) => task.enabled !== false);
   const statuses = {};
   for (const task of enabled) statuses[task.status || 'pending'] = (statuses[task.status || 'pending'] || 0) + 1;
-  const agents = buildTaskAgentRows(tasks, eventsByTask, workerMap);
+  const agents = buildTaskAgentRows(tasks, taskEvents, workerMap);
   const done = statuses.done || 0;
+  const activeRejected = enabled.filter((task) => task.status === 'rejected' && task.workId && task.claimedBy).length;
   return {
     total: tasks.length,
     enabled: enabled.length,
     disabled: tasks.length - enabled.length,
     done,
-    claimed: statuses.claimed || 0,
+    claimed: (statuses.claimed || 0) + activeRejected,
     pending: statuses.pending || 0,
-    failed: (statuses.failed || 0) + (statuses.rejected || 0),
+    failed: (statuses.failed || 0) + Math.max(0, (statuses.rejected || 0) - activeRejected),
     progress: enabled.length ? done / enabled.length : 0,
     statuses,
     agents
   };
 }
 
-function buildTaskAgentRows(tasks, eventsByTask, workerMap) {
+function buildTaskAgentRows(tasks, taskEvents, workerMap) {
   const agents = new Map();
+  const taskMap = new Map(tasks.map((task) => [task.id, task]));
+  const eventTaskIds = new Set(taskEvents.map((event) => event.taskId));
+  for (const event of taskEvents) consumeTaskEvent(agents, taskMap.get(event.taskId) || {}, event, workerMap);
   for (const task of tasks) {
-    const events = eventsByTask.get(task.id) || [];
-    if (events.length) {
-      for (const event of events) consumeTaskEvent(agents, task, event, workerMap);
-    } else if (task.claimedBy) {
+    if (!eventTaskIds.has(task.id) && task.claimedBy) {
       const agent = agentRow(agents, task.claimedBy, workerMap);
       agent.claimed += Math.max(1, Number(task.attempts || 1));
       if (task.status === 'done') {
@@ -65,13 +67,12 @@ function buildWorkerStats(workers, tasks, taskEvents, toolRuns) {
   const workerMap = new Map(workers.map((worker) => [worker.id, worker]));
   const agents = new Map();
   for (const worker of workers) agentRow(agents, worker.id, workerMap);
-  const eventsByTask = groupBy(taskEvents, (event) => event.taskId);
+  const taskMap = new Map(tasks.map((task) => [task.id, task]));
+  const eventTaskIds = new Set(taskEvents.map((event) => event.taskId));
+  for (const event of taskEvents) consumeTaskEvent(agents, taskMap.get(event.taskId) || {}, event, workerMap);
 
   for (const task of tasks) {
-    const events = eventsByTask.get(task.id) || [];
-    if (events.length) {
-      for (const event of events) consumeTaskEvent(agents, task, event, workerMap);
-    } else if (task.claimedBy) {
+    if (!eventTaskIds.has(task.id) && task.claimedBy) {
       const agent = agentRow(agents, task.claimedBy, workerMap);
       agent.claimed += Math.max(1, Number(task.attempts || 1));
       if (task.status === 'done') {
@@ -82,7 +83,7 @@ function buildWorkerStats(workers, tasks, taskEvents, toolRuns) {
         agent.failures += 1;
       }
     }
-    if (task.claimedBy && task.status === 'claimed') {
+    if (task.claimedBy && (task.status === 'claimed' || (task.status === 'rejected' && task.workId))) {
       const agent = agentRow(agents, task.claimedBy, workerMap);
       agent.activeTasks += 1;
       agent.currentTasks.push({ id: task.id, bvid: task.bvid, title: task.title, claimedAt: task.claimedAt, leaseExpiresAt: task.leaseExpiresAt });
@@ -115,6 +116,8 @@ function buildWorkerStats(workers, tasks, taskEvents, toolRuns) {
 }
 
 function consumeTaskEvent(agents, task, event, workerMap) {
+  const abortedFailure = event.type === 'attempt-aborted' && ['agent-fail', 'internal-agent-error', 'lease-expired'].includes(String(event.source || ''));
+  if (!['claimed', 'completed', 'failed', 'rejected'].includes(event.type) && !abortedFailure) return;
   const workerId = event.workerId || event.agentName || task.claimedBy || 'legacy-worker';
   const agent = agentRow(agents, workerId, workerMap);
   if (event.type === 'claimed') agent.claimed += 1;
@@ -123,7 +126,7 @@ function consumeTaskEvent(agents, task, event, workerMap) {
     agent.successes += 1;
     addWeightedTime(agent, Number(event.processingSeconds || 0), Number(event.videoDuration || task.duration || 0));
   }
-  if (event.type === 'failed' || event.type === 'rejected') agent.failures += 1;
+  if (event.type === 'failed' || event.type === 'rejected' || abortedFailure) agent.failures += 1;
 }
 
 function agentRow(map, workerId, workerMap) {
@@ -218,16 +221,6 @@ function buildToolStats(tools, runs, workerMap) {
       })).sort((a, b) => b.calls - a.calls)
     };
   });
-}
-
-function groupBy(items, keyOf) {
-  const map = new Map();
-  for (const item of items) {
-    const key = keyOf(item);
-    if (!map.has(key)) map.set(key, []);
-    map.get(key).push(item);
-  }
-  return map;
 }
 
 function secondsBetween(start, end) {

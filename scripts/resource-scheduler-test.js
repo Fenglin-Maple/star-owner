@@ -1,11 +1,17 @@
 const assert = require('assert');
 const { ResourceScheduler } = require('../src/core/resource-scheduler');
+const { ToolRunner, asrInfrastructureError } = require('../src/core/tool-runner');
 
 (async () => {
   await testConcurrencyAndFairness();
   await testDisabledLaneAndCapacityWait();
+  await testLaneDisabledDuringGateCheck();
   await testQueuedCancellation();
   await testFatalGateRejectsQueue();
+  await testBusyHealthyLanePreventsFatalQueueRejection();
+  await testToolMaintenanceWindow();
+  await testCleanupRecoveryTimerSurvivesCpuIdleStop();
+  testAsrRequestFailureClassification();
   console.log('resource scheduler ok');
 })().catch((error) => {
   console.error(error);
@@ -47,6 +53,27 @@ async function testConcurrencyAndFairness() {
   }));
   await Promise.all(jobs.map((job) => job.promise));
   assert.deepStrictEqual(order, ['a1', 'b1', 'a2'], `worker fairness failed: ${order.join(',')}`);
+}
+
+async function testLaneDisabledDuringGateCheck() {
+  const scheduler = new ResourceScheduler();
+  let releaseGate;
+  let firstGate = true;
+  let ran = false;
+  scheduler.registerPool('asr', {
+    lanes: [{ id: 'gpu', gate: () => firstGate ? new Promise((resolve) => { releaseGate = (value) => { firstGate = false; resolve(value); }; }) : Promise.resolve({ ready: true }) }]
+  });
+  const handle = scheduler.enqueue('asr', { id: 'disable-during-gate', workerId: 'worker-a', execute: async () => { ran = true; } });
+  while (!releaseGate) await delay(1);
+  scheduler.setLaneEnabled('asr', 'gpu', false);
+  releaseGate({ ready: true });
+  await delay(30);
+  assert.strictEqual(ran, false, 'a lane disabled during its asynchronous gate check still started work');
+  assert.strictEqual(scheduler.getJob(handle.id)?.state, 'queued');
+  assert.strictEqual(scheduler.snapshot().pools.asr.queuedJobs[0]?.reason, 'RESOURCE_DISABLED');
+  scheduler.setLaneEnabled('asr', 'gpu', true);
+  await handle.promise;
+  assert.strictEqual(ran, true);
 }
 
 async function testDisabledLaneAndCapacityWait() {
@@ -93,6 +120,85 @@ async function testFatalGateRejectsQueue() {
   await assert.rejects(first.promise, (error) => error.code === 'ASR_INFRASTRUCTURE_FAILURE' && error.possibleCauses.includes('broken runtime'));
   await assert.rejects(second.promise, (error) => error.code === 'ASR_INFRASTRUCTURE_FAILURE');
   assert.strictEqual(scheduler.snapshot().pools.asr.queued, 0, 'fatal resource failure left queued jobs behind');
+}
+
+async function testBusyHealthyLanePreventsFatalQueueRejection() {
+  const scheduler = new ResourceScheduler();
+  let releaseGpu;
+  let secondRan = false;
+  scheduler.registerPool('asr', {
+    lanes: [
+      { id: 'gpu', gate: async () => ({ ready: true }) },
+      { id: 'cpu', gate: async () => ({ ready: false, fatal: true, reason: 'CPU_SERVICE_UNAVAILABLE', message: 'CPU runtime is broken.' }) }
+    ]
+  });
+  const first = scheduler.enqueue('asr', {
+    id: 'gpu-busy',
+    workerId: 'worker-a',
+    execute: () => new Promise((resolve) => { releaseGpu = resolve; })
+  });
+  while (!releaseGpu) await delay(1);
+  const second = scheduler.enqueue('asr', {
+    id: 'wait-for-gpu',
+    workerId: 'worker-b',
+    execute: async (lane) => { secondRan = lane.id === 'gpu'; }
+  });
+  await delay(30);
+  assert.strictEqual(scheduler.getJob(second.id)?.state, 'queued', 'a fatal idle lane rejected work even though another enabled lane was only busy');
+  releaseGpu();
+  await Promise.all([first.promise, second.promise]);
+  assert.strictEqual(secondRan, true, 'queued work did not continue on the healthy lane after it became idle');
+}
+
+async function testToolMaintenanceWindow() {
+  const runner = Object.create(ToolRunner.prototype);
+  runner.shuttingDown = false;
+  runner.maintenance = null;
+  runner.activeRuns = new Map([['busy-run', {}]]);
+  runner.gpuAsr = fakeService();
+  runner.cpuAsr = fakeService();
+  runner.getState = () => ({ totals: { queued: 0, running: 0 } });
+  runner.notifyState = () => {};
+  let waited = 0;
+  setTimeout(() => runner.activeRuns.clear(), 30);
+  const release = await runner.acquireMaintenance('test install', () => { waited += 1; });
+  assert(waited > 0, 'dependency maintenance did not wait for active tools');
+  assert.strictEqual(runner.maintenance?.reason, 'test install');
+  await release();
+  assert.strictEqual(runner.maintenance, null, 'dependency maintenance lock was not released');
+}
+
+async function testCleanupRecoveryTimerSurvivesCpuIdleStop() {
+  const runner = Object.create(ToolRunner.prototype);
+  runner.config = { cpuAsrEnabled: false };
+  runner.cpuAsr = fakeService({ child: {} });
+  runner.cpuStopTimer = null;
+  runner.cleanupRecoveryTimer = setTimeout(() => {}, 5000);
+  const cleanupTimer = runner.cleanupRecoveryTimer;
+  runner.stopCpuWhenIdle();
+  assert.strictEqual(runner.cleanupRecoveryTimer, cleanupTimer, 'CPU idle cleanup cancelled deferred task-cache recovery');
+  clearTimeout(runner.cpuStopTimer);
+  clearTimeout(runner.cleanupRecoveryTimer);
+}
+
+function testAsrRequestFailureClassification() {
+  const failure = asrInfrastructureError(new Error('native worker exited'), {
+    device: 'cuda',
+    lastError: 'CUDA out of memory',
+    lastExitCode: 1
+  });
+  assert.strictEqual(failure.code, 'ASR_INFRASTRUCTURE_FAILURE');
+  assert.strictEqual(failure.failureKind, 'infrastructure');
+  assert(failure.possibleCauses.some((item) => /GPU|CUDA/.test(item)), 'ASR infrastructure failure omitted actionable GPU causes');
+}
+
+function fakeService(overrides = {}) {
+  return {
+    child: null,
+    currentRequestId: '',
+    stop() { this.child = null; },
+    ...overrides
+  };
 }
 
 function delay(ms) {

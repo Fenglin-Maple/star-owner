@@ -5,7 +5,7 @@ const { promisify } = require('util');
 const { AsrService } = require('./asr-service');
 const { isVideoUnavailableMessage, videoUnavailableError } = require('./media-errors');
 const { ResourceScheduler } = require('./resource-scheduler');
-const { abortTaskAttempt } = require('./task-attempt');
+const { abortTaskAttempt, recoverPendingAttemptCleanups } = require('./task-attempt');
 const { removeUnavailableTask } = require('./unavailable-task');
 const { PROJECT_ROOT, assertInside, ensureDir, safeName } = require('./workspace');
 
@@ -40,6 +40,8 @@ class ToolRunner {
     this.gpuTimer = null;
     this.leaseTimer = null;
     this.cpuStopTimer = null;
+    this.cleanupRecoveryTimer = null;
+    this.maintenance = null;
     this.gpuAsr = new AsrService({
       id: 'asr-gpu',
       device: 'cuda',
@@ -63,6 +65,7 @@ class ToolRunner {
     this.gpuAsr.model = this.config.asrModel;
     this.cpuAsr.model = this.config.asrModel;
     this.registerPools();
+    const cleanupRecovery = recoverPendingAttemptCleanups(this.store);
     await this.refreshGpuState();
     if (startGpuService && this.gpu.available && this.gpu.freeMiB >= this.config.gpuStartupReserveMiB) {
       try {
@@ -88,22 +91,36 @@ class ToolRunner {
       }
     }
     this.initialized = true;
-    this.gpuTimer = setInterval(() => {
-      this.refreshGpuState().finally(() => this.scheduler.dispatch('asr'));
+    this.gpuTimer = setInterval(async () => {
+      try {
+        await this.refreshGpuState();
+      } catch (error) {
+        try { this.onEvent({ type: 'gpu-state-refresh-failed', error: error.message || String(error) }); }
+        catch { console.error(`[gpu-state-refresh] ${error.message || String(error)}`); }
+      } finally {
+        this.scheduler.dispatch('asr');
+      }
     }, 3000);
     this.gpuTimer.unref?.();
-    this.leaseTimer = setInterval(() => this.protectActiveTaskLeases(), 60 * 1000);
+    this.leaseTimer = setInterval(() => {
+      try {
+        this.protectActiveTaskLeases();
+      } catch (error) {
+        try { this.onEvent({ type: 'task-lease-refresh-failed', error: error.message || String(error) }); }
+        catch { console.error(`[task-lease-refresh] ${error.message || String(error)}`); }
+      }
+    }, 60 * 1000);
     this.leaseTimer.unref?.();
     const recovery = this.restoreInterruptedRuns();
     this.protectActiveTaskLeases();
-    this.publish({ type: 'resource-scheduler-ready', restoredRuns: recovery.restoredRuns, rolledBackTasks: recovery.rolledBackTasks, cpuAsrEnabled: this.config.cpuAsrEnabled });
+    this.publish({ type: 'resource-scheduler-ready', restoredRuns: recovery.restoredRuns, rolledBackTasks: recovery.rolledBackTasks, recoveredCleanups: cleanupRecovery.filter((item) => item.ok).length, cpuAsrEnabled: this.config.cpuAsrEnabled });
     this.notifyState(true);
     return this.getState();
   }
 
   async ensureGpuAsr() {
     if (!this.initialized) return this.initialize();
-    if (this.gpuAsr.state === 'ready' || this.gpuAsr.state === 'busy') return this.getState();
+    if (this.gpuAsr.ready && this.gpuAsr.child) return this.getState();
     this.gpuAsr.model = this.config.asrModel;
     await this.refreshGpuState();
     if (!this.gpu.available) throw new Error(this.gpu.error || 'NVIDIA GPU is unavailable.');
@@ -157,6 +174,12 @@ class ToolRunner {
 
   start({ task, tool, collection, workerId, agentName, options = {} }) {
     if (!this.initialized) throw new Error('Resource scheduler is still starting.');
+    if (this.maintenance) {
+      const error = new Error(`Application tools are temporarily paused for ${this.maintenance.reason}. Wait for dependency installation to finish and retry.`);
+      error.code = 'TOOL_MAINTENANCE_ACTIVE';
+      error.failureKind = 'infrastructure';
+      throw error;
+    }
     if (!task) throw new Error('Task does not exist.');
     if (!tool) throw new Error('Tool does not exist.');
     if (!tool.enabled) throw new Error(`Tool is disabled: ${tool.id}`);
@@ -171,7 +194,7 @@ class ToolRunner {
     const now = new Date().toISOString();
     const callerId = workerId || agentName || task.claimedBy || 'unknown-worker';
     const pool = initialPoolForAction(tool.action);
-    const run = this.store.createToolRun({
+    const runRecord = {
       id: runId,
       taskId: task.id,
       workId: task.workId || '',
@@ -203,8 +226,9 @@ class ToolRunner {
       startedAt: '',
       updatedAt: now,
       finishedAt: ''
-    });
+    };
     fs.appendFileSync(logFile, `[${now}] queued ${tool.id} for ${task.id}\n`, 'utf8');
+    const run = this.store.createToolRun(runRecord);
     this.enqueuePersistedRun(run);
     this.protectActiveTaskLeases();
     this.publish({ type: 'tool-run-queued', runId, toolId: tool.id, taskId: task.id, resourcePool: pool });
@@ -225,12 +249,14 @@ class ToolRunner {
       warnings: []
     };
     this.activeRuns.set(run.id, state);
-    this.executeRun(state).finally(() => {
-      this.activeRuns.delete(run.id);
-      this.processes.delete(run.id);
-      this.stopCpuWhenIdle();
-      this.notifyState(true);
-    });
+    this.executeRun(state)
+      .catch((error) => this.handleUnexpectedRunFailure(state, error))
+      .finally(() => {
+        this.activeRuns.delete(run.id);
+        this.processes.delete(run.id);
+        this.stopCpuWhenIdle();
+        this.notifyState(true);
+      });
   }
 
   async executeRun(state) {
@@ -296,14 +322,48 @@ class ToolRunner {
     }
   }
 
+  handleUnexpectedRunFailure(state, error) {
+    const current = this.store.getToolRun(state.runId);
+    if (!current || TERMINAL_STATUSES.has(current.status)) return current;
+    const message = `Unexpected tool-runner failure: ${error?.message || String(error)}`;
+    try { this.appendLog(state.runId, `\n[${new Date().toISOString()}] ${message}\n`); } catch {}
+    try {
+      return this.finishRun(state, 'failed', {
+        error: message,
+        errorCode: error?.code || 'TOOL_RUNNER_FAILURE',
+        failureKind: error?.failureKind || 'infrastructure',
+        possibleCauses: Array.isArray(error?.possibleCauses) ? error.possibleCauses : [],
+        stage: 'error'
+      });
+    } catch {
+      try {
+        return this.store.updateToolRun(state.runId, {
+          status: 'failed',
+          stage: 'error',
+          error: message,
+          errorCode: error?.code || 'TOOL_RUNNER_FAILURE',
+          failureKind: 'infrastructure',
+          finishedAt: new Date().toISOString()
+        });
+      } catch { return null; }
+    }
+  }
+
   async executeBundle(state, run, task, tool, collection) {
     await this.runScheduledStage(state, 'api', 'metadata-comments', async () => {
-      const calls = [
-        ['info', this.buildArgs({ task, action: 'info', collection, artifactDir: run.artifactDir, options: run.options || {} })],
-        ['subtitles', this.buildArgs({ task, action: 'subtitles', collection, artifactDir: run.artifactDir, options: run.options || {} })],
-        ['comments', this.buildArgs({ task, action: 'comments', collection, artifactDir: run.artifactDir, options: { ...(run.options || {}), commentLimit: 3 } })]
-      ];
-      for (const [label, args] of calls) {
+      const options = run.options || {};
+      if (!options.skipInfo) {
+        await this.runChild(state, this.buildArgs({ task, action: 'info', collection, artifactDir: run.artifactDir, options }), run.timeoutMs);
+      }
+      if (!fs.existsSync(path.join(run.artifactDir, 'info.json'))) {
+        throw new Error('Required video metadata is missing after the material bundle metadata stage.');
+      }
+      const optionalCalls = [];
+      if (!options.skipSubtitles) optionalCalls.push(['subtitles', this.buildArgs({ task, action: 'subtitles', collection, artifactDir: run.artifactDir, options })]);
+      if (!options.skipComments && options.comments !== false && Number(options.commentLimit ?? 3) > 0) {
+        optionalCalls.push(['comments', this.buildArgs({ task, action: 'comments', collection, artifactDir: run.artifactDir, options: { ...options, commentLimit: clampNumber(options.commentLimit, 1, 3, 3) } })]);
+      }
+      for (const [label, args] of optionalCalls) {
         try {
           await this.runChild(state, args, run.timeoutMs);
         } catch (error) {
@@ -361,7 +421,6 @@ class ToolRunner {
           language: run.options?.language || 'zh',
           beamSize: clampNumber(run.options?.beamSize, 1, 10, 1),
           conditionOnPreviousText: Boolean(run.options?.conditionOnPreviousText),
-          chunkLength: clampNumber(run.options?.chunkLength, 5, 30, 10),
           maxNewTokens: clampNumber(run.options?.maxNewTokens, 32, 448, 64)
         }, {
           onProgress: (progress) => {
@@ -373,7 +432,17 @@ class ToolRunner {
         }), Number(run.timeoutMs || DEFAULT_TIMEOUT_MS), () => service.cancel(run.id));
         this.updateRun(run.id, { asrResult: result, actualCommand: `${service.id} transcribe ${audioFile}` });
         this.appendLog(run.id, `[${new Date().toISOString()}] ASR completed: ${JSON.stringify(result)}\n`);
+        this.recordAsrManifest(run);
         return result;
+      } catch (error) {
+        if (state.cancelled || ['RUN_CANCELLED', 'SCHEDULER_CANCELLED', 'TOOL_TIMEOUT'].includes(error.code)) throw error;
+        if (!isAsrInfrastructureFailure(error, service)) {
+          error.code ||= 'ASR_TRANSCRIPTION_FAILED';
+          error.failureKind ||= 'task';
+          throw error;
+        }
+        service.lastError = error.message || String(error);
+        throw asrInfrastructureError(error, service);
       } finally {
         state.asrService = null;
       }
@@ -440,7 +509,7 @@ class ToolRunner {
 
   runChild(state, args, timeoutMs = DEFAULT_TIMEOUT_MS) {
     if (state.cancelled) return Promise.reject(cancelledError(state.runId));
-    const command = ['node', ...args].join(' ');
+    const command = displayCommand(args);
     this.updateRun(state.runId, { actualCommand: command });
     this.appendLog(state.runId, `\n[${new Date().toISOString()}] start ${command}\n`);
     return new Promise((resolve, reject) => {
@@ -534,6 +603,25 @@ class ToolRunner {
     if (state.asrService) state.asrService.cancel(state.runId);
   }
 
+  scheduleCleanupRecovery(delayMs = 1800) {
+    if (this.cleanupRecoveryTimer || this.shuttingDown) return;
+    this.cleanupRecoveryTimer = setTimeout(() => {
+      this.cleanupRecoveryTimer = null;
+      const results = recoverPendingAttemptCleanups(this.store);
+      for (const result of results) {
+        this.publish({
+          type: result.ok ? 'task-attempt-cleanup-recovered' : 'task-attempt-cleanup-still-pending',
+          taskId: result.id,
+          cleanup: result.cleanup || null,
+          error: result.error || ''
+        });
+      }
+      const retryable = this.store.list('attemptCleanupQueue').some((item) => Number(item.attempts || 0) < 5);
+      if (retryable) this.scheduleCleanupRecovery(Math.min(5 * 60 * 1000, Math.max(15000, Number(delayMs || 1800) * 3)));
+    }, Math.max(500, Number(delayMs) || 1800));
+    this.cleanupRecoveryTimer.unref?.();
+  }
+
   finishRun(state, status, patch = {}) {
     if (state.finalized && !this.shuttingDown) return this.store.getToolRun(state.runId);
     state.finalized = true;
@@ -569,7 +657,7 @@ class ToolRunner {
     if (fs.existsSync(path.join(run.artifactDir, 'comments', 'comments.json'))) outputs.comments = 'comments/comments.json';
     if (fs.existsSync(path.join(run.artifactDir, 'subtitles', 'index.json'))) outputs.subtitles = 'subtitles/';
     if (fs.existsSync(path.join(run.artifactDir, 'audio', 'audio.wav'))) outputs.audio = 'audio/audio.wav';
-    if (fs.existsSync(path.join(run.artifactDir, 'asr', 'transcript.srt'))) outputs.asr = 'asr/';
+    addAsrManifestOutputs(outputs, run.artifactDir);
     manifest = {
       ...manifest,
       videoUrl: manifest.videoUrl || this.store.getTask(run.taskId)?.url || '',
@@ -579,6 +667,20 @@ class ToolRunner {
       warnings: [...new Set([...(manifest.warnings || []), ...warnings])]
     };
     fs.writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  }
+
+  recordAsrManifest(run) {
+    const file = path.join(run.artifactDir, 'manifest.json');
+    let manifest = {};
+    try { manifest = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+    const outputs = { ...(manifest.outputs || {}) };
+    addAsrManifestOutputs(outputs, run.artifactDir);
+    fs.writeFileSync(file, `${JSON.stringify({
+      ...manifest,
+      videoUrl: manifest.videoUrl || this.store.getTask(run.taskId)?.url || '',
+      createdAt: manifest.createdAt || run.createdAt,
+      outputs
+    }, null, 2)}\n`, 'utf8');
   }
 
   restoreInterruptedRuns() {
@@ -605,6 +707,16 @@ class ToolRunner {
       if (!ACTIVE_STATUSES.has(run.status)) continue;
       if (rolledBackTaskIds.has(run.taskId)) {
         this.store.updateToolRun(run.id, { status: 'cancelled', stage: 'cancelled', signal: 'ATTEMPT_ROLLED_BACK', finishedAt: new Date().toISOString() });
+        continue;
+      }
+      if (run.workerId === 'video-cache-manager' || run.agentName === 'video-cache-manager') {
+        this.store.updateToolRun(run.id, {
+          status: 'cancelled',
+          stage: 'cancelled',
+          signal: 'VIDEO_CACHE_JOB_RECOVERY',
+          error: '',
+          finishedAt: new Date().toISOString()
+        });
         continue;
       }
       const task = this.store.getTask(run.taskId);
@@ -642,7 +754,7 @@ class ToolRunner {
       const run = this.store.getToolRun(state.runId);
       if (!run || !ACTIVE_STATUSES.has(run.status)) continue;
       const task = this.store.getTask(run.taskId);
-      if (!task || !['claimed', 'rejected'].includes(task.status) || task.claimedBy !== run.workerId) continue;
+      if (!task || !['claimed', 'rejected'].includes(task.status) || task.claimedBy !== run.workerId || task.workId !== run.workId) continue;
       task.leaseExpiresAt = new Date(now.getTime() + 15 * 60 * 1000).toISOString();
       task.updatedAt = now.toISOString();
       this.store.upsertTask(task);
@@ -653,7 +765,18 @@ class ToolRunner {
 
   async gpuGate() {
     await this.refreshGpuState();
-    if (!this.gpu.available) return { ready: false, reason: 'GPU_UNAVAILABLE', message: this.gpu.error, retryAfterMs: 5000 };
+    if (!this.gpu.available) {
+      if (this.config.cpuAsrEnabled) return { ready: false, reason: 'GPU_UNAVAILABLE', message: this.gpu.error, retryAfterMs: 5000 };
+      return {
+        ready: false,
+        fatal: true,
+        reason: 'ASR_INFRASTRUCTURE_FAILURE',
+        code: 'ASR_INFRASTRUCTURE_FAILURE',
+        failureKind: 'infrastructure',
+        message: `GPU ASR 不可用且 CPU ASR 已关闭：${this.gpu.error || 'nvidia-smi 未返回可用显卡。'}`,
+        possibleCauses: ['NVIDIA 驱动或 nvidia-smi 不可用', '当前设备没有可用 NVIDIA GPU', '可修复 GPU 环境，或在设置中手动启用 CPU ASR']
+      };
+    }
     if (!this.gpuAsr.ready) {
       if (this.gpu.freeMiB < this.config.gpuStartupReserveMiB) {
         return {
@@ -690,6 +813,13 @@ class ToolRunner {
       await this.cpuAsr.start();
       return { ready: true };
     } catch (error) {
+      if (Number(this.cpuAsr.consecutiveFailures || 0) >= 3) {
+        this.config.cpuAsrEnabled = false;
+        this.scheduler.setLaneEnabled('asr', 'cpu', false);
+        this.persistConfig();
+        this.publish({ type: 'asr-cpu-disabled-after-failures', error: error.message || String(error) });
+        return { ready: false, reason: 'CPU_SERVICE_UNAVAILABLE', message: error.message, retryAfterMs: 500 };
+      }
       const failure = this.asrInfrastructureGate(this.cpuAsr, 'CPU');
       return failure || { ready: false, reason: 'CPU_SERVICE_UNAVAILABLE', message: error.message, retryAfterMs: Number(error.retryAfterMs || 5000) };
     }
@@ -698,6 +828,7 @@ class ToolRunner {
   asrInfrastructureGate(service, label) {
     if (Number(service.consecutiveFailures || 0) < 3) return null;
     if (label === 'GPU' && this.config.cpuAsrEnabled) return null;
+    if (label === 'CPU') return null;
     const possibleCauses = diagnoseAsrFailure(service, label);
     const exit = service.lastExitCode === null || service.lastExitCode === undefined ? '' : `，退出码 ${service.lastExitCode}`;
     return {
@@ -839,6 +970,7 @@ class ToolRunner {
       config: this.getConfig(),
       gpu: { ...this.gpu },
       services: { gpu: this.gpuAsr.status(), cpu: this.cpuAsr.status() },
+      maintenance: this.maintenance ? { ...this.maintenance } : null,
       pools,
       totals: {
         queued: Object.values(pools).reduce((sum, pool) => sum + Number(pool.queued || 0), 0),
@@ -901,7 +1033,40 @@ class ToolRunner {
     this.scheduler.shutdown();
     this.gpuAsr.stop();
     this.cpuAsr.stop();
+    this.maintenance = null;
     this.initialized = false;
+  }
+
+  async acquireMaintenance(reason = 'dependency installation', onWait = () => {}) {
+    while (!this.shuttingDown) {
+      const state = this.getState();
+      const busy = this.maintenance || this.activeRuns.size > 0 || state.totals.queued > 0 || state.totals.running > 0
+        || Boolean(this.gpuAsr.currentRequestId || this.cpuAsr.currentRequestId);
+      if (!busy) {
+        const id = `maintenance-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+        this.maintenance = { id, reason: String(reason || 'dependency installation'), startedAt: new Date().toISOString() };
+        this.notifyState(true);
+        this.gpuAsr.stop();
+        this.cpuAsr.stop();
+        try {
+          await waitForServicesStopped([this.gpuAsr, this.cpuAsr], 15000);
+        } catch (error) {
+          this.maintenance = null;
+          this.notifyState(true);
+          throw error;
+        }
+        let released = false;
+        return async () => {
+          if (released || this.maintenance?.id !== id) return;
+          released = true;
+          this.maintenance = null;
+          this.notifyState(true);
+        };
+      }
+      onWait(state);
+      await delay(750);
+    }
+    throw new Error('Application is shutting down; dependency installation was cancelled.');
   }
 
   updateRun(id, patch) {
@@ -1061,6 +1226,15 @@ function sanitizeOptions(options) {
   return JSON.parse(JSON.stringify(options));
 }
 
+function displayCommand(args) {
+  const safe = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index - 1] === '--cookies' ? '<cookie-file>' : String(args[index]);
+    safe.push(/\s/.test(value) ? JSON.stringify(value) : value);
+  }
+  return ['node', ...safe].join(' ');
+}
+
 function emptyGpuState() {
   return { available: false, index: 0, name: '', totalMiB: 0, usedMiB: 0, freeMiB: 0, error: '', checkedAt: '' };
 }
@@ -1082,6 +1256,33 @@ function diagnoseAsrFailure(service, label) {
     return ['所选 ASR 模型未完整安装或文件损坏', '依赖包解压未完成'];
   }
   return [`${label} ASR 运行时或模型无法加载`, '项目依赖损坏、权限拦截或原生运行库不兼容', '可在设置中重新下载 ASR 依赖后再恢复 Agent'];
+}
+
+function asrInfrastructureError(error, service) {
+  const detail = String(error?.message || error || 'ASR request failed.');
+  const wrapped = new Error(`ASR 常驻服务无法完成转写：${detail}`);
+  wrapped.code = 'ASR_INFRASTRUCTURE_FAILURE';
+  wrapped.failureKind = 'infrastructure';
+  wrapped.possibleCauses = diagnoseAsrFailure(service, service?.device === 'cpu' ? 'CPU' : 'GPU');
+  wrapped.cause = error;
+  return wrapped;
+}
+
+function isAsrInfrastructureFailure(error, service) {
+  if (!service?.ready || !service?.child) return true;
+  const message = String(error?.message || error || '').toLowerCase();
+  return /(?:cuda|cudnn|cublas|ctranslate2|out of memory|memory allocation|dll|winerror|access violation|driver|device unavailable|failed to load|module not found|no module named|broken pipe|epipe|service exited|native runtime|model.+(?:missing|not installed|does not exist))/.test(message);
+}
+
+function addAsrManifestOutputs(outputs, artifactDir) {
+  const directory = path.join(artifactDir, 'asr');
+  if (!fs.existsSync(path.join(directory, 'transcript.srt'))) return outputs;
+  outputs.asr = 'asr/';
+  outputs.asrSrt = 'asr/transcript.srt';
+  if (fs.existsSync(path.join(directory, 'asr-transcript.txt'))) outputs.asrTimedText = 'asr/asr-transcript.txt';
+  if (fs.existsSync(path.join(directory, 'asr-result.json'))) outputs.asrSegments = 'asr/asr-result.json';
+  outputs.asrHasTimestamps = true;
+  return outputs;
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -1121,13 +1322,17 @@ function withTimeout(promise, timeoutMs, onTimeout) {
   });
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function killProcessTree(child) {
   if (!child || child.killed) return;
   if (process.platform === 'win32' && child.pid) {
-    spawnSync('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
-    return;
+    const result = spawnSync('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
+    if (result.status === 0) return;
   }
   try { child.kill('SIGTERM'); } catch {}
 }
 
-module.exports = { DEFAULT_CONFIG, ToolRunner };
+module.exports = { DEFAULT_CONFIG, ToolRunner, asrInfrastructureError, isAsrInfrastructureFailure };

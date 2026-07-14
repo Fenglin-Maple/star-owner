@@ -4,9 +4,7 @@ import importlib.util
 import json
 import sys
 import time
-import wave
 from pathlib import Path
-from types import SimpleNamespace
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -21,7 +19,7 @@ def load_cli_module():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Persistent Star Owner faster-whisper service")
+    parser = argparse.ArgumentParser(description="Persistent Xing Cang Jia faster-whisper service")
     parser.add_argument("--device", choices=["cuda", "cpu"], required=True)
     parser.add_argument("--compute-type", required=True)
     parser.add_argument("--model", default="medium")
@@ -74,88 +72,55 @@ def transcribe(model, cli, args, request_id, request):
     output_dir.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
     emit({"event": "progress", "id": request_id, "phase": "audio-loading", "progress": 0})
-    import numpy as np
-
-    try:
-        with wave.open(str(source), "rb") as input_wave:
-            if input_wave.getnchannels() != 1 or input_wave.getsampwidth() != 2 or input_wave.getframerate() != 16000:
-                raise ValueError("non-canonical wav")
-            audio = np.frombuffer(input_wave.readframes(input_wave.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
-    except (wave.Error, ValueError):
-        from faster_whisper.audio import decode_audio
-        audio = decode_audio(str(source), sampling_rate=16000)
-    total_duration = len(audio) / 16000
+    segments, info = model.transcribe(
+        str(source),
+        language=None if request.get("language") == "auto" else request.get("language", "zh"),
+        beam_size=max(1, int(request.get("beamSize", 1))),
+        temperature=0.0,
+        repetition_penalty=1.05,
+        no_repeat_ngram_size=3,
+        vad_filter=True,
+        max_new_tokens=max(32, int(request.get("maxNewTokens", 64))),
+        hallucination_silence_threshold=2.0,
+        word_timestamps=True,
+        condition_on_previous_text=bool(request.get("conditionOnPreviousText", False)),
+    )
+    total_duration = max(0.0, float(getattr(info, "duration", 0.0) or 0.0))
     emit({"event": "progress", "id": request_id, "phase": "audio-loaded", "progress": 0, "totalSeconds": total_duration})
-    chunk_seconds = max(5, int(request.get("chunkLength", 10)))
-    chunk_samples = chunk_seconds * 16000
-    materialized = []
-    detected_language = request.get("language", "zh")
-    language_probability = 1.0
-    for chunk_index, chunk_start in enumerate(range(0, len(audio), chunk_samples)):
-        offset = chunk_start / 16000
-        chunk = audio[chunk_start:chunk_start + chunk_samples]
-        chunk_file = output_dir / f".asr-chunk-{chunk_index:04d}.wav"
-        pcm = (chunk.clip(-1, 1) * 32767).astype("int16")
-        with wave.open(str(chunk_file), "wb") as target:
-            target.setnchannels(1)
-            target.setsampwidth(2)
-            target.setframerate(16000)
-            target.writeframes(pcm.tobytes())
+    recognized = []
+    for segment_index, segment in enumerate(segments):
+        recognized.append(segment)
+        processed_seconds = min(total_duration, max(0.0, float(getattr(segment, "end", 0.0) or 0.0))) if total_duration else 0.0
         emit({
             "event": "progress",
             "id": request_id,
-            "phase": "chunk-started",
-            "chunkIndex": chunk_index,
-            "audioSeconds": offset,
-            "totalSeconds": total_duration,
-            "progress": min(1, offset / total_duration) if total_duration else 0,
-        })
-        try:
-            segments, info = model.transcribe(
-                str(chunk_file),
-                language=None if request.get("language") == "auto" else request.get("language", "zh"),
-                beam_size=max(1, int(request.get("beamSize", 1))),
-                temperature=0.0,
-                repetition_penalty=1.05,
-                no_repeat_ngram_size=3,
-                vad_filter=True,
-                max_new_tokens=max(32, int(request.get("maxNewTokens", 64))),
-                hallucination_silence_threshold=2.0,
-                condition_on_previous_text=bool(request.get("conditionOnPreviousText", False)),
-            )
-            chunk_segments = list(segments)
-        finally:
-            chunk_file.unlink(missing_ok=True)
-        detected_language = info.language
-        language_probability = info.language_probability
-        for item in chunk_segments:
-            materialized.append(SimpleNamespace(
-                id=len(materialized),
-                start=item.start + offset,
-                end=item.end + offset,
-                text=item.text,
-            ))
-        processed_seconds = min(total_duration, offset + len(chunk) / 16000)
-        emit({
-            "event": "progress",
-            "id": request_id,
-            "phase": "chunk-completed",
-            "chunkIndex": chunk_index,
-            "segmentCount": len(materialized),
+            "phase": "segment-completed",
+            "segmentIndex": segment_index,
+            "segmentCount": len(recognized),
             "audioSeconds": processed_seconds,
             "totalSeconds": total_duration,
             "progress": min(1, processed_seconds / total_duration) if total_duration else 1,
         })
+    materialized = cli.sentence_segments(recognized)
+    emit({
+        "event": "progress",
+        "id": request_id,
+        "phase": "transcription-completed",
+        "segmentCount": len(materialized),
+        "audioSeconds": total_duration,
+        "totalSeconds": total_duration,
+        "progress": 1,
+    })
     srt_file = output_dir / "transcript.srt"
     text_file = output_dir / "asr-transcript.txt"
     json_file = output_dir / "asr-result.json"
     cli.write_srt(srt_file, materialized)
-    text_file.write_text("\n".join(item.text.strip() for item in materialized if item.text.strip()) + "\n", encoding="utf-8")
+    cli.write_timestamped_text(text_file, materialized)
     payload = {
         "model": args.model,
         "source": str(source),
-        "language": detected_language,
-        "languageProbability": language_probability,
+        "language": info.language,
+        "languageProbability": info.language_probability,
         "duration": total_duration,
         "device": args.device,
         "computeType": args.compute_type,

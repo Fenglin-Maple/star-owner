@@ -20,7 +20,7 @@ function loadDataImage(source, maxBytes = MAX_CLIPBOARD_IMAGE_BYTES) {
   if (!match) throw new Error('只支持 Base64 编码的图片 Data URL。');
   const buffer = Buffer.from(match[2].replace(/\s/g, ''), 'base64');
   assertImageSize(buffer.length, maxBytes);
-  return { buffer, mimeType: match[1].toLowerCase(), sourceType: 'data' };
+  return validatedImage(buffer, match[1].toLowerCase(), 'data');
 }
 
 function loadLocalImage(source, trustedRoots = [], maxBytes = MAX_CLIPBOARD_IMAGE_BYTES) {
@@ -33,7 +33,7 @@ function loadLocalImage(source, trustedRoots = [], maxBytes = MAX_CLIPBOARD_IMAG
   const stat = fs.statSync(candidate);
   if (!stat.isFile()) throw new Error('图片路径不是文件。');
   assertImageSize(stat.size, maxBytes);
-  return { buffer: fs.readFileSync(candidate), mimeType: '', sourceType: 'file' };
+  return validatedImage(fs.readFileSync(candidate), '', 'file');
 }
 
 async function loadRemoteImage(source, options = {}) {
@@ -59,7 +59,7 @@ async function loadRemoteImage(source, options = {}) {
     if (!mimeType.startsWith('image/')) throw new Error('远程地址返回的不是图片。');
     const declaredSize = Number(response.headers.get('content-length') || 0);
     if (declaredSize) assertImageSize(declaredSize, maxBytes);
-    return { buffer: await readLimitedBody(response, maxBytes), mimeType, sourceType: 'remote' };
+    return validatedImage(await readLimitedBody(response, maxBytes), mimeType, 'remote');
   }
   throw new Error('远程图片读取失败。');
 }
@@ -100,6 +100,25 @@ function assertImageSize(size, maxBytes = MAX_CLIPBOARD_IMAGE_BYTES) {
   if (size > maxBytes) throw new Error(`图片超过 ${Math.round(maxBytes / 1024 / 1024)} MiB 限制。`);
 }
 
+function validatedImage(buffer, declaredMimeType, sourceType) {
+  const detected = detectRasterImage(buffer);
+  if (!detected) throw new Error('只支持 PNG、JPEG、GIF、WebP 或 AVIF 位图。');
+  const declared = String(declaredMimeType || '').toLowerCase();
+  if (declared && declared !== detected && !(declared === 'image/jpg' && detected === 'image/jpeg')) {
+    throw new Error(`图片内容与声明格式 ${declared} 不一致。`);
+  }
+  return { buffer, mimeType: detected, sourceType };
+}
+
+function detectRasterImage(buffer) {
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  if (buffer.length >= 6 && ['GIF87a', 'GIF89a'].includes(buffer.subarray(0, 6).toString('ascii'))) return 'image/gif';
+  if (buffer.length >= 12 && buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  if (buffer.length >= 12 && buffer.subarray(4, 8).toString('ascii') === 'ftyp' && /avi[fs]/.test(buffer.subarray(8, Math.min(buffer.length, 40)).toString('ascii'))) return 'image/avif';
+  return '';
+}
+
 function isInside(root, candidate) {
   const relative = path.relative(root, candidate);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
@@ -107,5 +126,6 @@ function isInside(root, candidate) {
 
 module.exports = {
   MAX_CLIPBOARD_IMAGE_BYTES,
+  detectRasterImage,
   loadClipboardImage
 };
