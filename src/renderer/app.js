@@ -1,6 +1,7 @@
 ﻿const pages = document.querySelectorAll('.page');
 const navItems = document.querySelectorAll('.nav-item');
 const navGroups = document.querySelectorAll('.nav-group');
+const navSubgroups = document.querySelectorAll('.nav-subgroup');
 const apiBadge = document.querySelector('#apiBadge');
 const userName = document.querySelector('#userName');
 const userAvatar = document.querySelector('#userAvatar');
@@ -83,6 +84,7 @@ const gpuMemoryLabel = document.querySelector('#gpuMemoryLabel');
 const gpuMemoryValue = document.querySelector('#gpuMemoryValue');
 const gpuMemoryBar = document.querySelector('#gpuMemoryBar');
 const schedulerPoolGrid = document.querySelector('#schedulerPoolGrid');
+const asrHardwareStatus = document.querySelector('#asrHardwareStatus');
 
 let runtime = {};
 let folders = [];
@@ -92,7 +94,7 @@ let profileFoldersLoading = false;
 let profileFoldersLoadingUserId = '';
 let profileFoldersRequestSerial = 0;
 let currentUser = null;
-let lastSnapshot = { users: [], collections: [], tasks: [], tools: [], toolRuns: [], workers: [], workspaces: [], activeCollection: null, analytics: { collections: {}, workers: [], tools: [] }, activities: [] };
+let lastSnapshot = { users: [], collections: [], tasks: [], tools: [], toolRuns: [], workers: [], workspaces: [], analytics: { collections: {}, workers: [], tools: [] }, activities: [] };
 let loginEndpointReady = false;
 let loginProbeTimer = null;
 let loginWatchTimer = null;
@@ -159,7 +161,7 @@ const TEXT = {
   openFile: '\u6253\u5f00\u6587\u4ef6',
   readmeLoading: '\u6b63\u5728\u8bfb\u53d6 README...',
   overviewTitle: '\u661f\u85cf\u5bb6\u5df2\u5c31\u7eea',
-  overviewHint: '\u540c\u6b65\u6536\u85cf\u5939\u540e\uff0cagent \u53ef\u901a\u8fc7 API \u9886\u53d6\u4efb\u52a1\uff0c\u5e76\u8bf7\u6c42\u5e94\u7528\u4ee3\u4e3a\u6267\u884c\u5de5\u5177\u3002',
+  overviewHint: '\u540c\u6b65\u6536\u85cf\u5939\u540e\uff0c\u5e94\u7528\u5185 Agent \u8d1f\u8d23\u751f\u6210\u89c6\u9891\u77e5\u8bc6\u6587\u6863\uff1b\u5916\u90e8 Agent \u53ef\u901a\u8fc7\u53ea\u8bfb API \u67e5\u9605\u5168\u91cf\u77e5\u8bc6\u5e93\u3002',
   metricCollections: '\u6536\u85cf\u5939',
   metricTasks: '\u4efb\u52a1',
   metricDone: '\u5b8c\u6210',
@@ -171,9 +173,9 @@ const TEXT = {
   toolOffline: '\u79bb\u7ebf',
   toolChecking: '\u68c0\u67e5\u4e2d',
   recentStatus: '\u6700\u8fd1\u72b6\u6001',
-  quickStart: '\u5916\u90e8Agent\u5e94\u7528\u63a5\u5165\u89c6\u9891\u603b\u7ed3\u5de5\u4f5c\u63d0\u793a\u8bcd',
-  quickStartHint: '\u5c55\u5f00\u67e5\u770b\u5de5\u4f5c\u76ee\u6807\u3001\u534f\u4f5c\u539f\u5219\u4e0e\u5b8c\u6574 agent \u63d0\u793a\u8bcd\u3002',
-  agentPromptTitle: '\u4ea4\u7ed9 Codex\u3001Claude Code \u6216\u5176\u5b83 agent',
+  quickStart: '\u5916\u90e8 Agent \u77e5\u8bc6\u5e93\u63a5\u5165\u63d0\u793a\u8bcd',
+  quickStartHint: '\u5c55\u5f00\u67e5\u770b\u53ea\u8bfb\u77e5\u8bc6\u5e93 API \u7684\u76ee\u5f55\u7b5b\u9009\u3001\u539f\u6587\u5206\u9875\u3001\u641c\u7d22\u548c\u56fe\u7247\u8bfb\u53d6\u6d41\u7a0b\u3002',
+  agentPromptTitle: '\u4ea4\u7ed9 Codex\u3001Claude Code\u3001OpenCode \u6216\u5176\u5b83 Agent',
   copyPrompt: '\u590d\u5236\u63d0\u793a\u8bcd',
   copy: '\u590d\u5236',
   waiting: '\u7b49\u5f85\u64cd\u4f5c...',
@@ -204,12 +206,11 @@ const TEXT = {
   readFoldersFirst: '\u8bf7\u5148\u8bfb\u53d6\u6536\u85cf\u5939',
   syncPreparing: '\u6b63\u5728\u51c6\u5907\u540c\u6b65...',
   tasksTitle: '\u4efb\u52a1\u603b\u89c8',
-  tasksHint: '\u67e5\u770b\u4efb\u52a1\u9886\u53d6\u3001\u5b8c\u6210\u548c\u6253\u56de\u72b6\u6001\uff0c\u5e76\u8bbe\u7f6e\u5916\u90e8 Agent \u7684\u89c6\u9891\u603b\u7ed3\u4efb\u52a1\u8303\u56f4\u3002',
+  tasksHint: '\u67e5\u770b\u5404\u6536\u85cf\u5939\u7684\u4efb\u52a1\u3001\u5b8c\u6210\u5ea6\u4e0e\u5de5\u4f5c\u7edf\u8ba1\uff0c\u5e76\u63a7\u5236\u5e94\u7528\u5185 Agent \u5b9e\u9645\u53ef\u9886\u53d6\u7684\u672a\u5b8c\u6210\u4efb\u52a1\u3002',
   taskInventory: '\u4efb\u52a1\u5e93\u5b58',
   currentInventory: '\u5f53\u524d\u5e93\u5b58',
-  activeAgentTarget: '\u5916\u90e8 Agent \u89c6\u9891\u603b\u7ed3\u4efb\u52a1\u8303\u56f4',
-  noActiveCollection: '\u5c1a\u672a\u6fc0\u6d3b\u5916\u90e8 Agent \u4efb\u52a1\u8303\u56f4',
-  activateCollection: '\u6fc0\u6d3b\u5916\u90e8Agent\u4efb\u52a1\u8303\u56f4\uff08\u89c6\u9891\u603b\u7ed3\uff09',
+  activeAgentTarget: '\u5f53\u524d\u67e5\u770b\u7684\u4efb\u52a1\u6536\u85cf\u5939',
+  noActiveCollection: '\u5c1a\u672a\u9009\u62e9\u4efb\u52a1\u6536\u85cf\u5939',
   videoTasks: '\u89c6\u9891\u4efb\u52a1',
   advancedFilters: '\u9ad8\u7ea7\u7b5b\u9009',
   inventoryUser: '\u7528\u6237',
@@ -232,7 +233,7 @@ const TEXT = {
   disabledTasks: '\u5df2\u5173\u95ed',
   agentPerformance: 'Agent \u7ee9\u6548',
   workersTitle: 'Agent \u5de5\u4f5c\u5217\u8868',
-  workersHint: '\u6bcf\u4e2a\u65b0 Agent \u4f1a\u8bdd\u7531\u5e94\u7528\u5206\u914d\u72ec\u7acb Worker ID\uff0c\u7ee9\u6548\u3001\u5de5\u5177\u548c\u4efb\u52a1\u8bb0\u5f55\u5206\u5f00\u7edf\u8ba1\u3002',
+  workersHint: '\u5e94\u7528\u5185\u6bcf\u4e2a\u89c6\u9891\u603b\u7ed3 Agent \u4f1a\u8bdd\u90fd\u4f7f\u7528\u72ec\u7acb Worker ID\uff0c\u7ee9\u6548\u3001\u5de5\u5177\u548c\u4efb\u52a1\u8bb0\u5f55\u5206\u5f00\u7edf\u8ba1\u3002',
   workerTotal: '\u5de5\u4f5c\u8005',
   workerActive: '\u53ef\u63a5\u5355',
   workerPaused: '\u5df2\u6682\u505c',
@@ -273,12 +274,12 @@ const TEXT = {
   clear: '\u6e05\u7a7a',
   refresh: '\u5237\u65b0',
   toolsTitle: 'Agent \u5de5\u5177\u6a21\u5757',
-  toolsHint: 'agent \u5fc5\u987b\u901a\u8fc7 API \u8bf7\u6c42\u5e94\u7528\u6267\u884c\u5de5\u5177\uff1b\u8fd9\u91cc\u7ba1\u7406\u53ef\u7528\u6a21\u5757\u548c\u63d0\u793a\u8bcd\u3002',
+  toolsHint: '\u5e94\u7528\u5185 Agent \u89c6\u9891\u603b\u7ed3\u5de5\u4f5c\u6d41\u7531\u8d44\u6e90\u8c03\u5ea6\u5668\u7edf\u4e00\u6267\u884c\u5de5\u5177\uff1b\u8fd9\u91cc\u7ba1\u7406\u6a21\u5757\u3001\u7528\u6cd5\u4e0e\u5f00\u6e90\u6765\u6e90\u3002',
   execTools: '\u6267\u884c\u5de5\u5177',
   runsTitle: '\u8fd0\u884c\u65e5\u5fd7',
-  runsHint: '\u7531\u5e94\u7528\u4ee3 agent \u6267\u884c\u7684\u5de5\u5177\u8fdb\u7a0b\u4f1a\u8bb0\u5f55\u5728\u8fd9\u91cc\u3002',
+  runsHint: '\u5e94\u7528\u5185 Agent \u5de5\u4f5c\u6d41\u7684\u5de5\u5177\u6392\u961f\u3001\u8fd0\u884c\u4e0e\u9519\u8bef\u4f1a\u8bb0\u5f55\u5728\u8fd9\u91cc\u3002',
   toolRuns: '\u5de5\u5177\u8fd0\u884c',
-  apiHint: 'agent \u901a\u8fc7\u672c\u5730 API \u9886\u53d6\u4efb\u52a1\u3001\u8fd0\u884c\u5de5\u5177\u3001\u8f6e\u8be2\u65e5\u5fd7\u548c\u63d0\u4ea4\u4ea7\u7269\u3002',
+  apiHint: '\u5916\u90e8 Agent \u901a\u8fc7\u672c\u5730\u53ea\u8bfb API \u5217\u51fa\u76ee\u5f55\u3001\u7b5b\u9009\u5143\u6570\u636e\u3001\u8bfb\u53d6 Markdown \u539f\u6587\u4e0e\u56fe\u7247\u3002',
   toolUsageAnalytics: '\u5de5\u5177\u8c03\u7528\u5206\u6790',
   toolUsageHint: '\u9ed8\u8ba4\u663e\u793a\u8c03\u7528\u91cf\uff0c\u5c55\u5f00\u67e5\u770b\u8017\u65f6\u3001\u6210\u529f\u7387\u4e0e\u8c03\u7528\u8005\u3002',
   apiQuickReference: 'API \u5feb\u901f\u53c2\u8003',
@@ -305,7 +306,7 @@ const TEXT = {
   noTools: '\u6682\u65e0\u5de5\u5177\u6a21\u5757',
   noToolsHint: '\u542f\u52a8\u65f6\u4f1a\u81ea\u52a8\u6ce8\u518c\u9ed8\u8ba4\u5de5\u5177\u3002',
   noRuns: '\u6682\u65e0\u8fd0\u884c\u8bb0\u5f55',
-  noRunsHint: 'agent \u901a\u8fc7 API \u8bf7\u6c42\u5e94\u7528\u6267\u884c\u5de5\u5177\u540e\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc\u3002',
+  noRunsHint: '\u5e94\u7528\u5185 Agent \u9996\u6b21\u6267\u884c\u5a92\u4f53\u5de5\u5177\u540e\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc\u3002',
   empty: '\u7a7a',
   unknownUp: '\u672a\u77e5 UP',
   unknownDuration: '\u672a\u77e5\u65f6\u957f',
@@ -314,8 +315,8 @@ const TEXT = {
   output: '\u8f93\u51fa',
   open: '\u5f00',
   closed: '\u5173',
-  agentUsage: 'Agent \u8c03\u7528\u65b9\u5f0f',
-  pollStatus: '\u8f6e\u8be2\u8fd0\u884c\u72b6\u6001',
+  agentUsage: '\u5e94\u7528\u5185\u8c03\u7528\u65b9\u5f0f',
+  pollStatus: '\u8d44\u6e90\u8c03\u5ea6',
   internalCommand: '\u5e94\u7528\u5185\u90e8\u6267\u884c\u547d\u4ee4',
   agentPrompt: '\u7ed9 agent \u7684\u63d0\u793a\u8bcd',
   projects: '\u5f00\u6e90\u9879\u76ee',
@@ -1042,8 +1043,11 @@ function setPage(name, sourceItem = null) {
   const activeItem = sourceItem && candidates.includes(sourceItem) ? sourceItem : candidates[0];
   navItems.forEach((item) => item.classList.toggle('active', item === activeItem));
   navGroups.forEach((group) => group.classList.toggle('contains-active', Boolean(group.contains(activeItem))));
+  navSubgroups.forEach((subgroup) => subgroup.classList.toggle('contains-active', Boolean(subgroup.contains(activeItem))));
   const activeGroup = activeItem?.closest('.nav-group');
   if (activeGroup) setNavGroupOpen(activeGroup, true);
+  const activeSubgroup = activeItem?.closest('.nav-subgroup');
+  if (activeSubgroup) setNavSubgroupOpen(activeSubgroup, true);
   pages.forEach((page) => page.classList.toggle('active', page.id === `page-${name}`));
   if (name === 'login') {
     openLoginWorkspace().catch((error) => showToast(TEXT.toastError, error.message || String(error), 'error'));
@@ -1077,6 +1081,22 @@ function restoreNavGroup() {
   const wanted = localStorage.getItem('sidebarOpenGroup');
   const group = [...navGroups].find((item) => item.dataset.navGroup === wanted);
   if (group) setNavGroupOpen(group, true);
+  const wantedSubgroup = localStorage.getItem('sidebarOpenSubgroup');
+  const subgroup = [...navSubgroups].find((item) => item.dataset.navSubgroup === wantedSubgroup);
+  if (subgroup) setNavSubgroupOpen(subgroup, true);
+}
+
+function setNavSubgroupOpen(target, open) {
+  if (!target) return;
+  const parent = target.closest('.nav-group');
+  for (const subgroup of navSubgroups) {
+    if (subgroup.closest('.nav-group') !== parent) continue;
+    const selected = subgroup === target && open;
+    subgroup.classList.toggle('open', selected);
+    subgroup.querySelector('.nav-subgroup-toggle')?.setAttribute('aria-expanded', String(selected));
+  }
+  if (open) localStorage.setItem('sidebarOpenSubgroup', target.dataset.navSubgroup || '');
+  else if (localStorage.getItem('sidebarOpenSubgroup') === target.dataset.navSubgroup) localStorage.removeItem('sidebarOpenSubgroup');
 }
 
 async function loadReadme() {
@@ -1122,7 +1142,7 @@ async function refreshSnapshot() {
     renderTaskInventory();
     renderTools(snap.tools || []);
     renderRuns(snap.toolRuns || []);
-    renderWorkers(snap.analytics?.workers || []);
+    renderWorkers((snap.analytics?.workers || []).filter((worker) => worker.tool === 'star-owner-internal'));
     renderExportPage();
     runtime.filenameMetadata = snap.settings?.filenameMetadata || runtime.filenameMetadata;
     renderFilenameMetadataSettings();
@@ -1191,7 +1211,7 @@ function restoreRefreshUiState(state) {
 
 function renderSettingsSummary() {
   const items = [
-    ['Agent API', runtime.apiUrl || '\u6b63\u5728\u542f\u52a8...'],
+    ['\u77e5\u8bc6\u5e93 API', runtime.apiUrl || '\u6b63\u5728\u542f\u52a8...'],
     ['\u9ed8\u8ba4 Workspace', runtime.defaultWorkspace?.name || '-'],
     ['\u5de5\u4f5c\u533a', runtime.workspaceRoot || 'workspace'],
     ['SQLite', 'workspace/orchestrator.sqlite'],
@@ -1215,13 +1235,18 @@ function renderScheduler(state = runtime.scheduler) {
     cpuAsrToggle.disabled = true;
     asrModelSelect.disabled = true;
     schedulerPoolGrid.innerHTML = '';
+    if (asrHardwareStatus) {
+      asrHardwareStatus.dataset.state = 'checking';
+      asrHardwareStatus.innerHTML = '<div><span></span><strong>\u6b63\u5728\u68c0\u6d4b\u672c\u673a ASR \u517c\u5bb9\u6027</strong></div><p>\u68c0\u67e5 NVIDIA/CUDA\u3001\u9879\u76ee\u8fd0\u884c\u65f6\u3001\u6a21\u578b\u3001CPU \u67b6\u6784\u4e0e\u7cfb\u7edf\u5185\u5b58\u3002</p>';
+    }
     return;
   }
   const queued = Number(state.totals?.queued || 0);
   const running = Number(state.totals?.running || 0);
   schedulerStatus.textContent = `${running} \u8fd0\u884c / ${queued} \u6392\u961f`;
   cpuAsrToggle.checked = Boolean(state.config?.cpuAsrEnabled);
-  cpuAsrToggle.disabled = schedulerUpdateInFlight || !runtime.backendReady;
+  const hardware = state.hardware || {};
+  cpuAsrToggle.disabled = schedulerUpdateInFlight || !runtime.backendReady || hardware.cpu?.supported === false;
   const modelPackages = new Map((runtime.dependencies?.packages || []).map((item) => [item.id, item]));
   for (const option of asrModelSelect.options) {
     const dependency = modelPackages.get(`model-${option.value}`);
@@ -1237,9 +1262,29 @@ function renderScheduler(state = runtime.scheduler) {
     ? `${modelLabel}正在服务，等待 ASR 队列空闲后可切换。`
     : `当前 ${modelLabel}，GPU 服务 ${gpuModelState}${state.services?.gpu?.pid ? ` / PID ${state.services.gpu.pid}` : ''}。`;
   const cpuState = state.services?.cpu?.state || 'stopped';
-  cpuAsrHint.textContent = state.config?.cpuAsrEnabled
+  cpuAsrHint.textContent = hardware.cpu?.supported === false
+    ? `\u5f53\u524d\u786c\u4ef6\u6216\u9879\u76ee\u8fd0\u884c\u65f6\u4e0d\u652f\u6301 ${modelLabel} CPU ASR\u3002`
+    : state.config?.cpuAsrEnabled
     ? `\u5df2\u5f00\u542f\uff0c\u670d\u52a1 ${cpuState}${state.services?.cpu?.pid ? ` / PID ${state.services.cpu.pid}` : ''}`
     : '\u9ed8\u8ba4\u5173\u95ed\uff0c\u4ec5\u5728\u624b\u52a8\u5f00\u542f\u540e\u52a0\u8f7d\u6a21\u578b\u3002';
+
+  if (asrHardwareStatus) {
+    const nvidia = hardware.nvidia || {};
+    const localReady = hardware.localAsrSupported === true;
+    const stateName = nvidia.supported ? 'ready' : hardware.cpu?.supported ? 'cpu' : 'unsupported';
+    const title = nvidia.supported
+      ? `NVIDIA CUDA ASR \u53ef\u7528\u00b7${nvidia.name || 'NVIDIA GPU'}\u00b7${nvidia.totalMiB || 0} MiB`
+      : hardware.cpu?.supported
+        ? `\u672a\u627e\u5230\u53ef\u7528 CUDA\uff0cCPU ASR \u53ef\u4f5c\u4e3a\u624b\u52a8\u56de\u9000`
+        : '\u5f53\u524d\u73af\u5883\u4e0d\u652f\u6301\u672c\u5730 ASR';
+    const detail = [
+      hardware.recommendation,
+      ...(hardware.issues || []),
+      hardware.runtime?.ready ? `faster-whisper ${hardware.runtime.fasterWhisper || '-'} / CTranslate2 ${hardware.runtime.ctranslate2 || '-'}` : ''
+    ].filter(Boolean).join(' ');
+    asrHardwareStatus.dataset.state = localReady ? stateName : 'unsupported';
+    asrHardwareStatus.innerHTML = `<div><span></span><strong title="${escapeHtml(title)}">${escapeHtml(title)}</strong></div><p>${escapeHtml(detail || '\u786c\u4ef6\u68c0\u6d4b\u5df2\u5b8c\u6210\u3002')}</p>`;
+  }
 
   const gpu = state.gpu || {};
   const total = Number(gpu.totalMiB || 0);
@@ -1509,20 +1554,8 @@ function renderTaskInventory() {
 }
 
 function renderActiveCollection(viewedCollection) {
-  const active = lastSnapshot.activeCollection;
   const label = document.querySelector('#activeCollectionLabel');
-  const button = document.querySelector('#activateCollection');
-  const bar = document.querySelector('.task-target-bar');
-  if (label) label.textContent = active ? `${active.userName || '-'} / ${active.name}` : TEXT.noActiveCollection;
-  bar?.classList.toggle('has-active-target', Boolean(active && !active.externalDispatchPaused && !active.biliDeleted));
-  const isViewedActive = Boolean(active && viewedCollection && active.id === viewedCollection.id);
-  const unavailable = Boolean(viewedCollection && (viewedCollection.biliDeleted || viewedCollection.syncState === 'syncing' || viewedCollection.syncReady === false));
-  const needsReactivation = Boolean(isViewedActive && active.externalDispatchPaused && !unavailable);
-  if (button) {
-    button.disabled = !viewedCollection || unavailable || (isViewedActive && !needsReactivation);
-    button.textContent = needsReactivation ? '\u91cd\u65b0\u6fc0\u6d3b\u5916\u90e8Agent\u4efb\u52a1\u8303\u56f4\uff08\u89c6\u9891\u603b\u7ed3\uff09' : (isViewedActive ? '\u5916\u90e8Agent\u4efb\u52a1\u8303\u56f4\u5df2\u6fc0\u6d3b\uff08\u89c6\u9891\u603b\u7ed3\uff09' : TEXT.activateCollection);
-    button.title = unavailable ? (viewedCollection.biliDeleted ? 'B\u7ad9\u6536\u85cf\u5939\u5df2\u5220\u9664\uff0c\u4e0d\u80fd\u6d3e\u53d1\u4efb\u52a1' : '\u8bf7\u5148\u5b8c\u6210\u8be5\u6536\u85cf\u5939\u7684\u4efb\u52a1\u540c\u6b65') : '';
-  }
+  if (label) label.textContent = viewedCollection ? `${viewedCollection.userName || '-'} / ${viewedCollection.name}` : TEXT.noActiveCollection;
 }
 
 function syncTaskSelectors() {
@@ -1691,7 +1724,7 @@ function renderTools(tools) {
       title: tool.name,
       subtitle: tool.description,
       right: `<span class="state-text">${tool.enabled ? TEXT.open : TEXT.closed}</span><label class="switch"><input type="checkbox" ${tool.enabled ? 'checked' : ''} data-tool-id="${escapeHtml(tool.id)}" /><span></span></label>`,
-      detail: `<div class="tool-detail"><div><h4>${TEXT.agentUsage}</h4><pre>POST ${escapeHtml(runtime.apiUrl || 'http://127.0.0.1:17391')}/api/tasks/&lt;taskId&gt;/tools/${escapeHtml(tool.id)}/run\n{\n  "workerId": "&lt;workerId&gt;",\n  "workId": "&lt;workId from claim&gt;",\n  "options": {}\n}</pre></div><div><h4>${TEXT.pollStatus}</h4><pre>GET ${escapeHtml(runtime.apiUrl || 'http://127.0.0.1:17391')}/api/tool-runs/&lt;runId&gt;?workerId=&lt;workerId&gt;&amp;workId=&lt;workId&gt;&amp;log=1</pre></div><div><h4>${TEXT.internalCommand}</h4><pre>${escapeHtml(tool.internalCommand || tool.command || '')}</pre></div><div><h4>${TEXT.agentPrompt}</h4><p>${escapeHtml(tool.agentPrompt)}</p></div><div><h4>${TEXT.output}</h4><div class="chip-row">${outputs}</div></div><div><h4>${TEXT.projects}</h4><ul class="project-list">${projects}</ul></div></div>`
+      detail: `<div class="tool-detail"><div><h4>${TEXT.agentUsage}</h4><p>\u7531\u5e94\u7528\u5185 Agent \u89c6\u9891\u603b\u7ed3\u5de5\u4f5c\u6d41\u6309\u4efb\u52a1\u9636\u6bb5\u8c03\u7528\uff0c\u5e94\u7528\u8d1f\u8d23\u6392\u961f\u3001\u8d44\u6e90\u9650\u6d41\u3001\u65e5\u5fd7\u548c\u4e2d\u6b62\u6e05\u7406\u3002\u5916\u90e8 Agent \u4e0d\u80fd\u6267\u884c\u8fd9\u4e9b\u5de5\u5177\u3002</p><pre>app://tools/${escapeHtml(tool.id)}\nresource action: ${escapeHtml(tool.action || '-')}</pre></div><div><h4>${TEXT.pollStatus}</h4><p>\u8fd0\u884c\u72b6\u6001\u4e0e\u6bcf\u6b21\u6267\u884c\u8bb0\u5f55\u5728\u300c\u8bbe\u7f6e -> \u72b6\u6001\u67e5\u8be2 -> Agent \u5de5\u5177\u72b6\u6001\u300d\u4e2d\u67e5\u770b\u3002</p></div><div><h4>${TEXT.internalCommand}</h4><pre>${escapeHtml(tool.internalCommand || tool.command || '')}</pre></div><div><h4>${TEXT.agentPrompt}</h4><p>${escapeHtml(tool.agentPrompt)}</p></div><div><h4>${TEXT.output}</h4><div class="chip-row">${outputs}</div></div><div><h4>${TEXT.projects}</h4><ul class="project-list">${projects}</ul></div></div>`
     });
     row.querySelector('input[type="checkbox"]').addEventListener('change', async (event) => {
       const enabled = event.target.checked;
@@ -1776,7 +1809,7 @@ function renderWorkers(workers) {
   document.querySelector('#workerMetricPaused').textContent = String(paused);
   document.querySelector('#workerMetricWorking').textContent = String(working);
   workerList.innerHTML = '';
-  if (!workers.length) return workerList.appendChild(emptyRow('\u6682\u65e0 Worker \u4f1a\u8bdd', '\u65b0 Agent \u9996\u6b21\u8c03\u7528 /api/workers/register \u540e\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc\u3002'));
+  if (!workers.length) return workerList.appendChild(emptyRow('\u6682\u65e0\u5e94\u7528\u5185 Worker \u4f1a\u8bdd', '\u5728\u300cAgent \u89c6\u9891\u603b\u7ed3\u5de5\u4f5c\u6d41\u300d\u6216\u300c\u89c6\u9891\u603b\u7ed3\uff08\u5355\u4e2a\uff09\u300d\u521b\u5efa\u4efb\u52a1\u540e\u4f1a\u663e\u793a\u5728\u8fd9\u91cc\u3002'));
 
   const maxCompleted = Math.max(1, ...workers.map((worker) => Number(worker.completed || 0)));
   for (const worker of workers) {
@@ -1865,7 +1898,7 @@ function renderDocumentLibrary() {
 function completedDocuments() {
   const collections = new Map((lastSnapshot.collections || []).map((collection) => [collection.id, collection]));
   return (lastSnapshot.tasks || [])
-    .filter((task) => task.status === 'done' && task.outputMarkdown)
+    .filter((task) => task.status === 'done' && task.outputMarkdown && task.knowledgeActive !== false)
     .map((task) => ({ task, collection: collections.get(task.collectionId) }))
     .filter((item) => item.collection);
 }
@@ -1961,8 +1994,7 @@ function renderDocumentList() {
     const favoriteStatus = collection?.biliDeleted || task.favoriteState === 'collection-deleted'
       ? ' / \u6536\u85cf\u72b6\u6001\uff1aB\u7ad9\u6536\u85cf\u5939\u5df2\u5220\u9664'
       : (task.removedFromFavorites || task.favoriteState === 'removed' ? ' / \u6536\u85cf\u72b6\u6001\uff1a\u5df2\u79fb\u51fa\u6536\u85cf\u5939' : '');
-    const versionStatus = task.singleTask ? ` / \u7248\u672c ${Number(task.revision || 1)}${task.knowledgeActive === false ? '\uff08\u5386\u53f2\uff09' : '\uff08\u5f53\u524d\uff09'}` : '';
-    row.innerHTML = `${cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy" />` : '<span class="document-cover-placeholder"></span>'}<span class="document-row-copy"><strong>${escapeHtml(task.title || task.bvid)}</strong><small>${escapeHtml(task.bvid)} / ${escapeHtml(task.owner || TEXT.unknownUp)} / ${escapeHtml(formatSeconds(task.duration))}${versionStatus}</small><em>\u6536\u85cf ${escapeHtml(formatDateTime(task.favoriteAddedAt))} / \u53d1\u5e03 ${escapeHtml(formatDateTime(task.publishedAt))}${favoriteStatus}</em></span>`;
+    row.innerHTML = `${cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy" />` : '<span class="document-cover-placeholder"></span>'}<span class="document-row-copy"><strong>${escapeHtml(task.title || task.bvid)}</strong><small>${escapeHtml(task.bvid)} / ${escapeHtml(task.owner || TEXT.unknownUp)} / ${escapeHtml(formatSeconds(task.duration))}</small><em>\u6536\u85cf ${escapeHtml(formatDateTime(task.favoriteAddedAt))} / \u53d1\u5e03 ${escapeHtml(formatDateTime(task.publishedAt))}${favoriteStatus}</em></span>`;
     row.addEventListener('click', () => selectDocument(task.id));
     row.addEventListener('contextmenu', (event) => {
       event.preventDefault();
@@ -1994,10 +2026,15 @@ function requestDocumentDelete(taskId) {
   const collection = (lastSnapshot.collections || []).find((item) => item.id === task?.collectionId);
   if (!task || !collection) return;
   documentDeleteTaskId = task.id;
-  const remoteGone = collection.biliDeleted || task.removedFromFavorites || ['removed', 'collection-deleted'].includes(task.favoriteState);
-  documentDeleteMessage.textContent = remoteGone
+  const biliCollection = Boolean(collection.mediaId) && collection.internal !== true && collection.collectionKind !== 'video-cache';
+  const remoteGone = biliCollection && (collection.biliDeleted || task.removedFromFavorites || ['removed', 'collection-deleted'].includes(task.favoriteState));
+  documentDeleteMessage.textContent = task.singleTask
+    ? `将永久删除“${task.title || task.bvid}”的单视频 Markdown、相关产物和任务记录。下次处理同一 BV 时会作为全新任务，不会提示存在旧产物。`
+    : remoteGone
     ? `将永久删除“${task.title || task.bvid}”的 Markdown 和相关产物。由于视频已移出 B站收藏夹或原收藏夹已删除，这条任务不会恢复。`
-    : `将永久删除“${task.title || task.bvid}”的 Markdown 和相关产物，并把任务按稳定收藏夹 ID 放回“${collection.name}”等待重新派发。`;
+    : biliCollection
+      ? `将永久删除“${task.title || task.bvid}”的 Markdown 和相关产物，并把任务按稳定收藏夹 ID 放回“${collection.name}”等待应用内 Agent 重新派发。`
+      : `将永久删除“${task.title || task.bvid}”的 Markdown、相关产物和本地总结任务；不会恢复为待派发。`;
   documentDeleteModal.hidden = false;
 }
 
@@ -2018,7 +2055,7 @@ async function confirmDocumentDelete() {
     await refreshSnapshot();
     showToast(TEXT.toastSuccess, result.restored
       ? `文档与产物已删除，任务已回到“${result.collectionName}”待派发。`
-      : '文档与产物已删除；收藏记录或原收藏夹已不存在，因此没有恢复任务。', 'success');
+      : (result.reason === 'single-task-deleted' ? '单视频文档、产物和任务记录已删除；下次相同 BV 将作为全新任务。' : '文档与产物已删除；该来源不恢复总结任务。'), 'success');
   } catch (error) {
     documentDeleteAccept.disabled = false;
     showToast(TEXT.toastError, error.message || String(error), 'error');
@@ -2126,7 +2163,7 @@ function renderExportPage() {
   const collectionId = document.querySelector('#exportCollectionSelect')?.value || '';
   const query = String(document.querySelector('#exportSearch')?.value || '').trim().toLocaleLowerCase();
   visibleExportTasks = (lastSnapshot.tasks || []).filter((task) => {
-    if (task.status !== 'done' || !task.outputMarkdown) return false;
+    if (task.status !== 'done' || !task.outputMarkdown || task.knowledgeActive === false) return false;
     const collection = (lastSnapshot.collections || []).find((item) => item.id === task.collectionId);
     if (!collection || String(collection.userId || collection.userName) !== userId) return false;
     if (collectionId && task.collectionId !== collectionId) return false;
@@ -2141,7 +2178,7 @@ function syncExportSelectors() {
   const userSelect = document.querySelector('#exportUserSelect');
   const collectionSelect = document.querySelector('#exportCollectionSelect');
   if (!userSelect || !collectionSelect) return;
-  const completedCollectionIds = new Set((lastSnapshot.tasks || []).filter((task) => task.status === 'done' && task.outputMarkdown).map((task) => task.collectionId));
+  const completedCollectionIds = new Set((lastSnapshot.tasks || []).filter((task) => task.status === 'done' && task.outputMarkdown && task.knowledgeActive !== false).map((task) => task.collectionId));
   const collections = (lastSnapshot.collections || []).filter((collection) => completedCollectionIds.has(collection.id) || isInternalCollection(collection));
   const users = new Map(collections.map((collection) => [String(collection.userId || collection.userName), collection.userName || collection.userId || '-']));
   const previousUser = userSelect.value;
@@ -2150,7 +2187,7 @@ function syncExportSelectors() {
   const userId = userSelect.value;
   const previousCollection = collectionSelect.value;
   const available = collections.filter((collection) => String(collection.userId || collection.userName) === userId);
-  collectionSelect.innerHTML = `<option value="">\u5168\u90e8\u6536\u85cf\u5939</option>${available.map((collection) => `<option value="${escapeHtml(collection.id)}">${escapeHtml(collection.name)} (${(lastSnapshot.tasks || []).filter((task) => task.collectionId === collection.id && task.status === 'done' && task.outputMarkdown).length} \u7bc7)</option>`).join('')}`;
+  collectionSelect.innerHTML = `<option value="">\u5168\u90e8\u6536\u85cf\u5939</option>${available.map((collection) => `<option value="${escapeHtml(collection.id)}">${escapeHtml(collection.name)} (${(lastSnapshot.tasks || []).filter((task) => task.collectionId === collection.id && task.status === 'done' && task.outputMarkdown && task.knowledgeActive !== false).length} \u7bc7)</option>`).join('')}`;
   if (available.some((collection) => collection.id === previousCollection)) collectionSelect.value = previousCollection;
 }
 
@@ -2334,6 +2371,13 @@ navGroups.forEach((group) => group.querySelector('.nav-group-toggle')?.addEventL
   if (document.body.classList.contains('sidebar-collapsed')) setSidebarCollapsed(false);
   setNavGroupOpen(group, shouldOpen);
 }));
+navSubgroups.forEach((subgroup) => subgroup.querySelector('.nav-subgroup-toggle')?.addEventListener('click', () => {
+  const shouldOpen = !subgroup.classList.contains('open') || document.body.classList.contains('sidebar-collapsed');
+  if (document.body.classList.contains('sidebar-collapsed')) setSidebarCollapsed(false);
+  const parent = subgroup.closest('.nav-group');
+  if (parent) setNavGroupOpen(parent, true);
+  setNavSubgroupOpen(subgroup, shouldOpen);
+}));
 document.querySelector('#userProfile')?.addEventListener('click', () => {
   if (!currentUser?.isLogin) setPage('login');
 });
@@ -2400,19 +2444,6 @@ taskCollectionSelect?.addEventListener('change', () => {
   lastTaskCollectionId = '';
   renderTaskInventory();
   updatePromptTemplate();
-});
-document.querySelector('#activateCollection')?.addEventListener('click', async () => {
-  const collectionId = taskCollectionSelect?.value;
-  if (!collectionId) return;
-  try {
-    const collection = await window.orchestrator.setActiveCollection(collectionId);
-    lastSnapshot.activeCollection = collection;
-    renderTaskInventory();
-    updatePromptTemplate();
-    showToast(TEXT.toastSuccess, `\u5916\u90e8 Agent \u89c6\u9891\u603b\u7ed3\u4efb\u52a1\u8303\u56f4\u5df2\u5207\u6362\uff1a${collection.userName || '-'} / ${collection.name}`, 'success');
-  } catch (error) {
-    showToast(TEXT.toastError, error.message || String(error), 'error');
-  }
 });
 document.querySelector('#taskFilterToggle')?.addEventListener('click', (event) => {
   const button = event.currentTarget;
@@ -2856,43 +2887,79 @@ renderBootstrap({ phase: 'starting', progress: 0.04, message: '\u6b63\u5728\u521
 function updatePromptTemplate() {
   if (!agentPromptTemplate) return;
   const apiUrl = runtime.apiUrl || 'http://127.0.0.1:17391';
-  agentPromptTemplate.textContent = `\u4f60\u6b63\u5728\u53c2\u4e0e\u300c\u661f\u85cf\u5bb6\u300d\u7684\u591a Agent \u89c6\u9891\u77e5\u8bc6\u6574\u7406\u5de5\u4f5c\u3002
-
-\u3010\u6574\u4f53\u76ee\u6807\u3011
-\u7528\u6237\u7684 Bilibili \u6536\u85cf\u5939\u4e2d\u957f\u671f\u7d2f\u79ef\u4e86 AI \u65b0\u95fb\u3001\u6280\u672f\u4ecb\u7ecd\u3001\u5de5\u7a0b\u7ecf\u9a8c\u548c\u5176\u5b83\u503c\u5f97\u4fdd\u7559\u7684\u89c6\u9891\u3002\u6211\u4eec\u8981\u628a\u8fd9\u4e9b\u89c6\u9891\u8f6c\u6362\u4e3a\u53ef\u68c0\u7d22\u3001\u53ef\u8df3\u8f6c\u65f6\u95f4\u8f74\u3001\u56fe\u6587\u5e76\u8302\u3001\u4fe1\u606f\u5b8c\u6574\u7684 Markdown \u77e5\u8bc6\u6587\u6863\uff0c\u4ee5\u540e\u53ef\u7ee7\u7eed\u6784\u5efa\u4e2a\u4eba RAG \u77e5\u8bc6\u5e93\u3002\u6587\u6863\u4e0d\u662f\u53ea\u5199\u51e0\u53e5\u6458\u8981\uff0c\u800c\u662f\u5728\u4e0d\u6b6a\u66f2\u539f\u610f\u7684\u524d\u63d0\u4e0b\uff0c\u8ba9\u8bfb\u8005\u53ef\u4ee5\u7528\u8f83\u5c11\u65f6\u95f4\u5b8c\u6574\u638c\u63e1\u89c6\u9891\u7684\u4e8b\u5b9e\u3001\u65b9\u6cd5\u3001\u8bba\u636e\u3001\u64cd\u4f5c\u7ec6\u8282\u548c\u5c40\u9650\u3002
-
-\u3010\u534f\u4f5c\u8bbe\u8ba1\u3011
-- \u684c\u9762\u5e94\u7528\u662f\u4efb\u52a1\u3001\u79df\u7ea6\u3001\u5de5\u5177\u3001\u5de5\u4f5c\u76ee\u5f55\u548c\u4ea7\u7269\u72b6\u6001\u7684\u552f\u4e00\u771f\u5b9e\u6765\u6e90\u3002
-- \u6bcf\u4e2a\u65b0 Agent \u6216\u65e0\u4e0a\u4e0b\u6587\u8bb0\u5fc6\u7684\u65b0\u4f1a\u8bdd\uff0c\u90fd\u5fc5\u987b\u5148\u5411\u5e94\u7528\u6ce8\u518c\u81ea\u5df1\u4f7f\u7528\u7684\u8c03\u7528\u5de5\u5177\u548c\u6a21\u578b\uff0c\u7531\u5e94\u7528\u751f\u6210 Worker ID\u3002\u4e0d\u8981\u81ea\u884c\u8d77 ID \u6216\u590d\u7528\u5176\u5b83\u4f1a\u8bdd\u7684 ID\u3002
-- \u6ce8\u518c\u540e\u8981\u5728\u5f53\u524d\u4f1a\u8bdd\u4e2d\u59a5\u5584\u4fdd\u5b58 Worker ID\u3002\u6bcf\u6b21\u9886\u5355\u8fd4\u56de\u7684 workId \u53ea\u5c5e\u4e8e\u8be5\u6b21\u5de5\u4f5c\uff0c\u5fc3\u8df3\u3001\u5de5\u5177\u8c03\u7528/\u53d6\u6d88\u3001\u63d0\u4ea4\u548c\u4e2d\u6b62\u90fd\u5fc5\u987b\u540c\u65f6\u643a\u5e26 workerId \u4e0e workId\u3002
-- \u7528\u6237\u4f1a\u5148\u5728\u684c\u9762\u5e94\u7528\u7684\u300c\u4efb\u52a1\u603b\u89c8\u300d\u4e2d\u9009\u62e9\u5e76\u6fc0\u6d3b\u5916\u90e8 Agent \u7684\u89c6\u9891\u603b\u7ed3\u4efb\u52a1\u8303\u56f4\uff1b\u4f60\u4e0d\u9700\u8981\u8ba9\u7528\u6237\u53e6\u884c\u63d0\u4f9b\u4efb\u4f55\u76ee\u6807\u53c2\u6570\u3002
-- \u6bcf\u4e2a Agent \u4e00\u6b21\u53ea\u9886\u53d6\u4e00\u4e2a\u89c6\u9891\uff0c\u5176\u5b83 Agent \u4e0d\u91cd\u590d\u5904\u7406\u5df2\u9886\u53d6\u4efb\u52a1\u3002
-- \u4f60\u53ea\u80fd\u5728 claim \u8fd4\u56de\u7684 artifactDir \u4e2d\u521b\u5efa\u8be5\u89c6\u9891\u7684\u4ea7\u7269\uff0c\u4e0d\u8981\u7f16\u8f91 SQLite\u3001\u7d22\u5f15\u3001workspace \u914d\u7f6e\u6216\u5176\u5b83\u4efb\u52a1\u76ee\u5f55\u3002
-- \u6240\u6709\u5a92\u4f53\u5de5\u5177\u5fc5\u987b\u901a\u8fc7\u684c\u9762\u5e94\u7528 API \u8c03\u7528\uff0c\u4e0d\u8981\u76f4\u63a5\u8fd0\u884c\u9879\u76ee\u5185\u90e8\u811a\u672c\u3002
-
-\u5e94\u7528 API\uff1a${apiUrl}
-
-\u3010\u5de5\u4f5c\u6d41\u7a0b\u3011
-1. \u9996\u5148 GET ${apiUrl}/api/manifest \u83b7\u53d6\u5f53\u524d\u7248\u672c\u7684\u5168\u90e8\u53ef\u7528\u63a5\u53e3\u3001\u53c2\u6570\u3001\u5de5\u5177\u548c\u534f\u4f5c\u89c4\u8303\u3002
-2. \u65b0\u4f1a\u8bdd POST ${apiUrl}/api/workers/register\uff0cbody \u4e3a {"tool":"<codex/claude-code/\u5176\u5b83\u8c03\u7528\u7aef>","model":"<\u5b9e\u9645\u6a21\u578b\u540d>","sessionLabel":"<\u53ef\u9009\u5907\u6ce8>"}\u3002\u4fdd\u5b58\u5e94\u7528\u8fd4\u56de\u7684 workerId\uff0c\u4e0d\u8981\u81ea\u884c\u751f\u6210\u3002
-3. \u6ce8\u518c\u540e\u53ef GET ${apiUrl}/api/manifest?workerId=<workerId> \u83b7\u53d6\u5e26\u5f53\u524d Worker \u72b6\u6001\u7684\u7edf\u4e00\u63a5\u53e3\u6e05\u5355\u3002
-4. GET ${apiUrl}/api/active-collection \u786e\u8ba4\u684c\u9762\u5e94\u7528\u5df2\u6fc0\u6d3b\u7684\u5916\u90e8 Agent \u89c6\u9891\u603b\u7ed3\u4efb\u52a1\u8303\u56f4\u3002\u5982\u679c\u8fd4\u56de NO_ACTIVE_COLLECTION\uff0c\u8bf7\u7528\u6237\u5148\u5728\u300c\u4efb\u52a1\u603b\u89c8\u300d\u4e2d\u6fc0\u6d3b\u76ee\u6807\u3002
-5. POST ${apiUrl}/api/tasks/claim\uff0cbody \u4e3a {"workerId":"<workerId>"}\u3002\u540c\u4e00 Agent \u53ef\u4ee5\u4fdd\u6301 workerId \u8fde\u7eed\u5de5\u4f5c\uff0c\u4f46\u6bcf\u6b21\u6210\u529f\u9886\u53d6\u90fd\u4f1a\u8fd4\u56de\u5168\u65b0 workId\u3002\u8fd4\u56de NO_TASK \u65f6\u6b63\u5e38\u7ed3\u675f\uff1b\u8fd4\u56de WORKER_PAUSED \u65f6\uff0c\u9075\u5faa\u300c\u6765\u81ea\u7528\u6237\u7684\u4fe1\u606f\uff0c\u4f60\u9700\u8981\u6682\u505c\u5de5\u4f5c\u300d\uff0c\u4e0d\u518d\u7ee7\u7eed\u7533\u8bf7\u65b0\u4efb\u52a1\u3002
-6. \u9605\u8bfb claim \u8fd4\u56de\u7684 workId\u3001\u89c6\u9891\u4fe1\u606f\u3001requirements\u3001tools\u3001artifactDir \u548c leaseExpiresAt\u3002\u5de5\u5177\u6392\u961f/\u8fd0\u884c\u671f\u95f4\u5e94\u7528\u4f1a\u81ea\u52a8\u4fdd\u62a4\u79df\u7ea6\uff1b\u5176\u5b83\u957f\u65f6\u5de5\u4f5c\u4ecd\u8981\u6bcf 15 \u5206\u949f\u5185 POST /api/tasks/<taskId>/heartbeat\uff0cbody \u540c\u65f6\u5e26 workerId \u548c workId\u3002
-7. \u901a\u8fc7 POST /api/tasks/<taskId>/tools/material-bundle/run \u51c6\u5907\u7d20\u6750\uff0cbody \u5305\u542b workerId\u3001workId \u548c options\u3002\u63a5\u53e3\u4f1a\u7acb\u5373\u8fd4\u56de HTTP 202\uff1bqueued \u662f\u6b63\u5e38\u72b6\u6001\uff0c\u6309 queuePosition\u3001queueReason\u3001estimatedWaitMs \u7b49\u5f85\uff0c\u4e0d\u8981\u91cd\u590d\u63d0\u4ea4\u540c\u4e00\u5de5\u5177\u3002\u7528 GET /api/tool-runs/<runId>?log=1 \u8ddf\u8e2a\u5230\u7ec8\u6001\uff1b\u5982\u679c\u8fd4\u56de WORK_ATTEMPT_ENDED\uff0c\u7acb\u5373\u505c\u6b62\u4f7f\u7528\u65e7 workId \u5e76\u91cd\u65b0\u9886\u53d6\u3002
-8. \u65e0\u8bba B \u7ad9\u662f\u5426\u63d0\u4f9b\u5b57\u5e55\uff0c\u90fd\u5fc5\u987b\u8fd0\u884c\u4e00\u6b21 ASR\uff0c\u5e76\u6bd4\u5bf9\u5b8c\u6574\u6027\u3001\u65f6\u95f4\u8f74\u3001\u4e13\u6709\u540d\u8bcd\u548c\u8bed\u4e49\u3002\u4f18\u5148\u8bfb\u53d6 asr/transcript.srt \u6216 asr/asr-result.json \u4e2d\u6bcf\u4e2a\u53e5\u6bb5\u7684\u771f\u5b9e\u8d77\u6b62\u65f6\u95f4\uff0cMarkdown \u65f6\u95f4\u8f74\u94fe\u63a5\u4e0d\u5f97\u6839\u636e\u7eaf\u6587\u672c\u987a\u5e8f\u731c\u6d4b\u3002\u65e0\u6cd5\u5224\u65ad\u5b57\u5e55\u8bed\u4e49\u65f6\u518d\u7528\u5173\u952e\u5e27\u548c\u591a\u6a21\u6001\u80fd\u529b\u6838\u5bf9\u3002
-9. \u9009\u62e9\u6709\u4fe1\u606f\u91cf\u7684\u5173\u952e\u5e27\uff0c\u4f8b\u5982\u67b6\u6784\u56fe\u3001\u64cd\u4f5c\u754c\u9762\u3001\u6570\u636e\u56fe\u8868\u3001\u4ee3\u7801\u6216\u7ed3\u679c\uff0c\u4e0d\u8981\u653e\u7f6e\u91cd\u590d\u3001\u6a21\u7cca\u6216\u65e0\u610f\u4e49\u622a\u56fe\u3002
-10. GET ${apiUrl}/api/templates/video-summary \u53d6\u5f97\u53c2\u8003 Markdown \u6a21\u677f\u3002\u5c3d\u91cf\u9075\u5faa\u6a21\u677f\u7ed3\u6784\uff0c\u4f46\u6839\u636e\u89c6\u9891\u5185\u5bb9\u5408\u7406\u589e\u51cf\u4e8c\u7ea7/\u4e09\u7ea7\u7ae0\u8282\u3002
-11. Markdown \u5f00\u5934\u5fc5\u987b\u6309\u300c\u5c0f\u7ed3 -> \u601d\u7ef4\u5bfc\u56fe -> \u76ee\u5f55\u300d\u6392\u5217\uff1b\u601d\u7ef4\u5bfc\u56fe\u4f7f\u7528\u53ef\u6e32\u67d3\u7684 Mermaid fenced code block\u3002\u6b63\u6587\u8981\u4fe1\u606f\u5b8c\u6574\uff0c\u4fdd\u7559\u4e8b\u5b9e\u3001\u6b65\u9aa4\u3001\u4ee3\u7801/\u53c2\u6570\u3001\u6848\u4f8b\u3001\u56e0\u679c\u3001\u524d\u63d0\u4e0e\u5c40\u9650\u3002
-12. \u5b9e\u8d28\u7ae0\u8282\u9644 Bilibili \u65f6\u95f4\u8f74\u8d85\u94fe\u63a5\uff1b\u5206 P \u89c6\u9891\u6807\u660e\u6240\u5c5e P\u3002\u6587\u6863\u8fd8\u8981\u6709\u5143\u6570\u636e\u3001\u5173\u952e\u5e27\u3001\u5b57\u5e55\u6bd4\u5bf9\u3001\u70ed\u8bc4\u524d\u4e09\u6761\u5206\u6790\u548c\u5904\u7406\u8bb0\u5f55\uff0c\u7981\u6b62\u5e7b\u89c9\u8865\u5168\u3002
-13. \u786e\u8ba4 Markdown\u3001info.json\u3001\u56fe\u7247\u548c\u8f85\u52a9\u4ea7\u7269\u5b8c\u6574\u540e\uff0c\u901a\u8fc7 clean-cache \u5220\u9664\u4e34\u65f6\u97f3\u89c6\u9891\uff0c\u4e0d\u8981\u5220\u9664\u6700\u7ec8\u6587\u6863\u3001\u56fe\u7247\u3001\u5b57\u5e55\u3001\u8bc4\u8bba\u6216\u5143\u6570\u636e\u3002
-14. POST /api/tasks/<taskId>/submit \u63d0\u4ea4\uff0cbody \u5fc5\u987b\u5e26 workerId\u3001workId \u548c\u4ea7\u7269\u8def\u5f84\u3002\u88ab\u6253\u56de\u65f6\u6309 errors \u4fee\u590d\u5e76\u91cd\u65b0\u63d0\u4ea4\u3002\u5982\u679c\u56e0\u9519\u8bef\u3001\u7528\u6237\u8981\u6c42\u6216\u5176\u5b83\u539f\u56e0\u65e0\u6cd5\u7ee7\u7eed\uff0c\u5fc5\u987b\u7acb\u5373 POST /api/tasks/<taskId>/abort\uff0cbody \u5e26 workerId\u3001workId \u548c\u53ef\u64cd\u4f5c\u7684 reason\u3002\u5e94\u7528\u4f1a\u53d6\u6d88\u5de5\u5177\u3001\u5220\u9664\u672c\u6b21\u7f13\u5b58\u5e76\u5c06\u4efb\u52a1\u9000\u56de pending\uff1b\u65e7 workId \u7acb\u5373\u5931\u6548\uff0c\u4e0b\u6b21\u4ece\u5934\u5f00\u59cb\u3002
-15. \u6536\u85cf\u5939\u540c\u6b65\u4f18\u5148\u4e8e Agent \u5de5\u4f5c\u3002\u6536\u5230 REMOVED_FROM_FAVORITES \u65f6\u653e\u5f03\u65e7\u4efb\u52a1\uff1b\u6536\u5230 COLLECTION_SYNCING\u3001COLLECTION_NOT_READY \u6216 COLLECTION_REACTIVATION_REQUIRED \u65f6\u505c\u6b62\u9886\u5355\u5e76\u7b49\u5f85\u7528\u6237\uff1bBILIBILI_COLLECTION_DELETED \u8868\u793a\u8be5\u6536\u85cf\u5939\u4e0d\u518d\u63d0\u4f9b\u4efb\u52a1\u3002`;
-  agentPromptTemplate.textContent = secureAgentApiText(agentPromptTemplate.textContent);
+  agentPromptTemplate.textContent = buildKnowledgeAgentPrompt(apiUrl);
+}
+function buildKnowledgeAgentPrompt(apiUrl) {
+  return [
+    '你正在通过「星藏家」的本机只读 API 查阅用户已经完成的视频 Markdown 知识库。',
+    '',
+    '【目标】',
+    '先读取目录和元数据，自行筛选与当前问题有关的用户、收藏夹和文档；再按需逐页读取原始 Markdown 与图片。回答必须以实际读取到的内容为依据，不要把搜索摘要或目录字段当成完整原文。',
+    '',
+    '【访问边界】',
+    '- Base URL：' + apiUrl,
+    '- API 仅监听 127.0.0.1，供本机 Codex、Claude Code、OpenCode 或其它非浏览器 Agent 使用。',
+    '- 默认可读取全部已完成 Markdown，不限制用户或收藏夹；接口没有写入、删除、接单、工具执行或提交能力。',
+    '- 不要调用旧的 /api/workers、/api/tasks、/api/tools、/api/tool-runs 等视频工作流接口；这些接口已关闭并返回 HTTP 410。',
+    '- 不要直接扫描、修改应用 workspace、SQLite 或索引文件。',
+    '',
+    '【推荐流程】',
+    '1. GET ' + apiUrl + '/api/manifest，读取当前协议、能力和全部端点。',
+    '2. GET ' + apiUrl + '/api/knowledge/catalog，查看用户、收藏夹、文档数量和最近日期。',
+    '3. GET ' + apiUrl + '/api/knowledge/documents?offset=0&limit=100，分页读取文档目录。可用 userId、collectionId、bvid、title、owner、tag、publishedFrom/publishedTo、favoriteFrom/favoriteTo 与 sort 筛选。',
+    '4. GET ' + apiUrl + '/api/knowledge/documents/<documentId> 读取元数据。publishedAt 是视频发布日期，favoriteAddedAt 是收藏日期，favoriteMembership 表示当前收藏状态。',
+    '5. GET ' + apiUrl + '/api/knowledge/documents/<documentId>/content?startLine=1&lineCount=400，逐行读取未经摘要的 Markdown 原文。nextStartLine 不为 null 时继续请求。',
+    '6. GET ' + apiUrl + '/api/knowledge/documents/<documentId>/assets 列出图片；再使用返回的资产 URL 读取原图。资产 ID 是文档内不透明标识，不要自行拼接文件路径。',
+    '7. 跨库检索可用 GET ' + apiUrl + '/api/knowledge/search?q=<query>&limit=20。搜索只用于定位；partial=true 表示达到扫描预算，需缩小范围或继续精确读取。',
+    '',
+    '【回答要求】',
+    '- 精确原文接口是事实来源。引用结论时标明文档标题、BV 号、用户/收藏夹；区分发布日期、收藏日期和完成日期。',
+    '- 比较多个视频时，先列出候选目录，再分别读取足够的原文页；不能只凭 snippet 下结论。',
+    '- 对支持视觉输入的模型，先列出资产并读取相关原图，再描述图片；不要臆造未读取图片的内容。',
+    '- 404 时重读目录确认 documentId；409 时说明托管产物缺失或无效；413 时缩小读取范围；410 时停止使用旧视频工作流接口。',
+    '- 找不到证据时明确说明知识库中没有足够信息。'
+  ].join('\n');
 }
 
 function secureAgentApiText(value) { return String(value || ''); }
 
+function buildKnowledgeApiDocs(apiUrl) {
+  return `Base URL: ${apiUrl}
+Mode: read-only knowledge access / all completed Markdown
+
+Discover protocol
+GET ${apiUrl}/api/manifest
+
+Catalog
+GET ${apiUrl}/api/knowledge/catalog
+
+Paginated document directory
+GET ${apiUrl}/api/knowledge/documents?offset=0&limit=100
+Filters: userId, collectionId, bvid, title, owner, tag,
+publishedFrom, publishedTo, favoriteFrom, favoriteTo, sort
+
+One document metadata record
+GET ${apiUrl}/api/knowledge/documents/<documentId>
+
+Exact raw Markdown, paged by 1-based lines
+GET ${apiUrl}/api/knowledge/documents/<documentId>/content?startLine=1&lineCount=400
+Follow nextStartLine until null when the complete source is required.
+
+List validated image assets
+GET ${apiUrl}/api/knowledge/documents/<documentId>/assets
+
+Read one image using the opaque URL returned by the asset list
+GET ${apiUrl}/api/knowledge/documents/<documentId>/assets/<assetId>
+
+Bounded metadata and Markdown search
+GET ${apiUrl}/api/knowledge/search?q=<query>&limit=20
+Search snippets locate candidates; exact Markdown reads remain the source of truth.
+
+Legacy external video workflow endpoints return HTTP 410 and
+EXTERNAL_VIDEO_WORKFLOW_DISABLED. The server listens on 127.0.0.1 only,
+rejects unrelated browser origins, exposes no filesystem paths, and has no mutation endpoint.`;
+}
+
 function buildApiDocs(apiUrl) {
-  return `Base URL: ${apiUrl}\n\n1. Discover the complete protocol\nGET ${apiUrl}/api/manifest\n\n2. Register this fresh agent session\nPOST ${apiUrl}/api/workers/register\n{\n  "tool": "codex",\n  "model": "<actual-model>",\n  "sessionLabel": "optional note"\n}\n\nSave the returned workerId. Do not invent one.\n\n3. Read the desktop-selected target\nGET ${apiUrl}/api/active-collection\n\n4. Claim one task\nPOST ${apiUrl}/api/tasks/claim\n{\n  "workerId": "<workerId>"\n}\n\nSave task.workId from the claim response. It is unique to this claim and must not be invented or reused after interruption.\n\n5. Run an app-managed tool\nPOST ${apiUrl}/api/tasks/<taskId>/tools/material-bundle/run\n{\n  "workerId": "<workerId>",\n  "workId": "<workId from claim>",\n  "options": {\n    "frames": 12,\n    "commentLimit": 3,\n    "timeoutMs": 7200000\n  }\n}\n\nThe app returns HTTP 202. queued is normal; do not submit a duplicate run.\n\n6. Poll until a terminal status\nGET ${apiUrl}/api/tool-runs/<runId>?workerId=<workerId>&workId=<workId>&log=1\n\nInspect queuePosition, queueReason, estimatedWaitMs, resourcePool, resourceLane, stage, and workAttempt. WORK_ATTEMPT_ENDED means this workId is invalid; stop and claim a new task with the same workerId.\nResource overview: GET ${apiUrl}/api/scheduler\n\n7. Read the Markdown template\nGET ${apiUrl}/api/templates/video-summary\n\n8. Heartbeat, submit, or abort\nPOST ${apiUrl}/api/tasks/<taskId>/heartbeat\nPOST ${apiUrl}/api/tasks/<taskId>/submit\nPOST ${apiUrl}/api/tasks/<taskId>/abort\n{\n  "workerId": "<workerId>",\n  "workId": "<workId from claim>",\n  "reason": "<why this attempt cannot continue>"\n}\n\nEvery state-changing task request includes both workerId and workId. Abort cancels app tools, removes this attempt's files, invalidates workId, and returns the task to pending. The next claim starts from scratch with a new workId. A paused worker receives WORKER_PAUSED and must stop requesting new work.`;
+  return buildKnowledgeApiDocs(apiUrl);
 }

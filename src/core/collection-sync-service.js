@@ -146,7 +146,6 @@ class CollectionSyncService {
           biliDeletedAt: '',
           syncState: 'needs-sync',
           syncReady: false,
-          externalDispatchPaused: true,
           remoteVideoCount: Number(folder.mediaCount || 0),
           remoteUpdatedAt: folder.updatedAt || '',
           updatedAt: new Date().toISOString()
@@ -308,7 +307,6 @@ class CollectionSyncService {
         remoteVideoCount: videos.length,
         archivedDocumentCount: summary.archived,
         latestFavoriteAt,
-        externalDispatchPaused: true,
         biliDeleted: false,
         biliDeletedAt: '',
         lastSyncSummary: summary
@@ -385,7 +383,6 @@ class CollectionSyncService {
         biliDeletedAt: now,
         syncState: 'deleted',
         syncReady: false,
-        externalDispatchPaused: true,
         remoteVideoCount: 0,
         videoCount: summary.archived,
         archivedDocumentCount: summary.archived,
@@ -434,7 +431,6 @@ class CollectionSyncService {
       id: collectionId,
       syncState: 'syncing',
       syncReady: false,
-      externalDispatchPaused: true,
       syncStartedAt: now,
       updatedAt: now
     };

@@ -50,7 +50,7 @@ function video(bvid, title, favoriteAddedAt) {
 
   const first = await service.sync({ collectionName: '7' });
   assert(first.count === 2 && first.collection.id === '100:7', 'initial collection sync result is incorrect');
-  assert(first.collection.syncReady === true && first.collection.syncState === 'ready' && first.collection.externalDispatchPaused === true, 'successful sync did not leave a ready, manually reactivated inventory');
+  assert(first.collection.syncReady === true && first.collection.syncState === 'ready', 'successful sync did not leave an internally dispatchable inventory');
   assert(first.collection.storageName === 'AIcode', 'initial immutable collection storage name is incorrect');
   assert(store.listTasks({ collectionId: '100:7' }).length === 2, 'initial collection tasks were not persisted');
   assert(events.some((event) => event.type === 'collection-sync-progress' && event.stage === 'done'), 'completion progress event was not emitted');

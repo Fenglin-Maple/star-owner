@@ -1,147 +1,23 @@
 # Deployment Guide
 
-This guide has two paths: a dependency-free portable build for ordinary users, and a reproducible source setup for developers and release maintainers. All paths are relative to the repository root.
+Version: `0.10.0`
 
 ## 1. Portable Release for Users
 
-Recommended GitHub release assets:
+Download the Windows x64 portable core archive from GitHub Releases, extract it to a writable local directory, and start `星藏家.exe` or the included shortcut.
 
-```text
-Star-Owner-v<version>-win-x64-core.zip
-Star-Owner-v<version>-runtime-win-x64.zip
-Star-Owner-v<version>-model-small.zip
-Star-Owner-v<version>-model-medium.zip
-```
+Do not install under a directory that the current user cannot modify. The portable application writes only to its project directory, registered Workspace libraries, and Electron user data required for the persistent Bilibili WebView partition.
 
-The core archive contains Electron, all npm dependencies, Mermaid, and may include the base media/ASR runtime for immediate startup. The runtime repair asset contains `runtime/python`, `runtime/vc-runtime`, and `runtime/faster-whisper`; model assets preserve `runtime/models/<model>` paths. Assets remain separate because complete Windows distributions can exceed GitHub's 2GB per-file limit. Users do not install Node.js, Python, Microsoft Visual C++ Redistributable, FFmpeg, yt-dlp, CUDA Toolkit, packages, or a model downloader.
+On first launch:
 
-Usage:
+1. The main window opens immediately.
+2. SQLite and the default Workspace initialize.
+3. The application checks project-local runtime, faster-whisper, both model packages, FFmpeg, yt-dlp and VC++ runtime.
+4. Missing required packages trigger an in-app download prompt.
+5. Downloads come from this repository's Release assets, show progress, verify SHA-256 when available, stage extraction, and commit under `runtime/`.
+6. Interrupted installation rolls back on next startup.
 
-1. Read `THIRD_PARTY_NOTICES.md`, especially the NVIDIA runtime terms.
-2. Extract the core archive to a writable directory. Do not run it from inside the ZIP.
-3. Double-click `Start-StarOwner.cmd`.
-4. If a required runtime or model is missing, accept the first-start prompt. The app downloads the matching assets and mandatory sibling SHA-256 files from this repository's Releases, verifies them, checks archive paths, and installs only under `runtime/`.
-5. Download progress and repair controls remain available in `设置 -> 项目依赖包`. Manual overlay extraction is still supported for offline installations.
-6. Log in from the application's Bilibili WebView and select a default Workspace.
-7. Windows may show an unknown-publisher warning until releases are code-signed.
-
-The AI features do not require another local model runtime. Open `AI -> AI 模型配置`, add an OpenAI-compatible or NewAPI-compatible provider, enter either the service root or its `/v1` API root, save it, pull the remote model list, and enable one or more models. The application probes and remembers the compatible `/v1` root when necessary. This shared configuration powers `AI -> RAG 知识库助手`, `Agent 视频总结工作流`, and `视频总结（单个）`. Multiple providers and enabled models can be saved. Context windows and maximum output tokens are configured independently per model; the provider output value is only a fallback. API keys are accepted only when Electron `safeStorage` is available, remain encrypted in the local application database, and are never included in release archives.
-
-The application creates `workspace/` beside itself and uses only project-relative runtime paths. Moving the extracted directory is supported. Cached videos stay below the selected Workspace under the reserved internal user and selected managed cache collection. User cookies, SQLite data, cached videos, task artifacts, and generated Markdown are never included in a public release archive.
-
-The bundled faster-whisper environment is relocated automatically. Release archives contain only a relative `pyvenv.cfg` marker; both the Electron main process and `tools/video-tool.js` rewrite its Python `home` to the current extracted directory before invoking the environment. This repair runs after the folder is moved as well as on first launch. On Windows, the ASR process registers the signed x64 libraries under `runtime/vc-runtime` before importing CTranslate2, so an outdated or damaged machine-wide Visual C++ runtime cannot crash model loading. ASR enables word timestamps and groups them into sentence-level entries; every run must leave equivalent timestamps in `asr/transcript.srt`, `asr/asr-transcript.txt`, and `asr/asr-result.json`.
-
-### Hardware
-
-- Windows 10/11 x64.
-- An NVIDIA driver capable of the bundled CUDA 12 runtime is recommended for GPU ASR.
-- The default `medium` model balances recognition quality and throughput on an 8GB laptop GPU; `small` remains available as the faster, lower-memory option.
-- CPU ASR can be enabled manually in Settings, but it is slower and disabled by default.
-
-## 2. Source Setup for Developers
-
-Requirements for building from source:
-
-- Git
-- Node.js 22 or newer
-- npm
-- PowerShell 5.1 or newer
-- `uv` for creating the project-local Python runtime
-
-```powershell
-git clone https://github.com/Fenglin-Maple/star-owner.git
-cd star-owner
-npm ci
-npm run setup:asr
-npm run verify:release
-npm start
-```
-
-The root `postinstall` only checks whether Electron's executable exists and, when needed, invokes the official `node_modules/electron/install.js`; it inherits `ELECTRON_MIRROR` and proxy environment variables. `npm run setup:asr` installs Python, CUDA Python wheels, faster-whisper, imageio-ffmpeg, yt-dlp, and both models under `runtime/`. It does not install them globally. `runtime-requirements.txt` pins the complete ASR/media environment, so `npm ci` itself does not run Python probes or media-binary downloaders.
-
-## 3. Build a Portable Archive
-
-First prepare the complete project-local runtime, then run:
-
-```powershell
-npm ci
-npm run setup:asr
-npm run verify:release
-npm run package:portable
-```
-
-The output is written below `dist/`, which is excluded from Git. The default command creates the GitHub-safe portable core, runtime repair archive, and separate `small` and `medium` model ZIPs plus a SHA-256 file for each.
-
-Available model modes:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle none
-powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle small
-powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle medium
-powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle all
-powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle all -SeparateModelAsset
-```
-
-- `all -SeparateModelAsset`: recommended GitHub release; produces a core ZIP, runtime repair ZIP, and ready-to-overlay `small` and `medium` model ZIPs.
-- `small` or `medium`: produces an immediately usable single-model archive for channels that permit larger files.
-- `none`: core runtime for a separately published model archive.
-- `all`: includes both models and is too large for GitHub as one file; add `-SeparateModelAsset` to emit the core, `small`, and `medium` assets separately.
-
-The builder copies only application/runtime inputs. It creates a fresh empty `workspace/`; it never copies the maintainer's SQLite database, cookies, downloaded videos, generated documents, logs, or shortcuts.
-
-## 4. Agent Deployment and API Use
-
-Start the desktop application before connecting an Agent. The local API defaults to:
-
-```text
-http://127.0.0.1:17391
-```
-
-An Agent should:
-
-1. `GET /api/manifest`
-2. `POST /api/workers/register`
-3. save the returned `workerId`
-4. `GET /api/active-collection`
-5. `POST /api/tasks/claim`
-6. save the claim response's one-time `workId`
-7. include both `workerId` and `workId` in heartbeat, tool-run/cancel, submit, and abort requests
-8. invoke tools only through the returned application API
-9. submit validated artifacts and let the application finalize paths
-
-A continuously running Agent retains one `workerId` across many tasks. Every successful claim creates a new `workId`; after completion, interruption, expiry, or replacement, the old value is invalid and must never be reused. `WORK_ATTEMPT_ENDED` instructs the Agent to keep its `workerId` and claim again.
-
-The Task Overview page selects and activates the video-summary range only for external HTTP API Agents. Application-managed sessions under `AI -> Agent 视频总结工作流` remain bound to the collection selected when each session was created, regardless of the external active target.
-
-Ordinary interruption uses `/api/tasks/<taskId>/abort`: the application cancels tools, removes that attempt, invalidates its `workId`, and returns the task to `pending`. A confirmed deleted/down/unavailable Bilibili video is different. Tool polling or a later task request may return HTTP `410` with `BILIBILI_VIDEO_UNAVAILABLE`; the Agent must stop retrying that video and claim again with the same `workerId`. The app permanently removes the inventory record, stores an `unavailableTasks` tombstone, and suppresses recreation during future collection synchronization.
-
-Collection sync is a desktop-owned maintenance transaction and has priority over Agent execution. Starting it stops every bound internal queue Agent, aborts all current work attempts for that collection, cleans their attempt files, and invalidates old `workId` values. A successful sync requires manual restart of internal workflows and manual reactivation of the external Agent scope. External callers may receive `COLLECTION_SYNCING`, `COLLECTION_NOT_READY`, `COLLECTION_REACTIVATION_REQUIRED`, `REMOVED_FROM_FAVORITES`, or terminal `BILIBILI_COLLECTION_DELETED`; they must follow the returned stop/wait/claim-new directive and retain their existing `workerId`.
-
-The synchronizer fetches all remote pages before applying one SQLite transaction. Failed or interrupted sync restores the previous complete collection snapshot and writes a rollback activity without a separate user prompt. Release verification must cover added favorites, unfinished removals, accepted-artifact preservation, remote rename with stable `storageName`, whole-folder deletion, post-sync dispatch blocking, and startup recovery from a persisted `collectionSyncTransactions` record.
-
-When the activated collection is an internal video-cache collection, the returned task includes `cachedVideoId`, `cachedVideoFile`, and `reuseCachedMedia`. Run the same material and cleanup APIs: the application reuses the merged video and preserves it during cleanup. Do not move or delete that cached file directly.
-
-See `AGENTS.md` for the complete worker and contributor contract.
-
-## 5. GitHub Release Checklist
-
-1. Run `npm run verify:release`.
-2. Confirm `git status` contains no `workspace/`, `runtime/`, `node_modules/`, logs, archives, SQLite files, cookies, or machine-specific shortcuts.
-3. Build the portable core/model assets and verify every SHA-256 file.
-4. Test extraction and launch in a clean Windows account or VM.
-5. Attach `LICENSE`, `THIRD_PARTY_NOTICES.md`, and GPL corresponding-source/source-offer material beside both release assets.
-6. Publish the source from the exact Git tag used to build the binary.
-7. Do not upload credentials, Bilibili cookies, account names, task databases, or generated media without permission.
-
-Before a public release, also verify the RAG supplier dialog, remote model pull against a test-compatible endpoint, one streaming response, 24 consecutive knowledge-tool rounds plus a final answer, restricted-mode approval, manual and threshold-triggered automatic context compression, publish/favorite dates in knowledge tools, a bordered Markdown table, one fenced-code copy action, and lightbox/right-click copy for both a local attachment and a knowledge-tool image. Never configure a maintainer API key in the database used to assemble a release.
-
-Run `npm run test:bili-client` to verify legacy HTTP/protocol-relative Bilibili image URLs are upgraded for the renderer, and `npm run test:asr-format` to verify word timestamps are split into sentence SRT/time-text entries without loading a GPU model. `npm run test:internal-agent` additionally verifies the model prompt receives both ASR and station SRT timestamps. `npm run test:asr-service` is a mandatory release gate: it loads the real CUDA `small` and `medium` models and verifies repeated requests reuse each persistent service process. Stop other GPU ASR instances first on an 8GB machine.
-
-Also verify one internal collection Agent and one single-task run with a disposable compatible provider: confirm streamed output, stable Worker identity across fresh per-video context cycles, context-budget reporting, material-tool queueing, Markdown validation, cache cleanup, the canonical `内置用户/<内置收藏夹>` archive, and both output-directory buttons. Confirm that single-task mode neither requests nor creates an arbitrary external destination. In the workflow page, verify newest-first creation order, the right-click delete menu, and collection-wide progress. Disable the active model while a disposable task is running and confirm that the session becomes unavailable, the current cache is removed, the task returns to pending, and restoring the model makes the session restartable. The 82% same-model semantic organization fallback is an extreme-path test; ordinary videos should report zero organization calls. Remove the test provider and test Workspace before building release assets.
-
-### Release asset contract for in-app installation
-
-Publish all dependency assets under the same tagged Release as the portable core whenever their contents changed. For a code-only update, unchanged multi-gigabyte dependencies may remain on a recent Release: the app first looks for exact `v<app version>` filenames, then always enumerates up to ten recent Releases for a compatible filename pattern. Dependency archives must begin with `runtime/`; absolute paths and `..` are rejected. For compatibility with an older Release lacking a dedicated runtime asset, the app may select its portable core archive but extracts only the two validated runtime subtrees.
+Release dependency assets:
 
 ```text
 Star-Owner-v<version>-runtime-win-x64.zip
@@ -152,29 +28,195 @@ Star-Owner-v<version>-model-medium.zip
 Star-Owner-v<version>-model-medium.zip.sha256
 ```
 
-The runtime archive must contain `runtime/python/cpython-3.12.13-windows-x86_64-none/python.exe`, `runtime/vc-runtime/msvcp140.dll`, and `runtime/faster-whisper/Lib/site-packages/faster_whisper`. The model archives must contain `runtime/models/small/model.bin` and `runtime/models/medium/model.bin`. Without these probes, extraction succeeds but installation is reported as incomplete.
+A code-only Release may reuse unchanged dependency assets from one of the recent Releases; users do not need to redownload packages already installed and healthy.
 
-## 6. Troubleshooting
+## 2. Hardware and ASR
 
-- Tool health is visible on the Startup page.
-- Dependency availability, download progress, and reinstall actions are visible in Settings. A partial or failed download remains non-active and can be retried.
-- GPU queue state and memory are visible in Settings and `GET /api/scheduler`.
-- If a portable build says Electron is missing, the archive was assembled incorrectly; do not ask the user to run `npm install` inside it.
-- If the GPU service cannot start, update the NVIDIA driver or enable CPU ASR after reviewing the performance tradeoff.
-- If Mermaid cannot render a diagram, the document preview shows a local error and the source block; correct the Mermaid syntax rather than loading a CDN.
-- If an internal Agent repeatedly appears to ignore clicks, jumps to the top, or remains in “stopping”, confirm the build includes the stable incremental renderer introduced after `v0.9.4`; current builds preserve session DOM nodes, expanded status rows, and scroll positions during live updates.
-- If a completed Markdown row has no cover, verify that its artifact directory still contains `info.json`, a `cover.*`/`thumbnail.*` file, or at least one frame. The library resolves those local sources in that order before falling back to the remote HTTPS cover.
-- If a removed video still appears after upgrading an older Workspace, restart once. Startup migration converts pending entries titled `已失效视频` into tombstones and reclassifies their historical internal-Agent/tool failures as skipped.
-- If model pulling returns 404, the Base URL is usually one path level too high or low. It must resolve `<baseUrl>/models` and `<baseUrl>/chat/completions`.
-- If an Agent workflow shows “模型不可用”, its saved provider was deleted or its model is no longer enabled. Restore the same provider/model in AI Model Configuration or create a new workflow; any task that was active when the configuration disappeared has already been cleaned and returned to pending.
-- If a Bilibili avatar URL returned by the API begins with legacy `http://`, current builds normalize it to HTTPS before rendering. A broken avatar after upgrade usually means the account API returned an empty image or the CDN itself is unreachable, not that the WebView lost login state.
-- If RAG sees a newly accepted single-video document before Document Library, verify the build includes current snapshot invalidation behavior. Current builds refresh task/document/export state immediately and perform a second snapshot read when completion races an in-flight read. The public Agent API contract is protocol `2.8`.
-- If a summary Agent reports missing sentence-level ASR timestamps, inspect `asr/transcript.srt`, `asr/asr-transcript.txt`, and `asr/asr-result.json`. Current outputs carry per-sentence start/end times in all three; the manifest has `asrHasTimestamps=true`, and Agents are instructed not to infer positions from plain text.
-- If a Chinese, English, or Japanese video produces only a few scattered ASR lines, first inspect `asr/asr-result.json`: `language`, `languageProbability`, `diagnostics.speechCoverage`, and `diagnostics.largestGaps` distinguish low-confidence language detection, genuinely sparse speech, wrong/quiet audio, and incomplete recognition. Current builds default to multilingual auto detection, beam 5, 448 decode tokens, previous-text conditioning, and padded VAD. A caller may retry the tool API with an explicit ISO language such as `ja`, but should not force `zh` for non-Chinese material.
-- Deleting a document from Document Library removes its managed summary artifacts. Active favorites and internal collections return the same task to `pending`; removed favorites and deleted Bilibili folders do not. Cache-library source video, cover, and cache metadata are intentionally preserved for a later re-summary.
-- If Settings reports a quarantined dependency-install journal, the application found an unreadable interrupted-install record, moved it aside under `runtime/`, and continued startup without deleting unknown paths. Re-run the affected dependency download from Settings.
-- If `npm ci` times out while Electron itself is downloaded from GitHub, retry from a network that can reach GitHub Releases. In mainland China, a one-session mirror override is `$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'; npm ci`; do not commit personal registry or proxy settings.
-- If a model returns no reasoning panel, confirm the provider exposes an explicit compatible reasoning field; the application does not reveal or synthesize hidden chain-of-thought.
-- If tool calls fail, verify that the selected model really implements OpenAI-compatible function calling and that its model capability switch is enabled.
-- In restricted RAG sessions, CMD and paths outside the selected sandbox intentionally wait for an in-app approval dialog.
-- If a RAG image cannot be copied, confirm that a local image remains inside a registered Workspace or that a remote URL returns a public `image/*` response no larger than 15 MiB. Private-network and Workspace-external sources are intentionally rejected.
+Supported packaged CPU runtime: Windows x64.
+
+Recommended local ASR capacity:
+
+| Model | NVIDIA GPU memory | CPU system memory |
+| --- | ---: | ---: |
+| small | 2048 MiB | 6144 MiB |
+| medium | 4096 MiB | 8192 MiB |
+
+The application automatically checks:
+
+- whether `nvidia-smi` reports an NVIDIA adapter;
+- total/free GPU memory;
+- whether project-local CTranslate2 detects a CUDA device;
+- whether faster-whisper and the selected model are installed;
+- OS, CPU architecture, memory and thread count for CPU fallback.
+
+The CUDA lane is disabled when these checks fail. CPU ASR is disabled by default and can be enabled only when the packaged CPU environment is supported. If neither path is valid, starting an internal video Agent is blocked with concrete diagnostic reasons.
+
+An 8GB laptop RTX 4070 is suitable for the default `medium` model with one persistent CUDA lane. Multiple video workflows may run concurrently, but ASR requests queue through the shared lane.
+
+## 3. Source Setup
+
+Requirements:
+
+- Windows 10/11 x64;
+- Node.js 22 or newer;
+- PowerShell;
+- Git;
+- optional NVIDIA GPU and current driver.
+
+```powershell
+git clone https://github.com/Fenglin-Maple/star-owner.git
+cd star-owner
+npm install
+npm start
+```
+
+Install or repair the complete ASR runtime:
+
+```powershell
+npm run setup:asr
+```
+
+Everything is installed below the repository:
+
+```text
+runtime/python/
+runtime/faster-whisper/
+runtime/vc-runtime/
+runtime/models/small/
+runtime/models/medium/
+```
+
+The application does not require a global FFmpeg, yt-dlp, Python virtual environment or SQLite native binary.
+
+## 4. External Knowledge API
+
+The local HTTP API is read-only. It is for external Codex, Claude Code, OpenCode or other Agent applications that need to inspect completed knowledge; it is not a video task execution API.
+
+Default base URL:
+
+```text
+http://127.0.0.1:17391
+```
+
+Discover the current protocol:
+
+```http
+GET /api/manifest
+```
+
+Core endpoints:
+
+```http
+GET /api/knowledge/catalog
+GET /api/knowledge/documents?offset=0&limit=100
+GET /api/knowledge/documents/<documentId>
+GET /api/knowledge/documents/<documentId>/content?startLine=1&lineCount=400
+GET /api/knowledge/documents/<documentId>/assets
+GET /api/knowledge/documents/<documentId>/assets/<assetId>
+GET /api/knowledge/search?q=<query>&limit=20
+```
+
+Deployment rules for external clients:
+
+1. Run on the same machine as the desktop application.
+2. Read the manifest on every new integration version.
+3. List catalog or document metadata before reading large content.
+4. Follow `nextOffset` and `nextStartLine` pagination.
+5. Use exact Markdown as source of truth; search snippets only identify candidates.
+6. Use returned asset URLs and opaque asset IDs; do not access Workspace paths.
+7. Distinguish `publishedAt`, `favoriteAddedAt`, `completedAt`, and `favoriteMembership`.
+8. Handle stable JSON errors by HTTP status and `code`.
+9. Do not send write methods or attempt old video workflow calls.
+
+Retired endpoints under `/api/workers`, `/api/tasks`, `/api/tools`, `/api/tool-runs`, `/api/active-collection`, `/api/scheduler`, and related paths return:
+
+```text
+HTTP 410
+EXTERNAL_VIDEO_WORKFLOW_DISABLED
+```
+
+The service binds to `127.0.0.1` and rejects unrelated browser Origin headers. It has no authentication against other processes on the same computer. Do not proxy, port-forward or expose it to a LAN/public network without adding authentication, authorization, TLS and a fresh threat review.
+
+## 5. Build a Portable Archive
+
+Run the release gate first:
+
+```powershell
+npm run verify:release
+```
+
+Build the portable archives:
+
+```powershell
+npm run package:portable
+```
+
+The builder verifies required runtime files, model files, license notices, package version consistency and machine-specific path hygiene before producing assets.
+
+## 6. Release Checklist
+
+1. Ensure `package.json` and `package-lock.json` versions match.
+2. Update README, DESIGN, DEPLOYMENT, AGENTS, SECURITY and CODE_REVIEW for changed contracts.
+3. Run `npm run verify:release`.
+4. Inspect `git status` for cookies, logs, Workspace artifacts, test databases, model keys and local paths.
+5. Build portable archives only when a Release is requested.
+6. Verify archive extraction in a clean directory.
+7. Check shortcuts, icon, first-run dependency prompt, login persistence, both themes and one real video workflow.
+8. Upload only changed Release assets. Unchanged model/runtime assets may remain from a compatible recent Release.
+
+## 7. Verification Commands
+
+Focused gates:
+
+```powershell
+npm run smoke
+npm run test:knowledge-api
+npm run test:hardware
+npm run test:internal-agent
+npm run test:document-lifecycle
+npm run test:collection-sync
+npm run test:security
+npm run test:asr-service
+```
+
+The aggregate verifier also runs scheduler, RAG, task rollback, video cache, image clipboard, persistence, Bilibili client, ASR timestamp format, analytics, JavaScript/Python syntax and `npm audit --audit-level=high`.
+
+## 8. Troubleshooting
+
+### Application starts but video Agent cannot run
+
+Open `设置 -> 应用设置 -> 资源调度`. Check the ASR compatibility card for project runtime, model, NVIDIA/CUDA, memory and CPU fallback details. Install missing packages or choose `small` if the current GPU/RAM cannot support `medium`.
+
+### NVIDIA is detected but CUDA ASR is unavailable
+
+Confirm the driver exposes the GPU through `nvidia-smi`, then run:
+
+```powershell
+runtime\faster-whisper\Scripts\python.exe tools\faster-whisper-cli.py --model medium --health
+```
+
+The JSON should report `modelReady: true` and at least one CUDA device. Repair dependencies in Settings if imports or DLL loading fail.
+
+### CPU ASR switch is disabled
+
+CPU ASR is intentionally unavailable when the selected model is missing, the packaged environment is not Windows x64, system memory is below the recommendation, or the runtime health check fails.
+
+### Knowledge API returns 409
+
+The indexed Markdown or asset directory is missing, unreadable, outside a registered Workspace, or no longer a regular managed file. Refresh the document library, verify the Workspace registration, and restore the artifact from backup if needed. The API never follows arbitrary paths.
+
+### Knowledge search returns partial results
+
+One request reached the 128 MiB scan budget. Filter by user, collection, BV, tag or date, then repeat search or read exact selected documents.
+
+### Port 17391 is occupied
+
+The server automatically selects an available local port. Read the current address from the title bar, Startup prompt, Runtime settings or Agent Tool Status page.
+
+### Collection sync was interrupted
+
+On restart the application restores the previous complete snapshot from `collectionSyncTransactions` and logs the rollback. Run synchronization again. Related internal workflows remain stopped until the user restarts them.
+
+### Single-video duplicate prompt appears
+
+The selected internal collection already contains a completed output for the same BV. Choose abandon to preserve it, or overwrite to remove it and generate one replacement. Deleting that document from Document Library removes the duplicate state entirely.

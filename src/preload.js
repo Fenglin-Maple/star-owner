@@ -6,7 +6,6 @@ contextBridge.exposeInMainWorld('orchestrator', {
   prepareAccountSwitch: () => ipcRenderer.invoke('bili:prepare-account-switch'),
   listFolders: () => ipcRenderer.invoke('bili:list-folders'),
   syncCollection: (payload) => ipcRenderer.invoke('api:sync-collection', payload),
-  setActiveCollection: (collectionId) => ipcRenderer.invoke('collections:set-active', collectionId),
   snapshot: () => ipcRenderer.invoke('store:snapshot'),
   setTasksEnabled: (payload) => ipcRenderer.invoke('tasks:set-enabled', payload),
   updateFilenameMetadata: (value) => ipcRenderer.invoke('settings:filename-metadata', value),

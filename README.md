@@ -1,392 +1,289 @@
 # 星藏家
 
-星藏家是一个面向 Bilibili 收藏夹的本地多 Agent 视频知识整理工作台。
+星藏家是一个面向 Bilibili 收藏夹的本地视频知识整理桌面应用。它负责收藏夹同步、视频缓存、ASR、关键帧、字幕比较、AI 视频总结、Markdown 文档库、RAG 对话和知识库导出。
 
 项目主页与源码：[Fenglin-Maple/star-owner](https://github.com/Fenglin-Maple/star-owner)
 
-**Built with OpenAI Codex.** 用户负责产品方向和真实工作流判断，Codex 参与了架构设计、Electron UI、Agent API、资源调度、GPU ASR 常驻服务、真实视频全流程测试、故障定位和发布工程化。它不是一次性生成的演示页，而是在连续协作中把需求跑成了能接单、能排队、能验收、能预览的桌面系统。
+**Built with OpenAI Codex.** 用户负责产品方向与真实工作流判断，Codex 参与架构、Electron UI、任务状态机、资源调度、GPU ASR、测试和发布工程化。
 
-桌面应用负责登录会话、收藏夹同步、任务库存、Worker 身份、工具执行、租约、产物校验、工作库和统计。Codex、Claude Code 或其它外部 Agent 可以通过本地 HTTP API 工作；应用内 Agent 也能使用同一套任务、工具、校验、缓存清理和归档规则持续接单。
-
-> 当前边界：视频知识整理可以由外部 Agent 或用户配置的应用内模型完成。模型供应商是用户自行配置的 OpenAI/NewAPI 兼容接口，应用不会附带或代售模型额度。
+> `0.10.0` 的边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
 
 ## 核心能力
 
-- 使用独立持久化 WebView 登录 Bilibili，不复用系统浏览器登录态。
-- 启动时实际调用每个工具的健康探针，并显示在线、部分可用或离线状态。
-- 同步指定账号的收藏夹，并保留 BV 号、标题、UP 主、时长、发布时间和收藏时间等信息。
-- 在“任务总览”中查看库存，并为外部 Agent 激活当前工作的账号与收藏夹范围。
-- 多个 Agent 并行领取任务，每个新会话由应用分配独立 Worker ID。
-- 任务使用 15 分钟租约，Agent 可通过心跳续期；超时任务自动回到可领取状态。
-- Agent 通过 API 请求应用执行下载、ASR、关键帧、评论和缓存清理工具。
-- 应用校验 Markdown、`info.json`、图片引用和必需章节，合格后才将任务标记完成。
-- 文档以“小结 → 思维导图 → 目录”开头，应用使用项目内 Mermaid 离线渲染思维导图。
-- 按 Worker ID 独立统计领取量、完成量、成功率、时长权重和工具调用。
-- “Agent 工具状态”将运行记录、调用统计和 API 快速参考合并展示，可展开查看每次执行、排队、资源通道、命令、日志与错误。
-- “Agent 视频总结工作流”可并行运行多个持续接单 Agent，每个会话拥有独立 Worker ID、模型、收藏夹目标、收藏夹总进度和 Token 统计；会话按创建时间倒序排列并支持右键删除。
-- “视频总结（单个）”可直接粘贴 BV 号或视频链接，微调要求并直接归档到“内置用户/内置收藏夹”；同收藏夹遇到相同 BV 时会打开已有文档、切回正在工作的会话或由用户明确创建新版本，不会静默重复处理。
-- “下载视频”可多次提交 BV 号、完整链接或短链，按队列并行下载合轨视频；公开访问失败且明确需要登录时才暂停等待。
-- 内置缓存视频收藏夹可在“任务总览”中成为外部 Agent 工作源，也可在创建应用内 Agent 会话时直接选择；素材工具自动复用已有 `merged.*`，不会重复下载。
-- “视频库”提供收藏夹、标题、BV、UP、标签、时长和下载日期筛选，以及本地封面、横竖屏自适应播放器、文件定位、缺失检测和确认删除。
-- AI 模型配置由 RAG 知识库助手、持续接单 Agent 和单视频 Agent 共用，支持多个供应商及每个供应商的多个模型。
-- 内置多会话 RAG 知识库助手，可连接 OpenAI/NewAPI 兼容供应商，直接检索已验收的收藏夹 Markdown 知识库；对话图片支持灯箱查看和原图复制，代码块支持语言标识与一键复制。
-- 从多个账号与收藏夹中选择已完成 Markdown，导出 RAG 目录和机器可读 manifest。
-- 首次启动会检查项目内媒体运行时和 ASR 模型；缺失时可从本仓库 GitHub Releases 一键下载、校验并安装，设置页支持重新下载。
-
-## 工作流程
-
-1. 在“B站登录”中登录账号，应用自动同步用户名、头像、Cookie 和收藏夹。
-2. 在“收藏夹同步”中读取列表并同步目标收藏夹，应用建立或增量更新任务库存；也可以在“下载视频”中先建立本地缓存库存。
-3. 使用外部 Agent 时，在“任务总览”中选择用户和普通/缓存收藏夹，点击“激活外部Agent任务范围（视频总结）”。应用内 Agent 工作流使用新建会话时单独选择的收藏夹，不受该激活项影响。
-4. 新 Agent 会话通过 `/api/workers/register` 上报调用工具和模型，获得应用生成的 Worker ID。
-5. Agent 使用 Worker ID 请求 `/api/tasks/claim`，一次领取一个启用任务。
-6. Agent 通过任务返回的工具接口准备视频、音频、字幕、关键帧和热评素材。
-7. Agent 参考标准模板完成 Markdown 与 `info.json`，清理临时媒体缓存后提交。
-8. 应用校验产物。通过则归档到 Workspace；不通过则返回明确错误供 Agent 修正。
-9. 用户可在“文档库”中筛选并预览已经完成的 Markdown，也可以在“RAG 知识库助手”中选择账号/收藏夹知识库直接对话分析。
-10. “导出”可把选中文档与 manifest 汇总到外部目录，用于其它 RAG 系统。
-
-收藏夹同步的优先级高于视频总结工作流。点击“同步任务”后，应用会立即停止该收藏夹的应用内 Agent 工作流、中止正在执行的工作并使旧 `workId` 失效，然后才用 B 站完整列表对账。同步成功后，内部工作流需要用户手动重新开始，外部 Agent 范围也需要在“任务总览”中重新激活。未完成同步、正在同步或已在 B 站删除的收藏夹不能派发任务。
-
-对账以已完成产物保护为前提：已经生成 Markdown 的视频即使后来被移出收藏夹，产物也会保留，标题附加“（已移出收藏夹）”，文档库、导出和 RAG 仍可正常使用。未完成的旧任务会从库存移除，旧外部会话收到 `REMOVED_FROM_FAVORITES`。整个 B 站收藏夹被删除时，本地收藏夹名称附加“（已在B站删除的收藏夹）”，只保留已完成产物并禁止继续派发。
-
-同步先完整拉取所有分页，再在一次 SQLite 事务中提交差异，不会用部分页面误删库存。网络错误、同步中断、应用退出或崩溃都会自动恢复到上一次完整的收藏夹状态，只在运行日志中记录回滚。收藏夹改名只更新显示名称，底层使用不变的 B 站收藏夹 ID 和 `storageName` 继续使用原目录，不会把新旧产物分到两个路径。
-
-不想启动外部 Agent 时，也可以在“AI → Agent 视频总结工作流”中新建多个应用内会话。它们会从指定收藏夹持续领取未完成任务，直到库存耗尽或用户暂停。临时处理单个视频时，使用启动页下方的一级入口或“AI → 视频总结（单个）”，选择或新建内置收藏夹并启动即可；产物直接进入该收藏夹，页面可打开收藏夹输出目录或本次产物目录。
+- 使用独立、持久化、沙箱化 WebView 登录 Bilibili，不复用系统浏览器登录态。
+- 同步账号收藏夹，保存 BV、标题、UP 主、时长、发布日期、收藏日期和收藏状态。
+- 同步前停止该收藏夹的应用内视频工作流；完整分页读取后以 SQLite 事务提交，失败或崩溃自动回滚。
+- “任务总览”的启用/关闭开关直接控制应用内 Agent 可领取的未完成任务；关闭任务不会影响已有完成文档。
+- 多个应用内 Agent 会话可绑定不同模型和收藏夹并行工作，每个任务使用新的 `workId` 与独立模型上下文。
+- 应用统一执行下载、合轨、ASR、字幕、关键帧、评论和缓存清理工具，并管理显存、并发、排队与日志。
+- faster-whisper 默认使用多语言 `medium` 模型，输出逐句 SRT、时间轴文本和结构化起止时间。
+- 自动检测 NVIDIA GPU、CTranslate2 CUDA、显存、项目内 Python/模型，以及 CPU ASR 回退所需的系统环境。
+- “视频总结（单个）”直接处理 BV 或链接，产物归档到内置用户/内置收藏夹。
+- 文档以“小结 -> 思维导图 -> 目录”开头，正文含真实 Bilibili 时间轴链接、关键帧、字幕比较和热评分析。
+- 文档库可筛选、预览和受管删除；RAG 助手可逐页读取原始 Markdown 与原图。
+- 外部只读知识库 API 提供目录、元数据、原文分页、搜索和受校验图片读取。
+- 下载视频队列与视频库支持合轨缓存、封面、横竖屏播放器、筛选、缺失检测和确认删除。
+- 所有数据库、Cookie、缓存、日志和产物默认位于项目 `workspace/` 与已注册 Workspace 库中。
 
 ## 桌面导航
 
-左侧栏使用一级菜单与可展开的二级菜单，收起侧边栏后页面会重新分配宽度，列表、图表和工作区随内容区域一起扩展：
+左侧栏支持展开、收起和三级菜单：
 
-- “启动页”显示后端启动进度、工具在线状态、默认最多 500 条最近状态，以及折叠的“外部Agent应用接入视频总结工作提示词”；
-- “视频总结（单个）”与“下载视频”是常用一级入口；
-- “工作准备”包含 B站登录、收藏夹同步和任务总览；
-- “AI”包含 RAG 知识库助手、Agent 视频总结工作流、视频总结（单个）和共享 AI 模型配置；
-- “文件浏览”包含视频库、文档库和导出；
-- “设置”固定在侧边栏底部，并将应用设置、Agent 工作列表、Agent 工具模块和 Agent 工具状态收纳为二级栏目；README 保留独立入口。
+- “启动页”：启动进度、工具健康状态、最近 500 条状态，以及默认收起的外部 Agent 知识库接入提示词。
+- “视频总结（单个）”：常用一级入口。
+- “下载视频”：建立应用托管的视频缓存收藏夹。
+- “工作准备”：B站登录、收藏夹同步、任务总览。
+- “AI”：RAG 知识库助手、Agent 视频总结工作流、视频总结（单个）、AI 模型配置。
+- “文件浏览”：视频库、文档库、导出。
+- “设置”：二级“应用设置”，以及二级“状态查询”下的三级 Agent 工作列表、Agent 工具模块、Agent 工具状态。
+- “README”：在应用内阅读本文件。
 
-## Agent 快速接入
+## 收藏夹工作流
 
-默认 API 地址：
+1. 在“B站登录”登录。应用自动同步用户名、头像、Cookie 和收藏夹列表。
+2. 在“收藏夹同步”选择收藏夹并点击“同步任务”。
+3. 在“任务总览”查看任务，按需要启用或关闭未完成视频。
+4. 在“AI -> Agent 视频总结工作流”新建会话，选择供应商、模型和工作收藏夹。
+5. Agent 从该收藏夹领取启用任务，应用准备视频、ASR、字幕、关键帧和热评素材。
+6. AI 生成 Markdown，应用规范化结构、校验产物、统一命名并清理临时媒体。
+7. 在“文档库”阅读，在“RAG 知识库助手”分析，或在“导出”生成外部 RAG 目录。
+
+收藏夹同步优先于工作流。开始同步会停止绑定该收藏夹的所有持续工作流，中止当前任务，清除本次尝试文件并使旧 `workId` 失效。同步成功后由用户手动重新开始工作流；未同步完成、正在同步或已在 B 站删除的收藏夹不能继续派发。
+
+同步对账遵循“已完成产物保留，未完成任务跟随远端”的原则：
+
+- 新增收藏视频：创建新的待派发任务。
+- 移出收藏夹且未完成：从任务库存移除。
+- 移出收藏夹但已经完成：保留文档，标题附加“（已移出收藏夹）”，RAG 可读取其收藏状态。
+- 收藏夹改名：按稳定的 B 站收藏夹 ID 更新显示名，继续使用原 `storageName` 与产物目录。
+- 收藏夹在 B 站删除：本地名称附加“（已在B站删除的收藏夹）”，保留完成文档，但禁止重启相关工作流。
+- 同步中断或应用崩溃：恢复上一次完整状态，并在运行日志记录回滚。
+
+## 单视频模式
+
+“视频总结（单个）”输出到默认 Workspace 的：
 
 ```text
-http://127.0.0.1:17391
+workspace/<内置用户>/<用户选择的内置收藏夹>/<视频产物目录>/
 ```
 
-先读取统一接口清单：
+同一个内置收藏夹中的同一 BV 只保留一个版本：
 
-```http
-GET /api/manifest
-```
+- 有任务正在工作：切换到原会话，不创建重复任务。
+- 已有完成产物：必须选择“放弃任务并保留旧产物”或“重新生成并覆盖旧产物”。
+- 选择覆盖：先清除旧产物和本次旧缓存，复用同一任务身份，从头生成唯一的新产物。
+- 失败、待开始或产物文件缺失：清理后原位从头重建。
+- 在文档库删除单视频产物：永久删除产物、任务和关联单视频会话，不回到待派发。
+- 删除后再次处理相同 BV：按全新单视频任务处理，不显示“已有产物”提醒。
 
-查看本次启动的工具接口检查结果：
+“保留缓存视频”默认关闭。关闭时验收后删除临时视频；开启时将合轨视频保留在该视频产物目录。
 
-```http
-GET /api/tool-health
-```
+## 文档删除语义
 
-每个全新 Agent 会话注册一次：
+文档库右键可删除完成文档和相关生成产物：
 
-```http
-POST /api/workers/register
-Content-Type: application/json
+- 来源仍在 B 站收藏夹：任务按不变的收藏夹 ID 回到 `pending`，可由应用内 Agent 重新处理；收藏夹改名不影响恢复目标。
+- 视频已移出 B 站收藏夹：删除产物和任务，不恢复。
+- 原 B 站收藏夹已删除：删除产物和任务，不恢复。
+- 单视频或其它本地内置产物：删除产物和任务，不恢复。
+- 缓存来源任务：删除总结生成物时保留已登记的缓存视频、封面和缓存元数据。
 
-{
-  "tool": "codex",
-  "model": "实际模型名称",
-  "sessionLabel": "可选会话备注"
-}
-```
+## 文档标准
 
-保存返回的 `workerId`。它代表当前 Agent 会话，可连续领取多个任务，不会因为某一单中止而失效。Worker ID 由应用生成，Agent 不应自行命名。
-
-桌面端已激活收藏夹后领取任务：
-
-```http
-POST /api/tasks/claim
-Content-Type: application/json
-
-{
-  "workerId": "worker-..."
-}
-```
-
-- 返回 `NO_TASK`：当前没有可领取任务，可以正常结束。
-- 返回 HTTP `423` 和 `WORKER_PAUSED`：用户已暂停该 Worker，停止继续申请新任务。
-- 领取响应中的 `workId` 是本次工作的唯一凭证。心跳、工具执行/取消、提交和中止必须同时携带 `workerId` 与 `workId`。
-- 同一个 Agent 可以持有同一个 `workerId` 连续完成很多任务，但每次成功调用 `/api/tasks/claim` 都会获得全新的 `workId`；完成上一单后申请下一单也绝不复用。
-- 已领取任务应在 15 分钟内发送心跳，并严格使用返回的 `artifactDir`。
-- `workId` 不得自行生成。任务完成、中止、租约回收或被重新领取后，旧 `workId` 永久失效。
-
-当前任务因错误、用户要求或其它原因无法继续时，Agent 必须说明原因并让应用中止本次尝试：
-
-```http
-POST /api/tasks/<taskId>/abort
-Content-Type: application/json
-
-{
-  "workerId": "worker-...",
-  "workId": "work-...",
-  "reason": "无法继续工作的具体问题、发生步骤和可排查原因"
-}
-```
-
-应用会取消该任务仍在排队或运行的工具、删除本次尝试产生的文件、清空领取与完成字段，并把任务恢复为未领取的 `pending`。旧 `workId` 立即失效；旧 Agent 再发送心跳、工具、取消、提交或中止请求时会收到 HTTP `409`、`WORK_ATTEMPT_ENDED` 和 `claim-new-task` 指令。Agent 应停止旧工作，并使用原 `workerId` 重新调用 `/api/tasks/claim`。下次领取会得到新的 `workId` 并从头创建素材。旧版 `/fail` 仍是兼容别名，但行为同样是完整回滚。
-
-如果接口返回 HTTP `410` 和 `BILIBILI_VIDEO_UNAVAILABLE`，说明应用已确认视频被删除、下架或不可用。这不是普通中止：Agent 不得重试或重建该视频文件，应保留当前 `workerId`，停止使用旧 `workId` 并申请下一项任务。应用会永久移除库存记录并阻止后续收藏夹同步将其复活。
-
-完整协作提示词可在应用“启动页”的“外部Agent应用接入视频总结工作提示词”中复制。
-
-## 文档产物要求
-
-标准模板位于 [`templates/video-summary-template.md`](templates/video-summary-template.md)，也可以通过以下接口获取：
-
-```http
-GET /api/templates/video-summary
-```
-
-视频总结至少包含：
+模板位于 [`templates/video-summary-template.md`](templates/video-summary-template.md)。应用内 Agent 至少生成：
 
 - 结论优先的小结；
 - 紧随小结的 Mermaid 思维导图；
-- 可点击的目录；
-- 带 Bilibili 时间轴链接的正文目录与章节；
-- 完整的新闻、技术、经验、方法、限制和时效性说明；
-- 精选关键帧及其用途说明；
-- Bilibili 字幕与本次 ASR 字幕的比较和选择依据；
+- 可点击目录；
+- 带 Bilibili 时间轴链接的完整正文；
+- 新闻、技术、经验、方法、参数、前提、限制和时效性说明；
+- 精选关键帧及用途说明；
+- Bilibili 字幕与本次 ASR 字幕的完整性、术语和时间轴比较；
 - 可获取时的热评前三条分析；
 - Worker、模型、工具、字幕选择和缓存清理记录。
 
-无论视频是否存在站内字幕，都必须运行一次 ASR。faster-whisper 开启词级时间识别，再按中英文句末标点整理为逐句时间轴；`asr/transcript.srt`、`asr/asr-transcript.txt` 和 `asr/asr-result.json` 分别提供逐句 SRT、可读时间轴文本和 `segments[].start/end` 结构化数据。Agent 必须依据这些真实起止时间生成 Bilibili 时间轴链接，不能根据纯文本顺序猜测。若字幕优劣无法判断，可结合关键帧和 Agent 的多模态能力校正专有名词与语义。
+无论是否存在站内字幕，都运行一次 ASR。Agent 优先读取：
 
-提交校验会拒绝缺少 Mermaid fenced code block，或没有按“小结 → 思维导图 → 目录”排列的文档。文档库使用随项目打包的 Mermaid，不依赖 CDN；历史文档中的思维导图在预览时也会提升到目录前显示。
+```text
+asr/transcript.srt
+asr/asr-transcript.txt
+asr/asr-result.json
+```
+
+`asr-result.json` 的 `segments[].start/end` 与 SRT 起止时间是时间轴依据，不能根据纯文本顺序猜测。无法判断字幕质量时，再结合关键帧和多模态模型核对。
 
 ## 应用托管工具
 
 | 工具 | 用途 |
 | --- | --- |
 | `video-info` | 获取视频完整元数据并生成 `info.json` |
-| `material-bundle` | 一次准备下载、字幕、ASR、关键帧、评论等主要素材 |
-| `merged-video` | 下载并生成音视频合轨的可播放视频 |
-| `asr` | 使用 faster-whisper 生成带逐句起止时间的 SRT、时间轴文本和结构化 JSON |
-| `bili-subtitles` | 提取各分 P 的站内人工/自动字幕；按视频时长和最低覆盖率拒绝串线或残缺资源，无可用字幕时写入空索引并保留拒绝原因 |
-| `comments-top3` | 获取热评前三条供评论分析 |
-| `clean-cache` | 删除临时音视频缓存；缓存库任务和显式保留选项会保留根目录合轨视频 |
+| `material-bundle` | 准备下载、字幕、ASR、关键帧和评论等素材 |
+| `merged-video` | 下载音视频并生成合轨视频 |
+| `asr` | 使用 faster-whisper 生成逐句时间轴字幕 |
+| `bili-subtitles` | 提取各分 P 站内字幕并检查覆盖率 |
+| `comments-top3` | 获取热评前三条 |
+| `clean-cache` | 删除临时音视频，保护已登记缓存源 |
 
-工具由应用进程启动并记录日志。Agent 不应绕过 API 直接运行项目脚本。工具请求立即返回 HTTP `202`，之后通过运行接口轮询 `queued -> running -> succeeded/failed/cancelled/timeout`；排队响应包含资源池、阶段、队位、等待原因和预计等待时间。
+这些工具只由应用内工作流调用。外部进程不能通过 HTTP 执行工具。工具模块页面可查看用途、提示词、内部命令、输出和开源项目来源，也可以禁用某个模块。
 
-项目将 FFmpeg（通过 `imageio-ffmpeg` 固定轮子）与 yt-dlp 固定安装到 `runtime/faster-whisper`，不依赖系统 PATH，也不在 `npm ci` 时运行第三方 Python 检查或下载媒体工具。faster-whisper 使用 `runtime/python` 下的 CPython 3.12、同一个项目虚拟环境，以及 `runtime/models/small` 和 `runtime/models/medium` 两个内置模型。CUDA 12 的 cuBLAS/cuDNN 也安装在该环境。
+资源池默认包括：
 
-重新部署完整 ASR 运行时：
+- `api`：2 条通道，限制 Bilibili API 启动频率。
+- `media`：3 条通道，用于下载、FFmpeg、音频和关键帧。
+- `disk`：2 条通道，用于缓存清理。
+- `asr`：1 条 CUDA `float16` 通道；可手动开启 CPU `int8` 辅助通道。
 
-```powershell
-npm run setup:asr
-```
+设置页显示真实 ASR 兼容性。`medium` 建议至少 4096 MiB 显存或 8192 MiB 系统内存；`small` 建议至少 2048 MiB 显存或 6144 MiB 系统内存。CPU 通道仅在当前项目内置运行时支持的 Windows x64 环境开放，默认关闭。
 
-该运行时和模型约占用 3.8GB，均位于项目 `runtime/` 目录。`FASTER_WHISPER_BIN` 仍可用于显式覆盖默认执行器。
+## 外部知识库 API
 
-### 资源池与常驻 ASR
-
-- `api`：2 条通道，启动间隔默认 850ms，降低 Bilibili API 突发请求和 412 风险。
-- `media`：3 条通道，统一承载 yt-dlp 下载、合轨、音频提取和关键帧处理；缓存下载管理器最多并行提交 3 个任务。
-- `disk`：2 条通道，负责缓存清理等磁盘操作。
-- `asr`：1 条常驻 CUDA `float16` 通道；设置页可手动开启第 2 条 CPU `int8` 通道。
-
-GPU ASR 在应用启动时默认加载多语言 `medium` 模型，在准确率、速度与 8GB 笔记本显存之间取得更均衡的效果；设置页可在 ASR 队列空闲时切换到更快、更省显存的 `small` 模型。默认语言为 `auto`，会检测中文、英文、日语及 faster-whisper 支持的其它语言；工具 API 仍可显式指定语言。切换会安全重启 GPU/CPU 常驻服务，转写或排队期间不会强制中断。服务直接启动项目内真实 CPython，并优先加载 `runtime/vc-runtime` 中随项目提供的 Microsoft Visual C++ 运行库，避免 Windows venv 启动器或电脑全局 DLL 版本破坏常驻服务。原生启动失败采用最长 60 秒的指数退避，不会被多个排队任务反复拉起刷屏。标准 16kHz PCM 音频由常驻模型连续解码，默认使用 beam 5、448 个解码 token、连续上下文和较宽松的 VAD；开启 `word_timestamps` 后按标点、停顿和长度边界组合为逐句起止时间。`asr-result.json` 同时记录检测语言、概率、语音时长、长空白区间和覆盖诊断，便于 Agent 区分“视频本来少说话”和“识别可能不完整”。进度依据已处理音频时间持续回传，不再用固定 10 秒切片破坏跨片语义。调度器通过 `nvidia-smi` 检查空闲显存，默认保留 1024MiB；低于阈值时新请求继续排队并返回 `GPU_CAPACITY_WAIT`。CPU ASR 默认关闭，不占用内存；关闭 CPU 开关时，正在执行的 CPU 请求会完成，但不再接收新任务，空闲后服务退出。
-
-查看实时资源状态：
+默认地址：
 
 ```text
-GET http://127.0.0.1:17391/api/scheduler
+http://127.0.0.1:17391
 ```
 
-应用重启时，未完成的视频总结任务不会恢复旧工具或断点：应用会取消遗留运行记录、清理本次目录并将任务退回 `pending`。下载视频等不属于已领取总结任务的独立队列由视频缓存管理器从任务级队列恢复；通用工具恢复器不会抢先重启同一下载进程。工具排队和运行期间，应用自动保护其父任务的 15 分钟租约；租约超时且已无活跃工具时也执行同一套完整回滚。
+外部 Agent 先读取协议：
 
-## Workspace
+```http
+GET /api/manifest
+```
 
-项目默认工作库为：
+推荐流程：
+
+```http
+GET /api/knowledge/catalog
+GET /api/knowledge/documents?offset=0&limit=100
+GET /api/knowledge/documents/<documentId>
+GET /api/knowledge/documents/<documentId>/content?startLine=1&lineCount=400
+GET /api/knowledge/documents/<documentId>/assets
+GET /api/knowledge/documents/<documentId>/assets/<assetId>
+GET /api/knowledge/search?q=<query>&limit=20
+```
+
+目录接口默认覆盖全量已完成 Markdown，可按 `userId`、`collectionId`、`bvid`、`title`、`owner`、`tag`、发布日期和收藏日期筛选。`publishedAt` 是视频发布日期，`favoriteAddedAt` 是收藏日期，`favoriteMembership` 表示仍在收藏夹、已移出或原收藏夹已删除。
+
+原文接口按 1 基行号分页，返回 `nextStartLine` 与 SHA-256。需要完整原文时持续读取到 `nextStartLine=null`。搜索摘要只用于定位，`partial=true` 表示触及扫描预算；精确 Markdown 原文始终是事实来源。
+
+图片接口只返回产物目录内经过签名与大小校验的 PNG、JPEG、GIF、WebP 或 AVIF。资产 ID 是文档内不透明标识，外部 Agent 不应推测本机路径。
+
+旧的视频工作流接口统一返回：
 
 ```text
-<project>/workspace
+HTTP 410
+EXTERNAL_VIDEO_WORKFLOW_DISABLED
 ```
 
-用户可以在“设置”中添加多个 Workspace，但必须指定一个默认库。新任务使用当前默认库，切换默认库不会移动或删除已有成果。
-
-缓存视频同样登记在 SQLite，并固定保存在 `<workspace>/内置用户/<缓存收藏夹>/视频缓存/`。同一收藏夹内的同一 BV 只允许一个活跃下载任务，避免多个任务同时写入同一个视频目录。默认“内置视频缓存”收藏夹受保护且不能删除，其它缓存收藏夹删除前必须确认，并只会删除通过托管根目录校验的视频目录。
-
-单个视频的产物结构：
-
-```text
-<workspace>/
-  <Bilibili 用户名>/
-    <收藏夹名>/
-      [BV-...][标题-...][UP-...][发布日-...][收藏日-...][来自收藏夹-...][标签-...]/
-        [BV-...][标题-...][UP-...][发布日-...][收藏日-...][来自收藏夹-...][标签-...].md
-        info.json
-        frames/
-        asr/
-        comments/
-        tool-runs/
-```
-
-目录和 Markdown 默认使用同一个元数据名称。设置页可分别关闭 BV 号、标题、UP 主、发布日期、收藏日期、来源收藏夹和标签；发布日与收藏日使用不同字段名，不会混淆。收藏夹快速同步不逐条请求标签，应用会在 Agent 提交时读取 `info.json`，补齐标签后整理最终目录和 Markdown 文件名。设置变更用于新验收产物，不会擅自移动已有知识库。
-
-SQLite 数据库位于 `workspace/orchestrator.sqlite`。Agent 不直接读写数据库、索引、配置或工作库注册信息。
-
-## Markdown 文档库
-
-“文档库”只索引已经通过应用验收且仍存在输出路径的任务。可按账号和收藏夹切换，搜索 BV 号、UP 主或标题，并组合使用收藏日期、发布日期和视频时长筛选。排序支持收藏时间或发布时间的正序与倒序。列表封面优先使用产物目录中的本地封面，旧产物可从 `info.json`、常见封面文件或首张关键帧回退，最后才使用经过主进程 HTTPS/Bilibili 域名校验的远程封面。应用内单视频或队列 Agent 完成验收后会主动使主界面任务快照失效并刷新；即使完成事件恰好发生在另一次刷新期间，也会自动补做一次刷新，因此无需重启应用即可看到新文档。
-
-列表筛选只读取 SQLite 轻量索引；选择一篇后才读取 Markdown 正文。预览支持本地关键帧、表格、代码、引用和网页链接，时间轴链接交给系统默认浏览器打开，也可以直接用本机默认 Markdown 应用打开原文件。右键文档可删除 Markdown 与本次总结产物：视频仍属于当前收藏夹或位于内置收藏夹时，任务按稳定 `collectionId` 回到 `pending`，所以收藏夹改名不会恢复到错误目录；视频已移出 B站收藏夹或原收藏夹已删除时，只删除历史产物并移除本地任务，不再恢复派发。仍在收藏夹但后来失效的视频会在下一次 Agent 执行时继续使用既有终态识别逻辑。
+包括 `/api/workers`、`/api/tasks`、`/api/tools`、`/api/tool-runs`、`/api/active-collection` 和相关子路径。
 
 ## RAG 知识库助手
 
-“RAG 知识库助手”是面向本地视频知识库的多会话 Agent 工作台。它不复制第二份知识库：可选范围直接来自已经通过应用验收、且 Markdown 文件仍存在的任务，并按 Bilibili 用户与收藏夹分组。左上角铅笔按钮直接跳转到统一的“AI 模型配置”，新建会话使用其下方的明确文字按钮。
+RAG 助手支持多个 OpenAI/NewAPI 兼容供应商和多会话：
 
-- 供应商：支持 OpenAI-compatible 与 NewAPI-compatible 的 `/models`、`/chat/completions` 接口；当用户填写服务根域名时会自动探测并记住 `/v1` 兼容根路径。API Key 由主进程保存，渲染层不会读取明文。
-- 模型：每个供应商可以拉取并多选启用多个模型，并为每个模型分别记录上下文窗口、最大输出 Token、工具、推理流、视觉、音频、图片返回、压缩和子 Agent 能力。未知现代模型默认使用 1M 上下文/128K 输出，GPT-5/Codex 默认使用 400K/128K，均可手动覆盖。
-- 对话：支持多个持久化会话、流式正文、供应商返回的推理字段、工具状态、当前上下文占比、手动/自动上下文压缩和按模型累计 Token 统计。活动上下文达到模型窗口的 75% 时会强制用当前供应商/模型的新请求整理旧对话；模型输出与协议预留较大时会更早触发。压缩完整分块读取上次压缩后的历史，不做固定字符截断，当前提问保持原文，旧消息仍保留在界面但不会与工作记忆重复发给模型。输入栏右下角可直接切换当前会话的供应商与模型。推理区只在供应商实际返回 `reasoning_content`、`reasoning` 或 `thinking` 时出现；普通模型只显示一条助手回复状态。AI 返回的 Markdown 围栏代码块会显示语言和独立复制按钮，表格带主题化边框并可横向滚动。
-- 会话设置：默认收起，通过聊天标题栏设置按钮打开弹窗；可修改会话名称、模型、知识库、沙盒和权限。右键会话可直接编辑或二次确认删除。
-- 知识库：可在会话顶部紧凑的可搜索下拉框或详细设置中多选多个账号/收藏夹，两处实时同步同一份会话配置；支持工具调用的模型除 `knowledge_search` 外，还能列出选中知识库的原始文档、按行逐字读取完整 Markdown。检索结果、文档列表、原文读取和图片读取都会明确提供视频发布日期与收藏日期，模型可据此判断时效和收藏顺序。单视频重新生成会保留旧版本供文档库浏览和导出，但只有验收成功的当前版本默认进入 RAG；删除当前版本后会自动回退到仍存在的上一完成版本。读取采用分页和上下文预算，不会用摘要冒充原文，也不会把整个收藏夹一次性塞进模型请求。不支持工具调用的模型仍只会收到应用预检索的相关片段。
-- 知识库图片：开启模型“视觉”能力后，助手可按文档读取最多四张原始本地图片并作为多模态输入直接查看。应用在工具记录中展示这些原图；模型也可使用工具返回的安全图片 URI，把已查看图片嵌入回答。用户附件、AI 回答和工具记录中的图片都可左键打开全屏灯箱，右键直接复制原图到系统剪贴板。图片 URI 只能解析当前会话已选择知识库内仍存在的文件。
-- 附件：文本、Markdown、JSON、CSV、代码、PDF 和 DOCX 会提取文字；兼容模型可接收图片和音频。文件选择器导入或在输入框按 `Ctrl+V` 粘贴的剪贴板图片会先保存到会话沙盒，发送前显示缩略预览，移除未发送附件会同步清理沙盒文件和记录；发送后在用户消息中保留原图预览，并作为多模态输入交给启用视觉能力的模型。视频及其它不属于标准兼容接口输入的文件保留在会话沙盒中供文件工具处理。
-- 剪贴板安全：复制会话图片只允许当前 Workspace 中的本地文件、受限大小的图片 Data URL 或解析到公网的 HTTP(S) 图片；Workspace 外路径、私网地址、非图片响应和超过 15 MiB 的内容会被拒绝。
-- Agent 工具：单次回答最多允许 24 个完整工具轮次，并额外保留一次最终回答请求；可检索/读取知识库，列出、读取、写入会话文件，执行 CMD，使用内置不可见浏览器检索/读取网页，调用系统默认浏览器，以及在模型支持时发起隔离的子 Agent 调用。
-- 权限：每个会话拥有独立沙盒。有限权限下，沙盒外路径、CMD、私网浏览和打开默认浏览器会弹窗审批；完全访问模式允许访问沙盒外路径并减少审批。
+- 按用户/收藏夹多选知识库；
+- 原始 Markdown 分页读取和最多 24 轮知识工具调用；
+- 对支持视觉输入的模型提供原图；
+- 显示流式内容、供应商返回的 reasoning、工具状态和 Token 用量；
+- 会话达到模型窗口 75% 或安全输入边界时自动压缩，也可手动压缩；
+- 上传图片、PDF、Markdown、Word、音频、视频等附件，能力按模型声明降级；
+- 每个会话使用独立沙盒；CMD、沙盒外文件和私网访问在有限权限下请求批准。
 
-能力开关描述“允许应用向该模型发送什么”，不保证远程模型一定实现相应协议。推理链、图片输出、音视频输入、工具调用、上下文压缩和子 Agent 均以供应商实际返回与模型能力为准。为避免误泄露资料，只有用户在当前会话中选择的知识库和附件才会发往配置的远程模型供应商。
+应用只显示供应商明确返回的 reasoning，不提取隐藏思维链。
 
-## Agent 工作流与单视频总结
+## 视频 Agent 上下文
 
-“AI 模型配置”是三类 AI 功能共用的模型中心。用户可以保存多个 OpenAI-compatible 或 NewAPI-compatible 供应商，拉取模型列表，启用多个模型，并分别声明上下文窗口、最大输出、工具、推理流和视觉等能力。供应商输出值只是模型未单独配置时的默认值，不等于上下文窗口。API Key 由主进程加密保存；视频总结 Agent 和 RAG 知识库助手读取同一份配置与按模型 Token 统计。对话历史按模型上下文预算动态装载，不再固定截断为 40 条。
+持续工作流的 Worker ID 在会话内保持不变，但每个视频获得新的 `workId` 和全新的模型请求上下文。上一视频的消息不会进入下一视频，只有统计数据累计。
 
-“Agent 视频总结工作流”用于收藏夹批处理。每个会话绑定一个模型、一个收藏夹和一个由应用生成的 Worker ID，可同时启动多个会话并行工作。左侧会话始终按创建时间倒序排列，可右键删除未运行的单个工作流；详情顶部显示所绑定收藏夹的完成、处理中、剩余、失败/打回和关闭数量及总进度。应用内 Agent 使用与外部 Agent 相同的 15 分钟租约、资源池排队、素材工具、Markdown 模板、提交校验、缓存清理、最终命名和工作绩效记录；暂停可以等待当前单完成，立即停止只需点击一次，应用会立即取消当前工具、删除本次缓存并把任务恢复为未领取未完成。应用正常退出、意外退出后的启动恢复、租约超时和 Agent 自身错误使用相同回滚规则。
+普通视频直接使用当前任务完整素材。只有预计请求达到模型上下文窗口 82%，或供应商实际返回上下文超限时，应用才使用相同供应商与模型开启独立整理请求，完整分块读取素材并生成分层证据包；原 Worker ID、当前 `workId` 和任务状态不变。若整理后仍超限，任务按标准中止流程清理并回到待派发。
 
-持续接单会话不会把上一条视频的模型消息带入下一条：每次领取视频都会在相同 Worker ID 下创建新的独立模型上下文，只有累计 Token 统计和工作记录跨任务保留，每个任务仍获得新的 `workId`。普通视频会把当前任务的完整素材直接交给总结模型，不触发额外整理。只有预计请求接近所配置上下文窗口的 82%，或供应商实际返回上下文超限时，应用才用相同供应商、相同模型发起独立的“上下文整理 Agent”请求：完整分块读取站内字幕、ASR、元数据、素材清单、评论或超长修订稿，再分层合并为保留时间轴、事实、步骤、参数、代码、限制、例外、字幕冲突和不确定性的结构化证据包。原始素材不做字符裁剪，也不会删除；原 Worker ID、当前 `workId` 和任务状态保持不变，随后由原 Agent 在当前任务的新请求中继续生成。界面显示独立上下文轮次、预计占用和语义整理次数。若整理后供应商仍拒绝上下文，则按任务失败规则回滚并清理缓存。
+## Workspace
 
-如果会话引用的供应商被删除，或模型从已启用列表中移除，界面会明确标为“模型不可用”并禁止启动。若删除发生在工作中，应用会中止当前模型/工具调用、清理本次缓存、使当前 `workId` 失效、把任务退回 `pending` 并暂停 Worker。重新启用原供应商中的同一模型后可以重新开始；供应商记录已经删除时，应使用新配置创建新的工作流。
+默认目录：
 
-资源等待与基础设施故障会被区别处理：显存暂时不足、API 限速等可恢复状态继续排队；ASR 常驻服务连续原生崩溃等不可恢复状态会终止相关工具队列、清除当前尝试、暂停 Worker、把当前视频退回待领取，并让内置 Agent 在自己的输出区报告中断步骤、错误、可能原因和处理建议。外部 Agent 无法继续时应调用 `/abort` 上报同类信息；其下次任务申请若收到 `stop-and-report` 指令及原因，不应继续领取其它视频。
+```text
+<project>/workspace/
+```
 
-确认已删除、下架或不存在的视频属于终态，不按普通失败回退。应用会保留下载器的真实错误尾部，移除任务和对应视频索引，清理本次尝试文件，并在 SQLite 的 `unavailableTasks` 中写入墓碑；后续收藏夹同步不会重新创建该任务。内部 Agent 将其记为“跳过”并继续下一单，外部 Agent 的旧工作请求会收到 `BILIBILI_VIDEO_UNAVAILABLE`，而不是让同一视频反复失败。
+主要结构：
 
-`BILIBILI_VIDEO_UNAVAILABLE` 表示视频本身的终态；`REMOVED_FROM_FAVORITES` 只表示用户将它从该收藏夹移出。后者不会删除已验收 Markdown，但未完成的旧 `workId` 会立即失效。`COLLECTION_SYNCING`、`COLLECTION_NOT_READY` 和 `COLLECTION_REACTIVATION_REQUIRED` 要求外部 Agent 保留 `workerId`、停止当前工作并等待用户完成同步或重新激活；`BILIBILI_COLLECTION_DELETED` 是该收藏夹不再派发任务的终态。
+```text
+workspace/
+  orchestrator.sqlite
+  <用户名>/
+    cookies/
+    <收藏夹 storageName>/
+      <BV + 标题 + UP + 日期 + 收藏夹 + 标签>/
+        <同名>.md
+        info.json
+        cover.*
+        frames/
+        subtitles/
+        asr/
+        comments/
+```
 
-运行中的 Agent 页面只增量更新进度、思考、正文和日志，不再在每个流式片段后重建会话界面；“设置”下的 Agent 状态页面也会在快照刷新后恢复展开项与滚动位置。任务完成、中止或视频不可用事件会通知文档库、任务总览和导出页刷新共享 SQLite 快照，刷新期间到达的新事件不会被合并丢失。立即停止请求会被前端去重，并由后端一次完成工具取消、缓存清理和任务回滚。
-
-“视频总结（单个）”不要求先从 Bilibili 收藏夹导入任务：
-
-1. 粘贴 BV 号或视频链接；
-2. 选择模型以及“内置用户”下的内置收藏夹，也可以现场新建收藏夹；
-3. 应用按“内置收藏夹 + BV”预检重复项：正在处理时切换到原会话；已有完成产物时弹窗选择打开、取消或重新生成新版本；失败、未开始或文件缺失的旧任务会清理缓存后复用同一任务从头处理；
-4. 选择关键帧数量、热评数量并填写额外要求；
-5. 可选择“处理完成后保留缓存视频到视频文件夹”，默认关闭；未启用任何远程模型时启动按钮不可点击；
-6. 应用第一次强制不携带 Cookie，优先尝试公开获取视频与元数据；只有工具明确返回登录、注册用户、私有视频或 Cookie 必需信号时，才进入“等待登录”并弹窗提供 B站登录跳转；
-7. 登录完成后回到单视频页面点击“登录后重试”，应用同步新的 Cookie 并从头处理；
-8. 界面流式显示模型推理字段、正文、阶段、进度、日志、累计 Token 和当前独立上下文预算；
-9. 通过校验后，完整视频产物直接归档到默认 Workspace 的 `内置用户/<内置收藏夹>/<视频产物目录>/`，不再要求或生成外部目录副本；表单可打开收藏夹输出目录，完成详情可打开本次产物目录。
-
-内置用户和内置收藏夹使用普通知识库索引。即使还没有 Markdown，文档库和导出也会显示内置用户及收藏夹，并标注 `0 篇`；完成后产物自动进入普通筛选。RAG 知识库助手只选择有可检索 Markdown 的知识库。单视频任务仍会执行独立 ASR、字幕比较、关键帧、热评、清缓存和结构校验，不是简化质量要求的旁路。
-
-## 视频缓存队列与视频库
-
-“下载视频”不依赖 AI 模型。每次提交必须选择一个内置缓存视频收藏夹，可现场新建；输入支持 BV 号、普通视频链接和 Bilibili 短链。视频固定保存到所选收藏夹的应用托管目录，不提供任意外部输出路径。下载管理器先读取公开元数据并缓存封面，再通过应用工具队列下载 720p 以内的合轨视频，保存标题、UP、时长、标签、发布时间、画面尺寸、下载时间和文件位置。只有明确需要登录时才暂停并弹出登录入口，登录后可一次恢复全部等待项。
-
-缓存收藏夹会出现在“任务总览”的内置用户下。激活后，外部 Agent 领取到的是普通任务协议；应用内 Agent 则在创建工作流时直接选择该缓存收藏夹。两种任务都额外带有 `cachedVideoId`、`cachedVideoFile` 和 `reuseCachedMedia`。素材包直接复用缓存视频，ASR、字幕、关键帧和评论仍按完整总结标准执行。Agent 仍调用 `clean-cache`；任务中止时，应用保留已登记的合轨视频、封面、`info.json` 和 `cache-record.json`，删除本次生成的音频、ASR、字幕、关键帧、评论、草稿和工具日志。
-
-“文件浏览 → 视频库”使用自定义主题播放器，不启用浏览器原生 controls。封面优先读取视频目录中的本地文件，现有记录可回退到任务元数据中的 Bilibili HTTPS 封面；缩略图完整显示而不裁切。播放器根据媒体真实宽高切换横屏或竖屏布局，竖屏视频保持原始比例居中完整展示。列表中的 BV 号支持左键通过默认浏览器打开原视频、右键复制纯 BV 号并显示角落提示。列表会实时标记缓存文件是否存在，支持按缓存收藏夹、标题/BV/UP/标签、时长和下载日期筛选。可在资源管理器中定位单个视频；多选删除和收藏夹删除均需要确认。默认“内置视频缓存”收藏夹不可删除，后端还会校验登记根目录，避免删除到缓存目录以外。
-
-## 任务与 Worker 管理
-
-- 任务可以单独或批量启用、关闭；关闭任务不会再被派发。
-- 领取顺序默认按收藏时间从新到旧。
-- 同步收藏夹时保留已有任务的完成状态、启用状态和历史记录。
-- 每个 Worker 独立记录调用工具、模型、当前任务、最后活动时间和绩效。
-- 用户可在“Agent 工作列表”中暂停或重新激活 Worker。
-- 暂停只阻止下一次任务分配，不会阻止已领取任务发送心跳或提交成果。
-
-## RAG 导出
-
-“导出”栏目只读取已经通过校验的完成任务。导出队列可跨用户和收藏夹保存选择，并支持将以下元数据加入文件名：
-
-- BV 号；
-- 视频标题；
-- UP 主；
-- 来源收藏夹；
-- 发布日期；
-- 收藏日期；
-- 标签。
-
-每次导出还会生成 `star-owner-rag-manifest-<timestamp>.json`，记录源账号、收藏夹、视频链接、时间信息、源 Markdown 和导出文件路径。导出不会删除或移动 Workspace 中的原始产物。
+设置页可以注册多个 Workspace 库，但必须指定一个默认库。知识库 API 只读取已注册 Workspace 内、状态为 `done` 且文件仍存在的 Markdown，不暴露本机绝对路径。
 
 ## 下载与部署
 
-普通用户只需从 GitHub Release 下载并解压 `Star-Owner-v<version>-win-x64-core.zip`，然后双击 `Start-StarOwner.cmd`。应用首次启动会检查项目内的媒体/ASR 运行时以及内置 `small`、`medium` 模型；若缺失，会弹窗询问是否从本仓库 Release 自动下载对应资产。下载、SHA-256 校验、路径安全检查和解压进度都在应用内显示，也可在“设置 → 项目依赖包”稍后下载或重新安装。
+Windows 用户可从 GitHub Releases 下载便携包。首次启动若缺少运行时或模型，应用会提示从本项目 Release 下载并显示进度；设置页可重新检查和下载。
 
-依赖 Release 提供 `Star-Owner-v<version>-runtime-win-x64.zip`、`Star-Owner-v<version>-model-small.zip` 和 `Star-Owner-v<version>-model-medium.zip`。所有压缩包内部都保留从项目根目录开始的 `runtime/...` 相对路径。GitHub 单文件上限为 2GB，因此大型运行时和模型不放进 Git 仓库，也不要求用户手工拼装超大单体包。便携核心包可继续预装基础运行时；缺失或损坏时应用先查找当前版本资产，再从最近十个 Release 中复用文件名契约兼容的 runtime/模型资产，因此代码更新不必重复上传内容未变化的数 GB 依赖包。安装采用持久化事务记录和备份目录；启动时会回滚未完成安装，损坏的事务记录会被隔离并在设置页显示警告，不会阻塞应用启动。
-
-完整的人类部署、Agent 接入、便携包构建和 GitHub 发布步骤见 [`DEPLOYMENT.md`](DEPLOYMENT.md)。Agent 与代码贡献者规则见 [`AGENTS.md`](AGENTS.md)。
-
-## 从源码运行
-
-源码开发需要 Node.js 22+、npm 和 `uv`。所有媒体运行时仍安装到项目自己的 `runtime/`，不会污染系统 Python。
+源码运行：
 
 ```powershell
-npm ci
-npm run setup:asr
-npm run verify:release
+git clone https://github.com/Fenglin-Maple/star-owner.git
+cd star-owner
+npm install
 npm start
 ```
 
-烟雾测试：
+部署完整 ASR 运行时：
 
 ```powershell
-npm run smoke
-npm run test:rag
-npm run test:internal-agent
-npm run test:scheduler
-npm run test:video-cache
-npm run test:security
-npm run test:persistence
-npm run test:collection-sync
+npm run setup:asr
 ```
+
+发布前总验证：
+
+```powershell
+npm run verify:release
+```
+
+新增重点测试：
+
+```powershell
+npm run test:knowledge-api
+npm run test:hardware
+npm run test:internal-agent
+npm run test:document-lifecycle
+```
+
+本版本只提交源码与文档时无需重新上传未变化的 Release 依赖包。
 
 ## 项目结构
 
 ```text
-src/main.js                 Electron 主进程、IPC、窗口和导出
-src/preload.js              安全的渲染层桥接
-src/core/store.js           SQLite 持久化与 Worker/任务记录
-src/core/api-server.js      收紧后的本地 Agent API 与任务生命周期
-src/core/collection-sync-service.js  收藏夹同步与任务索引
-src/core/collection-state.js         收藏夹远程状态、移出归档与派发护栏
-src/core/submission-artifacts.js     内外部 Agent 共用的产物归档
-src/core/unavailable-task.js         失效视频终态清理、墓碑与防复活
-src/core/network-policy.js           URL、跨域与私网策略
-src/core/desktop-security.js         Electron/WebView 安全边界
-src/core/atomic-file.js              SQLite 可恢复写入
-src/core/tool-runner.js     受控工具进程、超时、日志和取消
-src/core/analytics.js       收藏夹、Worker 和工具统计
-src/core/bili.js            Bilibili 会话与收藏夹接口
-src/core/rag-assistant.js   RAG 会话、兼容模型、检索、工具与权限
-src/core/internal-agent-manager.js  应用内持续 Agent、单任务与统一验收
-src/core/dependency-manager.js      Release 依赖检查、下载、校验与安装
-src/renderer/               桌面 UI
-templates/                  Agent 参考模板
-runtime/                    项目内 Python、VC++ 运行库、faster-whisper、CUDA DLL 和模型
-workspace/                  默认数据库、Cookie 和工作产物
-DESIGN.md                   完整设计与实现约束
-DEPLOYMENT.md               人类、Agent 与 GitHub Release 部署指南
-CODE_REVIEW.md              安全与可维护性审查记录
-THIRD_PARTY_NOTICES.md      第三方组件、模型与许可证清单
+src/main.js                         Electron 主进程与 IPC
+src/core/api-server.js              本机只读知识库 HTTP 服务
+src/core/knowledge-api.js           目录、原文、搜索与图片边界
+src/core/internal-agent-manager.js  应用内视频总结工作流
+src/core/collection-sync-service.js 收藏夹事务同步
+src/core/document-lifecycle.js      文档删除与任务恢复语义
+src/core/tool-runner.js             工具资源池与 ASR 常驻服务
+src/core/hardware-capabilities.js   NVIDIA/CUDA/CPU ASR 能力检测
+src/core/rag-assistant.js           RAG 会话、工具与权限
+src/core/video-cache-manager.js     下载队列与视频缓存库
+src/core/store.js                   sql.js 持久化
+src/renderer/                       桌面 UI
+tools/                              项目内媒体和 ASR 工具入口
+templates/                          视频总结 Markdown 模板
+scripts/                            测试、部署与发布验证
 ```
 
-更详细的架构、状态机和安全边界见 [`DESIGN.md`](DESIGN.md)。
+## 安全与许可
 
-本地 Agent API 只接受无浏览器 `Origin` 的本机进程请求或同源请求，不开放通配 CORS；JSON 请求体限制为 1 MiB。Bilibili WebView 运行在沙箱中，只允许 Bilibili 官方域名且禁止弹窗。保存账号密码或模型 API Key 时，如果系统 `safeStorage` 不可用，应用会拒绝保存，不会明文回退。完整审查记录与残余风险见 [`CODE_REVIEW.md`](CODE_REVIEW.md)。
+知识库 API 仅绑定 `127.0.0.1`，拒绝无关浏览器 Origin，不开放通配 CORS，没有写接口，也不提供面向不可信本机进程的认证。不要将端口映射到局域网或公网。
 
-## 开源许可
+Bilibili Cookie 为工具兼容性必须以 Netscape 明文格式保存；账号密码和模型 API Key 使用 Electron `safeStorage`，不可用时拒绝明文保存。发布前不要提交 `workspace/`、日志、Cookie、模型密钥或私人文档。
 
-项目自有代码采用 [`GPL-3.0-or-later`](LICENSE)。FFmpeg、Electron、Mermaid、yt-dlp、faster-whisper、模型、Microsoft Visual C++ 运行库和 NVIDIA 运行库各自保留上游许可；其中 Microsoft VC++ 与 NVIDIA CUDA/cuDNN 是专有可再分发运行库，并非开源软件。发布二进制前必须阅读 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) 并履行 FFmpeg 对应源码义务。
-
-请勿把 `workspace/`、Cookie、账号信息、SQLite 数据库、日志、下载视频或本机快捷方式提交到 GitHub。
+项目采用 `GPL-3.0-or-later`。第三方组件与模型条款见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)，部署说明见 [`DEPLOYMENT.md`](DEPLOYMENT.md)，设计细节见 [`DESIGN.md`](DESIGN.md)，安全边界见 [`SECURITY.md`](SECURITY.md)。

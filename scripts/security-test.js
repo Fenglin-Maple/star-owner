@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { ApiServer, MAX_JSON_BODY_BYTES } = require('../src/core/api-server');
+const { ApiServer } = require('../src/core/api-server');
 const { isAllowedBilibiliNavigation } = require('../src/core/desktop-security');
 const { assertHiddenBrowserUrl } = require('../src/core/hidden-browser-policy');
 const { assertBilibiliUrl, isAllowedApiOrigin, isPrivateNetworkHost } = require('../src/core/network-policy');
@@ -47,12 +47,17 @@ function assert(condition, message) {
     assert(health.headers.get('access-control-allow-origin') === null, 'wildcard CORS header is still present');
     const crossOrigin = await fetch(`${api.url()}/api/health`, { headers: { origin: 'https://example.com' } });
     assert(crossOrigin.status === 403, `cross-origin request returned ${crossOrigin.status}`);
-    const oversized = await fetch(`${api.url()}/api/workers/register`, {
+    const retiredWorkflow = await fetch(`${api.url()}/api/workers/register`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ tool: 'test', model: 'test', metadata: { payload: 'x'.repeat(MAX_JSON_BODY_BYTES) } })
+      body: JSON.stringify({ tool: 'test', model: 'test' })
     });
-    assert(oversized.status === 413, `oversized JSON request returned ${oversized.status}`);
+    const retiredPayload = await retiredWorkflow.json();
+    assert(retiredWorkflow.status === 410 && retiredPayload.code === 'EXTERNAL_VIDEO_WORKFLOW_DISABLED', `retired video workflow returned ${retiredWorkflow.status}`);
+    const knowledgeWrite = await fetch(`${api.url()}/api/knowledge/catalog`, { method: 'POST' });
+    const knowledgeWritePayload = await knowledgeWrite.json();
+    assert(knowledgeWrite.status === 405 && knowledgeWritePayload.code === 'METHOD_NOT_ALLOWED', 'read-only knowledge API accepted a write method');
+    assert(knowledgeWrite.headers.get('x-content-type-options') === 'nosniff', 'knowledge API response omitted MIME sniffing protection');
   } finally {
     api.stop();
   }

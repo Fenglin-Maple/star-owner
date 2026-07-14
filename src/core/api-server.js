@@ -1,858 +1,194 @@
 const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const { validateSubmission } = require('./validation');
-const { buildAnalytics } = require('./analytics');
-const { collectionBlockReason, collectionStorageName } = require('./collection-state');
+const { KnowledgeApi } = require('./knowledge-api');
 const { isAllowedApiOrigin } = require('./network-policy');
-const { applySubmissionFinalization, stageSubmissionFinalization } = require('./submission-artifacts');
-const { abortTaskAttempt, createWorkId } = require('./task-attempt');
-const { PROJECT_ROOT, collectionDirs, ensureDir, normalizeTags, videoArtifactDir } = require('./workspace');
 
-const DEFAULT_LEASE_MS = 15 * 60 * 1000;
-const MAX_JSON_BODY_BYTES = 1024 * 1024;
-const PAUSED_MESSAGE = '来自用户的信息，你需要暂停工作';
-const TEMPLATE_FILE = path.join(PROJECT_ROOT, 'templates', 'video-summary-template.md');
+const DISABLED_VIDEO_PREFIXES = [
+  '/api/workers',
+  '/api/tasks',
+  '/api/tools',
+  '/api/tool-runs',
+  '/api/collections',
+  '/api/active-collection',
+  '/api/templates/video-summary',
+  '/api/scheduler',
+  '/api/stats',
+  '/api/tool-health'
+];
 
 class ApiServer {
-  constructor({ store, toolRunner, getToolHealth, onEvent }) {
-    this.store = store;
-    this.toolRunner = toolRunner;
-    this.getToolHealth = getToolHealth || (() => []);
-    this.onEvent = onEvent || (() => {});
+  constructor({ store }) {
+    this.knowledgeApi = new KnowledgeApi({ store });
     this.server = null;
     this.port = 0;
   }
 
   async start(preferredPort = 17391) {
+    if (this.server) return this.url();
     this.server = http.createServer((req, res) => {
-      Promise.resolve(this.route(req, res)).catch((error) => this.handleRouteError(res, error));
+      Promise.resolve(this.route(req, res)).catch((error) => this.sendError(res, error));
     });
     this.server.requestTimeout = 30000;
     this.server.headersTimeout = 15000;
     this.server.keepAliveTimeout = 5000;
     this.server.maxHeadersCount = 100;
-    await new Promise((resolve, reject) => {
-      const listenRandom = () => {
-        this.server.removeAllListeners('error');
-        this.server.listen(0, '127.0.0.1', () => resolve());
-        this.server.once('error', reject);
-      };
-      this.server.once('error', listenRandom);
-      this.server.listen(preferredPort, '127.0.0.1', () => {
-        this.server.removeListener('error', listenRandom);
-        resolve();
-      });
-    });
-    this.port = this.server.address().port;
+    await listenLocal(this.server, preferredPort);
+    this.port = Number(this.server.address()?.port || 0);
     return this.url();
   }
 
   stop() {
-    if (this.server) this.server.close();
+    if (!this.server) return;
+    this.server.close();
+    this.server = null;
+    this.port = 0;
   }
 
   url() {
     return `http://127.0.0.1:${this.port}`;
   }
 
-  handleRouteError(res, error) {
+  async route(req, res) {
+    const url = parseRequestUrl(req.url, this.url());
+    if (!isAllowedApiOrigin(req.headers.origin, this.url())) {
+      throw apiError(403, 'API_ORIGIN_FORBIDDEN', 'Browser cross-origin access to the local knowledge API is forbidden.');
+    }
+    if (req.method === 'OPTIONS') return this.json(res, { ok: true, readOnly: true });
+
+    if (isDisabledVideoWorkflowPath(url.pathname)) throw disabledVideoWorkflowError();
+    if (req.method !== 'GET') throw apiError(405, 'METHOD_NOT_ALLOWED', 'The external knowledge API is read-only and accepts GET requests only.');
+
+    if (['/api', '/api/manifest', '/api/knowledge', '/api/knowledge/manifest'].includes(url.pathname)) {
+      return this.json(res, this.knowledgeApi.manifest(this.url()));
+    }
+    if (url.pathname === '/api/health') {
+      return this.json(res, { ok: true, mode: 'knowledge-read-only', protocolVersion: '3.0', url: this.url() });
+    }
+    if (url.pathname === '/api/knowledge/catalog') {
+      return this.json(res, this.knowledgeApi.catalog(this.url()));
+    }
+    if (url.pathname === '/api/knowledge/documents') {
+      return this.json(res, this.knowledgeApi.listDocuments(url.searchParams, this.url()));
+    }
+    if (url.pathname === '/api/knowledge/search') {
+      return this.json(res, this.knowledgeApi.search(url.searchParams, this.url()));
+    }
+
+    const assetMatch = url.pathname.match(/^\/api\/knowledge\/documents\/([^/]+)\/assets\/([^/]+)$/);
+    if (assetMatch) {
+      const documentId = decodePathPart(assetMatch[1]);
+      const assetId = decodePathPart(assetMatch[2]);
+      return this.sendAsset(req, res, this.knowledgeApi.readAsset(documentId, assetId));
+    }
+
+    const documentMatch = url.pathname.match(/^\/api\/knowledge\/documents\/([^/]+)(?:\/(content|assets))?$/);
+    if (documentMatch) {
+      const documentId = decodePathPart(documentMatch[1]);
+      const action = documentMatch[2] || '';
+      if (action === 'content') return this.json(res, this.knowledgeApi.readContent(documentId, url.searchParams, this.url()));
+      if (action === 'assets') return this.json(res, this.knowledgeApi.listAssets(documentId, this.url()));
+      return this.json(res, this.knowledgeApi.document(documentId, this.url()));
+    }
+
+    throw apiError(404, 'API_NOT_FOUND', 'Knowledge API endpoint not found. Read GET /api/manifest for the current protocol.');
+  }
+
+  sendAsset(req, res, asset) {
+    if (String(req.headers['if-none-match'] || '') === asset.etag) {
+      res.writeHead(304, securityHeaders({ etag: asset.etag, 'cache-control': 'private, max-age=60' }));
+      res.end();
+      return;
+    }
+    res.writeHead(200, securityHeaders({
+      'content-type': asset.mimeType,
+      'content-length': asset.buffer.length,
+      'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(asset.filename)}`,
+      'cache-control': 'private, max-age=60',
+      etag: asset.etag
+    }));
+    res.end(asset.buffer);
+  }
+
+  json(res, value, status = 200) {
+    if (res.headersSent || res.destroyed) return;
+    const body = Buffer.from(JSON.stringify(value), 'utf8');
+    res.writeHead(status, securityHeaders({
+      'content-type': 'application/json; charset=utf-8',
+      'content-length': body.length,
+      'cache-control': 'no-store'
+    }));
+    res.end(body);
+  }
+
+  sendError(res, error) {
     if (res.headersSent || res.destroyed) {
       if (!res.destroyed) res.destroy();
       return;
     }
-    this.json(res, apiErrorPayload(error), Number(error.statusCode || 500));
-  }
-
-  async route(req, res) {
-    try {
-      const url = new URL(req.url, this.url());
-      if (!isAllowedApiOrigin(req.headers.origin, this.url())) {
-        return this.json(res, { error: 'Browser cross-origin access to the local Agent API is forbidden.' }, 403);
-      }
-      if (req.method === 'OPTIONS') return this.json(res, { ok: true });
-      if (req.method === 'GET' && (url.pathname === '/api' || url.pathname === '/api/manifest')) return this.apiManifest(res, url);
-      if (req.method === 'GET' && url.pathname === '/api/health') return this.json(res, { ok: true, url: this.url() });
-      if (req.method === 'GET' && url.pathname === '/api/tool-health') return this.json(res, { tools: this.getToolHealth(), checkedAt: new Date().toISOString() });
-      if (req.method === 'GET' && url.pathname === '/api/scheduler') return this.json(res, { scheduler: this.toolRunner.getState() });
-      if (req.method === 'POST' && url.pathname === '/api/workers/register') return this.registerWorker(req, res);
-      if (req.method === 'GET' && url.pathname === '/api/workers') return this.json(res, { workers: buildAnalytics(this.store).workers });
-      if (req.method === 'GET' && url.pathname === '/api/templates/video-summary') return this.videoSummaryTemplate(res);
-      if (req.method === 'GET' && url.pathname === '/api/collections') return this.json(res, { collections: this.store.listCollections().map(publicCollection) });
-      if (req.method === 'GET' && url.pathname === '/api/active-collection') return this.getActiveCollection(res);
-      if (req.method === 'GET' && url.pathname === '/api/stats') return this.listStats(res, url);
-      if (req.method === 'GET' && url.pathname === '/api/workspaces') return this.json(res, { workspaces: this.store.listWorkspaces().map(publicWorkspace) });
-      if (req.method === 'GET' && url.pathname === '/api/tools') return this.listTools(res, url);
-      if (req.method === 'GET' && url.pathname === '/api/tasks') return this.listTasks(res, url);
-      if (req.method === 'GET' && url.pathname === '/api/tool-runs') return this.listToolRuns(res, url);
-      if (req.method === 'POST' && url.pathname === '/api/tasks/claim') return this.claimTask(req, res);
-
-      const workerMatch = url.pathname.match(/^\/api\/workers\/([^/]+)$/);
-      if (workerMatch) {
-        const workerId = decodeURIComponent(workerMatch[1]);
-        if (req.method === 'GET') return this.getWorker(res, workerId);
-      }
-
-      const taskToolMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/tools\/([^/]+)\/run$/);
-      if (taskToolMatch && req.method === 'POST') {
-        return this.runTaskTool(req, res, decodeURIComponent(taskToolMatch[1]), decodeURIComponent(taskToolMatch[2]));
-      }
-
-      const runMatch = url.pathname.match(/^\/api\/tool-runs\/([^/]+)(?:\/([^/]+))?$/);
-      if (runMatch) {
-        const runId = decodeURIComponent(runMatch[1]);
-        const action = runMatch[2] || '';
-        if (req.method === 'GET' && !action) return this.getToolRun(res, runId, url);
-        if (req.method === 'POST' && action === 'cancel') return this.cancelToolRun(req, res, runId);
-      }
-
-      const taskMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)(?:\/([^/]+))?$/);
-      if (taskMatch) {
-        const taskId = decodeURIComponent(taskMatch[1]);
-        const action = taskMatch[2] || '';
-        if (req.method === 'GET' && !action) {
-          const task = this.store.getTask(taskId);
-          if (!task) {
-            const missing = missingTaskError(this.store, taskId);
-            return this.json(res, apiErrorPayload(missing), Number(missing.statusCode || 404));
-          }
-          const collection = this.store.getCollectionById(task.collectionId);
-          if (task.workId && ['claimed', 'rejected'].includes(task.status)) {
-            const worker = this.requireQueryWorker(url);
-            this.assertTaskWorker(task, worker, url.searchParams.get('workId'));
-            return this.json(res, { task: collection ? this.taskContext(task, collection, worker) : publicTask(task) });
-          }
-          return this.json(res, { task: publicTask(task) });
-        }
-        if (req.method === 'POST' && action === 'heartbeat') return this.heartbeatTask(req, res, taskId);
-        if (req.method === 'POST' && action === 'submit') return this.submitTask(req, res, taskId);
-        if (req.method === 'POST' && action === 'abort') return this.abortTask(req, res, taskId);
-        if (req.method === 'POST' && action === 'fail') return this.failTask(req, res, taskId);
-      }
-
-      this.json(res, { error: 'Not found' }, 404);
-    } catch (error) {
-      this.json(res, apiErrorPayload(error), Number(error.statusCode || 500));
-    }
-  }
-
-  listTools(res, url) {
-    const enabled = url.searchParams.get('enabled');
-    const filter = enabled === null ? {} : { enabled: enabled === 'true' || enabled === '1' };
-    this.json(res, { tools: this.store.listTools(filter).map((tool) => this.publicTool(tool)) });
-  }
-
-  listStats(res, url) {
-    const analytics = buildAnalytics(this.store);
-    const collectionId = url.searchParams.get('collectionId');
-    if (!collectionId) return this.json(res, { analytics });
-    this.json(res, { collectionId, stats: analytics.collections[collectionId] || null });
-  }
-
-  listTasks(res, url) {
-    const collectionId = url.searchParams.get('collectionId') || '';
-    const all = this.store.listTasks({ collectionId });
-    const limit = boundedLimit(url.searchParams.get('limit'));
-    this.json(res, { tasks: all.slice(0, limit).map(publicTask), total: all.length, limit });
-  }
-
-  apiManifest(res, url) {
-    const workerId = url.searchParams.get('workerId') || '';
-    const worker = workerId ? this.store.getWorker(workerId) : null;
-    this.json(res, this.buildApiManifest(worker));
-  }
-
-  buildApiManifest(worker = null) {
-    const base = this.url();
-    return {
-      product: '星藏家',
-      protocolVersion: '2.8',
-      baseUrl: base,
-      worker: worker ? this.publicWorker(worker) : null,
-      activeCollection: publicCollection(this.store.getActiveCollection()),
-      requiredFlow: [
-        'A new agent session registers once and receives an app-generated workerId.',
-        'A long-running agent keeps one workerId, while every successful claim returns a brand-new one-time workId.',
-        'Every state-changing task request includes workerId and the workId returned by that specific claim.',
-        'Read the desktop-selected active collection, then claim one task.',
-        'Collection synchronization has priority over Agent work. A syncing, deleted, not-yet-synced, or post-sync-paused collection cannot issue tasks.',
-        'Use app-managed tool endpoints. Tool calls return HTTP 202 and may remain queued; poll the run until it reaches a terminal status.',
-        'The app protects the task lease while one of its tool runs is queued or running. Clean cache and submit final artifacts after tools finish.',
-        'If the attempt cannot continue, call the task abort endpoint with workerId, workId, and a concrete reason. The app removes the attempt and the next claim starts from scratch.'
-      ],
-      endpoints: [
-        { method: 'GET', path: '/api/manifest?workerId=<workerId>', purpose: 'Return this complete interface manifest and current context.', params: { workerId: 'Optional after registration.' } },
-        { method: 'POST', path: '/api/workers/register', purpose: 'Create a new caller identity for this fresh agent session.', body: { tool: 'Required caller application, e.g. codex or claude-code.', model: 'Required model name.', sessionLabel: 'Optional human-readable session note.' } },
-        { method: 'GET', path: '/api/tool-health', purpose: 'Return startup probe results for every app-managed tool interface.' },
-        { method: 'GET', path: '/api/scheduler', purpose: 'Return resource pools, queue depth, GPU memory, ASR service state, and CPU ASR policy.' },
-        { method: 'GET', path: '/api/active-collection', purpose: 'Read the collection activated by the desktop user.' },
-        { method: 'POST', path: '/api/tasks/claim', purpose: 'Claim one enabled task and create a unique workId for this attempt.', body: { workerId: 'Required app-generated Worker identity.' } },
-        { method: 'GET', path: '/api/tasks/<taskId>?workerId=<workerId>&workId=<workId>', purpose: 'Read the active task context. Active attempts require both credentials returned by registration and claim.' },
-        { method: 'POST', path: '/api/tasks/<taskId>/heartbeat', purpose: 'Extend the 15-minute lease.', body: { workerId: 'Required.', workId: 'Required one-time claim id.' } },
-        { method: 'POST', path: '/api/tasks/<taskId>/tools/<toolId>/run', purpose: 'Queue a tool run. Returns HTTP 202 with queue position, reason, pool, and stage.', body: { workerId: 'Required.', workId: 'Required one-time claim id.', options: 'Tool-specific options object.' } },
-        { method: 'GET', path: '/api/tool-runs/<runId>?workerId=<workerId>&workId=<workId>&log=1', purpose: 'Poll an owned run. Runs associated with a work attempt require that attempt\'s workerId and workId.' },
-        { method: 'POST', path: '/api/tool-runs/<runId>/cancel', purpose: 'Cancel a tool run owned by the current work attempt.', body: { workerId: 'Required.', workId: 'Required one-time claim id.' } },
-        { method: 'GET', path: '/api/templates/video-summary', purpose: 'Return the reference Markdown template.' },
-        { method: 'POST', path: '/api/tasks/<taskId>/submit', purpose: 'Validate and submit final artifacts.', body: { workerId: 'Required.', workId: 'Required one-time claim id.', artifactDir: 'Assigned artifact directory.', markdownFile: 'Final Markdown path.', metadataFile: 'info.json path.' } },
-        { method: 'POST', path: '/api/tasks/<taskId>/abort', purpose: 'Stop the current attempt, cancel app-managed tools, delete attempt files, invalidate workId, and return the task to pending.', body: { workerId: 'Required.', workId: 'Required one-time claim id.', reason: 'Required explanation of why work cannot continue.' } },
-        { method: 'POST', path: '/api/tasks/<taskId>/fail', purpose: 'Compatibility alias for abort. Failed attempts are cleaned and returned to pending.', body: { workerId: 'Required.', workId: 'Required one-time claim id.', reason: 'Required failure explanation.' } }
-      ],
-      tools: this.store.listTools({ enabled: true }).map((tool) => this.publicTool(tool)),
-      markdownTemplateUrl: `${base}/api/templates/video-summary`,
-      pauseMessage: PAUSED_MESSAGE
-    };
-  }
-
-  async registerWorker(req, res) {
-    const body = await readBody(req);
-    const worker = this.store.registerWorker(body);
-    this.onEvent({ type: 'worker-registered', workerId: worker.id, tool: worker.tool, model: worker.model });
+    const status = boundedStatus(error?.statusCode);
     this.json(res, {
-      workerId: worker.id,
-      worker: this.publicWorker(worker),
-      message: 'Store this workerId for the lifetime of this agent session. Each claim also returns a one-time workId required by every state-changing request for that task.',
-      manifest: this.buildApiManifest(worker)
-    }, 201);
-  }
-
-  getWorker(res, workerId) {
-    const worker = this.store.getWorker(workerId);
-    if (!worker) return this.json(res, { worker: null }, 404);
-    const stats = buildAnalytics(this.store).workers.find((item) => item.workerId === workerId) || null;
-    this.json(res, { worker: this.publicWorker(worker), stats });
-  }
-
-  videoSummaryTemplate(res) {
-    if (!fs.existsSync(TEMPLATE_FILE)) throw new Error('Video summary template is missing.');
-    this.json(res, { name: 'video-summary-template.md', template: fs.readFileSync(TEMPLATE_FILE, 'utf8') });
-  }
-
-  getActiveCollection(res) {
-    const collection = this.store.getActiveCollection();
-    if (!collection) return this.json(res, { collection: null, message: 'NO_ACTIVE_COLLECTION' });
-    const stats = buildAnalytics(this.store).collections[collection.id] || null;
-    this.json(res, { collection: publicCollection(collection), stats });
-  }
-
-  listToolRuns(res, url) {
-    const all = this.store.listToolRuns({ taskId: url.searchParams.get('taskId') || '' });
-    const limit = boundedLimit(url.searchParams.get('limit'));
-    this.json(res, { runs: all.slice(0, limit).map((run) => publicToolRun(run, this.store, false)), total: all.length, limit });
-  }
-
-  getToolRun(res, runId, url) {
-    const run = this.store.getToolRun(runId);
-    if (!run) return this.json(res, { run: null }, 404);
-    if (run.workId) this.assertRunCredentials(run, url);
-    const authenticatedAttempt = Boolean(run.workId);
-    const withLog = authenticatedAttempt && (url.searchParams.get('log') === '1' || url.searchParams.get('log') === 'true');
-    const task = run.workId ? this.store.getTask(run.taskId) : null;
-    const active = Boolean(run.workId && task?.workId === run.workId && ['claimed', 'rejected'].includes(task.status));
-    const safeRun = publicToolRun(withLog ? { ...run, logTail: readTail(run.logFile) } : run, this.store, authenticatedAttempt);
-    this.json(res, {
-      run: safeRun,
-      ...(run.workId ? {
-        workAttempt: active
-          ? { active: true, workId: run.workId }
-          : { active: false, code: 'WORK_ATTEMPT_ENDED', workId: run.workId, directive: claimNewTaskDirective() }
-      } : {})
-    });
-  }
-
-  async cancelToolRun(req, res, runId) {
-    const body = await readBody(req);
-    const worker = this.requireWorker(body);
-    const existing = this.store.getToolRun(runId);
-    if (!existing) throw new Error(`Tool run not found: ${runId}`);
-    const task = this.store.getTask(existing.taskId);
-    if (!task) throw missingTaskError(this.store, existing.taskId);
-    this.assertTaskWorker(task, worker, body.workId);
-    if (existing.workId && existing.workId !== String(body.workId || '')) throw workAttemptEndedError(task, String(body.workId || ''));
-    if ((existing.workerId || existing.agentName) !== worker.id) throw new Error('This worker does not own the tool run.');
-    const run = this.toolRunner.cancel(runId);
-    this.json(res, { run: publicToolRun(run, this.store, true) });
-  }
-
-  async claimTask(req, res) {
-    const body = await readBody(req);
-    const worker = this.requireWorker(body);
-    if (worker.status === 'paused') {
-      return this.json(res, {
-        task: null,
-        message: 'WORKER_PAUSED',
-        userMessage: [PAUSED_MESSAGE, worker.pauseReason ? `原因：${worker.pauseReason}` : ''].filter(Boolean).join('\n'),
-        directive: worker.pauseReason ? { action: 'stop-and-report', reason: worker.pauseReason } : { action: 'pause' },
-        worker: this.publicWorker(worker)
-      }, 423);
-    }
-    reclaimExpired(this.store, '', this.toolRunner);
-    const existingAttempt = this.store.listTasks().find((item) => item.claimedBy === worker.id
-      && item.workId
-      && ['claimed', 'rejected'].includes(item.status));
-    if (existingAttempt) {
-      throw httpError(409, 'This worker already owns an active task attempt. Finish or abort it before claiming another task.', {
-        code: 'WORKER_ALREADY_HAS_TASK',
-        taskId: existingAttempt.id,
-        workId: existingAttempt.workId,
-        taskStatus: existingAttempt.status,
-        directive: {
-          action: 'resume-owned-attempt',
-          method: 'GET',
-          path: `/api/tasks/${encodeURIComponent(existingAttempt.id)}?workerId=${encodeURIComponent(worker.id)}&workId=${encodeURIComponent(existingAttempt.workId)}`,
-          message: 'Continue, submit, or abort the existing workId before claiming another task.'
-        }
-      });
-    }
-    const collection = this.store.getActiveCollection();
-    if (!collection) throw new Error('No active collection. Select and activate one in the desktop task inventory.');
-    const collectionReason = collectionBlockReason(collection, { external: true });
-    if (collectionReason) throw collectionDispatchError(collection, collectionReason);
-    if (body.collectionId && body.collectionId !== collection.id) {
-      throw new Error('The desktop app owns task targeting. Remove collectionId or activate that collection in the task inventory.');
-    }
-    if (body.collectionName && body.collectionName !== collection.name) {
-      throw new Error('The desktop app owns task targeting. Remove collectionName or activate that collection in the task inventory.');
-    }
-    const task = this.store.listTasks({ collectionId: collection.id })
-      .find((item) => item.enabled !== false && (item.status === 'pending' || item.status === 'failed' || (item.status === 'rejected' && !item.workId && !item.claimedBy)));
-    if (!task) return this.json(res, { task: null, message: 'NO_TASK' });
-    const now = new Date();
-    const workspace = this.store.getDefaultWorkspace();
-    if (!workspace) throw new Error('No default workspace is configured.');
-    const dirs = collectionDirs(workspace.root, collection.userName, collectionStorageName(collection));
-    const canReuseArtifact = task.artifactDir && (task.cachedVideoId ? fs.existsSync(task.artifactDir) : task.workspaceId === workspace.id);
-    const artifactDir = canReuseArtifact
-      ? task.artifactDir
-      : videoArtifactDir(dirs.videos, task, collection, this.store.getFilenameMetadata());
-    ensureDir(artifactDir);
-    Object.assign(task, {
-      status: 'claimed',
-      workId: createWorkId(),
-      claimedBy: worker.id,
-      claimedAt: now.toISOString(),
-      leaseExpiresAt: new Date(now.getTime() + DEFAULT_LEASE_MS).toISOString(),
-      attempts: Number(task.attempts || 0) + 1,
-      workspaceId: workspace.id,
-      workspaceRoot: workspace.root,
-      allowedRoot: task.cachedVideoId ? task.allowedRoot : dirs.root,
-      artifactDir,
-      validatorErrors: [],
-      failureReason: '',
-      infrastructureError: '',
-      abortReason: '',
-      abortSource: '',
-      abortedAt: '',
-      updatedAt: now.toISOString()
-    });
-    this.store.upsertTask(task);
-    this.store.commit();
-    this.store.recordTaskEvent(task.id, 'claimed', {
-      collectionId: collection.id,
-      workerId: worker.id,
-      agentName: worker.id,
-      attempt: task.attempts,
-      workId: task.workId,
-      workspaceId: workspace.id
-    });
-    this.onEvent({ type: 'task-claimed', taskId: task.id, collectionId: collection.id, workerId: worker.id, agentName: worker.id });
-    this.json(res, { worker: this.publicWorker(worker), task: this.taskContext(task, collection, worker) });
-  }
-
-  async runTaskTool(req, res, taskId, toolId) {
-    const body = await readBody(req);
-    const worker = this.requireWorker(body);
-    const task = this.store.getTask(taskId);
-    if (!task) throw missingTaskError(this.store, taskId);
-    this.assertTaskWorker(task, worker, body.workId);
-    if (task.enabled === false) throw new Error('Task is disabled and cannot run tools.');
-    const activeRuns = this.store.listToolRuns({ taskId }).filter((run) => run.workId === task.workId && ['queued', 'running'].includes(run.status));
-    if (activeRuns.length) {
-      const duplicate = activeRuns.find((run) => run.toolId === toolId) || activeRuns[0];
-      throw httpError(409, 'Another app-managed tool is already queued or running for the current work attempt.', {
-        code: 'TOOL_RUN_ALREADY_ACTIVE',
-        taskId,
-        workId: task.workId,
-        activeRuns: activeRuns.map((run) => ({ id: run.id, toolId: run.toolId, status: run.status, stage: run.stage || '' })),
-        directive: {
-          action: 'poll-tool-run',
-          path: `/api/tool-runs/${encodeURIComponent(duplicate.id)}?workerId=${encodeURIComponent(worker.id)}&workId=${encodeURIComponent(task.workId)}&log=1`,
-          message: 'Poll or cancel the existing run before starting another tool for this workId.'
-        }
-      });
-    }
-    const tool = this.store.get('tools', toolId);
-    if (!tool) throw new Error(`Tool not found: ${toolId}`);
-    const collection = this.store.getCollectionById(task.collectionId);
-    const run = this.toolRunner.start({
-      task,
-      tool,
-      collection,
-      workerId: worker.id,
-      options: body.options || {}
-    });
-    this.json(res, { run: publicToolRun(run, this.store, true) }, 202);
-  }
-
-  async heartbeatTask(req, res, taskId) {
-    const body = await readBody(req);
-    const worker = this.requireWorker(body);
-    const task = this.store.getTask(taskId);
-    if (!task) throw missingTaskError(this.store, taskId);
-    this.assertTaskWorker(task, worker, body.workId);
-    task.leaseExpiresAt = new Date(Date.now() + DEFAULT_LEASE_MS).toISOString();
-    task.updatedAt = new Date().toISOString();
-    this.store.upsertTask(task);
-    this.store.commit();
-    const collection = this.store.getCollectionById(task.collectionId);
-    this.json(res, { task: collection ? this.taskContext(task, collection, worker) : publicTask(task) });
-  }
-
-  async submitTask(req, res, taskId) {
-    const body = await readBody(req);
-    const worker = this.requireWorker(body);
-    const task = this.store.getTask(taskId);
-    if (!task) throw missingTaskError(this.store, taskId);
-    this.assertTaskWorker(task, worker, body.workId);
-    const activeRuns = this.store.listToolRuns({ taskId }).filter((run) => run.workId === task.workId && ['queued', 'running'].includes(run.status));
-    if (activeRuns.length) {
-      throw httpError(409, 'Wait for all app-managed tool runs to finish or cancel them before submitting artifacts.', {
-        code: 'TOOL_RUNS_ACTIVE',
-        taskId,
-        workId: task.workId,
-        activeRuns: activeRuns.map((run) => ({ id: run.id, toolId: run.toolId, status: run.status, stage: run.stage || '' })),
-        directive: { action: 'poll-tool-runs', message: 'Submit only after every run for this workId reaches a terminal status.' }
-      });
-    }
-    const validation = validateSubmission(task, body);
-    const now = new Date().toISOString();
-    this.store.recordSubmission(taskId, {
-      createdAt: now,
-      workerId: worker.id,
-      agentName: worker.id,
-      request: body,
-      accepted: validation.ok,
-      errors: validation.errors
-    });
-    if (!validation.ok) {
-      Object.assign(task, {
-        status: 'rejected',
-        validatorErrors: validation.errors,
-        updatedAt: now
-      });
-      this.store.upsertTask(task);
-      this.store.commit();
-      this.store.recordTaskEvent(task.id, 'rejected', {
-        collectionId: task.collectionId,
-        workerId: worker.id,
-        agentName: worker.id,
-        errors: validation.errors
-      });
-      this.onEvent({ type: 'task-rejected', taskId: task.id, collectionId: task.collectionId, workerId: worker.id, agentName: worker.id });
-      return this.json(res, { accepted: false, errors: validation.errors }, 422);
-    }
-    const collection = this.store.getCollectionById(task.collectionId) || {};
-    const metadata = readMetadataFile(validation.metadataFile);
-    task.tags = normalizeTags(metadata.tags || task.tags);
-    const completedWorkId = task.workId;
-    const completedTask = {
-      ...task,
-      status: 'done',
-      workId: '',
-      completedAt: now,
-      validatorErrors: [],
-      updatedAt: now
-    };
-    const event = {
-      id: `submission-completed:${completedWorkId || task.id}`,
-      taskId: task.id,
-      type: 'completed',
-      createdAt: now,
-      collectionId: task.collectionId,
-      workerId: worker.id,
-      agentName: worker.id,
-      workId: completedWorkId,
-      processingSeconds: secondsBetween(task.claimedAt, now),
-      videoDuration: Number(task.duration || 0)
-    };
-    const staged = stageSubmissionFinalization({
-      store: this.store,
-      task,
-      collection,
-      validation,
-      filenameMetadata: this.store.getFilenameMetadata(),
-      completedTask,
-      event
-    });
-    const { task: finalizedTask } = applySubmissionFinalization(this.store, staged);
-    this.onEvent({ type: 'task-completed', taskId: task.id, collectionId: task.collectionId, workerId: worker.id, agentName: worker.id });
-    this.json(res, { accepted: true, completedWorkId, task: publicTask(finalizedTask) });
-  }
-
-  async failTask(req, res, taskId) {
-    return this.abortTask(req, res, taskId, 'agent-fail');
-  }
-
-  async abortTask(req, res, taskId, source = 'agent-abort') {
-    const body = await readBody(req);
-    const worker = this.requireWorker(body);
-    const task = this.store.getTask(taskId);
-    if (!task) throw missingTaskError(this.store, taskId);
-    this.assertTaskWorker(task, worker, body.workId);
-    const reason = String(body.reason || '').trim();
-    if (!reason) throw new Error('reason is required so the application can record why this attempt stopped.');
-    const result = abortTaskAttempt({ store: this.store, toolRunner: this.toolRunner, taskId, workerId: worker.id, reason, source });
-    this.onEvent({ type: 'task-attempt-aborted', taskId: task.id, collectionId: task.collectionId, workerId: worker.id, agentName: worker.id, reason, source, cleanup: result.cleanup });
-    this.json(res, { aborted: true, endedWorkId: result.endedWorkId, task: publicTask(result.task), cancelledRuns: result.cancelledRuns, cleanup: result.cleanup });
-  }
-
-  requireWorker(body = {}) {
-    const workerId = String(body.workerId || '').trim();
-    if (!workerId) throw new Error('workerId is required. Register this fresh agent session with POST /api/workers/register.');
-    return this.store.touchWorker(workerId);
-  }
-
-  requireQueryWorker(url) {
-    const workerId = String(url.searchParams.get('workerId') || '').trim();
-    if (!workerId) throw httpError(401, 'workerId is required for active work-attempt details.', { code: 'WORKER_ID_REQUIRED' });
-    const worker = this.store.getWorker(workerId);
-    if (!worker) throw httpError(401, `Unknown workerId: ${workerId}.`, { code: 'UNKNOWN_WORKER' });
-    return worker;
-  }
-
-  assertRunCredentials(run, url) {
-    const worker = this.requireQueryWorker(url);
-    const workId = String(url.searchParams.get('workId') || '').trim();
-    if (!workId) throw httpError(401, 'workId is required for this tool run.', { code: 'WORK_ID_REQUIRED' });
-    if (worker.id !== String(run.workerId || run.agentName || '') || workId !== String(run.workId || '')) {
-      throw httpError(403, 'This worker does not own the requested tool run.', { code: 'TOOL_RUN_OWNED_BY_ANOTHER' });
-    }
-  }
-
-  assertTaskWorker(task, worker, workId) {
-    const suppliedWorkId = String(workId || '').trim();
-    if (!suppliedWorkId) throw workIdRequiredError(task);
-    if (!task.workId || task.workId !== suppliedWorkId || !['claimed', 'rejected'].includes(task.status)) {
-      throw workAttemptEndedError(task, suppliedWorkId);
-    }
-    if (!task.claimedBy || task.claimedBy !== worker.id) throw httpError(409, 'This work attempt is owned by another worker.', {
-      code: 'WORK_ATTEMPT_OWNED_BY_ANOTHER',
-      taskId: task.id,
-      workId: suppliedWorkId,
-      directive: { action: 'stop', message: 'Do not continue or modify this task.' }
-    });
-  }
-
-  publicWorker(worker) {
-    return {
-      id: worker.id,
-      workerId: worker.id,
-      tool: worker.tool,
-      model: worker.model,
-      sessionLabel: worker.sessionLabel || '',
-      status: worker.status,
-      createdAt: worker.createdAt,
-      lastSeenAt: worker.lastSeenAt,
-      pausedAt: worker.pausedAt || '',
-      pauseReason: worker.pauseReason || ''
-    };
-  }
-
-  taskContext(task, collection, worker = null) {
-    return {
-      id: task.id,
-      status: task.status,
-      workId: task.workId || '',
-      bvid: task.bvid,
-      title: task.title,
-      owner: task.owner,
-      duration: task.duration,
-      userName: collection.userName,
-      collectionName: collection.name,
-      collectionId: collection.id,
-      workspaceId: task.workspaceId,
-      workspaceRoot: task.workspaceRoot,
-      videoUrl: canonicalVideoUrl(task),
-      artifactDir: task.artifactDir,
-      allowedRoot: task.allowedRoot,
-      leaseExpiresAt: task.leaseExpiresAt,
-      outputMarkdown: task.outputMarkdown || '',
-      completedAt: task.completedAt || '',
-      validatorErrors: task.validatorErrors || [],
-      cachedVideoId: task.cachedVideoId || '',
-      cachedVideoFile: task.cachedVideoFile || '',
-      reuseCachedMedia: Boolean(task.cachedVideoId || task.reuseCachedMedia),
-      worker: worker ? this.publicWorker(worker) : null,
-      apiManifestUrl: `${this.url()}/api/manifest${worker ? `?workerId=${encodeURIComponent(worker.id)}` : ''}`,
-      markdownTemplateUrl: `${this.url()}/api/templates/video-summary`,
-      requirements: {
-        output: ['Markdown 总结', 'info.json', '精选关键帧', '字幕比对结果', '可获取时的热评前三条'],
-        requiredSections: ['小结', '目录', '思维导图', '字幕比对', '评论分析', '处理记录'],
-        requiredOpeningOrder: ['小结', '思维导图', '目录'],
-        cleanup: task.cachedVideoId
-          ? '最终产物保存后仍调用 clean-cache；应用会保留缓存库中的合轨视频，只删除音频等过渡缓存。'
-          : '最终产物保存后，通过 clean-cache 工具运行 API 删除临时视频和音频缓存。',
-        authorization: '本次领取的 workId 是一次性工作凭证。心跳、工具运行/取消、提交和中止都必须同时提交 workerId 与 workId。不要自行生成或复用旧 workId。',
-        inventory: '收藏夹同步优先于 Agent 工作。任务被移出、收藏夹正在同步/未就绪/待重新激活或已在 B站删除时，必须按接口 directive 停止或等待，不得绕过库存状态继续工作。',
-        transcriptTimeline: 'ASR 必须提供逐句起止时间。优先读取 asr/transcript.srt；也可读取 asr/asr-result.json 的 segments[].start/end，或包含同等时间轴的 asr/asr-transcript.txt。Markdown 时间轴链接必须依据这些真实时间，不得按文本顺序猜测。',
-        interruption: `如果当前任务因错误、用户要求或其它原因无法继续，必须立即 POST ${this.url()}/api/tasks/${encodeURIComponent(task.id)}/abort 并提交 workerId、workId 与 reason。应用会取消工具、删除本次产物并将任务退回 pending；旧 workId 随即失效，不要自行保留断点或直接修改文件状态。`
-      },
-      abortUsage: `POST ${this.url()}/api/tasks/${encodeURIComponent(task.id)}/abort`,
-      toolPolicy: 'Agent 不直接运行本地工具脚本。必须通过 /api/tasks/<taskId>/tools/<toolId>/run 请求桌面应用代为执行。',
-      tools: this.store.listTools({ enabled: true }).map((tool) => this.publicTool(tool, task.id))
-    };
-  }
-
-  publicTool(tool, taskId = '<taskId>') {
-    const taskPart = taskId === '<taskId>' ? '<taskId>' : encodeURIComponent(taskId);
-    return {
-      id: tool.id,
-      action: tool.action,
-      name: tool.name,
-      category: tool.category,
-      enabled: tool.enabled,
-      description: tool.description,
-      apiUsage: `POST ${this.url()}/api/tasks/${taskPart}/tools/${encodeURIComponent(tool.id)}/run`,
-      statusUsage: `GET ${this.url()}/api/tool-runs/<runId>?workerId=<workerId>&workId=<workId>&log=1`,
-      cancelUsage: `POST ${this.url()}/api/tool-runs/<runId>/cancel`,
-      internalCommand: tool.internalCommand,
-      agentPrompt: tool.agentPrompt,
-      outputs: tool.outputs,
-      projects: tool.projects,
-      resourcePolicy: resourcePolicyForAction(tool.action),
-      workIdRequired: true
-    };
-  }
-
-  json(res, data, status = 200) {
-    res.writeHead(status, {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store',
-      'x-content-type-options': 'nosniff'
-    });
-    res.end(JSON.stringify(data, null, 2));
+      error: String(error?.publicMessage || error?.message || 'Knowledge API request failed.'),
+      code: String(error?.code || 'KNOWLEDGE_API_ERROR')
+    }, status);
   }
 }
 
-function reclaimExpired(store, collectionId, toolRunner = null) {
-  const now = new Date();
-  const protectedAttempts = new Set(
-    store.listToolRuns().filter((run) => ['queued', 'running'].includes(run.status) && run.workId).map((run) => `${run.taskId}:${run.workId}`)
-  );
-  for (const task of store.listTasks({ collectionId })) {
-    if (['claimed', 'rejected'].includes(task.status) && task.leaseExpiresAt && new Date(task.leaseExpiresAt) <= now) {
-      if (protectedAttempts.has(`${task.id}:${task.workId}`)) continue;
-      abortTaskAttempt({ store, toolRunner, taskId: task.id, workerId: task.claimedBy, reason: 'Task lease expired before the Agent completed or aborted the attempt.', source: 'lease-expired' });
-    }
-  }
-}
-
-function resourcePolicyForAction(action) {
-  if (action === 'bundle') return ['api', 'media', 'asr'];
-  if (action === 'asr') return ['media', 'asr'];
-  if (['info', 'subtitles', 'comments'].includes(action)) return ['api'];
-  if (action === 'clean-cache') return ['disk'];
-  return ['media'];
-}
-
-function canonicalVideoUrl(task = {}) {
-  if (task.bvid) return `https://www.bilibili.com/video/${task.bvid}`;
-  return task.url || '';
-}
-
-function readMetadataFile(file) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return {};
-  }
-}
-
-function readBody(req) {
+function listenLocal(server, preferredPort) {
+  const port = Number.isInteger(Number(preferredPort)) && Number(preferredPort) >= 0 ? Number(preferredPort) : 17391;
   return new Promise((resolve, reject) => {
-    let text = '';
-    let bytes = 0;
-    const contentLength = Number(req.headers['content-length'] || 0);
-    if (contentLength > MAX_JSON_BODY_BYTES) return reject(httpError(413, 'JSON request body exceeds 1 MiB.'));
-    req.on('data', (chunk) => {
-      bytes += chunk.length;
-      if (bytes > MAX_JSON_BODY_BYTES) {
-        reject(httpError(413, 'JSON request body exceeds 1 MiB.'));
-        req.removeAllListeners('data');
-        req.resume();
-        return;
-      }
-      text += chunk.toString();
-    });
-    req.on('end', () => {
-      if (!text) return resolve({});
-      try {
-        resolve(JSON.parse(text));
-      } catch (error) {
-        reject(new Error(`Invalid JSON body: ${error.message}`));
-      }
-    });
-    req.on('error', reject);
+    const listen = (targetPort, fallbackAllowed) => {
+      const onError = (error) => {
+        server.removeListener('listening', onListening);
+        if (fallbackAllowed && error?.code === 'EADDRINUSE') return listen(0, false);
+        reject(error);
+      };
+      const onListening = () => {
+        server.removeListener('error', onError);
+        resolve();
+      };
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(targetPort, '127.0.0.1');
+    };
+    listen(port, port !== 0);
   });
 }
 
-function httpError(statusCode, message, details = {}) {
+function parseRequestUrl(value, baseUrl) {
+  try { return new URL(value || '/', baseUrl); }
+  catch { throw apiError(400, 'REQUEST_URL_INVALID', 'Malformed request URL.'); }
+}
+
+function decodePathPart(value) {
+  try { return decodeURIComponent(String(value || '')); }
+  catch { throw apiError(400, 'REQUEST_PATH_INVALID', 'Malformed encoded path parameter.'); }
+}
+
+function isDisabledVideoWorkflowPath(pathname) {
+  return DISABLED_VIDEO_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
+}
+
+function disabledVideoWorkflowError() {
+  return apiError(
+    410,
+    'EXTERNAL_VIDEO_WORKFLOW_DISABLED',
+    'External Agent video-summary task, Worker, tool-execution, and submission APIs are disabled. Use the desktop application for video workflows or GET /api/manifest for read-only knowledge access.'
+  );
+}
+
+function apiError(statusCode, code, message) {
   const error = new Error(message);
   error.statusCode = statusCode;
-  Object.assign(error, details);
+  error.code = code;
   return error;
 }
 
-function workIdRequiredError(task) {
-  return httpError(400, 'workId is required. Use the one-time workId returned by the current task claim.', {
-    code: 'WORK_ID_REQUIRED',
-    taskId: task.id,
-    directive: { action: 'use-claimed-work-id', message: 'Read workId from the task claim response. Do not invent one.' }
-  });
+function boundedStatus(value) {
+  const status = Number(value || 500);
+  return Number.isInteger(status) && status >= 400 && status <= 599 ? status : 500;
 }
 
-function missingTaskError(store, taskId) {
-  const unavailable = store.get('unavailableTasks', String(taskId || ''));
-  if (unavailable) return httpError(410, 'This Bilibili video was deleted, removed, or made unavailable. The task was permanently removed from inventory.', {
-      code: 'BILIBILI_VIDEO_UNAVAILABLE',
-      taskId,
-      unavailable: publicTombstone(unavailable),
-      directive: { action: 'stop', message: 'Do not retry this task. Request a new task with the same workerId.' }
-    });
-  const removed = store.get('removedFavoriteTasks', String(taskId || ''));
-  if (removed) return httpError(410, 'This video was removed from the synchronized Bilibili favorites collection. The unfinished task will not be reassigned.', {
-    code: 'REMOVED_FROM_FAVORITES',
-    taskId,
-    removed: publicTombstone(removed),
-    directive: { action: 'claim-new-task', keepWorkerId: true, message: 'Stop this attempt and request a new task with the same workerId.' }
-  });
-  return httpError(404, `Task not found: ${taskId}`, { code: 'TASK_NOT_FOUND', taskId });
+function securityHeaders(extra = {}) {
+  return { 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', ...extra };
 }
 
-function publicTombstone(value = {}) {
-  return {
-    taskId: value.taskId || value.id || '',
-    collectionId: value.collectionId || '',
-    bvid: value.bvid || '',
-    title: value.title || '',
-    reason: value.reason || '',
-    source: value.source || '',
-    removedAt: value.removedAt || ''
-  };
-}
-
-function publicCollection(collection) {
-  if (!collection) return null;
-  const { cookieFile, workspaceRoot, collectionRoot, videosDir, exportDir, cacheRoot, ...safe } = collection;
-  return safe;
-}
-
-function publicTask(task = {}) {
-  const {
-    cookieFile,
-    workId,
-    workspaceRoot,
-    allowedRoot,
-    artifactDir,
-    outputMarkdown,
-    metadataFile,
-    coverFile,
-    cachedVideoFile,
-    ...safe
-  } = task;
-  return safe;
-}
-
-function publicWorkspace(workspace = {}) {
-  return { id: workspace.id, name: workspace.name, isDefault: Boolean(workspace.isDefault), createdAt: workspace.createdAt, updatedAt: workspace.updatedAt };
-}
-
-function publicToolRun(run = {}, store, detailed = false) {
-  const sensitivePaths = [
-    ...store.listCollections().map((collection) => collection.cookieFile),
-    ...store.listTasks().map((task) => task.cookieFile)
-  ].filter(Boolean);
-  const redact = (value) => sensitivePaths.reduce((text, sensitive) => text.split(String(sensitive)).join('<cookie-file>'), String(value || ''));
-  const redactValue = (value) => {
-    if (typeof value === 'string') return redact(value);
-    if (Array.isArray(value)) return value.map(redactValue);
-    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactValue(item)]));
-    return value;
-  };
-  const safe = {
-    ...run,
-    actualCommand: redact(run.actualCommand),
-    error: redact(run.error),
-    asrResult: redactValue(run.asrResult),
-    ...(Object.prototype.hasOwnProperty.call(run, 'logTail') ? { logTail: redact(run.logTail) } : {})
-  };
-  if (!detailed) {
-    for (const key of ['workId', 'cwd', 'artifactDir', 'logFile', 'actualCommand', 'options', 'logTail', 'asrResult']) delete safe[key];
-    if (safe.error) safe.error = 'Tool run failed; detailed diagnostics are available only to the authenticated work attempt.';
-  }
-  return safe;
-}
-
-function collectionDispatchError(collection, reason) {
-  let code = 'COLLECTION_NOT_READY';
-  let status = 423;
-  if (collection.biliDeleted) { code = 'BILIBILI_COLLECTION_DELETED'; status = 410; }
-  else if (collection.syncState === 'syncing') code = 'COLLECTION_SYNCING';
-  else if (collection.syncReady === false || (collection.syncReady === undefined && !collection.lastSyncedAt)) code = 'COLLECTION_NOT_READY';
-  else if (collection.externalDispatchPaused) code = 'COLLECTION_REACTIVATION_REQUIRED';
-  return httpError(status, reason, {
-    code,
-    collectionId: collection.id,
-    directive: { action: 'stop-and-wait-for-user', keepWorkerId: true, message: reason }
-  });
-}
-
-function workAttemptEndedError(task, workId) {
-  return httpError(409, 'This work attempt no longer exists. It was completed, interrupted, expired, or replaced by a newer claim.', {
-    code: 'WORK_ATTEMPT_ENDED',
-    taskId: task.id,
-    workId,
-    taskStatus: task.status,
-    directive: claimNewTaskDirective()
-  });
-}
-
-function claimNewTaskDirective() {
-  return {
-    action: 'claim-new-task',
-    method: 'POST',
-    path: '/api/tasks/claim',
-    keepWorkerId: true,
-    message: 'Stop using this workId and request a new task with the same workerId.'
-  };
-}
-
-function apiErrorPayload(error) {
-  const payload = { error: error.message || String(error) };
-  for (const key of ['code', 'taskId', 'workId', 'taskStatus', 'collectionId', 'directive', 'unavailable', 'removed', 'failureKind', 'possibleCauses', 'resourceReason', 'activeRuns']) {
-    if (error[key] !== undefined) payload[key] = error[key];
-  }
-  return payload;
-}
-
-function boundedLimit(value, fallback = 300) {
-  return Math.max(1, Math.min(1000, Math.floor(Number(value) || fallback)));
-}
-
-function secondsBetween(start, end) {
-  const startMs = Date.parse(start || '');
-  const endMs = Date.parse(end || '');
-  return startMs && endMs >= startMs ? (endMs - startMs) / 1000 : 0;
-}
-
-function readTail(file, maxBytes = 12000) {
-  if (!file || !fs.existsSync(file)) return '';
-  const stat = fs.statSync(file);
-  const start = Math.max(0, stat.size - maxBytes);
-  const fd = fs.openSync(file, 'r');
-  const buffer = Buffer.alloc(stat.size - start);
-  fs.readSync(fd, buffer, 0, buffer.length, start);
-  fs.closeSync(fd);
-  return buffer.toString('utf8');
-}
-
-module.exports = { ApiServer, MAX_JSON_BODY_BYTES };
+module.exports = { ApiServer, DISABLED_VIDEO_PREFIXES, disabledVideoWorkflowError, isDisabledVideoWorkflowPath };

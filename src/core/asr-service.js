@@ -213,8 +213,8 @@ class AsrService {
   }
 }
 
-function findRuntimePython() {
-  const root = path.join(PROJECT_ROOT, 'runtime', 'python');
+function findRuntimePython(projectRoot = PROJECT_ROOT) {
+  const root = path.join(projectRoot, 'runtime', 'python');
   if (!fs.existsSync(root)) return '';
   for (const item of fs.readdirSync(root, { withFileTypes: true })) {
     if (!item.isDirectory()) continue;
@@ -224,9 +224,9 @@ function findRuntimePython() {
   return '';
 }
 
-function serviceEnvironment() {
-  const venv = path.join(PROJECT_ROOT, 'runtime', 'faster-whisper');
-  const vcRuntime = path.join(PROJECT_ROOT, 'runtime', 'vc-runtime');
+function serviceEnvironment(projectRoot = PROJECT_ROOT) {
+  const venv = path.join(projectRoot, 'runtime', 'faster-whisper');
+  const vcRuntime = path.join(projectRoot, 'runtime', 'vc-runtime');
   const sitePackages = process.platform === 'win32'
     ? path.join(venv, 'Lib', 'site-packages')
     : path.join(venv, 'lib', 'python3', 'site-packages');
@@ -243,4 +243,4 @@ function serviceEnvironment() {
   };
 }
 
-module.exports = { AsrService };
+module.exports = { AsrService, findRuntimePython, serviceEnvironment };

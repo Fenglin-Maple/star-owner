@@ -6,7 +6,6 @@ const { collectionBlockReason, collectionStorageName } = require('./collection-s
 const { promoteMindMap } = require('./markdown');
 const { isLoginRequiredMessage, isVideoUnavailableMessage, loginRequiredError } = require('./media-errors');
 const { abortTaskAttempt, cleanupAttemptFiles, createWorkId } = require('./task-attempt');
-const { activateKnowledgeVersion } = require('./task-versions');
 const { removeUnavailableTask } = require('./unavailable-task');
 const { resolveBvid } = require('./video-cache-manager');
 const { validateSubmission } = require('./validation');
@@ -173,7 +172,7 @@ class InternalAgentManager {
     this.reclaimExpired(collection.id);
     const sessions = this.listSessions().filter((session) => session.mode === 'single');
     const candidates = this.store.listTasks({ collectionId: collection.id })
-      .filter((task) => task.bvid === bvid)
+      .filter((task) => task.bvid === bvid && task.singleTask === true)
       .sort((left, right) => String(right.completedAt || right.createdAt || '').localeCompare(String(left.completedAt || left.createdAt || '')));
     const sessionFor = (task) => sessions.find((session) => session.singleTaskId === task.id);
     const activeTask = candidates.find((task) => {
@@ -202,7 +201,10 @@ class InternalAgentManager {
     const collection = this.store.getCollectionById(inspection.collectionId);
     const duplicateAction = String(input.duplicateAction || '');
     if (inspection.active) throw new Error(`这个视频已有任务正在处理，请切换到现有会话：${inspection.active.sessionTitle || inspection.active.bvid}`);
-    if (inspection.latestCompleted && duplicateAction !== 'regenerate') throw new Error('所选内置收藏夹中已经存在这个视频的完成产物，请先选择打开已有文档或重新生成新版本。');
+    if (inspection.latestCompleted && duplicateAction !== 'overwrite') throw new Error('所选内置收藏夹中已经存在这个视频的完成产物，请选择放弃本次任务并保留旧产物，或重新生成并覆盖旧产物。');
+    if (inspection.latestCompleted) {
+      return this.reuseSingleTask(inspection.latestCompleted.taskId, input, provider, modelId, { overwrite: true });
+    }
     if (inspection.recoverable) {
       return this.reuseSingleTask(inspection.recoverable.taskId, input, provider, modelId);
     }
@@ -210,8 +212,6 @@ class InternalAgentManager {
     const dirs = collectionDirs(workspace.root, INTERNAL_USER_NAME, collectionStorageName(collection));
     const now = new Date().toISOString();
     const taskId = `${collection.id}:${bvid}:single-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
-    const previous = inspection.latestCompleted ? this.store.getTask(inspection.latestCompleted.taskId) : null;
-    const revisions = this.store.listTasks({ collectionId: collection.id }).filter((task) => task.bvid === bvid).map((task) => Number(task.revision || 1));
     this.store.upsertTask({
       id: taskId,
       collectionId: collection.id,
@@ -232,9 +232,9 @@ class InternalAgentManager {
       validatorErrors: [],
       internal: true,
       singleTask: true,
-      versionGroupId: previous?.versionGroupId || previous?.id || taskId,
-      revisionOfTaskId: previous?.id || '',
-      revision: revisions.length ? Math.max(...revisions) + 1 : 1,
+      versionGroupId: '',
+      revisionOfTaskId: '',
+      revision: 1,
       knowledgeActive: true,
       publicAttempt: true,
       cookieFile: '',
@@ -249,9 +249,10 @@ class InternalAgentManager {
     return this.createSession({ ...input, mode: 'single', singleTaskId: taskId, collectionId: collection.id, acceptNewTasks: false });
   }
 
-  reuseSingleTask(taskId, input, provider, modelId) {
+  reuseSingleTask(taskId, input, provider, modelId, options = {}) {
     const task = this.store.getTask(String(taskId || ''));
     if (!task) throw new Error('可重试的旧任务已经不存在，请重新检查。');
+    this.removeSingleTaskSiblings(task);
     cleanupAttemptFiles(this.store, task);
     const now = new Date().toISOString();
     this.store.upsertTask({
@@ -280,6 +281,9 @@ class InternalAgentManager {
       publicAttempt: true,
       cookieFile: '',
       keepVideoCache: Boolean(input.keepVideoCache),
+      versionGroupId: '',
+      revisionOfTaskId: '',
+      revision: 1,
       knowledgeActive: true,
       supersededByTaskId: '',
       updatedAt: now
@@ -288,7 +292,7 @@ class InternalAgentManager {
     if (!existing) {
       this.store.commit();
       const created = this.createSession({ ...input, mode: 'single', singleTaskId: task.id, collectionId: task.collectionId, acceptNewTasks: false });
-      return { ...created, reusedTask: true };
+      return { ...created, reusedTask: true, overwritten: Boolean(options.overwrite) };
     }
     const oldWorker = this.store.getWorker(existing.workerId);
     if (oldWorker) this.store.updateWorker(oldWorker.id, { status: 'paused', pauseReason: '单视频任务已从头重建并分配新 Worker。' });
@@ -319,9 +323,29 @@ class InternalAgentManager {
       updatedAt: now
     });
     this.saveSession(existing);
-    this.log(existing, '检测到未完成或产物缺失的同 BV 任务，已清理旧缓存并从头重建。');
+    this.log(existing, options.overwrite
+      ? '用户确认覆盖同 BV 的旧产物；旧产物已清理，本次从头生成唯一产物。'
+      : '检测到未完成或产物缺失的同 BV 任务，已清理旧缓存并从头重建。');
     this.store.commit();
-    return { ...this.publicSession(existing), reusedTask: true };
+    return { ...this.publicSession(existing), reusedTask: true, overwritten: Boolean(options.overwrite) };
+  }
+
+  removeSingleTaskSiblings(keepTask) {
+    const siblings = this.store.listTasks({ collectionId: keepTask.collectionId })
+      .filter((task) => task.id !== keepTask.id && task.singleTask === true && task.bvid === keepTask.bvid);
+    for (const sibling of siblings) {
+      cleanupAttemptFiles(this.store, sibling);
+      for (const session of this.listSessions().filter((item) => item.singleTaskId === sibling.id)) {
+        try { this.store.updateWorker(session.workerId, { status: 'paused', pauseReason: '同 BV 单视频任务已合并为唯一产物。' }); } catch {}
+        this.store.delete('internalAgentSessions', session.id);
+      }
+      this.store.delete('tasks', sibling.id);
+      this.store.delete('videos', sibling.id);
+    }
+    if (siblings.length) {
+      const collection = this.store.getCollectionById(keepTask.collectionId);
+      if (collection) this.store.set('collections', collection.id, { ...collection, videoCount: this.store.listTasks({ collectionId: collection.id }).length, updatedAt: new Date().toISOString() });
+    }
   }
 
   collectionOutputDirectory(collectionId) {
@@ -362,6 +386,14 @@ class InternalAgentManager {
     if (!collectionAvailability.available) throw new Error(collectionAvailability.reason);
     const modelAvailability = this.modelAvailability(session);
     if (!modelAvailability.available) throw new Error(modelAvailability.reason);
+    const scheduler = this.toolRunner.getState?.() || {};
+    const hardware = scheduler.hardware;
+    if (hardware?.checkedAt && !hardware.localAsrSupported) {
+      throw new Error(`当前硬件环境无法运行本地 ASR：${hardware.issues?.join(' ') || hardware.recommendation || '请在设置中检查运行时、模型、显卡与内存。'}`);
+    }
+    if (hardware?.checkedAt && !hardware.nvidia?.supported && hardware.cpu?.supported && !scheduler.config?.cpuAsrEnabled) {
+      throw new Error('未检测到可用 NVIDIA/CUDA ASR；本机可使用 CPU ASR，但该通道默认关闭。请先在“设置 → 资源调度”中手动开启 CPU ASR。');
+    }
     if (session.status === 'waiting-login') {
       const user = this.getCurrentUser();
       if (!user?.isLogin) {
@@ -1140,10 +1172,6 @@ class InternalAgentManager {
     const event = { id: `submission-completed:${completedWorkId || task.id}`, taskId: task.id, type: 'completed', createdAt: now, collectionId: task.collectionId, workerId: session.workerId, agentName: session.workerId, workId: completedWorkId, processingSeconds: secondsBetween(task.claimedAt, now), videoDuration: Number(task.duration || 0), internalAgent: true };
     const staged = stageSubmissionFinalization({ store: this.store, task, collection, validation, filenameMetadata: this.store.getFilenameMetadata(), completedTask, event });
     const { finalized } = applySubmissionFinalization(this.store, staged);
-    if (task.singleTask) {
-      activateKnowledgeVersion(this.store, task.id);
-      this.store.commit();
-    }
     this.emitEvent({ type: 'task-completed', taskId: task.id, collectionId: task.collectionId, workerId: session.workerId, agentName: session.workerId, internalAgent: true });
     return finalized;
   }

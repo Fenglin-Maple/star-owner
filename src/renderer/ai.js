@@ -11,7 +11,7 @@
     modelNew: $('#aiModelNewProvider'), modelProviderList: $('#aiModelProviderList'), modelProviderId: $('#aiModelProviderId'), modelProviderName: $('#aiModelProviderName'), modelProviderType: $('#aiModelProviderType'), modelProviderBaseUrl: $('#aiModelProviderBaseUrl'), modelProviderApiKey: $('#aiModelProviderApiKey'), modelProviderTemperature: $('#aiModelProviderTemperature'), modelProviderMaxTokens: $('#aiModelProviderMaxTokens'), modelProviderHeaders: $('#aiModelProviderHeaders'), modelDelete: $('#aiModelDeleteProvider'), modelSave: $('#aiModelSaveProvider'), modelFetch: $('#aiModelFetchModels'), modelCount: $('#aiModelRemoteCount'), modelRemote: $('#aiModelRemoteModels'),
     dependencyList: $('#dependencyList'), dependencyRefresh: $('#dependencyRefresh'), dependencyModal: $('#dependencyPromptModal'), dependencyMissing: $('#dependencyPromptMissing'), dependencyLater: $('#dependencyPromptLater'), dependencyDownload: $('#dependencyPromptDownload'),
     loginRequiredModal: $('#singleLoginRequiredModal'), loginRequiredVideo: $('#singleLoginRequiredVideo'), loginRequiredReason: $('#singleLoginRequiredReason'), loginLater: $('#singleLoginLater'), goLogin: $('#singleGoLogin'),
-    duplicateModal: $('#singleDuplicateModal'), duplicateMessage: $('#singleDuplicateMessage'), duplicateVideo: $('#singleDuplicateVideo'), duplicateMeta: $('#singleDuplicateMeta'), duplicateCancel: $('#singleDuplicateCancel'), duplicateOpen: $('#singleDuplicateOpen'), duplicateRegenerate: $('#singleDuplicateRegenerate')
+    duplicateModal: $('#singleDuplicateModal'), duplicateMessage: $('#singleDuplicateMessage'), duplicateVideo: $('#singleDuplicateVideo'), duplicateMeta: $('#singleDuplicateMeta'), duplicateCancel: $('#singleDuplicateCancel'), duplicateRegenerate: $('#singleDuplicateRegenerate')
   };
 
   let state = { providers: [], sessions: [], collections: [], internalCollections: [] };
@@ -321,20 +321,15 @@
       }
       if (inspection.latestCompleted) {
         const decision = await requestDuplicateDecision(inspection);
-        if (decision === 'open') {
-          await window.orchestrator.openDocument(inspection.latestCompleted.taskId);
-          notify('已打开已有文档', `没有为 ${inspection.bvid} 创建重复任务。`, 'success');
-          return;
-        }
-        if (decision !== 'regenerate') return;
-        payload.duplicateAction = 'regenerate';
+        if (decision !== 'overwrite') return;
+        payload.duplicateAction = 'overwrite';
       }
       const session = await window.orchestrator.internalAgentCreateSingle(payload);
       activeSingleId = session.id;
       persistActiveIds();
       await window.orchestrator.internalAgentStart(session.id);
       await refreshAll({ quiet: true });
-      notify(session.reusedTask ? '旧任务已从头重建' : '单任务已开始', session.reusedTask ? '旧缓存已清理，本次不会从中断位置继续。' : '可以切换到其它页面，后台会继续处理。', 'success');
+      notify(session.overwritten ? '旧产物已清理并开始覆盖' : (session.reusedTask ? '旧任务已从头重建' : '单任务已开始'), session.overwritten ? '单视频模式只保留唯一产物，本次会从头生成。' : (session.reusedTask ? '旧缓存已清理，本次不会从中断位置继续。' : '可以切换到其它页面，后台会继续处理。'), 'success');
     } catch (error) { notify('无法开始单任务', error.message || String(error), 'error'); }
     finally { updateSingleStartState(); }
   }
@@ -342,9 +337,9 @@
   function requestDuplicateDecision(inspection) {
     const existing = inspection.latestCompleted;
     if (duplicateDecisionResolver) duplicateDecisionResolver('cancel');
-    elements.duplicateMessage.textContent = `“${inspection.collectionName}”中已经存在完成产物。打开旧文档不会重复消耗模型与 ASR；重新生成会保留旧版本，并让新版本成为 RAG 默认版本。`;
+    elements.duplicateMessage.textContent = `“${inspection.collectionName}”中已经存在完成产物。单视频模式不保留历史版本：可以放弃本次任务并保留旧产物，或清理旧产物后从头生成唯一的新产物。`;
     elements.duplicateVideo.textContent = existing.title || existing.bvid;
-    elements.duplicateMeta.textContent = `${existing.bvid} · 版本 ${existing.revision || 1} · 完成于 ${formatDate(existing.completedAt)}`;
+    elements.duplicateMeta.textContent = `${existing.bvid} · 完成于 ${formatDate(existing.completedAt)}`;
     elements.duplicateModal.hidden = false;
     return new Promise((resolve) => { duplicateDecisionResolver = resolve; });
   }
@@ -671,8 +666,7 @@
   elements.loginLater.addEventListener('click', () => { elements.loginRequiredModal.hidden = true; });
   elements.goLogin.addEventListener('click', () => { elements.loginRequiredModal.hidden = true; window.dispatchEvent(new CustomEvent('star:navigate', { detail: { page: 'login' } })); });
   elements.duplicateCancel.addEventListener('click', () => resolveDuplicateDecision('cancel'));
-  elements.duplicateOpen.addEventListener('click', () => resolveDuplicateDecision('open'));
-  elements.duplicateRegenerate.addEventListener('click', () => resolveDuplicateDecision('regenerate'));
+  elements.duplicateRegenerate.addEventListener('click', () => resolveDuplicateDecision('overwrite'));
   elements.duplicateModal.addEventListener('click', (event) => { if (event.target === elements.duplicateModal) resolveDuplicateDecision('cancel'); });
   elements.singleSession.addEventListener('change', () => { activeSingleId = elements.singleSession.value; persistActiveIds(); renderSinglePage(); });
   elements.modelNew.addEventListener('click', () => { editingProviderId = '__new__'; renderModelPage(); elements.modelProviderName.focus(); });

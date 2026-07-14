@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { Store } = require('../src/core/store');
+const { deleteCompletedDocument } = require('../src/core/document-lifecycle');
 const { InternalAgentManager, normalizeGeneratedMarkdown, planGenerationRequest, splitTextByTokenBudget } = require('../src/core/internal-agent-manager');
 const { isLoginRequiredMessage, isVideoUnavailableMessage } = require('../src/core/media-errors');
 
@@ -65,6 +66,7 @@ function assert(condition, message) {
   let holdToolRuns = false;
   let infrastructureArtifactDir = '';
   const toolRunner = {
+    getState: () => ({ hardware: { checkedAt: '', localAsrSupported: false }, config: { cpuAsrEnabled: false } }),
     start: ({ task, tool, workerId, collection: runCollection }) => {
       const id = `run-${tool.id}-${Date.now()}`;
       const loginBlocked = forceLoginFailure && tool.id === 'material-bundle' && !runCollection?.cookieFile;
@@ -87,7 +89,16 @@ function assert(condition, message) {
   let currentUser = null;
   const cookieFixture = path.join(root, 'login-cookies.txt');
   const manager = new InternalAgentManager({ store, toolRunner, ragAssistant: rag, bili: { exportCookies: async () => { fs.writeFileSync(cookieFixture, 'cookie'); return cookieFixture; } }, getCurrentUser: () => currentUser, emit: (event) => events.push(event) });
-  const collection = manager.listInternalCollections()[0];
+  const toggleCollection = manager.createInternalCollection('任务开关测试');
+  store.upsertTask({ id: `${toggleCollection.id}:disabled`, collectionId: toggleCollection.id, bvid: 'BVDISABLED01', title: '关闭任务', status: 'pending', enabled: false, favoriteAddedAt: '2026-07-15T10:00:00.000Z' });
+  store.upsertTask({ id: `${toggleCollection.id}:enabled`, collectionId: toggleCollection.id, bvid: 'BVENABLED001', title: '开启任务', status: 'pending', enabled: true, favoriteAddedAt: '2026-07-14T10:00:00.000Z' });
+  store.commit();
+  const toggleSession = manager.createSession({ title: '任务开关领取测试', collectionId: toggleCollection.id, providerId: 'provider-test', modelId: 'model-test' });
+  const toggleClaim = manager.claimNextTask(toggleSession, new Set());
+  assert(toggleClaim?.id === `${toggleCollection.id}:enabled`, 'internal Agent claimed a task disabled in Task Overview');
+  manager.abortAttempt(toggleClaim.id, toggleSession.workerId, 'test cleanup', 'test');
+  manager.deleteSession(toggleSession.id);
+  const collection = manager.listInternalCollections().find((item) => item.id !== toggleCollection.id);
   const tasksBeforeInvalidModel = store.listTasks().length;
   let invalidSingleModelRejected = false;
   try { await manager.createSingleTask({ video: 'BVINVALID001', collectionId: collection.id, providerId: 'provider-test', modelId: 'missing-model' }); }
@@ -118,36 +129,26 @@ function assert(condition, message) {
   try { await manager.createSingleTask({ video: task.bvid, collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' }); }
   catch (error) { duplicateRejected = error.message.includes('已经存在'); }
   assert(duplicateRejected, 'single-video creation bypassed the completed-document decision');
-  const regeneratedSession = await manager.createSingleTask({ video: task.bvid, collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test', duplicateAction: 'regenerate' });
+  const regeneratedSession = await manager.createSingleTask({ video: task.bvid, collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test', duplicateAction: 'overwrite' });
   await manager.start(regeneratedSession.id);
   const regenerated = await waitForSession(manager, regeneratedSession.id);
   const regeneratedTask = store.getTask(regenerated.singleTaskId);
   assert(regenerated.status === 'completed' && regeneratedTask.status === 'done', 'single-video regeneration did not complete');
-  assert(regeneratedTask.revision === 2 && regeneratedTask.revisionOfTaskId === task.id && regeneratedTask.artifactDir !== task.artifactDir, 'single-video regeneration did not create a separate version');
-  assert(store.getTask(task.id).knowledgeActive === false && regeneratedTask.knowledgeActive === true, 'RAG-active document version was not switched after regeneration acceptance');
+  assert(regeneratedTask.id === task.id && regeneratedTask.revision === 1 && !regeneratedTask.revisionOfTaskId, 'single-video overwrite created a historical task version');
+  assert(store.listTasks({ collectionId: collection.id }).filter((item) => item.singleTask && item.bvid === task.bvid).length === 1, 'single-video overwrite kept more than one task/output version');
 
-  store.upsertTask({
-    ...regeneratedTask,
-    status: 'pending',
-    outputMarkdown: '',
-    artifactDir: '',
-    completedAt: '',
-    documentDeletedAt: new Date().toISOString()
-  });
-  store.commit();
-  const tasksBeforeDeletedVersionReuse = store.listTasks({ collectionId: collection.id }).length;
-  const reusedDeletedVersion = await manager.createSingleTask({
+  const deletedSingle = deleteCompletedDocument({ store, taskId: regeneratedTask.id });
+  assert(deletedSingle.reason === 'single-task-deleted' && !store.getTask(regeneratedTask.id), 'deleting a single-video output did not remove its task record');
+  const tasksBeforeNewAfterDelete = store.listTasks({ collectionId: collection.id }).length;
+  const newAfterDelete = await manager.createSingleTask({
     video: task.bvid,
     collectionId: collection.id,
     providerId: 'provider-test',
-    modelId: 'model-test',
-    duplicateAction: 'regenerate'
+    modelId: 'model-test'
   });
-  assert(reusedDeletedVersion.singleTaskId === regeneratedTask.id && reusedDeletedVersion.reusedTask === true, 'a deleted latest version was not rebuilt in place');
-  assert(store.listTasks({ collectionId: collection.id }).length === tasksBeforeDeletedVersionReuse, 'rebuilding a deleted latest version created an orphan task version');
-  store.delete('tasks', regeneratedTask.id);
-  store.delete('internalAgentSessions', reusedDeletedVersion.id);
-  store.upsertTask({ ...task, knowledgeActive: true });
+  assert(newAfterDelete.singleTaskId !== regeneratedTask.id && store.listTasks({ collectionId: collection.id }).length === tasksBeforeNewAfterDelete + 1, 'same BV after document deletion did not start as a fresh single-video task');
+  store.delete('tasks', newAfterDelete.singleTaskId);
+  store.delete('internalAgentSessions', newAfterDelete.id);
   store.commit();
 
   const pendingSession = await manager.createSingleTask({ video: 'BVREUSABLE01', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });

@@ -3,6 +3,7 @@ const path = require('path');
 const { execFile, spawn, spawnSync } = require('child_process');
 const { promisify } = require('util');
 const { AsrService } = require('./asr-service');
+const { detectAsrHardware } = require('./hardware-capabilities');
 const { isVideoUnavailableMessage, videoUnavailableError } = require('./media-errors');
 const { ResourceScheduler } = require('./resource-scheduler');
 const { abortTaskAttempt, recoverPendingAttemptCleanups } = require('./task-attempt');
@@ -34,6 +35,7 @@ class ToolRunner {
     this.processes = new Map();
     this.config = { ...DEFAULT_CONFIG };
     this.gpu = emptyGpuState();
+    this.hardware = emptyHardwareState();
     this.initialized = false;
     this.shuttingDown = false;
     this.stateTimer = null;
@@ -67,7 +69,14 @@ class ToolRunner {
     this.registerPools();
     const cleanupRecovery = recoverPendingAttemptCleanups(this.store);
     await this.refreshGpuState();
-    if (startGpuService && this.gpu.available && this.gpu.freeMiB >= this.config.gpuStartupReserveMiB) {
+    this.hardware = await detectAsrHardware({ gpu: this.gpu, model: this.config.asrModel });
+    this.scheduler.setLaneEnabled('asr', 'gpu', this.hardware.nvidia.supported);
+    if (this.config.cpuAsrEnabled && !this.hardware.cpu.supported) {
+      this.config.cpuAsrEnabled = false;
+      this.scheduler.setLaneEnabled('asr', 'cpu', false);
+      this.persistConfig();
+    }
+    if (startGpuService && this.hardware.nvidia.supported && this.gpu.freeMiB >= this.config.gpuStartupReserveMiB) {
       try {
         await this.gpuAsr.start();
         await this.refreshGpuState();
@@ -76,9 +85,9 @@ class ToolRunner {
         this.publish({ type: 'asr-gpu-start-failed', error: error.message });
       }
     } else if (startGpuService) {
-      this.gpuAsr.lastError = this.gpu.available
+      this.gpuAsr.lastError = this.hardware.nvidia.supported
         ? `GPU free memory ${this.gpu.freeMiB} MiB is below startup reserve ${this.config.gpuStartupReserveMiB} MiB.`
-        : (this.gpu.error || 'NVIDIA GPU is unavailable.');
+        : (this.hardware.issues.join(' ') || this.gpu.error || 'NVIDIA CUDA ASR is unavailable.');
     }
     if (this.config.cpuAsrEnabled) {
       try {
@@ -123,7 +132,9 @@ class ToolRunner {
     if (this.gpuAsr.ready && this.gpuAsr.child) return this.getState();
     this.gpuAsr.model = this.config.asrModel;
     await this.refreshGpuState();
-    if (!this.gpu.available) throw new Error(this.gpu.error || 'NVIDIA GPU is unavailable.');
+    this.hardware = await detectAsrHardware({ gpu: this.gpu, model: this.config.asrModel });
+    this.scheduler.setLaneEnabled('asr', 'gpu', this.hardware.nvidia.supported);
+    if (!this.hardware.nvidia.supported) throw new Error(this.hardware.issues.join(' ') || this.gpu.error || 'NVIDIA CUDA ASR is unavailable.');
     if (this.gpu.freeMiB < this.config.gpuStartupReserveMiB) throw new Error(`GPU free memory ${this.gpu.freeMiB} MiB is below startup reserve ${this.config.gpuStartupReserveMiB} MiB.`);
     await this.gpuAsr.start();
     await this.refreshGpuState();
@@ -765,7 +776,8 @@ class ToolRunner {
 
   async gpuGate() {
     await this.refreshGpuState();
-    if (!this.gpu.available) {
+    this.syncHardwareGpuState();
+    if (!this.hardware.nvidia.supported) {
       if (this.config.cpuAsrEnabled) return { ready: false, reason: 'GPU_UNAVAILABLE', message: this.gpu.error, retryAfterMs: 5000 };
       return {
         ready: false,
@@ -773,8 +785,8 @@ class ToolRunner {
         reason: 'ASR_INFRASTRUCTURE_FAILURE',
         code: 'ASR_INFRASTRUCTURE_FAILURE',
         failureKind: 'infrastructure',
-        message: `GPU ASR 不可用且 CPU ASR 已关闭：${this.gpu.error || 'nvidia-smi 未返回可用显卡。'}`,
-        possibleCauses: ['NVIDIA 驱动或 nvidia-smi 不可用', '当前设备没有可用 NVIDIA GPU', '可修复 GPU 环境，或在设置中手动启用 CPU ASR']
+        message: `GPU ASR 不可用且 CPU ASR 已关闭：${this.hardware.issues.join(' ') || this.gpu.error || '未检测到兼容的 NVIDIA/CUDA 环境。'}`,
+        possibleCauses: ['当前设备没有兼容的 NVIDIA GPU', 'NVIDIA 驱动、CUDA 运行库或 CTranslate2 设备检测失败', this.hardware.cpu.supported ? '可在设置中手动启用 CPU ASR' : '当前 CPU/内存环境也不满足本地 ASR 条件']
       };
     }
     if (!this.gpuAsr.ready) {
@@ -809,6 +821,9 @@ class ToolRunner {
 
   async cpuGate() {
     if (!this.config.cpuAsrEnabled) return { ready: false, reason: 'CPU_ASR_DISABLED', retryAfterMs: 5000 };
+    if (!this.hardware.cpu.supported) {
+      return { ready: false, fatal: true, reason: 'ASR_HARDWARE_UNSUPPORTED', code: 'ASR_HARDWARE_UNSUPPORTED', failureKind: 'infrastructure', message: this.hardware.recommendation, possibleCauses: this.hardware.issues };
+    }
     try {
       await this.cpuAsr.start();
       return { ready: true };
@@ -879,6 +894,7 @@ class ToolRunner {
     } catch (error) {
       this.gpu = { ...emptyGpuState(), error: error.message || String(error), checkedAt: new Date().toISOString() };
     }
+    if (this.hardware?.checkedAt) this.syncHardwareGpuState();
     this.notifyState();
     return this.gpu;
   }
@@ -888,6 +904,10 @@ class ToolRunner {
     const modelChanged = next.asrModel !== this.config.asrModel;
     const enablingCpu = !this.config.cpuAsrEnabled && next.cpuAsrEnabled;
     let cpuStartError = null;
+
+    if (enablingCpu && !this.hardware.cpu.supported) {
+      throw new Error(`当前硬件环境不支持所选模型的 CPU ASR：${this.hardware.issues.join(' ') || this.hardware.recommendation}`);
+    }
 
     if (modelChanged) {
       const asrPool = this.scheduler.snapshot().pools?.asr;
@@ -906,7 +926,7 @@ class ToolRunner {
       try {
         await waitForServicesStopped([this.gpuAsr, this.cpuAsr]);
       } catch (error) {
-        this.scheduler.setLaneEnabled('asr', 'gpu', true);
+        this.scheduler.setLaneEnabled('asr', 'gpu', this.hardware.nvidia.supported);
         this.scheduler.setLaneEnabled('asr', 'cpu', this.config.cpuAsrEnabled);
         this.notifyState(true);
         throw error;
@@ -918,7 +938,12 @@ class ToolRunner {
     this.cpuAsr.model = next.asrModel;
     if (modelChanged) {
       await this.refreshGpuState();
-      if (this.gpu.available && this.gpu.freeMiB >= this.config.gpuStartupReserveMiB) {
+      this.hardware = await detectAsrHardware({ gpu: this.gpu, model: next.asrModel });
+      if (next.cpuAsrEnabled && !this.hardware.cpu.supported) {
+        this.config.cpuAsrEnabled = false;
+        cpuStartError = new Error(`所选模型不满足 CPU ASR 条件：${this.hardware.issues.join(' ') || this.hardware.recommendation}`);
+      }
+      if (this.hardware.nvidia.supported && this.gpu.freeMiB >= this.config.gpuStartupReserveMiB) {
         try { await this.gpuAsr.start(); }
         catch (error) {
           this.gpuAsr.lastError = error.message;
@@ -926,7 +951,7 @@ class ToolRunner {
         }
       }
     }
-    if (enablingCpu || (modelChanged && next.cpuAsrEnabled)) {
+    if (this.config.cpuAsrEnabled && (enablingCpu || modelChanged)) {
       try {
         await this.cpuAsr.start();
       } catch (error) {
@@ -934,7 +959,7 @@ class ToolRunner {
         cpuStartError = error;
       }
     }
-    this.scheduler.setLaneEnabled('asr', 'gpu', true);
+    this.scheduler.setLaneEnabled('asr', 'gpu', this.hardware.nvidia.supported);
     this.scheduler.setLaneEnabled('asr', 'cpu', this.config.cpuAsrEnabled);
     this.persistConfig();
     if (!this.config.cpuAsrEnabled) this.stopCpuWhenIdle();
@@ -969,6 +994,7 @@ class ToolRunner {
       ready: this.initialized && !this.shuttingDown,
       config: this.getConfig(),
       gpu: { ...this.gpu },
+      hardware: JSON.parse(JSON.stringify(this.hardware)),
       services: { gpu: this.gpuAsr.status(), cpu: this.cpuAsr.status() },
       maintenance: this.maintenance ? { ...this.maintenance } : null,
       pools,
@@ -992,6 +1018,18 @@ class ToolRunner {
       this.stateTimer = null;
       this.onState(this.getState());
     }, 100);
+  }
+
+  syncHardwareGpuState() {
+    if (!this.hardware?.nvidia) return;
+    const minimum = this.config.asrModel === 'small' ? 2048 : 4096;
+    this.hardware.nvidia.detected = Boolean(this.gpu.available);
+    this.hardware.nvidia.name = String(this.gpu.name || '');
+    this.hardware.nvidia.totalMiB = Number(this.gpu.totalMiB || 0);
+    this.hardware.nvidia.supported = Boolean(this.hardware.runtime?.ready && this.gpu.available && Number(this.hardware.nvidia.cudaDeviceCount || 0) > 0 && Number(this.gpu.totalMiB || 0) >= minimum);
+    this.hardware.localAsrSupported = Boolean(this.hardware.nvidia.supported || this.hardware.cpu?.supported);
+    this.hardware.preferredMode = this.hardware.nvidia.supported ? 'cuda' : this.hardware.cpu?.supported ? 'cpu' : 'unavailable';
+    if (this.scheduler.pools?.has?.('asr')) this.scheduler.setLaneEnabled('asr', 'gpu', this.hardware.nvidia.supported);
   }
 
   shutdown() {
@@ -1237,6 +1275,21 @@ function displayCommand(args) {
 
 function emptyGpuState() {
   return { available: false, index: 0, name: '', totalMiB: 0, usedMiB: 0, freeMiB: 0, error: '', checkedAt: '' };
+}
+
+function emptyHardwareState() {
+  return {
+    checkedAt: '',
+    selectedModel: 'medium',
+    localAsrSupported: false,
+    preferredMode: 'unavailable',
+    runtime: { ready: false, pythonAvailable: false, modelReady: false, error: '' },
+    system: { platform: process.platform, arch: process.arch, totalMemoryMiB: 0, cpuThreads: 0 },
+    nvidia: { detected: false, name: '', totalMiB: 0, cudaDeviceCount: 0, supported: false },
+    cpu: { supported: false, architectureSupported: false, minimumMemoryMiB: 0 },
+    issues: ['ASR hardware detection has not completed.'],
+    recommendation: 'Wait for ASR hardware detection.'
+  };
 }
 
 function diagnoseAsrFailure(service, label) {

@@ -146,8 +146,6 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   store.upsertTask({ id: 'c2:BVDISABLED', collectionId: 'c2', bvid: 'BVDISABLED', title: 'Disabled', status: 'pending', enabled: false, favoriteAddedAt: '2999-01-01T00:00:00.000Z' });
   store.upsertTask({ id: 'c2:BVENABLED', collectionId: 'c2', bvid: 'BVENABLED', title: 'Enabled', status: 'pending', enabled: true, favoriteAddedAt: '2025-01-01T00:00:00.000Z', cookieFile: path.join(WORKSPACE_ROOT, 'private-task-cookie.txt') });
   store.commit();
-  store.setActiveCollection('c2');
-  if (store.getActiveCollection()?.id !== 'c2') throw new Error('active collection persistence failed');
   const healthRunner = new ToolRunner({ store });
   if (healthRunner.config.asrModel !== 'medium') throw new Error('medium ASR model must be the default');
   const canonicalArgs = healthRunner.buildArgs({
@@ -160,205 +158,87 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   if (!canonicalArgs.includes('BVTEST') || canonicalArgs.includes('bilibili://video/123')) throw new Error('tool target must prefer bvid over app-deep-link URL');
   const toolHealth = await healthRunner.probeTools(store.listTools());
   if (toolHealth.length !== store.listTools().length || toolHealth.some((item) => !item.responded)) throw new Error('tool interface health probe failed');
-  const api = new ApiServer({ store, bili: {}, toolRunner: healthRunner, getCurrentUser: () => null, getToolHealth: () => toolHealth });
-  await api.start(0);
-  const registerResponse = await fetch(`${api.url()}/api/workers/register`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ tool: 'codex', model: 'smoke-model', sessionLabel: 'smoke' })
+  const registration = { workerId: store.registerWorker({ tool: 'star-owner-internal', model: 'smoke-model', sessionLabel: 'smoke internal worker', metadata: { internalAgent: true } }).id };
+  const knowledgeCollection = {
+    id: 'knowledge-smoke',
+    mediaId: 'knowledge-smoke',
+    name: 'Knowledge smoke',
+    sourceName: 'Knowledge smoke',
+    userId: 'u1',
+    userName: 'smoke-user',
+    syncReady: true,
+    syncState: 'ready'
+  };
+  const knowledgeArtifact = path.join(extraRoot, 'smoke-user', 'Knowledge smoke', 'BVKNOWLEDGE1');
+  const knowledgeMarkdown = path.join(knowledgeArtifact, 'summary.md');
+  const knowledgeImage = path.join(knowledgeArtifact, 'cover.png');
+  fs.mkdirSync(knowledgeArtifact, { recursive: true });
+  fs.writeFileSync(knowledgeMarkdown, '# Knowledge smoke\n\nExact raw knowledge line.\n\nSecond page content.\n', 'utf8');
+  fs.writeFileSync(knowledgeImage, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'));
+  store.upsertCollection(knowledgeCollection);
+  store.upsertTask({
+    id: 'knowledge-smoke:BVKNOWLEDGE1',
+    collectionId: knowledgeCollection.id,
+    bvid: 'BVKNOWLEDGE1',
+    title: 'Knowledge smoke document',
+    owner: 'Smoke UP',
+    tags: ['AI', 'Smoke'],
+    status: 'done',
+    enabled: true,
+    artifactDir: knowledgeArtifact,
+    outputMarkdown: knowledgeMarkdown,
+    coverFile: knowledgeImage,
+    allowedRoot: extraRoot,
+    workspaceRoot: extraRoot,
+    publishedAt: '2026-07-01T01:00:00.000Z',
+    favoriteAddedAt: '2026-07-02T02:00:00.000Z',
+    completedAt: '2026-07-03T03:00:00.000Z',
+    createdAt: '2026-07-02T02:00:00.000Z'
   });
-  const registration = await registerResponse.json();
-  if (!registerResponse.ok || !registration.workerId) throw new Error('worker registration failed');
-  const manifestResponse = await fetch(`${api.url()}/api/manifest?workerId=${registration.workerId}`);
-  const manifest = await manifestResponse.json();
-  if (!manifestResponse.ok || manifest.worker?.workerId !== registration.workerId || !manifest.endpoints?.length) throw new Error('API manifest failed');
-  if (manifest.protocolVersion !== '2.8' || manifest.activeCollection?.cookieFile) throw new Error('API manifest exposed a cookie path or stale protocol contract');
-  const collectionsResponse = await fetch(`${api.url()}/api/collections`);
-  const collectionsPayload = await collectionsResponse.json();
-  if (!collectionsResponse.ok || collectionsPayload.collections.some((item) => Object.prototype.hasOwnProperty.call(item, 'cookieFile'))) throw new Error('collection API exposed a cookie path');
-  const tasksResponse = await fetch(`${api.url()}/api/tasks?collectionId=c2`);
-  const tasksPayload = await tasksResponse.json();
-  if (!tasksResponse.ok || tasksPayload.tasks.some((item) => Object.prototype.hasOwnProperty.call(item, 'cookieFile'))) throw new Error('task list API exposed a cookie path');
-  const templateResponse = await fetch(`${api.url()}/api/templates/video-summary`);
-  const template = await templateResponse.json();
-  if (!templateResponse.ok || !template.template?.includes('## 字幕比对')) throw new Error('Markdown template API failed');
-  const summaryPosition = template.template.indexOf('## 小结');
-  const mindMapPosition = template.template.indexOf('## 思维导图');
-  const contentsPosition = template.template.indexOf('## 目录');
-  if (!(summaryPosition >= 0 && mindMapPosition > summaryPosition && contentsPosition > mindMapPosition)) throw new Error('Markdown opening order failed');
-  const healthResponse = await fetch(`${api.url()}/api/tool-health`);
-  const healthPayload = await healthResponse.json();
-  if (!healthResponse.ok || healthPayload.tools?.length !== toolHealth.length) throw new Error('tool health API failed');
-  const activeResponse = await fetch(`${api.url()}/api/active-collection`);
-  const active = await activeResponse.json();
-  if (!activeResponse.ok || active.collection?.id !== 'c2') throw new Error('active collection API failed');
-  store.upsertCollection({ id: 'c-sync-guard', mediaId: 'sync-guard', name: 'Sync guard', userId: 'u1', userName: 'smoke-user', syncReady: false, syncState: 'needs-sync', externalDispatchPaused: true });
-  store.setActiveCollection('c-sync-guard');
-  const unsyncedClaimResponse = await fetch(`${api.url()}/api/tasks/claim`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ workerId: registration.workerId })
-  });
-  const unsyncedClaim = await unsyncedClaimResponse.json();
-  if (unsyncedClaimResponse.status !== 423 || unsyncedClaim.code !== 'COLLECTION_NOT_READY') throw new Error('external Agent bypassed an unsynchronized Bilibili collection');
-  store.upsertCollection({ ...store.getCollectionById('c-sync-guard'), syncReady: true, syncState: 'ready', lastSyncedAt: new Date().toISOString(), externalDispatchPaused: true });
-  const syncPausedClaimResponse = await fetch(`${api.url()}/api/tasks/claim`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ workerId: registration.workerId })
-  });
-  const syncPausedClaim = await syncPausedClaimResponse.json();
-  if (syncPausedClaimResponse.status !== 423 || syncPausedClaim.code !== 'COLLECTION_REACTIVATION_REQUIRED') throw new Error('external Agent bypassed post-sync manual reactivation');
-  store.set('removedFavoriteTasks', 'c-sync-guard:BVREMOVED', { id: 'c-sync-guard:BVREMOVED', taskId: 'c-sync-guard:BVREMOVED', bvid: 'BVREMOVED', removedAt: new Date().toISOString() });
   store.commit();
-  const removedTaskResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent('c-sync-guard:BVREMOVED')}`);
-  const removedTask = await removedTaskResponse.json();
-  if (removedTaskResponse.status !== 410 || removedTask.code !== 'REMOVED_FROM_FAVORITES') throw new Error('removed favorite did not invalidate the old external work context');
-  store.setActiveCollection('c2');
-  const claimResponse = await fetch(`${api.url()}/api/tasks/claim`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ workerId: registration.workerId })
-  });
-  const claim = await claimResponse.json();
-  if (!claimResponse.ok || claim.task?.bvid !== 'BVENABLED') throw new Error('disabled task was claimable');
-  if (Object.prototype.hasOwnProperty.call(claim.task, 'cookieFile')) throw new Error('claimed task exposed a cookie path');
-  if (!claim.task.workId?.startsWith('work-')) throw new Error('claim did not return a one-time workId');
-  if (!claim.task.abortUsage || !claim.task.requirements?.interruption?.includes('/abort')) throw new Error('claim context omitted attempt-abort instructions');
-  const firstWorkId = claim.task.workId;
-  const unauthenticatedTaskResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(claim.task.id)}`);
-  if (unauthenticatedTaskResponse.status !== 401) throw new Error('active task details were readable without workerId/workId credentials');
-  const publicTasks = await (await fetch(`${api.url()}/api/tasks`)).json();
-  const publicClaimedTask = publicTasks.tasks.find((item) => item.id === claim.task.id);
-  if (publicClaimedTask?.workId || publicClaimedTask?.artifactDir || publicClaimedTask?.workspaceRoot || publicClaimedTask?.cookieFile) {
-    throw new Error('public task inventory exposed work credentials or local paths');
-  }
-  store.createToolRun({
-    id: 'conflicting-active-run',
-    taskId: claim.task.id,
-    collectionId: claim.task.collectionId,
-    toolId: 'material-bundle',
-    toolName: '素材流水线',
-    workerId: registration.workerId,
-    workId: firstWorkId,
-    status: 'running',
-    artifactDir: claim.task.artifactDir,
-    createdAt: new Date().toISOString()
-  });
-  const conflictingToolResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(claim.task.id)}/tools/bili-subtitles/run`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ workerId: registration.workerId, workId: firstWorkId })
-  });
-  const conflictingTool = await conflictingToolResponse.json();
-  if (conflictingToolResponse.status !== 409 || conflictingTool.code !== 'TOOL_RUN_ALREADY_ACTIVE' || conflictingTool.activeRuns?.[0]?.id !== 'conflicting-active-run') {
-    throw new Error('a second tool was allowed to write the same active work-attempt directory');
-  }
-  if (!conflictingTool.directive?.path?.includes(`workerId=${encodeURIComponent(registration.workerId)}`)
-    || !conflictingTool.directive?.path?.includes(`workId=${encodeURIComponent(firstWorkId)}`)) {
-    throw new Error('duplicate tool guidance omitted the credentials required by its polling endpoint');
-  }
-  store.updateToolRun('conflicting-active-run', { status: 'cancelled', finishedAt: new Date().toISOString() });
-  const missingWorkIdResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(claim.task.id)}/heartbeat`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ workerId: registration.workerId })
-  });
-  const missingWorkId = await missingWorkIdResponse.json();
-  if (missingWorkIdResponse.status !== 400 || missingWorkId.code !== 'WORK_ID_REQUIRED') throw new Error('task API accepted a missing workId');
-  const abortArtifactDir = claim.task.artifactDir;
-  fs.writeFileSync(path.join(abortArtifactDir, 'partial.md'), '# interrupted');
-  store.createToolRun({
-    id: 'abort-run',
-    taskId: claim.task.id,
-    collectionId: claim.task.collectionId,
-    toolId: 'material-bundle',
-    toolName: '素材流水线',
-    workerId: registration.workerId,
-    workId: firstWorkId,
-    status: 'queued',
-    artifactDir: abortArtifactDir,
-    createdAt: new Date().toISOString()
-  });
-  const abortResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(claim.task.id)}/abort`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ workerId: registration.workerId, workId: firstWorkId, reason: 'smoke interruption' })
-  });
-  const aborted = await abortResponse.json();
-  if (!abortResponse.ok || !aborted.aborted || aborted.task?.status !== 'pending') throw new Error('task abort API failed');
-  if (aborted.endedWorkId !== firstWorkId || aborted.task?.workId) throw new Error('task abort did not invalidate workId');
-  if (fs.existsSync(abortArtifactDir) || store.getToolRun('abort-run')?.status !== 'cancelled') throw new Error('task abort API left attempt files or active runs behind');
-  const staleHeartbeatResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(claim.task.id)}/heartbeat`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ workerId: registration.workerId, workId: firstWorkId })
-  });
-  const staleHeartbeat = await staleHeartbeatResponse.json();
-  if (staleHeartbeatResponse.status !== 409 || staleHeartbeat.code !== 'WORK_ATTEMPT_ENDED' || staleHeartbeat.directive?.action !== 'claim-new-task' || staleHeartbeat.directive?.keepWorkerId !== true) throw new Error('stale workId did not receive claim-new-task guidance');
-  const unauthenticatedRunResponse = await fetch(`${api.url()}/api/tool-runs/abort-run?log=1`);
-  if (unauthenticatedRunResponse.status !== 401) throw new Error('tool run details and logs were readable without work credentials');
-  const endedRunResponse = await fetch(`${api.url()}/api/tool-runs/abort-run?workerId=${encodeURIComponent(registration.workerId)}&workId=${encodeURIComponent(firstWorkId)}`);
-  const endedRun = await endedRunResponse.json();
-  if (endedRun.workAttempt?.active !== false || endedRun.workAttempt?.code !== 'WORK_ATTEMPT_ENDED') throw new Error('tool polling did not expose ended work attempt');
-  const reclaimResponse = await fetch(`${api.url()}/api/tasks/claim`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ workerId: registration.workerId })
-  });
-  const reclaimed = await reclaimResponse.json();
-  if (!reclaimResponse.ok || reclaimed.task?.id !== claim.task.id || !reclaimed.task.workId || reclaimed.task.workId === firstWorkId) throw new Error('reclaim did not issue a fresh workId');
-  const supersededResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(reclaimed.task.id)}/heartbeat`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ workerId: registration.workerId, workId: firstWorkId })
-  });
-  const superseded = await supersededResponse.json();
-  if (supersededResponse.status !== 409 || superseded.code !== 'WORK_ATTEMPT_ENDED') throw new Error('old workId became valid after the same task was reclaimed');
-  const rejectedResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(reclaimed.task.id)}/submit`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ workerId: registration.workerId, workId: reclaimed.task.workId, artifactDir: reclaimed.task.artifactDir, markdownFile: path.join(reclaimed.task.artifactDir, 'missing.md'), metadataFile: path.join(reclaimed.task.artifactDir, 'missing-info.json') })
-  });
-  if (rejectedResponse.status !== 422 || store.getTask(reclaimed.task.id)?.status !== 'rejected') throw new Error('invalid submission did not keep the active work attempt in rejected state');
-  const rejectedClaimResponse = await fetch(`${api.url()}/api/tasks/claim`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ workerId: registration.workerId })
-  });
-  const rejectedClaim = await rejectedClaimResponse.json();
-  if (rejectedClaimResponse.status !== 409 || rejectedClaim.code !== 'WORKER_ALREADY_HAS_TASK' || rejectedClaim.workId !== reclaimed.task.workId) {
-    throw new Error('worker was not directed back to its rejected active work attempt');
-  }
-  if (!rejectedClaim.directive?.path?.includes(`workerId=${encodeURIComponent(registration.workerId)}`)
-    || !rejectedClaim.directive?.path?.includes(`workId=${encodeURIComponent(reclaimed.task.workId)}`)) {
-    throw new Error('existing-attempt guidance omitted the credentials required to reopen the task');
-  }
-  const rejectedStats = buildAnalytics(store);
-  const rejectedWorkerStats = rejectedStats.workers.find((item) => item.workerId === registration.workerId);
-  if (rejectedWorkerStats?.activeTasks !== 1 || rejectedStats.collections.c2?.claimed !== 1 || rejectedStats.collections.c2?.failed !== 0) {
-    throw new Error('active rejected work attempt was reported as inactive or terminally failed');
-  }
-  store.set('unavailableTasks', 'missing-unavailable-task', { id: 'missing-unavailable-task', taskId: 'missing-unavailable-task', collectionId: 'c1', bvid: 'BVUNAVAILABLE1', title: 'Removed video', reason: 'Uploader removed this video.', source: 'smoke', removedAt: new Date().toISOString() });
-  store.commit();
-  const unavailableResponse = await fetch(`${api.url()}/api/tasks/missing-unavailable-task`);
-  const unavailablePayload = await unavailableResponse.json();
-  if (unavailableResponse.status !== 410 || unavailablePayload.unavailable?.reason !== 'Uploader removed this video.' || unavailablePayload.directive?.action !== 'stop') {
-    throw new Error('unavailable-task API response dropped tombstone details');
-  }
-  const secondAbortResponse = await fetch(`${api.url()}/api/tasks/${encodeURIComponent(reclaimed.task.id)}/abort`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ workerId: registration.workerId, workId: reclaimed.task.workId, reason: 'finish smoke cleanup' })
-  });
-  if (!secondAbortResponse.ok) throw new Error('second work attempt cleanup failed');
-  const pausedWorker = store.updateWorker(registration.workerId, { status: 'paused', pauseReason: 'smoke pause' });
-  if (pausedWorker.status !== 'paused') throw new Error('worker pause failed');
-  const pausedClaimResponse = await fetch(`${api.url()}/api/tasks/claim`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ workerId: registration.workerId })
-  });
-  const pausedClaim = await pausedClaimResponse.json();
-  api.stop();
-  if (pausedClaimResponse.status !== 423 || !pausedClaim.userMessage.startsWith('来自用户的信息，你需要暂停工作') || pausedClaim.directive?.action !== 'stop-and-report' || pausedClaim.directive?.reason !== 'smoke pause') throw new Error('paused worker allocation guard failed');
 
+  const api = new ApiServer({ store });
+  await api.start(0);
+  try {
+    const manifestResponse = await fetch(api.url() + '/api/manifest');
+    const manifest = await manifestResponse.json();
+    if (!manifestResponse.ok || manifest.protocolVersion !== '3.0' || manifest.mode !== 'knowledge-read-only' || manifest.access?.videoWorkflowApi !== false || !Array.isArray(manifest.endpoints)) throw new Error('read-only knowledge manifest failed');
+
+    const catalogResponse = await fetch(api.url() + '/api/knowledge/catalog');
+    const catalog = await catalogResponse.json();
+    if (!catalogResponse.ok || !catalog.collections.some((item) => item.id === knowledgeCollection.id && item.documentCount === 1)) throw new Error('knowledge catalog omitted a completed collection');
+
+    const documentsResponse = await fetch(api.url() + '/api/knowledge/documents?collectionId=' + encodeURIComponent(knowledgeCollection.id) + '&limit=1');
+    const documents = await documentsResponse.json();
+    const document = documents.documents?.[0];
+    if (!documentsResponse.ok || documents.total !== 1 || document?.bvid !== 'BVKNOWLEDGE1' || document.publishedAt !== '2026-07-01T01:00:00.000Z' || document.favoriteAddedAt !== '2026-07-02T02:00:00.000Z') throw new Error('knowledge document directory or date metadata failed');
+    const serializedDirectory = JSON.stringify(documents);
+    if (serializedDirectory.includes(extraRoot) || serializedDirectory.includes('cookieFile') || serializedDirectory.includes('outputMarkdown')) throw new Error('knowledge directory exposed local paths or private fields');
+
+    const contentResponse = await fetch(api.url() + '/api/knowledge/documents/' + encodeURIComponent(document.id) + '/content?startLine=1&lineCount=2');
+    const content = await contentResponse.json();
+    if (!contentResponse.ok || content.exactSource !== true || content.content !== '# Knowledge smoke\n' || content.nextStartLine !== 3) throw new Error('exact Markdown line paging failed');
+    const secondContent = await (await fetch(api.url() + '/api/knowledge/documents/' + encodeURIComponent(document.id) + '/content?startLine=' + content.nextStartLine + '&lineCount=20')).json();
+    if (!secondContent.content.includes('Exact raw knowledge line.') || secondContent.nextStartLine !== null) throw new Error('knowledge Markdown continuation failed');
+
+    const assetsResponse = await fetch(api.url() + '/api/knowledge/documents/' + encodeURIComponent(document.id) + '/assets');
+    const assets = await assetsResponse.json();
+    if (!assetsResponse.ok || assets.assets.length !== 1 || assets.assets[0].mimeType !== 'image/png') throw new Error('knowledge asset listing failed');
+    const imageResponse = await fetch(assets.assets[0].url);
+    if (!imageResponse.ok || imageResponse.headers.get('content-type') !== 'image/png' || !(await imageResponse.arrayBuffer()).byteLength) throw new Error('knowledge image read failed');
+
+    const searchResponse = await fetch(api.url() + '/api/knowledge/search?q=' + encodeURIComponent('raw knowledge') + '&collectionId=' + encodeURIComponent(knowledgeCollection.id));
+    const search = await searchResponse.json();
+    if (!searchResponse.ok || search.results?.[0]?.id !== document.id || search.scannedDocuments !== 1) throw new Error('knowledge search failed');
+
+    for (const endpoint of ['/api/workers/register', '/api/tasks/claim', '/api/tools', '/api/tool-runs/run-1']) {
+      const response = await fetch(api.url() + endpoint, { method: endpoint.endsWith('register') || endpoint.endsWith('claim') ? 'POST' : 'GET' });
+      const payload = await response.json();
+      if (response.status !== 410 || payload.code !== 'EXTERNAL_VIDEO_WORKFLOW_DISABLED') throw new Error('legacy external video endpoint remained active: ' + endpoint);
+    }
+  } finally {
+    api.stop();
+  }
   store.setDefaultWorkspace(defaultWorkspace.id);
   store.removeWorkspace(extraWorkspace.id);
 

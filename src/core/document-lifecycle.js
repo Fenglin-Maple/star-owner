@@ -1,6 +1,5 @@
 const { collectionStorageName, isBiliCollection, taskSourceTitle } = require('./collection-state');
 const { cleanupAttemptFiles, cleanupTaskSnapshot } = require('./task-attempt');
-const { activateLatestKnowledgeVersion } = require('./task-versions');
 
 function deleteCompletedDocument({ store, taskId, source = 'document-library' }) {
   const task = store.getTask(String(taskId || ''));
@@ -8,35 +7,49 @@ function deleteCompletedDocument({ store, taskId, source = 'document-library' })
   const collection = store.getCollectionById(task.collectionId);
   if (!collection) throw new Error('文档所属收藏夹不存在，无法安全更新任务状态。');
 
+  const singleFamily = task.singleTask === true
+    ? store.listTasks({ collectionId: task.collectionId }).filter((item) => item.singleTask === true && item.bvid === task.bvid)
+    : [task];
+  const cleanups = singleFamily.map((item) => ({ taskId: item.id, cleanupTask: cleanupTaskSnapshot(item), cleanup: cleanupAttemptFiles(store, item) }));
   const cleanupTask = cleanupTaskSnapshot(task);
-  const cleanup = cleanupAttemptFiles(store, task);
+  const cleanup = cleanups.find((item) => item.taskId === task.id)?.cleanup || { mode: 'none', deleted: [], preserved: [] };
   const remoteMembershipGone = isBiliCollection(collection) && (
     collection.biliDeleted
     || task.removedFromFavorites
     || ['removed', 'collection-deleted'].includes(task.favoriteState)
   );
+  const restoreToPending = isBiliCollection(collection) && !remoteMembershipGone && task.singleTask !== true;
   const now = new Date().toISOString();
   let restored = false;
   let removed = false;
 
   store.transaction(() => {
-    if (remoteMembershipGone) {
-      store.delete('tasks', task.id);
-      store.delete('videos', task.id);
-      store.set('removedFavoriteTasks', task.id, {
-        ...(store.get('removedFavoriteTasks', task.id) || {}),
-        id: task.id,
-        taskId: task.id,
-        collectionId: task.collectionId,
-        bvid: task.bvid,
-        title: taskSourceTitle(task),
-        reason: collection.biliDeleted
-          ? 'B站收藏夹已删除，文档被用户删除后不恢复总结任务。'
-          : '视频已移出B站收藏夹，文档被用户删除后不恢复总结任务。',
-        removedAt: now,
-        cleanupPending: false,
-        cleanupTask
-      });
+    if (!restoreToPending) {
+      for (const removedTask of singleFamily) {
+        store.delete('tasks', removedTask.id);
+        store.delete('videos', removedTask.id);
+        for (const session of store.list('internalAgentSessions').filter((item) => item.singleTaskId === removedTask.id)) {
+          store.delete('internalAgentSessions', session.id);
+          const worker = store.getWorker(session.workerId);
+          if (worker) store.set('workers', worker.id, { ...worker, status: 'paused', pauseReason: '对应的单视频总结产物已被用户删除。', pausedAt: worker.pausedAt || now, updatedAt: now });
+        }
+      }
+      if (remoteMembershipGone) {
+        store.set('removedFavoriteTasks', task.id, {
+          ...(store.get('removedFavoriteTasks', task.id) || {}),
+          id: task.id,
+          taskId: task.id,
+          collectionId: task.collectionId,
+          bvid: task.bvid,
+          title: taskSourceTitle(task),
+          reason: collection.biliDeleted
+            ? 'B站收藏夹已删除，文档被用户删除后不恢复总结任务。'
+            : '视频已移出B站收藏夹，文档被用户删除后不恢复总结任务。',
+          removedAt: now,
+          cleanupPending: false,
+          cleanupTask
+        });
+      }
       removed = true;
     } else {
       const cache = task.cachedVideoId ? store.getVideoCache(task.cachedVideoId) : null;
@@ -72,7 +85,6 @@ function deleteCompletedDocument({ store, taskId, source = 'document-library' })
       restored = true;
     }
 
-    activateLatestKnowledgeVersion(store, task);
     const latestCollection = store.getCollectionById(collection.id);
     if (latestCollection) {
       const tasks = store.listTasks({ collectionId: collection.id });
@@ -93,7 +105,8 @@ function deleteCompletedDocument({ store, taskId, source = 'document-library' })
     source,
     restored,
     removed,
-    cleanup
+    cleanup,
+    cleanups
   });
   return {
     taskId: task.id,
@@ -103,9 +116,10 @@ function deleteCompletedDocument({ store, taskId, source = 'document-library' })
     restored,
     removed,
     reason: removed
-      ? (collection.biliDeleted ? 'collection-deleted' : 'removed-from-favorites')
+      ? (task.singleTask ? 'single-task-deleted' : remoteMembershipGone ? (collection.biliDeleted ? 'collection-deleted' : 'removed-from-favorites') : 'local-task-deleted')
       : 'pending',
-    cleanup
+    cleanup,
+    cleanups
   };
 }
 

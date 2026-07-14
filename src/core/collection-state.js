@@ -43,13 +43,12 @@ function collectionSyncReady(collection = {}) {
   return collection.syncReady === undefined && Boolean(collection.lastSyncedAt);
 }
 
-function collectionBlockReason(collection = {}, { external = false } = {}) {
+function collectionBlockReason(collection = {}) {
   if (!collection || !collection.id) return '收藏夹不存在。';
   if (!isBiliCollection(collection)) return '';
   if (collection.biliDeleted) return 'B站收藏夹已删除，已完成产物仍可阅读，但不能继续派发视频总结任务。';
   if (collection.syncState === 'syncing') return '该收藏夹正在同步，Agent 任务已暂停。';
   if (!collectionSyncReady(collection)) return '该收藏夹尚未完成任务同步，请先在「收藏夹同步」中完成同步。';
-  if (external && collection.externalDispatchPaused) return '收藏夹同步后尚未重新激活外部 Agent 任务范围。';
   return '';
 }
 

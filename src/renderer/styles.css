@@ -561,16 +561,25 @@ body.theme-claude .nav-group-toggle { font-family: var(--font-ui); }
 .nav-chevron { width: 13px !important; height: 13px !important; color: var(--muted-2) !important; transition: transform .18s ease; }
 .nav-group.open > .nav-group-toggle .nav-chevron { transform: rotate(90deg); }
 .nav-submenu { max-height: 0; display: grid; gap: 2px; overflow: hidden; opacity: 0; transition: max-height .2s ease, opacity .15s ease; }
-.nav-group.open > .nav-submenu { max-height: 180px; opacity: 1; }
+.nav-group.open > .nav-submenu { max-height: 220px; opacity: 1; }
 .nav-subitem { height: 32px; padding-left: 22px; color: var(--muted); font-size: 11.5px; font-weight: 500; }
 .nav-subitem.active { color: var(--text); }
 .nav-subitem svg { width: 14px; height: 14px; }
+.nav-subgroup { min-width: 0; display: grid; gap: 2px; }
+.nav-subgroup-toggle { height: 32px; display: grid; grid-template-columns: 22px minmax(0, 1fr) 14px; align-items: center; gap: 9px; min-width: 0; padding: 0 10px 0 22px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font: 500 11.5px var(--font-ui); text-align: left; }
+.nav-subgroup-toggle:hover, .nav-subgroup.contains-active > .nav-subgroup-toggle { color: var(--text); background: color-mix(in srgb, var(--row-hover) 48%, transparent); }
+.nav-subgroup-toggle > svg:first-child { width: 14px; height: 14px; justify-self: center; }
+.nav-subgroup-toggle span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-subgroup.open > .nav-subgroup-toggle .nav-chevron { transform: rotate(90deg); }
+.nav-tertiary-menu { max-height: 0; display: grid; gap: 2px; overflow: hidden; opacity: 0; transition: max-height .18s ease, opacity .14s ease; }
+.nav-subgroup.open > .nav-tertiary-menu { max-height: 104px; opacity: 1; }
+.nav-tertiary-item { height: 30px; padding-left: 38px; font-size: 11px; }
 body.sidebar-collapsed .nav-item,
 body.sidebar-collapsed .nav-group-toggle { grid-template-columns: 1fr; justify-items: center; padding: 0; }
 body.sidebar-collapsed .nav-item span,
 body.sidebar-collapsed .nav-group-toggle span,
 body.sidebar-collapsed .nav-chevron { position: absolute; opacity: 0; pointer-events: none; }
-body.sidebar-collapsed .nav-submenu { max-height: 0; opacity: 0; }
+body.sidebar-collapsed .nav-submenu, body.sidebar-collapsed .nav-tertiary-menu { max-height: 0; opacity: 0; }
 
 .main {
   position: relative;
@@ -1035,6 +1044,14 @@ webview { width: 100%; height: 100%; }
 .scheduler-asr-row strong, .scheduler-asr-row span { display: block; }
 .scheduler-asr-row strong { font-size: 11px; }
 .scheduler-asr-row span { margin-top: 2px; color: var(--muted); font-size: 9px; }
+.asr-hardware-status { display: grid; gap: 4px; padding: 7px 9px; border: 1px solid color-mix(in srgb, var(--line) 65%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--bg) 28%, transparent); }
+.asr-hardware-status > div { min-width: 0; display: flex; align-items: center; gap: 7px; }
+.asr-hardware-status > div > span { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--warning); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 12%, transparent); }
+.asr-hardware-status strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.asr-hardware-status p { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+.asr-hardware-status[data-state="ready"] > div > span { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 12%, transparent); }
+.asr-hardware-status[data-state="cpu"] > div > span { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); }
+.asr-hardware-status[data-state="unsupported"] > div > span { background: var(--red); box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 12%, transparent); }
 .gpu-memory-row { display: grid; gap: 5px; padding: 0 2px; }
 .gpu-memory-row > div:first-child { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 9px; }
 .gpu-memory-row span { min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }

@@ -103,6 +103,10 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Video cache test failed." }
   & npm run test:security
   if ($LASTEXITCODE -ne 0) { throw "Security policy test failed." }
+  & npm run test:knowledge-api
+  if ($LASTEXITCODE -ne 0) { throw "Read-only knowledge API test failed." }
+  & npm run test:hardware
+  if ($LASTEXITCODE -ne 0) { throw "ASR hardware capability test failed." }
   & npm run test:image-clipboard
   if ($LASTEXITCODE -ne 0) { throw "Image clipboard security test failed." }
   & npm run test:persistence

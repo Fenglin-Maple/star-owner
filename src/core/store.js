@@ -365,25 +365,6 @@ class Store {
     return this.get('collections', id);
   }
 
-  getActiveCollection() {
-    const setting = this.get('settings', 'activeCollection');
-    if (!setting?.collectionId) return null;
-    return this.getCollectionById(setting.collectionId);
-  }
-
-  setActiveCollection(collectionId) {
-    const collection = this.getCollectionById(collectionId);
-    if (!collection) throw new Error(`Collection not found: ${collectionId}`);
-    const setting = {
-      id: 'activeCollection',
-      collectionId: collection.id,
-      activatedAt: new Date().toISOString()
-    };
-    this.set('settings', setting.id, setting);
-    this.save();
-    return collection;
-  }
-
   getFilenameMetadata() {
     return normalizeFilenameMetadata(this.get('settings', 'filenameMetadata') || {}, DEFAULT_FILENAME_METADATA);
   }
@@ -557,7 +538,7 @@ function defaultTools() {
       enabled: true,
       order: 10,
       description: '读取单个 Bilibili 视频的完整属性，生成 info.json。',
-      apiUsage: 'POST /api/tasks/<taskId>/tools/video-info/run',
+      apiUsage: 'app://tools/video-info (internal workflow only)',
       internalCommand: 'node tools/video-tool.js info <videoUrl> --out <artifactDir> --cookies <cookieFile>',
       agentPrompt: '通过工具运行 API 调用本模块。成功后检查 artifactDir/info.json，并把关键元数据用于 Markdown。',
       outputs: ['info.json'],
@@ -574,7 +555,7 @@ function defaultTools() {
       enabled: true,
       order: 20,
       description: '一次性准备总结素材：元数据、站内字幕、合轨视频、关键帧、ASR 字幕、热评前三条和 manifest。',
-      apiUsage: 'POST /api/tasks/<taskId>/tools/material-bundle/run',
+      apiUsage: 'app://tools/material-bundle (internal workflow only)',
       internalCommand: 'node tools/video-tool.js bundle <videoUrl> --out <artifactDir> --cookies <cookieFile> --frames 12 --asr --comments --comment-limit 3',
       agentPrompt: '通过工具运行 API 优先调用本模块。ASR 完成后优先读取 asr/transcript.srt 或 asr/asr-result.json 的真实起止时间，不要根据纯文本顺序猜测视频位置。失败时查看 run.log，再拆分调用其它模块。',
       outputs: ['manifest.json', 'info.json', 'subtitles/', 'merged.mp4', 'frames/', 'asr/transcript.srt', 'asr/asr-transcript.txt', 'asr/asr-result.json', 'comments/comments.json'],
@@ -592,7 +573,7 @@ function defaultTools() {
       enabled: true,
       order: 30,
       description: '下载并生成可播放的合轨 mp4，供多模态检查、字幕校验或关键帧抽取使用。',
-      apiUsage: 'POST /api/tasks/<taskId>/tools/merged-video/run',
+      apiUsage: 'app://tools/merged-video (internal workflow only)',
       internalCommand: 'node tools/video-tool.js merged <videoUrl> --out <artifactDir> --cookies <cookieFile> --height 720',
       agentPrompt: '通过工具运行 API 调用。完成 Markdown 后再调用 clean-cache 清理临时音视频。',
       outputs: ['merged.mp4'],
@@ -609,7 +590,7 @@ function defaultTools() {
       enabled: true,
       order: 40,
       description: '不管是否存在官方字幕，都运行一次多语言自动识别 ASR，生成带真实分段起止时间的 SRT、时间轴文本和 JSON，用于和官方/自动字幕比对及建立视频时间轴链接。',
-      apiUsage: 'POST /api/tasks/<taskId>/tools/asr/run',
+      apiUsage: 'app://tools/asr (internal workflow only)',
       internalCommand: 'node tools/video-tool.js asr <videoUrl> --out <artifactDir> --cookies <cookieFile>',
       agentPrompt: '必须通过工具运行 API 调用，并在 Markdown 的“字幕比对”章节说明采用哪份字幕。默认自动检测中文、英文、日语等语言；优先读取 asr/transcript.srt，也要检查 asr/asr-result.json 的 language、languageProbability、diagnostics 与 start/end。asr/asr-transcript.txt 同样包含时间轴，不得猜测内容位置。',
       outputs: ['asr/transcript.srt', 'asr/asr-transcript.txt', 'asr/asr-result.json'],
@@ -626,7 +607,7 @@ function defaultTools() {
       enabled: true,
       order: 45,
       description: '读取视频各分 P 的站内人工/自动字幕，输出索引、原始 JSON、SRT 和纯文本；没有字幕时也写入明确的空索引。',
-      apiUsage: 'POST /api/tasks/<taskId>/tools/bili-subtitles/run',
+      apiUsage: 'app://tools/bili-subtitles (internal workflow only)',
       internalCommand: 'node tools/video-tool.js subtitles <videoUrl> --out <artifactDir> --cookies <cookieFile>',
       agentPrompt: '通过工具运行 API 调用，并将站内字幕与本次 ASR 字幕比较；index.json 的 available=false 表示站内未提供字幕。',
       outputs: ['subtitles/index.json', 'subtitles/*.json', 'subtitles/*.srt', 'subtitles/*.txt'],
@@ -642,7 +623,7 @@ function defaultTools() {
       enabled: true,
       order: 50,
       description: '获取热评前三条，供最终 Markdown 的评论分析栏目使用。',
-      apiUsage: 'POST /api/tasks/<taskId>/tools/comments-top3/run',
+      apiUsage: 'app://tools/comments-top3 (internal workflow only)',
       internalCommand: 'node tools/video-tool.js comments <videoUrl> --out <artifactDir> --cookies <cookieFile> --comment-limit 3',
       agentPrompt: '通过工具运行 API 调用。只需要分析热评前三条；不可用时在评论分析栏目说明原因。',
       outputs: ['comments/comments.json'],
@@ -658,7 +639,7 @@ function defaultTools() {
       enabled: true,
       order: 60,
       description: '删除临时视频/音频缓存，保留 Markdown、图片、字幕、评论和 JSON 记录。',
-      apiUsage: 'POST /api/tasks/<taskId>/tools/clean-cache/run',
+      apiUsage: 'app://tools/clean-cache (internal workflow only)',
       internalCommand: 'node tools/video-tool.js clean-cache <artifactDir>',
       agentPrompt: '提交前确认最终产物完整，再通过工具运行 API 调用本模块。',
       outputs: ['removed media cache list'],

@@ -7,7 +7,6 @@ const MarkdownIt = require('markdown-it');
 const { buildAnalytics } = require('./core/analytics');
 const { ApiServer } = require('./core/api-server');
 const { BiliClient, assertBilibiliImageUrl, isBilibiliCookieDomain, normalizeBilibiliAssetUrl } = require('./core/bili');
-const { collectionBlockReason } = require('./core/collection-state');
 const { CollectionSyncService } = require('./core/collection-sync-service');
 const { DependencyManager } = require('./core/dependency-manager');
 const { secureMainWindow } = require('./core/desktop-security');
@@ -205,7 +204,7 @@ async function bootstrap() {
   emitBootstrap('Loading persistent GPU ASR service...', 0.84);
   await toolRunner.initialize();
   videoCacheManager.initialize();
-  emitBootstrap('Starting resource pools and local Agent API...', 0.92);
+  emitBootstrap('Starting resource pools and read-only knowledge API...', 0.92);
   apiServer = new ApiServer({
     store,
     toolRunner,
@@ -400,7 +399,6 @@ ipcMain.handle('store:snapshot', async () => {
     workspaces: store.listWorkspaces(),
     workers: store.listWorkers(),
     internalAgentSessions: internalAgentManager?.state().sessions || [],
-    activeCollection: rendererCollection(store.getActiveCollection()),
     videoCache: videoCacheManager?.state() || { collections: [], videos: [], jobs: [] },
     analytics: buildAnalytics(store),
     scheduler: toolRunner?.getState() || null,
@@ -408,20 +406,6 @@ ipcMain.handle('store:snapshot', async () => {
     activities: store.listRecent('activities', 500),
     taskEvents: store.listRecent('taskEvents', 500)
   };
-});
-
-ipcMain.handle('collections:set-active', async (_event, collectionId) => {
-  assertBackendReady();
-  const current = store.getCollectionById(collectionId);
-  if (!current) throw new Error(`Collection not found: ${collectionId}`);
-  if (current.collectionKind === 'document-archive') throw new Error('该收藏夹仅保留已完成文档，不能激活为外部 Agent 视频总结任务范围。');
-  const reason = collectionBlockReason({ ...current, externalDispatchPaused: false }, { external: true });
-  if (reason) throw new Error(reason);
-  const collection = { ...current, externalDispatchPaused: false, externalActivatedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-  store.upsertCollection(collection);
-  store.setActiveCollection(collection.id);
-  publishEvent({ type: 'active-collection-changed', collectionId: collection.id, userName: collection.userName, collectionName: collection.name });
-  return collection;
 });
 
 ipcMain.handle('tasks:set-enabled', async (_event, payload) => {

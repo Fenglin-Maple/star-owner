@@ -100,9 +100,14 @@
               </button>
               <div class="nav-submenu">
                 <button class="nav-item nav-subitem" data-page="settings" title="应用设置"><svg viewBox="0 0 24 24"><path d="M4 7h16M7 3v8M4 17h16M17 13v8"/></svg><span>应用设置</span></button>
-                <button class="nav-item nav-subitem" data-page="workers" title="Agent 工作列表"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.87"/></svg><span data-i18n="navWorkers"></span></button>
-                <button class="nav-item nav-subitem" data-page="tools" title="Agent 工具模块"><svg viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5 5L4 17v3h3l5.7-5.7a4 4 0 0 0 5-5l-2.4 2.4-3-3z"/></svg><span data-i18n="navTools"></span></button>
-                <button class="nav-item nav-subitem" data-page="agent-tool-status" title="Agent 工具状态"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 9h8M8 13h5M16 13h1"/></svg><span>Agent 工具状态</span></button>
+                <div class="nav-subgroup" data-nav-subgroup="status">
+                  <button class="nav-subgroup-toggle" type="button" aria-expanded="false" title="状态查询"><svg viewBox="0 0 24 24"><path d="M4 19V9M10 19V5M16 19v-7M22 19V3"/></svg><span>状态查询</span><svg class="nav-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></button>
+                  <div class="nav-tertiary-menu">
+                    <button class="nav-item nav-subitem nav-tertiary-item" data-page="workers" title="Agent 工作列表"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.87"/></svg><span data-i18n="navWorkers"></span></button>
+                    <button class="nav-item nav-subitem nav-tertiary-item" data-page="tools" title="Agent 工具模块"><svg viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5 5L4 17v3h3l5.7-5.7a4 4 0 0 0 5-5l-2.4 2.4-3-3z"/></svg><span data-i18n="navTools"></span></button>
+                    <button class="nav-item nav-subitem nav-tertiary-item" data-page="agent-tool-status" title="Agent 工具状态"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 9h8M8 13h5M16 13h1"/></svg><span>Agent 工具状态</span></button>
+                  </div>
+                </div>
               </div>
             </div>
             <button class="nav-item" data-page="readme" title="README">
@@ -226,12 +231,11 @@
               <div class="task-target-copy">
                 <span data-i18n="activeAgentTarget"></span>
                 <strong id="activeCollectionLabel" data-i18n="noActiveCollection"></strong>
-                <small>此处激活项只限制通过 Agent API 接单的外部 Agent。应用内“Agent 视频总结工作流”始终使用创建会话时选择的收藏夹，不受此处影响。</small>
+                <small>任务开关直接控制应用内“Agent 视频总结工作流”的可领取范围。工作流选择这个收藏夹后会跳过已关闭的未完成任务；已经完成的文档不受开关影响。</small>
               </div>
               <div class="task-target-controls">
                 <label><span data-i18n="inventoryUser"></span><select id="taskUserSelect"></select></label>
                 <label><span data-i18n="inventoryCollection"></span><select id="taskCollectionSelect"></select></label>
-                <button id="activateCollection" class="primary-button compact-button" data-i18n="activateCollection"></button>
                 <button id="refreshTasks" class="icon-action" data-i18n-title="refresh" aria-label="refresh"><svg viewBox="0 0 24 24"><path d="M20 6v5h-5M4 18v-5h5M18.5 9A7 7 0 0 0 6.2 6.2L4 9M5.5 15A7 7 0 0 0 17.8 17.8L20 15"/></svg></button>
               </div>
             </section>
@@ -435,7 +439,7 @@
 
           <section class="page" id="page-agent-tool-status">
             <div class="page-head agent-tool-status-head">
-              <div><h1>Agent 工具状态</h1><p>集中查看工具执行记录、调用统计与 Agent API 规范。</p></div>
+              <div><h1>Agent 工具状态</h1><p>集中查看应用内工具执行记录、调用统计与外部知识库只读 API。</p></div>
               <button id="refreshRuns" class="secondary-button" data-i18n="refresh"></button>
             </div>
             <div class="agent-tool-status-grid">
@@ -448,7 +452,7 @@
                 <div id="apiToolAnalytics" class="setting-list"></div>
               </section>
               <section class="section-block api-doc-panel">
-                <div class="section-title"><h2 data-i18n="apiQuickReference"></h2><button id="copyApiDocs" class="secondary-button compact-button" data-i18n="copy"></button></div>
+                <div class="section-title"><h2>外部 Agent 知识库 API</h2><button id="copyApiDocs" class="secondary-button compact-button" data-i18n="copy"></button></div>
                 <pre id="apiDocs"></pre>
               </section>
             </div>
@@ -639,6 +643,10 @@
                     <span></span>
                   </label>
                 </div>
+                <div id="asrHardwareStatus" class="asr-hardware-status" data-state="checking">
+                  <div><span></span><strong>正在检测本机 ASR 兼容性</strong></div>
+                  <p>检查 NVIDIA/CUDA、项目运行时、模型、CPU 架构与系统内存。</p>
+                </div>
                 <div class="scheduler-model-row">
                   <div>
                     <strong>faster-whisper 常驻模型</strong>
@@ -715,7 +723,7 @@
       <section class="rag-modal-dialog compact single-duplicate-dialog" role="alertdialog" aria-modal="true" aria-labelledby="singleDuplicateTitle">
         <header><div><h2 id="singleDuplicateTitle">这个视频已经总结过</h2><p id="singleDuplicateMessage"></p></div></header>
         <div class="single-duplicate-body"><strong id="singleDuplicateVideo"></strong><span id="singleDuplicateMeta"></span></div>
-        <footer><button id="singleDuplicateCancel" class="secondary-button" type="button">取消</button><span></span><button id="singleDuplicateOpen" class="secondary-button" type="button">打开已有文档</button><button id="singleDuplicateRegenerate" class="primary-button" type="button">重新生成新版本</button></footer>
+        <footer><button id="singleDuplicateCancel" class="secondary-button" type="button">放弃任务并保留旧产物</button><span></span><span></span><button id="singleDuplicateRegenerate" class="primary-button" type="button">重新生成并覆盖旧产物</button></footer>
       </section>
     </div>
     <div id="documentContextMenu" class="document-context-menu" role="menu" hidden>

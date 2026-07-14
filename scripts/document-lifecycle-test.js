@@ -42,27 +42,22 @@ function assert(condition, message) {
   const deletedResult = deleteCompletedDocument({ store, taskId: deleted.id });
   assert(deletedResult.removed && !store.getTask(deleted.id), 'deleted Bilibili collection document was incorrectly restored');
 
-  const internalCollection = collection('builtin:versions', '内置版本测试', path.join(root, 'builtin'), { internal: true, userId: 'builtin-agent-user', userName: '内置用户' });
+  const internalCollection = collection('builtin:single', '内置单视频测试', path.join(root, 'builtin'), { internal: true, userId: 'builtin-agent-user', userName: '内置用户' });
   store.upsertCollection(internalCollection);
-  const first = completedTask(internalCollection, 'single-v1', 'BVVERSION001', { singleTask: true, revision: 1, knowledgeActive: false, completedAt: '2026-01-01T00:00:00.000Z' });
-  const second = completedTask(internalCollection, 'single-v2', 'BVVERSION001', { singleTask: true, revision: 2, knowledgeActive: true, completedAt: '2026-01-02T00:00:00.000Z' });
-  writeArtifact(first);
-  writeArtifact(second);
-  store.upsertTask(first);
-  store.upsertTask(second);
-  store.upsertTask(completedTask(internalCollection, 'ordinary-same-bv', 'BVVERSION001', { singleTask: false, knowledgeActive: true }));
+  const single = completedTask(internalCollection, 'single-only', 'BVSINGLE0001', { singleTask: true });
+  writeArtifact(single);
+  store.upsertTask(single);
   store.commit();
-  const versionResult = deleteCompletedDocument({ store, taskId: second.id });
-  assert(versionResult.restored && store.getTask(second.id).status === 'pending', 'latest internal version was not returned to pending');
-  assert(store.getTask(first.id).knowledgeActive === true, 'previous completed version was not restored as the RAG-active version');
-  assert(store.getTask('ordinary-same-bv').knowledgeActive === true, 'single-video version selection changed an unrelated ordinary task');
+  const singleResult = deleteCompletedDocument({ store, taskId: single.id });
+  assert(singleResult.removed && singleResult.reason === 'single-task-deleted' && !store.getTask(single.id), 'single-video output deletion restored a task instead of deleting it permanently');
+  assert(!fs.existsSync(single.artifactDir), 'single-video generated artifacts survived deletion');
 
-  fs.rmSync(first.outputMarkdown, { force: true });
-  store.upsertTask({ ...second, status: 'done', outputMarkdown: second.outputMarkdown, knowledgeActive: true });
-  writeArtifact(second);
+  const local = completedTask(internalCollection, 'local-summary', 'BVLOCAL00001');
+  writeArtifact(local);
+  store.upsertTask(local);
   store.commit();
-  deleteCompletedDocument({ store, taskId: second.id });
-  assert(store.getTask(first.id).knowledgeActive !== true, 'a missing historical Markdown was reactivated for RAG');
+  const localResult = deleteCompletedDocument({ store, taskId: local.id });
+  assert(localResult.removed && localResult.reason === 'local-task-deleted' && !store.getTask(local.id), 'ordinary local document was incorrectly restored to pending');
 
   fs.rmSync(root, { recursive: true, force: true });
   console.log('document lifecycle test passed');

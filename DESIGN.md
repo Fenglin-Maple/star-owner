@@ -1,575 +1,315 @@
 # 星藏家 Design
 
+Version: `0.10.0`
+
 ## 1. Product Goal
 
-星藏家 is a local Electron desktop workbench for turning Bilibili favorite-folder videos into structured Markdown through external or application-managed agents.
+星藏家 converts Bilibili favorites and application-managed cached videos into durable Markdown knowledge. The product is a desktop workbench, not a landing page: account login, synchronization, task controls, AI execution, media tools, documents, RAG, video playback, export, settings, and status inspection all live in one application.
 
-The desktop app owns orchestration, persistence, credentials, task leasing, tool execution, validation, and artifact inventory. Codex, Claude Code, and other agents use the local HTTP API to claim one task at a time, ask the app to execute media tools, and submit their final work.
+The system optimizes for:
 
-The same pipeline has two workers: external agents use the local HTTP API, while internal agents use a main-process manager and user-configured compatible models. Both paths share Worker identity, leases, ToolRunner resources, validation, cleanup, final naming, analytics, and Workspace archives. Separately, the built-in RAG assistant analyzes Markdown that has already passed submission validation.
+- long-running local ownership of personal knowledge;
+- repeatable video-to-Markdown processing;
+- safe multi-Agent concurrency inside the application;
+- recoverable collection synchronization and task interruption;
+- exact Markdown and image access for local RAG clients;
+- project-local dependencies and portable distribution.
 
 ## 2. Core Boundaries
 
-- The app is the source of truth for users, collections, tasks, leases, tools, runs, submissions, workspaces, and analytics.
-- Agents do not edit SQLite, app indexes, collection exports, or workspace configuration.
-- Agents only write task artifacts inside the `artifactDir` returned by the claim API.
-- Agents never launch project media scripts directly. They call the tool-run API and the app launches the process.
-- Disabled tasks are excluded from claims and cannot start new tool runs.
-- The desktop Task Overview page owns the active collection target for external HTTP API agents. Internal Agent sessions use the collection selected when each session is created and are independent of this external target.
-- Confirmed deleted, removed, or unavailable videos are terminal: the app removes them from task/video inventory, records an `unavailableTasks` tombstone, and collection sync must not recreate them.
-- A task lease lasts 15 minutes and can be extended with heartbeat calls.
-- Submission paths and Markdown structure are validated before a task becomes complete.
-- Accepted documents begin with `小结 -> 思维导图 -> 目录`; the mind map is a valid Mermaid fenced block.
+1. The desktop application is the only writer of SQLite, task state, Workspace indexes, artifacts, cookies, tool runs, and internal Worker records.
+2. Video-summary execution is application-internal. External Agents cannot register video Workers, claim tasks, execute media tools, heartbeat, submit, or abort.
+3. The public local HTTP API is read-only knowledge access across all completed Markdown documents.
+4. Task Overview switches affect internal Agent claim eligibility. A disabled unfinished task is skipped; an already completed document remains readable.
+5. Each internal queue Agent binds its own collection. No global active external collection exists.
+6. Single-video mode keeps one canonical output per internal collection/BV pair.
+7. Only deletion of a completed task that still belongs to an active Bilibili favorite restores that task to pending.
 
 ## 3. Architecture
 
 ```mermaid
 flowchart LR
-  User["Desktop user"] --> UI["星藏家 Electron UI"]
-  UI --> Main["Electron main process"]
-  Main --> Bili["Persistent Bilibili WebView session"]
-  Main --> DB["SQLite / sql.js"]
-  Main --> API["Local Agent HTTP API"]
-  Main --> RAG["Built-in RAG assistant"]
-  Main --> Internal["Internal Agent manager"]
-  RAG --> Provider["OpenAI / NewAPI compatible provider"]
-  Internal --> Provider
-  Internal --> Runner
-  RAG --> Library
-  API --> Agent["Codex / Claude / other agent"]
-  Agent --> API
-  API --> Runner["App ToolRunner"]
-  Runner --> Tools["yt-dlp / FFmpeg / faster-whisper"]
-  Runner --> Library["Default workspace library"]
-  Agent --> Assigned["Assigned artifactDir only"]
-  Assigned --> Library
+  UI[Electron Renderer] --> IPC[Preload IPC]
+  IPC --> Main[Electron Main]
+  Main --> Store[(sql.js SQLite)]
+  Main --> Sync[CollectionSyncService]
+  Main --> Internal[InternalAgentManager]
+  Main --> RAG[RagAssistant]
+  Main --> Cache[VideoCacheManager]
+  Main --> Docs[DocumentLifecycle]
+  Internal --> Tools[ToolRunner and ResourceScheduler]
+  Tools --> ASR[Persistent faster-whisper]
+  Tools --> Media[yt-dlp and FFmpeg]
+  Main --> API[Read-only Knowledge API]
+  API --> Knowledge[KnowledgeApi]
+  Knowledge --> Store
+  Knowledge --> Workspace[Registered Workspace Libraries]
+  External[Codex Claude OpenCode] --> API
 ```
 
-Runtime modules:
+Important modules:
 
-- `src/main.js`: window, IPC, startup, encrypted credentials, workspace configuration.
-- `src/core/store.js`: SQLite-backed records and migrations.
-- `src/core/api-server.js`: Agent-only HTTP API and task lifecycle.
-- `src/core/collection-sync-service.js`: desktop-owned Bilibili collection synchronization and indexing.
-- `src/core/collection-state.js`: shared remote-folder, favorite-membership, immutable-storage, and dispatch-readiness rules.
-- `src/core/submission-artifacts.js`: shared final naming, relocation, and cached-video record updates.
-- `src/core/unavailable-task.js`: terminal unavailable-video removal, attempt cleanup, tombstones, and sync suppression.
-- `src/core/network-policy.js`: Bilibili URL, local API origin, and private-network policies.
-- `src/core/desktop-security.js`: main-window and Bilibili WebView navigation hardening.
-- `src/core/atomic-file.js`: recoverable whole-file SQLite persistence.
-- `src/core/tool-runner.js`: controlled child processes, timeouts, logs, cancellation.
-- `src/core/analytics.js`: collection, agent, and tool usage statistics.
-- `src/core/workspace.js`: path safety and workspace layout.
-- `src/core/bili.js`: Bilibili session APIs and cookie export.
-- `src/core/rag-assistant.js`: compatible providers, RAG sessions, retrieval, streaming, model tools, approvals, and usage accounting.
-- `src/core/internal-agent-manager.js`: persistent internal Worker sessions, per-task model-context budgeting, collection queues, single-task mode, streaming generation, validation, cleanup, and canonical Workspace output.
-- `src/core/document-lifecycle.js`: user-requested accepted-document deletion, artifact cleanup, stable-collection restoration, and remote-membership tombstones.
-- `src/core/task-versions.js`: accepted single-video revision selection and the one default RAG-active version per collection/BV.
-- `src/core/dependency-manager.js`: project-relative dependency probes, GitHub Release resolution, queued download, SHA-256 verification, safe extraction, and install progress.
-- `src/renderer/*`: frameless desktop UI.
+- `src/main.js`: Electron lifecycle, secure IPC, login session, Renderer snapshots.
+- `src/core/store.js`: sql.js persistence and typed record helpers.
+- `src/core/collection-sync-service.js`: transactional favorite reconciliation.
+- `src/core/internal-agent-manager.js`: internal queue and single-video orchestration.
+- `src/core/tool-runner.js`: media tools, resource pools, leases, ASR services.
+- `src/core/hardware-capabilities.js`: local ASR environment evaluation.
+- `src/core/document-lifecycle.js`: managed deletion and restoration policy.
+- `src/core/api-server.js`: minimal read-only local HTTP server.
+- `src/core/knowledge-api.js`: knowledge catalog, exact content, search, assets.
+- `src/core/rag-assistant.js`: in-app RAG sessions, tools, sandbox, compression.
+- `src/core/video-cache-manager.js`: managed download queue and video library.
 
 ## 4. Persistence
 
-The project uses `sql.js` and writes the database to:
+The database is `workspace/orchestrator.sqlite`. sql.js exports atomically through a temporary file, fsync, backup, and recovery path. Transaction save failure restores the pre-transaction database.
 
-```text
-workspace/orchestrator.sqlite
-```
+Main record scopes include:
 
-The generic `kv` table currently stores these scopes:
+- users, collections, tasks, removedFavoriteTasks, unavailableTasks;
+- workers, internalAgentSessions, taskEvents, toolRuns;
+- videoCacheCollections, videoCache, videoCacheJobs;
+- ragProviders, ragModels, ragSessions, ragMessages;
+- workspaces, settings, activities;
+- collectionSyncTransactions and submission finalization journals.
 
-- `users`
-- `collections`
-- `videos`
-- `tasks`
-- `removedFavoriteTasks`
-- `unavailableTasks`
-- `taskEvents`
-- `submissions`
-- `tools`
-- `toolRuns`
-- `workers`
-- `activities`
-- `workspaces`
-- `settings` (including the active collection target)
-- `credentials`
-- `ragProviders`
-- `ragSessions`
-- `ragMessages`
-- `ragAttachments`
-- `ragModelUsage`
-- `internalAgentSessions`
-- `videoCaches`
-- `videoCacheJobs`
-
-Task records are migrated on startup so legacy tasks default to `enabled: true`.
-
-Passwords are encrypted with Electron `safeStorage` where available. The renderer only receives a decrypted password when a saved account is explicitly selected for login.
+Legacy fields such as historical external activation or single-video revision markers may remain in existing databases but have no active product behavior. New code does not create external activation state or multiple single-video revisions.
 
 ## 5. Workspace Libraries
 
-The app can register multiple workspace roots. Exactly one must be the default workspace. New claims always use the current default; changing the default does not move or delete existing artifacts.
-
-The built-in default is the project-local directory:
+At least one Workspace is always registered and one is default. New artifacts use the default library.
 
 ```text
-<project>/workspace
-```
-
-Agent artifacts use this layout:
-
-```text
-<workspace-root>/
-  <Bilibili username>/
-    <favorite-folder name>/
-      [BV-...][title-...][UP-...][published-...][favorited-...][collection-...][tags-...]/
-        [BV-...][title-...][UP-...][published-...][favorited-...][collection-...][tags-...].md
+<workspace>/
+  orchestrator.sqlite
+  <user>/
+    cookies/
+    <collection storageName>/
+      <video metadata name>/
+        summary.md
         info.json
+        cover.*
         frames/
+        subtitles/
         asr/
         comments/
         tool-runs/
 ```
 
-Directory and Markdown basenames use one app-owned metadata policy. BV id, title, owner, publish date, favorite-added date, source collection, and tags are enabled by default and independently persisted in SQLite. Publish and favorite dates use visibly distinct labels. Fast collection sync does not fetch per-video tags; submission reads the validated `info.json`, normalizes tags, and then atomically renames the accepted artifact directory and Markdown. Existing accepted artifacts are not silently migrated when settings change. Numeric suffixes resolve collisions.
-
-App-owned collection exports are kept under:
-
-```text
-<workspace-root>/.star-note/exports/<username>/<favorite-folder>/
-```
-
-Bilibili cookie exports remain app-managed under the project system workspace:
-
-```text
-workspace/users/<username>/cookies/
-```
-
-Removing a workspace from Settings only removes its registry record. It never deletes files from disk.
+Collection display names may change, so path identity uses collection ID plus a persistent `storageName`. The knowledge API accepts artifacts only inside a registered Workspace real path and rejects traversal and symlink escape.
 
 ## 6. Bilibili Login
 
-- Web content uses the persistent Electron partition `persist:bili-orchestrator`.
-- Closing and reopening the app preserves the Bilibili site session.
-- Opening the login page does not restart login when the persisted session is already valid.
-- Selecting another saved credential is the explicit account-switch operation.
-- Account switching clears Bilibili-domain cookies and site storage before attempting the new login.
-- One-click login stays disabled until the real Bilibili password form is available.
-- SMS verification is detected inside the WebView and bridged to controls outside the WebView.
-- Successful login detection automatically refreshes username, avatar, cookies, and favorite folders.
-- Avatar bytes are fetched through the persistent Electron Bilibili session, restricted to trusted HTTPS hosts and supported raster signatures, converted to a bounded data URL, and persisted with the user record. This keeps the avatar visible after relogin or CDN cookie/referrer changes without exposing Cookie paths to the renderer.
-- Bilibili profile and media asset URLs are normalized from legacy `http://` or protocol-relative forms to HTTPS before they reach the CSP-restricted renderer, so a successful re-login cannot leave the profile image blocked as mixed content.
-- Manual login detection remains available as a fallback.
+The Bilibili WebView uses `persist:bili-orchestrator`, Electron sandboxing, no Node bridge, official-domain navigation only, denied popups, and persistent login state. Successful login automatically synchronizes user ID, name, avatar, cookies, and favorite folders.
 
-The top-right profile popover is disabled while logged out. After login it lists all favorite folders with video counts and latest favorite-addition dates. It has a hover bridge and delayed close so the list can be entered and clicked reliably. Clicking a synced folder opens its task inventory.
+Saved account passwords require Electron `safeStorage`. Netscape cookie files remain plaintext because yt-dlp requires them and are stored under the user Workspace hierarchy with export time metadata.
 
 ## 7. Collection Sync
 
-Collection sync:
+Synchronization is a desktop-owned maintenance transaction:
 
-1. Resolves the current Bilibili account and stable favorite-folder id. Display names are mutable; `storageName`, `mediaId`, and existing artifact roots are not changed by a remote rename.
-2. Persists a `collectionSyncTransactions` recovery record, marks the collection `syncing`, blocks external claims, immediately stops every internal queue Agent bound to that collection, aborts all current internal/external attempts, cleans attempt files, and invalidates their `workId` values.
-3. Reads every page of the remote video list before changing inventory. Partial pagination, HTTP errors, cancellation, process exit, and crash restore the previous complete collection snapshot and emit only a persisted rollback log entry.
-4. Applies the complete remote/local diff in one SQLite transaction. New videos become `pending`; current videos refresh metadata without resetting accepted artifacts; unavailable-video tombstones remain suppressed.
-5. A missing unfinished favorite task is removed from dispatch inventory and recorded in `removedFavoriteTasks`, so stale external requests receive `REMOVED_FROM_FAVORITES`. A missing `done` task keeps its artifact and `outputMarkdown`, becomes disabled/archived, and gains the `（已移出收藏夹）` display suffix.
-6. Folder discovery is authoritative for known Bilibili `mediaId` values. A missing remote folder gains `（已在B站删除的收藏夹）`, keeps only completed local artifacts, permanently blocks dispatch, and marks bound internal sessions collection-unavailable. A reappearing or renamed folder requires a successful full sync before restart.
-7. Successful sync leaves internal sessions stopped for explicit user restart and leaves external dispatch paused until the user reactivates that collection in Task Overview. It then writes a compact app-owned synchronization snapshot and one persisted completion activity.
+1. Resolve the immutable Bilibili collection ID and current local snapshot.
+2. Persist a `collectionSyncTransactions` recovery record.
+3. Mark the collection `syncing` and `syncReady=false`.
+4. Stop every internal queue Agent bound to the collection.
+5. Abort current attempts, cancel tools, remove attempt files, and invalidate work IDs.
+6. Fetch every remote page before changing inventory.
+7. Reconcile additions, removals, completed archives, unavailable tombstones, rename state, and counts in one SQLite transaction.
+8. Remove the recovery record only after commit.
+9. On interruption or startup recovery, restore the previous snapshot and log the rollback.
 
-Task metadata includes BV id, title, UP owner, duration, cover, URL, favorite time, publish time, and collection ownership.
+Reconciliation policy:
 
-RAG search, document listing, exact Markdown reads, and knowledge-image inspection expose favorite membership separately from the historical favorite-added date. Archived accepted documents remain usable in Document Library, Export, and RAG, while the model is told whether the item was removed or its source Bilibili folder was deleted.
+- new remote item -> create pending task;
+- removed unfinished item -> remove task;
+- removed completed item -> keep document and mark `favoriteState=removed`;
+- renamed folder -> update display/source name, retain storage identity;
+- deleted remote folder -> retain completed documents, mark collection deleted, remove unfinished work, block restart;
+- unavailable-video tombstone -> never recreate during later sync.
 
-The Collections page shows loaded/total counts and a determinate progress bar. Progress events are not written to the activity table, which avoids hundreds of low-value log records during large-folder synchronization.
+## 8. Internal Task Lifecycle
 
-After a persisted or new login succeeds, the automatic folder discovery result is also written into the Collections page selector. Manual discovery remains available. The sync action stays disabled until that selector contains a real folder. Clicking a folder in the top-right profile popover opens the Collections page and selects the same folder instead of navigating to task inventory.
+Queue workflow states include idle, running, draining, stopping, paused, completed, model-unavailable, unavailable, and error reporting phases.
 
-## 8. Task Lifecycle
+Task claim requirements:
 
-Statuses:
+- selected collection exists and is dispatchable;
+- Bilibili collection is sync-ready and not deleted;
+- task belongs to the session collection;
+- task is enabled;
+- task is pending, failed, or an unowned rejected record;
+- task is not excluded by the current loop.
 
-```text
-pending -> claimed -> done
-                   -> rejected -> claimed
-                   -> failed   -> claimed
-claimed -> pending (lease expiry)
-```
+Every claim creates a new random `workId`, work directory, claim timestamp, and 15-minute lease. The persistent Worker ID belongs to the Agent session and is reused across videos; model messages are not.
 
-The independent `enabled` flag controls dispatch:
+All interruption paths converge on `abortTaskAttempt`:
 
-- `enabled: true`: eligible for claims when status permits.
-- `enabled: false`: visible in inventory, but never returned by claim and unable to launch tools.
+- cancel queued/running tools;
+- stop provider generation;
+- remove attempt files or preserve registered cache sources;
+- clear work ID, claim, lease, output and error fields;
+- return eligible ordinary tasks to pending;
+- pause the internal Worker when required.
 
-Inventory controls support:
+Confirmed deleted/down/unavailable video errors use `removeUnavailableTask`, not ordinary rollback. They remove the task, clean artifacts, create a tombstone, and let queue workflows continue with another task.
 
-- exported-user switching;
-- exported-collection switching;
-- explicit activation of the collection that agents are allowed to work on;
-- BV id, UP owner, and title search;
-- favorite-date start/end filters;
-- newest-first and oldest-first sorting;
-- dual-handle duration filtering;
-- selecting all visible tasks;
-- inverting visible selection;
-- batch enabling and disabling;
-- per-task enable toggles.
+## 9. Single-Video Lifecycle
 
-Claim order is newest favorite-addition time first.
+Single-video mode creates a normal internal task with `singleTask=true`, but duplicate handling is collection/BV scoped:
 
-## 9. Agent API
+- active duplicate -> return existing session;
+- completed duplicate without decision -> require explicit user decision;
+- abandon -> no state change;
+- overwrite -> clean the old artifact, reuse one task identity, reset output state, and process from the beginning;
+- failed/pending/missing artifact -> clean and reuse from the beginning;
+- no duplicate -> create a fresh task.
 
-Default base URL:
+There is no accepted revision history. `revision` remains `1` only for compatibility with old records. Overwrite cannot leave sibling single tasks for the same collection/BV.
 
-```text
-http://127.0.0.1:17391
-```
+Deleting a completed single-video document removes all same-BV single-task siblings, linked single sessions, generated files, and task/video records. A later identical BV creates a fresh task and does not show the duplicate modal.
 
-Endpoints:
+## 10. Document Lifecycle
 
-```http
-GET  /api
-GET  /api/manifest?workerId=<workerId>
-GET  /api/health
-GET  /api/tool-health
-POST /api/workers/register
-GET  /api/workers
-GET  /api/workers/:workerId
-GET  /api/collections
-GET  /api/active-collection
-GET  /api/tasks?collectionId=<id>
-POST /api/tasks/claim
-GET  /api/tasks/:id
-POST /api/tasks/:id/heartbeat
-POST /api/tasks/:id/submit
-POST /api/tasks/:id/abort
-POST /api/tasks/:id/fail
-GET  /api/tools
-POST /api/tasks/:taskId/tools/:toolId/run
-GET  /api/tool-runs
-GET  /api/tool-runs/:runId?log=1
-POST /api/tool-runs/:runId/cancel
-GET  /api/stats?collectionId=<id>
-GET  /api/workspaces
-GET  /api/templates/video-summary
-```
+`deleteCompletedDocument` owns document deletion:
 
-`GET /api` and `GET /api/manifest` are the discovery entry points. Protocol `2.8` returns the current desktop-selected collection, every Agent-facing endpoint with method/parameters, enabled tool contracts, the template URL, authenticated tool-run polling rules, one-time `workId` lifecycle directives, and the standard pause message.
+| Source state | Result after deletion |
+| --- | --- |
+| Active Bilibili favorite | Remove generated artifacts and restore same task to pending |
+| Removed Bilibili favorite | Remove artifacts and task; write removed-favorite history |
+| Deleted Bilibili collection | Remove artifacts and task; do not restore |
+| Single-video internal task | Remove artifact, task, linked session |
+| Other local/internal task | Remove artifact and task |
+| Cache-backed source | Preserve registered video, cover and cache metadata |
 
-The API accepts origin-less local process requests and same-origin requests only. Browser pages from unrelated origins receive HTTP `403`; wildcard CORS is not enabled. JSON request bodies are capped at 1 MiB and all asynchronous handlers terminate through one response/error boundary. Collection synchronization, task inventory switches, and tool enable state are desktop IPC responsibilities and are intentionally absent from the public Agent API.
+Restoration always uses immutable `collectionId`; collection rename cannot redirect a task.
 
-Every fresh Agent session first registers its actual caller tool and model:
+## 11. Read-Only Knowledge API
 
-```json
-{
-  "tool": "codex",
-  "model": "gpt-5",
-  "sessionLabel": "optional human note"
-}
-```
-
-`POST /api/workers/register` creates and returns an app-owned identity such as `worker-...`. A Worker can claim multiple tasks over its session lifetime. Every successful claim also creates a one-time `workId` such as `work-...`; heartbeat, tool-run/cancellation, submission, and abort bodies require both IDs. Agents must never invent a `workId`.
-
-A long-running Worker keeps its `workerId` while processing task after task, but `workId` is never a session identifier: claim N and claim N+1 always receive different values, including when both claims happen to target the same video after a rollback.
-
-The user first selects and activates a collection in the desktop task page. `GET /api/active-collection` exposes that target. The claim endpoint always uses it; an agent request cannot override the active target with a different collection id or name.
-
-Recommended claim body:
-
-```json
-{
-  "workerId": "worker-..."
-}
-```
-
-The claim response includes Worker identity, one-time Work identity, user, collection, video, lease, cookie, workspace, assigned artifact path, document requirements, API-manifest URL, Markdown-template URL, and every enabled app tool.
-
-`POST /api/tasks/:id/abort` is the canonical interruption path. It requires the current `workerId`, `workId`, and an actionable `reason`; it cancels queued/running app tools, removes attempt files, invalidates `workId`, clears claim/completion/output fields, records an `attempt-aborted` event, and returns the task to `pending`. `/fail` is retained only as a compatibility alias with identical rollback behavior. The operation is idempotent so simultaneous stop signals from the tool layer and Agent manager cannot duplicate destructive work.
-
-Confirmed video deletion/removal is a separate terminal transition. Strong Bilibili/yt-dlp signatures produce `BILIBILI_VIDEO_UNAVAILABLE`; `unavailable-task.js` cancels other active runs, cleans attempt files, removes `tasks` and `videos` records, records a `video-unavailable` event and `unavailableTasks` tombstone, and updates collection inventory. Collection synchronization checks that tombstone before persistence, so a later full sync cannot revive the task. Internal Agents count this outcome as skipped and continue; external callers receive HTTP `410`/terminal guidance. A startup migration performs the same transition for older pending entries already titled `已失效视频` and reclassifies matching historical failures as skipped.
-
-An old caller cannot resume through a stable video `taskId`: every task-changing endpoint validates the current `workId`. Missing work IDs return `WORK_ID_REQUIRED`; invalidated, expired, completed, or superseded IDs return HTTP `409`, `WORK_ATTEMPT_ENDED`, and a `claim-new-task` directive with `keepWorkerId: true`. Tool-run polling also exposes the ended-attempt directive. Reclaiming the same video creates a different `workId`.
-
-Normal artifacts are removed as a whole. A cache-collection task preserves only its registered merged video, local cover, `info.json`, and `cache-record.json`; generated audio, ASR, subtitles, frames, comments, drafts, manifests, and tool logs are removed. Application shutdown, crash recovery on the next launch, lease expiry without an active tool, internal Agent stop, login-required restart, and fatal infrastructure errors all use the same service. No interrupted summary tool run is resumed after restart.
-
-Worker allocation state is controlled only by the desktop UI. Pausing a Worker stops future claims and returns HTTP `423`, `WORKER_PAUSED`, and `来自用户的信息，你需要暂停工作`. It does not invalidate an already claimed task, so the Worker may heartbeat or submit that task. Reactivation resumes future allocation. The public Agent API exposes Worker status but cannot pause or reactivate a Worker.
-
-## 10. Tool Modules
-
-Default modules:
-
-- `video-info`
-- `material-bundle`
-- `merged-video`
-- `asr`
-- `bili-subtitles`
-- `comments-top3`
-- `clean-cache`
-
-Tool execution rules:
-
-- The API checks task and tool enable state.
-- The app validates `artifactDir` against the task's allowed root.
-- ToolRunner first persists every request as `queued`; the HTTP API returns `202` before execution begins.
-- ToolRunner spawns a hidden child process without shell string composition.
-- Each run has a SQLite record and a log under `artifactDir/tool-runs/`.
-- Runs expose stage, resource pool/lane, queue position/length, wait reason, estimated wait, timeout, cancellation, and activity events.
-- Queued and stale running records are reconstructed from SQLite after an application restart.
-- A queued or running tool run protects its parent task lease from automatic reclamation.
-- Temporary downloaded video/audio is removed by `clean-cache` after final artifacts are ready.
-
-Resource pools:
-
-- `api`: two lanes with an 850ms minimum start interval for Bilibili API rate shaping.
-- `media`: two lanes shared by yt-dlp, merge, audio extraction, and frame processing.
-- `disk`: two lanes for cleanup and other bounded disk work.
-- `asr`: one persistent CUDA lane and one optional persistent CPU lane.
-
-Scheduling is fair across Worker IDs: after a lane completes, the scheduler prefers a queued request from a different Worker before another request from the last Worker. Every lane remains single-consumer; concurrency comes from explicit lanes rather than multiple calls entering one process.
-
-At every application startup, the main process launches `node tools/video-tool.js health <action>` for every registered tool. A tool is online only when the script returns the expected `pong` payload and all required local commands are resolvable. A responsive module with missing dependencies is marked degraded; missing scripts, invalid responses, and timeouts are marked offline. The latest results are exposed through `GET /api/tool-health` and the Startup page.
-
-FFmpeg and yt-dlp are project-local dependencies and are resolved before PATH. faster-whisper is deployed under `runtime/faster-whisper` on a project-local CPython 3.12 runtime. Multilingual `medium` is the default balanced model and `small` is the lower-latency/lower-memory alternative under `runtime/models`; the signed project-local Microsoft Visual C++ runtime and CUDA 12 cuBLAS/cuDNN DLL directories are registered before CTranslate2 loads. Settings may switch models only while the ASR pool is idle. The application disables ASR lanes, stops both persistent services, changes the model, and safely reloads enabled services before accepting new work. `FASTER_WHISPER_BIN` remains an optional explicit override.
-
-`tools/faster-whisper-cli.py` remains the setup, health, and standalone diagnostic contract. `tools/faster-whisper-service.py` is the production NDJSON service contract: it loads one multilingual model, accepts sequential transcription requests, auto-detects Chinese, English, Japanese, and other supported languages unless the caller explicitly overrides the language, enables word timestamps, groups recognized words at CJK/Latin sentence-ending punctuation and long pauses, and writes the same per-sentence start/end timeline to SRT, readable timestamped text, and structured JSON. Production defaults use beam 5, up to 448 decode tokens, previous-text conditioning, and speech padding suitable for short utterances. `asr-result.json` records the requested/detected language, confidence, recognized-speech coverage, first/last speech positions, and long gaps so an Agent can identify sparse or suspicious transcription instead of silently guessing. `src/core/asr-service.js` owns its lifetime and applies an exponential restart backoff after unexpected native exits so multiple queued jobs cannot create a process-spawn storm.
-
-The GPU service starts the real project CPython process directly, avoiding the Windows venv launcher between Electron and the long-lived NDJSON pipes, and uses CUDA `float16`. Each request decodes the complete canonical PCM audio in one faster-whisper call with `word_timestamps=true`; the service materializes emitted segments to report processed audio time, then groups words across model-segment boundaries into sentence entries using punctuation, long pauses, duration, and length guards. This preserves cross-boundary speech while producing genuine sentence start/end times. Before dispatch, `nvidia-smi` must report at least 1024MiB free after model load; otherwise the request remains queued with `GPU_CAPACITY_WAIT`. The CPU `int8` service is disabled by default, does not load at startup, and can only be enabled from desktop Settings.
-
-`material-bundle` is a staged plan rather than one monolithic process: Bilibili metadata, per-part station subtitles, and comments use the API pool; download/frame/audio preparation uses the media pool; transcription uses the persistent ASR pool. Direct `asr` similarly prepares `audio/audio.wav` in the media pool before entering the ASR pool. `scripts/setup-faster-whisper.ps1` reproduces both ASR models and the complete runtime through `npm run setup:asr`.
-
-Resource gates classify recoverable waits separately from terminal infrastructure faults. Capacity waits remain queued. A fatal idle lane cannot reject the queue while another enabled lane is merely busy; queued requests wait for that healthy lane. After three consecutive ASR process startup crashes and no enabled healthy/busy alternative, the gate rejects affected queued jobs with `ASR_INFRASTRUCTURE_FAILURE`, structured likely causes, and no further automatic task claims. ToolRunner pauses the Worker and returns the claimed task to pending. An internal Agent changes to `blocked` and writes a user-visible diagnostic report into its output stream; an external Worker receives a `stop-and-report` directive and the same reason on its next claim request.
-
-Every summary task must run ASR even when a Bilibili subtitle exists. The authoritative ASR timeline is available as `asr/transcript.srt`, timestamped `asr/asr-transcript.txt`, and `segments[].start/end` in `asr/asr-result.json`; submission validation requires all three to contain the same sentence count and matching finite start/end times, and the manifest advertises `asrHasTimestamps=true`. Internal Agents read the SRT first and use the equivalent JSON or timestamped text only as format fallbacks. Station subtitles are validated against each part's duration and minimum timeline coverage before they are declared usable; all valid station SRT files are supplied rather than one arbitrary plain-text file. The agent derives Markdown links from actual subtitle times, compares usable transcripts, and may use selected frames with multimodal reasoning when the better transcript is unclear. Comment analysis uses at most the top three hot comments.
-
-The reference document contract is stored at `templates/video-summary-template.md` and returned by `GET /api/templates/video-summary`. It includes front matter, a conclusion-first summary, an immediately following Mermaid mind map, linked contents, timestamp links, selected frames, subtitle comparison, top-three comment analysis, and processing provenance.
-
-Mermaid 11 is bundled under project-local `node_modules` and loaded by the Electron renderer without a CDN. Preview converts `language-mermaid` blocks to SVG with `securityLevel: strict`. A rendering failure stays local and displays the source plus an actionable error. For legacy accepted documents, preview promotes an existing mind-map section ahead of the table of contents without rewriting the source file.
-
-## 11. Submission Validation
-
-Submission checks:
-
-- `artifactDir` is inside the task's allowed collection root.
-- Markdown and metadata files exist inside the artifact directory.
-- Required sections exist: summary, contents, mind map, subtitle comparison, comment analysis, and processing log.
-- Opening section order is `小结 -> 思维导图 -> 目录`, and the mind-map section contains a Mermaid fenced block.
-- Referenced local images exist and remain inside the artifact directory.
-- A rejected submission records validation errors and can be corrected and resubmitted.
-
-## 12. Analytics
-
-Collection analytics show enabled, processing, failed/rejected, disabled, completed, and progress counts.
-
-All performance records are separated by app-generated Worker ID. Tool/model/session labels are descriptive dimensions and never merge two Worker sessions.
-
-Per-Worker metrics:
-
-- claimed task count;
-- completed task count;
-- failed/rejected count;
-- success rate;
-- weighted processing ratio;
-- active tasks and lease expiry;
-- tool calls, tool success rate, and average tool duration.
-
-Weighted processing ratio is defined as:
+The server binds only to `127.0.0.1`. Protocol `3.0` exposes:
 
 ```text
-total processing seconds / total video seconds
+GET /api/manifest
+GET /api/health
+GET /api/knowledge/catalog
+GET /api/knowledge/documents
+GET /api/knowledge/documents/<documentId>
+GET /api/knowledge/documents/<documentId>/content
+GET /api/knowledge/documents/<documentId>/assets
+GET /api/knowledge/documents/<documentId>/assets/<assetId>
+GET /api/knowledge/search
 ```
 
-Lower values mean faster processing after normalizing for video duration.
+Directory filters include user, collection, BV, title, owner, tag, publish date, favorite date, and sort order. Responses expose semantic metadata but no local paths, cookies, keys, work IDs, or mutable task internals.
 
-Tool analytics show:
+Content reads are exact UTF-8 Markdown, paged by 1-based lines with a maximum page size and SHA-256. Search scans at most 128 MiB per request and reports partial results. A snippet is never presented as full source.
 
-- call count;
-- active runs;
-- success and failure count;
-- success rate;
-- average duration;
-- unique caller count;
-- calls per Worker, including caller tool and model.
+Assets are document-scoped raster images. The server validates artifact root, regular file, real path, size, raster signature and opaque asset ID; supported formats are PNG, JPEG, GIF, WebP and AVIF. ETag supports repeat reads.
 
-The task-page performance popover always opens, including before the first claim. Its empty dashboard explains which independent Worker charts will appear. The Work Agent page is the full management view: it lists each Worker session, current tasks, independent performance charts, caller metadata, last activity, and pause/reactivate controls.
+Old external video workflow prefixes return HTTP `410` with `EXTERNAL_VIDEO_WORKFLOW_DISABLED`. Non-GET knowledge requests return `405`.
 
-## 13. UI Design
+The API rejects unrelated browser Origin values and omits wildcard CORS. It does not authenticate other local processes and must not be exposed to a LAN or public network.
 
-Brand: `星藏家`.
+## 12. Tool and ASR Scheduling
 
-The app uses a minimal flat mobile-style icon: a white rounded-square tile containing a star over three layered collection bookmarks. The reproducible source is `scripts/generate-icon.py`, which writes `assets/star-note.png` and `assets/star-note.ico` without remote assets or font dependencies.
+Internal tools are registered in SQLite but invoked only through `ToolRunner`. Pools:
 
-Window behavior:
+- API: Bilibili metadata/subtitles/comments with start-rate limiting;
+- media: yt-dlp, FFmpeg, audio extraction and keyframes;
+- disk: cleanup;
+- ASR: one CUDA lane and optional CPU lane.
 
-- frameless custom title bar;
-- default size `1350 x 836`;
-- startup always restores and centers the default size instead of preserving a previous resize or maximized state;
-- minimum size `980 x 680`;
-- narrow collapsible left navigation with standalone Startup/single-video/download entries, three main expandable page groups, and fixed bottom utilities;
-- content grids consume the width released by a collapsed sidebar instead of only translating left;
-- no page-level scrolling at the default size;
-- internal scrolling for task, tool, run, log, and workspace inventories;
-- themed thin scrollbars, custom selects, checkboxes, ranges, and focus states;
-- animated bottom-right operation notifications;
-- seven persisted themes.
-- each theme has its own startup loader colors; theme changes use a point-origin radial View Transition that fades into the destination palette.
-- restrained navigation type scale and weight with fixed icon/text columns; Claude Code keeps its dedicated font family.
+GPU ASR is a persistent faster-whisper service. CPU ASR is disabled by default and starts only after the user enables it.
 
-Pages:
+Hardware detection combines:
 
-- Startup: themed backend progress, per-tool interface health, global totals, a collapsed “External Agent application integration video-summary prompt”, and up to the newest 500 processing activities.
-- Bilibili login: persistent WebView, encrypted account vault, one-click login, SMS bridge.
-- Collections: folder discovery and full collection sync.
-- Task Overview: explicit external-Agent video-summary range activation, a compact progress band, primary search, collapsible advanced filters, batch state, and agent performance.
-- Work Preparation group: Bilibili Login, Collection Sync, and Task Overview.
-- AI group: RAG Knowledge Assistant, Agent Video Summary Workflow, Single Video Summary, and shared AI Model Configuration. Single Video Summary also has a standalone root navigation shortcut immediately below Startup.
-- Settings group: fixed at the lower left and expandable to Application Settings, Agent Work List, Agent Tool Modules, and Agent Tool Status. Agent Tool Status combines run inventory, tool-call analytics, and API reference in one page.
-- File Browse group: Video Library, Markdown Library, and Export.
-- Agent Video Summary Workflow: concurrent persistent sessions, each bound to an app-owned Worker ID, provider/model, collection, per-task progress stream, collection-wide progress, token usage, and pause/stop controls. Session rows are ordered by immutable creation time, newest first, and expose a right-click delete action for inactive workflows.
-- Live Agent rendering patches progress, stream text, reasoning, logs, and list summaries in place. Full structural rendering occurs only when action availability/session structure changes, so pointer events and independent scroll containers survive frequent model/tool deltas. Stop actions are deduplicated client-side and complete an idempotent backend rollback immediately.
-- Single Video Summary: direct BV/URL input, adjustable material requirements, internal collection creation, live generation, canonical `内置用户/<内置收藏夹>` output, and buttons for opening the collection or completed artifact directory. Before creation it checks the stable collection/BV pair: active work switches to its existing session; accepted work asks the user to open, cancel, or regenerate; failed, pending, deleted-output, or missing-artifact work is cleaned and reused from the beginning. Regeneration creates a separate collision-safe artifact revision only when no recoverable task exists. Historical revisions remain browseable/exportable while exactly one accepted revision is the default RAG source.
-- AI Model Configuration: the shared multi-provider/multi-model source for RAG, collection Agents, and single-task Agents. Sessions whose provider or enabled model is removed are marked unavailable and cannot start; an active attempt is aborted, cleaned, returned to pending, and paused before the configuration change completes.
-- RAG Knowledge Assistant: persistent session list and streaming conversation surface; a compact searchable top-toolbar multi-select provides quick knowledge-library switching while the full session-settings picker remains available, and both write the same session collection IDs. Session settings are hidden by default and open in a focused modal through a conventional gear button. Its upper-left pencil and session model-management button navigate to the shared AI Model Configuration page instead of opening a duplicate provider editor. New conversation creation has a separate labeled control.
-- Markdown library: accepted-document index by user and collection, BV/owner/title search, favorite/publish date filters, duration range, four time sort modes, and on-demand in-app Markdown preview with local frames. List covers resolve from the task-local cover, `info.json`, conventional cover filenames, the first keyframe, then a main-process-validated Bilibili HTTPS remote cover. Internal completion emits snapshot invalidation; a revision counter forces a second read when completion races an in-flight snapshot, so accepted single-video work appears without restart. Right-click deletion removes the accepted Markdown and generated artifacts. Active Bilibili membership and internal collections restore the same task to `pending` by immutable `collectionId`; remote folder renames therefore do not fork inventory. Removed favorites and deleted remote collections delete the task instead of restoring it. Registered cache-source video/cover/metadata files are preserved while generated summary material is removed. Deleting the current single-video revision promotes the newest still-present accepted revision as the default RAG source.
-- Work Agent: independent Worker sessions, current assignments, performance, pause, and reactivation.
-- Export: completed Markdown selection across users/collections, a persistent export queue, seven filename metadata controls, and destination-folder export.
-- Tool modules: module enable state, usage, prompts, outputs, and open-source attribution.
-- Agent Tool Status: first-level per-tool status summaries and second-level individual queued/running history with stage, pool/lane, queue reason, estimated wait, commands, logs, terminal result, compact usage bars, expandable analytics, and API reference.
-- Snapshot-driven status pages assign stable keys to expandable rows/details and restore expansion plus pane scroll offsets after refresh; user interaction receives a short refresh guard so a pending snapshot cannot destroy the clicked node. Internal task completion/abort/unavailable events also invalidate the shared task snapshot. A revision counter schedules a follow-up read when an event arrives during an in-flight read, preventing a completed single-video document from appearing only after restart.
-- Settings: themes, seven artifact filename fields, multiple workspace libraries, default selection, live GPU/resource-pool state, small/medium ASR model switching, manual CPU ASR enablement, runtime state, and dependency download/repair controls.
-- README: a rendered, user-facing summary of this design, Agent onboarding, tools, artifact rules, and RAG export. The page reads the root `README.md` directly so the application and repository share one source.
+- project-local Python and faster-whisper health process;
+- selected `small` or `medium` model files;
+- CTranslate2 version and CUDA device count;
+- `nvidia-smi` adapter name, total/free/used memory;
+- Windows x64 CPU runtime support, system memory, CPU thread count.
 
-## 14. Startup Strategy
+Recommended thresholds:
 
-The renderer shell is displayed before backend work begins. Startup no longer contains artificial delay calls.
+| Model | GPU total | CPU system memory |
+| --- | ---: | ---: |
+| small | 2048 MiB | 6144 MiB |
+| medium | 4096 MiB | 8192 MiB |
 
-Critical startup path:
+Unsupported GPU lanes are disabled. Unsupported CPU environments disable the CPU toggle and block workflow startup when no valid ASR path exists.
 
-1. Render desktop shell.
-2. Initialize project workspace.
-3. Open SQLite.
-4. Register Bilibili client and ToolRunner.
-5. Probe every tool script and dependency, streaming individual results to the renderer.
-6. Query NVIDIA memory, load the persistent GPU faster-whisper service, and restore interrupted queued/running tool calls.
-7. Start the local API and expose `/api/tool-health` plus `/api/scheduler`.
-8. Mark backend ready. CPU ASR remains stopped unless its persisted desktop setting is enabled.
+Every video runs ASR with language auto-detection. Output includes sentence-level SRT, readable timeline text, structured segments, language/probability, coverage and silence diagnostics.
 
-Snapshots, saved credentials, and persisted-login verification load asynchronously after the shell is usable. The progress panel has only a short visual completion hold.
+## 13. Markdown Validation
 
-## 15. RAG Markdown Export
+Accepted output requires:
 
-The Export page reads only validation-accepted `done` tasks. Users filter by Bilibili account, favorite folder, BV id, UP owner, or title; select completed Markdown documents; keep selections while switching source collections; and export the queue to a chosen directory.
+- Markdown and `info.json` under the assigned artifact directory;
+- opening order Summary, Mind Map, Contents;
+- Mermaid fenced mind map;
+- substantive body and timeline links;
+- subtitle comparison and ASR evidence;
+- keyframe references that resolve to validated local images;
+- comments section and processing record;
+- temporary media cleanup unless cache preservation is explicit.
 
-Filename metadata can independently include BV id, video title, UP owner, source collection, publish date, favorite-added date, and tags. The same token labels are used by workspace artifact naming and export naming. This allows a later RAG importer to classify sources before opening every Markdown body. Each export also writes `star-owner-rag-manifest-<timestamp>.json` with source/output paths and normalized video metadata.
+Finalization applies metadata naming with Windows path budgeting, move retries, copy fallback, and a recoverable journal.
 
-Export safeguards:
+## 14. Context Management
 
-- include completed and validation-accepted tasks only;
-- preserve source user, collection, BV id, video URL, and timestamps;
-- detect filename collisions;
-- emit a timestamped machine-readable manifest for every batch;
-- never delete source workspace artifacts.
+Queue Agents create a clean model request for every video. At 82% estimated context usage, or after a provider context-limit response, the same provider/model runs independent semantic map/reduce requests over every source chunk. The resulting evidence pack preserves timeline, facts, steps, parameters, code, constraints, conflicts and uncertainty. It does not alter Worker ID or work ID.
 
-## 16. Built-in RAG Assistant
+RAG sessions retain conversation history. At 75% of the model window or a lower reserve-safe input boundary, automatic compression summarizes eligible history while preserving the current user turn and avoiding duplicate resend of already summarized messages. Manual compression remains available.
 
-The assistant is intentionally separate from the external video Worker protocol. It reads accepted knowledge documents, but it cannot mark video tasks complete or bypass submission validation.
+## 15. RAG Assistant
 
-Provider contract:
+RAG sessions share provider/model configuration with video Agents but have separate conversation state, sandbox, permissions and usage counters. Knowledge tools provide catalog search, exact Markdown, metadata dates and images. Restricted mode requires approval for shell commands, sandbox-external paths, default-browser opening and private-network browsing.
 
-- `openai` and `newapi` currently share the OpenAI-compatible `GET /models` and `POST /chat/completions` wire format;
-- the configured Base URL is the API root immediately before `/models` and `/chat/completions`;
-- API keys and saved account passwords require Electron `safeStorage`; saving is rejected rather than falling back to plaintext when platform encryption is unavailable;
-- arbitrary extra request headers support self-hosted gateways without hard-coding vendor rules;
-- streaming accepts SSE and providers that return ordinary JSON despite `stream: true`;
-- reasoning is displayed only from explicit provider fields such as `reasoning_content`, `reasoning`, or `thinking`.
-- provider discovery tries the configured API root and a `/v1` candidate, then persists the successful compatible root;
-- context windows and output limits are independent model-level values. Unknown modern models default to 1M/128K, while GPT-5/Codex defaults to 400K/128K; provider output limits are fallbacks only;
-- conversation history is selected backwards by the model's remaining context budget instead of a fixed message count.
+The UI displays only reasoning text returned by the provider. Unsupported vision, tools, reasoning, image output, compression or subagent capabilities degrade honestly.
 
-Model records are user-verifiable capability declarations. The app stores context window and switches for tools, reasoning, vision, audio, image output, compression, and subagents. A switch enables the corresponding request shape or UI; it does not emulate a capability absent from the upstream model.
+## 16. UI Design
 
-Knowledge retrieval:
+The application uses a custom frameless title bar, seven themes, a compact left sidebar and non-default form controls. Settings navigation has three levels:
 
-- catalog only `done` tasks whose accepted Markdown path still exists;
-- group collections by Bilibili user and allow multiple collections per session;
-- split Markdown by headings and bounded character windows, cache by file modification time, and rank passages with title-aware lexical matching;
-- inject retrieved passages before inference when tools are disabled, or expose `knowledge_search`, `knowledge_list_documents`, and paged `knowledge_read_document` when tools are enabled;
-- include the Bilibili publish timestamp and favorite-addition timestamp in passage search, document lists, exact reads, and image-inspection metadata; these remain distinct chronology fields;
-- preserve exact original Markdown for document reads rather than reconstructing it from index chunks. Line ranges and a `next_start_line` cursor let the model inspect large files without forcing an entire collection into one context;
-- when vision is enabled, `knowledge_view_images` resolves only local images referenced by a selected accepted document, sends up to four originals as multimodal `image_url` parts, and returns session-scoped display URIs. Tool history shows viewed images and answers may embed the same safe URIs;
-- require the model system prompt to cite source title and collection and avoid claims not present in results.
+```text
+设置
+  应用设置
+  状态查询
+    Agent 工作列表
+    Agent 工具模块
+    Agent 工具状态
+```
 
-Conversation state persists in SQLite. Each session stores provider/model selection, selected collections, sandbox, permission mode, system prompt, token totals, optional compressed summary, compression boundary, and manual/automatic compression counts. Before every answer, active history plus attachment input is estimated against the configured model window. Automatic compression is mandatory at 75%, or earlier when output/protocol reserves leave less input capacity. It uses the same provider/model in independent requests, completely chunks the uncompressed older history, hierarchically merges durable summaries, keeps the current user message verbatim, and marks the last folded message so old messages remain visible without being sent twice. Manual compression invokes the same loss-aware pipeline. Text/PDF/DOCX extraction and media files live in the session sandbox. Imported images expose only a renderer-safe local preview URL; pending and sent user messages render the original image. Removing an unsent attachment deletes both its SQLite record and sandbox file, while sent-message references are protected from standalone deletion. Input-area paste detects clipboard image items, asks Electron to read and normalize the native clipboard bitmap as PNG, validates a 15 MiB limit/signature, and stores it under the current session sandbox before multimodal submission. User attachments, Markdown images, and knowledge-tool images share a delegated interaction layer: left click opens a full-window lightbox and right click copies the decoded original bitmap through main-process Electron clipboard IPC. Local copy sources must resolve under a registered Workspace; remote sources reject private-network DNS results, non-image responses, excessive redirects, and bodies over 15 MiB. Per-model accounting consumes provider usage fields when present and falls back to a clearly approximate character estimate.
+Task Overview has no external activation button. Its collection selector defines the inventory currently inspected, and row switches affect internal workflow claims.
 
-Assistant Markdown is rendered with raw HTML disabled. Fenced code blocks retain the Markdown language class and receive an idempotent renderer-side toolbar after every full or streaming render. The toolbar displays the language and copies the current code text through the existing text clipboard IPC; inline code remains visually distinct without receiving block controls. Markdown tables are wrapped in a bounded horizontal scroller and use collapsed, theme-aware borders for headers, cells, rows, and alternating backgrounds.
+Startup includes a collapsed external knowledge API prompt. Agent Tool Status includes the read-only protocol reference. Resource Scheduling displays ASR hardware compatibility and disables unsupported controls.
 
-The session settings inspector is modal rather than permanently occupying chat width. It contains title, provider/model, capability, knowledge, sandbox, permission, and usage controls. The compact composer selectors update the same persisted provider/model fields, so switching from either surface remains synchronized. Each provider owns an independent multi-select enabled-model list; sessions reference one provider and one enabled model at a time.
+## 17. Startup and Dependencies
 
-The tool loop permits 24 complete model/tool rounds per user turn and then one final model request without another tool execution. Supported tools cover knowledge search, exact source reads, multimodal source-image inspection, sandbox file list/read/write, Windows CMD, hidden-browser web search/page reading, opening the default browser, and an isolated same-model subagent call. Tool calls, reasoning deltas, content deltas, compression phase, completion state, and errors stream to the renderer. The renderer creates its assistant row only after the main process assigns the durable message id. Full history renders are built off-DOM, committed atomically, and serialized ahead of stream updates so an early model delta cannot appear above the user message. Cancellation aborts the active provider request, automatic compression, and command child process.
+The main window appears before heavy initialization. Bootstrap progress covers database, dependencies, models, resource pools, ASR health, knowledge API and login synchronization. Tool probes run during startup and report online/degraded/offline state.
 
-Security model:
+Project-local runtime and models may be installed from GitHub Release assets. Installation uses staging, backup, SHA-256 verification, a transaction journal and startup rollback. Archives may write only below `runtime/`.
 
-- restricted mode allows paths inside the session sandbox;
-- outside-sandbox paths, CMD, private/local browsing, and default-browser opening require renderer approval;
-- an approval can allow once, deny, or promote the session to full access;
-- full access broadens filesystem/CMD authority but still restricts browser tools to HTTP(S);
-- approval requests expire after two minutes and are denied when the app exits;
-- hidden pages run in an isolated sandboxed Electron partition with Node disabled, popups denied, and the browser window never shown.
+## 18. Security and Reliability
 
-The current retrieval engine is deterministic lexical RAG rather than an embedding/vector database. This avoids an additional model dependency and works offline, while keeping a future embedding index behind the same collection/session boundary.
+- Electron main and WebView run with sandbox boundaries and strict navigation policies.
+- Credentials require safeStorage; cookies remain local plaintext only where tools require it.
+- Provider Base URLs, headers, private networks and hidden browsing are validated.
+- Markdown raw HTML is disabled; images are constrained by source, size and signature.
+- Filesystem deletion and API reading resolve real paths under registered roots.
+- Application shutdown and restart recovery abort active video attempts rather than resuming partial state.
+- SQLite and dependency installation use recoverable writes.
 
-## 17. Internal Agent Execution
+## 19. Verification
 
-The internal Agent manager persists sessions in SQLite and registers each one through the same Worker store as external callers. Queue sessions claim only from their selected collection, so multiple internal sessions can work concurrently without changing the desktop collection activated for external agents. Claim ownership is synchronous and leases are renewed while app-managed tools are queued or running. Interrupted app sessions recover as stopped after restart; their tasks and attempt files are rolled back instead of resumed.
+`npm run verify:release` checks package/lock versions, machine-specific paths, JavaScript/Python syntax, all integration tests, both ASR models and npm audit.
 
-Each claimed video starts a fresh provider request context containing only the fixed system contract and that video's materials. Previous-video messages are never appended. The persistent Worker ID, aggregate usage, counters, and logs survive across videos, while every task has a new `workId` and increments the session context-cycle counter. Ordinary videos send their complete current-task material directly to the summary model and perform no extra organization call.
+Protocol and lifecycle gates include:
 
-Before inference, the manager reserves protocol, vision-image, and output capacity against the configured model context window. Only when the estimated request reaches 82% of that window, or when the provider actually reports a context-limit error, does it create independent “context organizer Agent” requests using the same provider and model. Station subtitles, ASR, metadata, manifest, comments, and an oversized repair draft are split into complete token-budgeted chunks without character truncation. Map requests preserve timeline, facts, steps, parameters, code, constraints, exceptions, transcript conflicts, comment positions, and uncertainty; reduce requests merge every chunk result into a hierarchical evidence pack. The original files remain untouched. The original Worker ID, current `workId`, claim, and task state remain active, and the original Agent continues generation from the evidence pack in a fresh request. Provider limits smaller than configured cause chunk sizes to decrease automatically. If the organized evidence still cannot fit, the ordinary abort/cleanup path is used rather than carrying a partial checkpoint into another task.
-
-For each task the manager runs the material bundle, refreshes task metadata from `info.json`, sends the template, every usable station SRT, the sentence-timestamped ASR transcript, comments, manifest, metadata, and optionally up to four keyframes to the selected model, streams explicit reasoning/content fields to the renderer, and validates the draft. The prompt explicitly requires timestamp links to use subtitle start/end values instead of inferred text order. One repair attempt includes concrete validator errors. Accepted work runs cache cleanup and the same `submission-artifacts` service as the public API. Usage is recorded in both the session and shared per-model accounting.
-
-Provider/model availability is resolved dynamically from the shared AI configuration in every public session state and again before start. Removing a referenced provider or enabled model marks inactive sessions `model-unavailable`. If an affected session is running, its controller is aborted, the standard attempt-cleanup service invalidates the current `workId` and returns the task to `pending`, and the Worker is paused. Re-enabling the same model on the existing provider makes the session restartable; a deleted provider record requires a newly configured workflow. No path resumes a partial model context.
-
-Single-task mode creates a normal enabled task under the reserved `内置用户` identity and a user-selected internal collection. It does not request an arbitrary destination: the accepted artifact's only canonical output is the default Workspace path under `内置用户/<内置收藏夹>/<视频产物目录>`. The form can open the selected collection root, and a completed session can open its validated artifact directory; both paths are resolved and validated by the main process. The first material run deliberately omits cookies even when the WebView is logged in. Only explicit registered-user, sign-in, private-video, or cookie-required errors move the session into `waiting-login`; ordinary network and model failures remain normal errors. The renderer then offers a direct Bilibili Login navigation action. A manual resume after successful login exports the current account cookie and retries the same pending task.
-
-Single-video revisions use a stable `versionGroupId`, monotonic `revision`, and `knowledgeActive` marker. Accepted regeneration never overwrites an older artifact directory. If an unfinished or missing-artifact revision already exists, it is cleaned and reused instead of allocating another task row. Only the newest accepted active revision appears in the default RAG catalog; Document Library and Export may still show historical accepted revisions.
-
-Internal users and collections are always present in the Markdown Library and Export selectors, including before they contain accepted documents; option labels include the current accepted-document count. The RAG knowledge catalog remains intentionally limited to collections with retrievable accepted Markdown.
-
-## 18. Managed Dependencies
-
-The dependency manager probes only project-relative paths. Required packages are the Windows media/ASR runtime and both built-in multilingual `small` and `medium` models. A missing required package triggers one consent prompt per application version. Downloads are serialized, stream progress to the renderer, resolve exact current-version assets first and always enumerate up to ten recent Releases for compatible dependency filenames second, require and verify a sibling `.sha256`, reject unsafe archive entries, and extract through a staged install transaction. Existing paths move to a project-local backup before replacement; an interrupted transaction rolls back at startup. A corrupt journal is quarantined and reported in Settings rather than interpreted as filesystem authority or allowed to block startup. This allows a code-only Release to reuse unchanged multi-gigabyte dependency assets safely. For older Releases without a dedicated runtime asset, the manager can extract only validated runtime subtrees from the portable core archive.
-
-Release asset contracts:
-
-- `Star-Owner-v<version>-runtime-win-x64.zip` contains `runtime/python`, `runtime/vc-runtime`, and `runtime/faster-whisper`;
-- `Star-Owner-v<version>-model-small.zip` contains `runtime/models/small`;
-- `Star-Owner-v<version>-model-medium.zip` contains `runtime/models/medium`;
-- every asset must have a same-name `.sha256` text asset; installation rejects unchecked archives.
-
-Core portable archives may bundle the base runtime for immediate startup. The separate runtime asset remains the repair/source-clone installation path. Model assets stay separate to respect GitHub per-file limits. After an ASR package is installed, ToolRunner re-probes and starts the persistent GPU service when possible; CPU ASR remains opt-in.
-
-## 19. Open-Source Distribution
-
-The repository tracks application source, lockfiles, templates, packaging scripts, documentation, the small signed `runtime/vc-runtime` compatibility layer, and a pinned `runtime-requirements.txt`. It intentionally ignores `node_modules/`, the generated Python/CUDA/model portions of `runtime/`, ASR models, `workspace/`, databases, logs, archives, and machine shortcuts. FFmpeg is supplied by the pinned imageio-ffmpeg wheel and yt-dlp by its pinned Python package inside the same runtime; portable archives include that prepared runtime. A small root `postinstall` compensates for Electron packages that expose `install.js` without automatically running it, and does nothing when the Electron executable is already present.
-
-Ordinary users receive GitHub Release portable assets assembled by `scripts/build-portable-release.ps1`. Because complete Windows distributions can exceed GitHub's 2GB per-asset limit, the default release separates the portable core, repairable runtime, and model archives. The application can install missing Release assets itself, so users do not need global Node, Python, FFmpeg, yt-dlp, CUDA Toolkit, package installation, or a model downloader. Single-archive builds remain available for distribution channels that accept larger files.
-
-Project-owned code is `GPL-3.0-or-later`. Third-party software and model data retain their own terms. The current imageio-ffmpeg executable is a GPL-enabled FFmpeg 7.1 build, while CUDA/cuDNN packages use NVIDIA proprietary redistribution terms. `THIRD_PARTY_NOTICES.md` is the release authority for component versions, source obligations, and license boundaries. Portable archives are aggregates and must preserve all included notices.
-
-All committed paths are relative to the repository root or computed at runtime from module/script location. Release verification rejects common maintainer-specific Windows paths and excludes local Workspace data.
-
-## 20. Video Cache Queue and Library
-
-Downloaded videos are first-class SQLite resources. `VideoCacheManager` owns protected and user-created cache collections, persisted jobs, public-first resolution, login-required suspension, queue recovery, metadata capture, and safe deletion. The protected `内置视频缓存` collection always exists under the reserved internal user. New downloads always use the selected collection's application-managed cache root; the download page does not expose arbitrary output directories. A job stores its source input, resolved BV, destination root, public/login attempt, current ToolRunner run, phase, progress, error, and cache record. Running or queued jobs recover to the queue after restart. Metadata capture also stores a local Bilibili cover and the reported video dimensions; existing records fall back to their normalized HTTPS cover URL when no local cover is available.
-
-The manager submits metadata and merged-video work through ToolRunner rather than invoking yt-dlp directly. Media concurrency is three lanes, while Bilibili metadata remains under the throttled API pool. yt-dlp progress is parsed into SQLite run state and exposed in the renderer. Short links and ordinary Bilibili URLs resolve to a canonical BV before a task is created. Public access is always attempted first; only explicit login, cookie, registered-user, or private-video signals move a job to `waiting-login`. Video-library thumbnails use `object-fit: contain`; after `loadedmetadata`, the themed player classifies the real media dimensions and applies a portrait or landscape layout without cropping.
-
-Every completed cache record owns a normal enabled task with `cachedVideoId`, `cachedVideoFile`, and `reuseCachedMedia`. Both public and internal Agent claim paths preserve the registered artifact directory. Cache jobs and records contain no external-root compatibility mode and are confined to application-managed collection roots. Active jobs are unique per collection/BV pair, preventing concurrent duplicate downloads into the same artifact directory. `video-tool` reuses an existing root `merged.*`; `clean-cache` automatically receives `--preserve-video` for cache tasks. Submission finalization relocates the cache record when the artifact directory is renamed, so the video library remains valid after Markdown acceptance.
-
-## 21. Security and Reliability Boundaries
-
-The renderer uses a restrictive Content Security Policy. The main BrowserWindow is sandboxed, cannot navigate away from the packaged renderer, and cannot create popup windows. The persistent login WebView has no Node/preload access, accepts navigation only to `bilibili.com` and `b23.tv` domains, and cannot create popup windows. Download-link resolution applies the same Bilibili allowlist to every redirect.
-
-Submission validation accepts only regular, non-symlink Markdown and metadata files inside the assigned artifact directory. Markdown is limited to 16 MiB and metadata JSON to 4 MiB before content parsing. The SQLite/sql.js database is persisted through a temporary file and crash-recovery backup instead of overwriting the live database directly.
-
-Document deletion is a main-process operation, never a renderer filesystem action. Cleanup resolves the artifact against its registered allowed Workspace root, refuses the root itself, and only then changes inventory state. Cache-backed tasks preserve their registered source media; ordinary task artifacts are removed as a whole. Remote membership/deletion state is evaluated from SQLite collection/task records, so a display-name change cannot redirect or revive a task.
-
-The video library computes `fileExists` on every state read and never hides stale records. Filters cover cache collection, title/BV/UP/tag text, duration, and download order. Playback uses a themed custom control surface without native browser controls. Video and collection deletion require renderer confirmation. The backend resolves every artifact against its registered allowed root, refuses deletion of the root itself, protects the default collection, and keeps at least one cache collection.
+- `scripts/knowledge-api-test.js`;
+- `scripts/hardware-capabilities-test.js`;
+- `scripts/internal-agent-test.js`;
+- `scripts/document-lifecycle-test.js`;
+- `scripts/collection-sync-test.js`;
+- `scripts/security-test.js`;
+- `scripts/smoke-test.js`.
