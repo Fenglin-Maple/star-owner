@@ -1427,7 +1427,7 @@ function buildGenerationPrompt({ session, task, collection, materials, template 
 1. 开头章节严格为“小结 -> 思维导图 -> 目录”，思维导图使用有效 Mermaid mindmap。
 2. 正文完整覆盖视频的新闻、技术、经验、步骤、参数、限制和时效性，不能只做简短摘要。
 3. 章节标题加入 Bilibili 时间轴链接：https://www.bilibili.com/video/${task.bvid}?t=<秒数>。优先依据 ASR/站内 SRT 的起止时间换算秒数，不得根据文字顺序猜测时间位置。
-4. 必须比较站内字幕与本次 ASR；无论有无站内字幕，本次 ASR 都已经执行。时间轴字幕中的“HH:MM:SS,mmm --> HH:MM:SS,mmm”是可直接使用的真实分段时间。
+4. 必须比较站内字幕与本次 ASR；无论有无站内字幕，都必须检查本次 ASR 结果。若 asr-result.json 标记 noAudioStream=true，说明源视频没有音轨，应如实说明并改用站内字幕、关键帧与多模态画面理解，不得把它当作工具失败。时间轴字幕中的“HH:MM:SS,mmm --> HH:MM:SS,mmm”是可直接使用的真实分段时间。
 5. 从给出的关键帧中选择适合正文的图片，使用相对路径 frames/xxx.jpg，并解释图片价值。
 6. 评论分析只处理可获取的热评前三条。
 7. 处理记录写明 Worker ID、模型、工具、字幕选择、关键帧依据和缓存清理。

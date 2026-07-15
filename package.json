@@ -21,6 +21,7 @@
     "test:collection-sync": "node scripts/collection-sync-test.js",
     "test:bili-client": "node scripts/bili-client-test.js",
     "test:asr-format": "node scripts/asr-format-test-runner.js",
+    "test:media-edge": "node scripts/media-edge-cases-test.js",
     "test:analytics": "node scripts/analytics-test.js",
     "test:scheduler": "node scripts/resource-scheduler-test.js",
     "test:asr-service": "node scripts/asr-service-test.js",

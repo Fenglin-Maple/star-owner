@@ -102,7 +102,7 @@ workspace/<内置用户>/<用户选择的内置收藏夹>/<视频产物目录>/
 - 可获取时的热评前三条分析；
 - Worker、模型、工具、字幕选择和缓存清理记录。
 
-无论是否存在站内字幕，都运行一次 ASR。Agent 优先读取：
+无论是否存在站内字幕，都会检查并运行一次 ASR。Agent 优先读取：
 
 ```text
 asr/transcript.srt
@@ -110,7 +110,7 @@ asr/asr-transcript.txt
 asr/asr-result.json
 ```
 
-`asr-result.json` 的 `segments[].start/end` 与 SRT 起止时间是时间轴依据，不能根据纯文本顺序猜测。无法判断字幕质量时，再结合关键帧和多模态模型核对。
+`asr-result.json` 的 `segments[].start/end` 与 SRT 起止时间是时间轴依据，不能根据纯文本顺序猜测。若源视频本身没有音轨，应用会写入 `noAudioStream=true` 的空 ASR 诊断并继续任务；Agent 必须明确说明无音轨，改用站内字幕、关键帧与多模态画面理解。无法判断字幕质量时，再结合关键帧和多模态模型核对。
 
 ## 应用托管工具
 

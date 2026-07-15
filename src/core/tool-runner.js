@@ -410,9 +410,24 @@ class ToolRunner {
 
   async runAsrStage(state, run) {
     const audioFile = path.join(run.artifactDir, 'audio', 'audio.wav');
+    let manifest = {};
+    try { manifest = JSON.parse(fs.readFileSync(path.join(run.artifactDir, 'manifest.json'), 'utf8')); } catch {}
+    let audioStatus = manifest.audio || {};
+    try {
+      if (!audioStatus.reason) audioStatus = JSON.parse(fs.readFileSync(path.join(run.artifactDir, 'audio', 'status.json'), 'utf8'));
+    } catch {}
     if (!fs.existsSync(audioFile)) {
-      let manifest = {};
-      try { manifest = JSON.parse(fs.readFileSync(path.join(run.artifactDir, 'manifest.json'), 'utf8')); } catch {}
+      if (audioStatus.available === false && audioStatus.reason === 'NO_AUDIO_STREAM') {
+        const result = writeNoAudioAsrArtifacts(run.artifactDir, {
+          model: this.config.asrModel,
+          duration: this.store.getTask(run.taskId)?.duration,
+          message: audioStatus.message
+        });
+        this.updateRun(run.id, { asrResult: result, actualCommand: 'ASR skipped: source video has no audio stream' });
+        this.appendLog(run.id, `[${new Date().toISOString()}] ASR skipped: source video has no audio stream; empty diagnostic artifacts created.\n`);
+        this.recordAsrManifest(run);
+        return result;
+      }
       const context = [...(state.warnings || []), ...(manifest.warnings || [])].join('\n');
       if (isVideoUnavailableMessage(context)) throw videoUnavailableError(context);
       throw new Error(`ASR audio is missing: ${audioFile}${context ? `\nEarlier tool errors:\n${context.slice(-2400)}` : ''}`);
@@ -1345,6 +1360,41 @@ function addAsrManifestOutputs(outputs, artifactDir) {
   if (fs.existsSync(path.join(directory, 'asr-result.json'))) outputs.asrSegments = 'asr/asr-result.json';
   outputs.asrHasTimestamps = true;
   return outputs;
+}
+
+function writeNoAudioAsrArtifacts(artifactDir, options = {}) {
+  const directory = ensureDir(path.join(artifactDir, 'asr'));
+  const message = String(options.message || '源视频不包含音频流，ASR 没有可转写内容。');
+  const diagnostics = {
+    sentenceCount: 0,
+    speechSeconds: 0,
+    speechCoverage: 0,
+    firstSpeechAt: null,
+    lastSpeechAt: null,
+    largeGapCount: 0,
+    largestGaps: [],
+    noAudioStream: true,
+    warnings: [message]
+  };
+  const payload = {
+    model: String(options.model || ''),
+    source: '',
+    language: null,
+    languageProbability: 0,
+    requestedLanguage: 'auto',
+    duration: Math.max(0, Number(options.duration || 0)),
+    device: 'not-applicable',
+    computeType: 'not-applicable',
+    skipped: true,
+    skipReason: 'NO_AUDIO_STREAM',
+    noAudioStream: true,
+    segments: [],
+    diagnostics
+  };
+  fs.writeFileSync(path.join(directory, 'transcript.srt'), '', 'utf8');
+  fs.writeFileSync(path.join(directory, 'asr-transcript.txt'), `[无音轨] ${message}\n`, 'utf8');
+  fs.writeFileSync(path.join(directory, 'asr-result.json'), `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  return { ok: true, skipped: true, reason: 'NO_AUDIO_STREAM', segments: 0, diagnostics };
 }
 
 function clampNumber(value, min, max, fallback) {

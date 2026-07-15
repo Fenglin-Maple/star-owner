@@ -35,6 +35,7 @@
 13. **中：切换 ASR 模型后 CPU 条件不满足时仍可能尝试启动 CPU 服务。** 配置切换只在重新检测后仍支持且开关有效时启动 CPU 常驻服务。
 14. **维护性：外部视频 API 字段和单视频版本模块继续制造错误契约。** 删除 Renderer 激活桥、Store 活动收藏夹方法、同步中的外部分发字段和未使用 `task-versions.js`；工具元数据改为应用内调用标识。
 15. **质量：启动页和工具页仍引导使用旧接口。** 启动页现在默认收起完整知识库接入提示词；Agent 工具状态页显示只读 API；工具模块说明只允许应用内调度。
+16. **高：无音轨视频被当作 FFmpeg 随机失败并反复派发。** 音频提取现在保留 FFmpeg stderr、规范化 Windows 负退出码，并把 `Output file does not contain any stream` 转换为 `NO_AUDIO_STREAM`；工作流生成空 ASR 诊断后继续使用字幕与关键帧。
 
 ## 延续有效的安全修复
 
@@ -67,6 +68,7 @@
 - `npm run test:hardware`：NVIDIA/CUDA、CPU 回退、模型显存/内存和缺失运行时；
 - `npm run test:internal-agent`：内部任务开关、单视频唯一覆盖与删除后新建；
 - `npm run test:document-lifecycle`：B 站恢复与本地永久删除矩阵；
+- `npm run test:media-edge`：无音轨视频识别、空 ASR 诊断和继续处理；
 - `npm run smoke`：端到端只读 API 和核心应用契约。
 
 总门禁还包含全部既有功能测试、JavaScript/Python 语法、双模型真实 ASR 服务和 `npm audit --audit-level=high`。

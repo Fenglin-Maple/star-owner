@@ -238,7 +238,7 @@ Recommended thresholds:
 
 Unsupported GPU lanes are disabled. Unsupported CPU environments disable the CPU toggle and block workflow startup when no valid ASR path exists.
 
-Every video runs ASR with language auto-detection. Output includes sentence-level SRT, readable timeline text, structured segments, language/probability, coverage and silence diagnostics.
+Every video passes through the ASR precondition and language-detection workflow. Sources with audio produce sentence-level SRT, readable timeline text, structured segments, language/probability, coverage and silence diagnostics. A video-only source produces a successful empty diagnostic with `noAudioStream=true`; the Agent continues with station subtitles and keyframes instead of retrying an impossible extraction.
 
 ## 13. Markdown Validation
 

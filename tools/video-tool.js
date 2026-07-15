@@ -44,7 +44,15 @@ async function main() {
   if (command === 'subtitles') return writeSubtitles(videoUrl, outDir, args);
   if (command === 'comments') return writeComments(videoUrl, outDir, args);
   if (command === 'merged') return downloadMerged(videoUrl, outDir, args);
-  if (command === 'audio') return prepareAudio(videoUrl, outDir, args);
+  if (command === 'audio') {
+    try { return await prepareAudio(videoUrl, outDir, args); }
+    catch (error) {
+      if (!isNoAudioStreamError(error)) throw error;
+      const status = writeNoAudioStatus(outDir);
+      console.log(path.join(outDir, 'audio', 'status.json'));
+      return status;
+    }
+  }
   if (command === 'asr') return runAsr(videoUrl, outDir, args);
   if (command === 'bundle') return buildBundle(videoUrl, outDir, args);
   throw new Error(`未知命令：${command}`);
@@ -237,9 +245,22 @@ async function prepareAudio(videoUrl, outDir, args) {
   const audioDir = path.join(outDir, 'audio');
   fs.mkdirSync(audioDir, { recursive: true });
   const audioFile = path.join(audioDir, 'audio.wav');
-  run('ffmpeg', ['-y', '-i', merged, '-vn', '-ac', '1', '-ar', '16000', audioFile]);
+  run('ffmpeg', ['-y', '-i', merged, '-vn', '-ac', '1', '-ar', '16000', audioFile], { capture: true });
   console.log(audioFile);
   return audioFile;
+}
+
+function writeNoAudioStatus(outDir) {
+  const audioDir = path.join(outDir, 'audio');
+  fs.mkdirSync(audioDir, { recursive: true });
+  const status = {
+    available: false,
+    reason: 'NO_AUDIO_STREAM',
+    message: '源视频不包含音频流，无法执行语音识别；后续总结应使用站内字幕与关键帧。',
+    detectedAt: new Date().toISOString()
+  };
+  fs.writeFileSync(path.join(audioDir, 'status.json'), `${JSON.stringify(status, null, 2)}\n`, 'utf8');
+  return status;
 }
 
 async function buildBundle(videoUrl, outDir, args) {
@@ -289,7 +310,12 @@ async function buildBundle(videoUrl, outDir, args) {
       await prepareAudio(videoUrl, outDir, args);
       manifest.outputs.audio = 'audio/audio.wav';
     } catch (error) {
-      manifest.warnings.push(`audio failed: ${error.message || String(error)}`);
+      if (isNoAudioStreamError(error)) {
+        manifest.audio = writeNoAudioStatus(outDir);
+        manifest.outputs.audioStatus = 'audio/status.json';
+      } else {
+        manifest.warnings.push(`audio failed: ${error.message || String(error)}`);
+      }
     }
   }
 
@@ -656,14 +682,49 @@ function resolveCommand(command) {
   return '';
 }
 
-function run(command, args) {
+function run(command, args, options = {}) {
   const executable = resolveCommand(command);
   if (!executable) throw new Error(`未找到 ${command}，请先安装并加入 PATH。`);
   let finalArgs = args;
   if (command === 'faster-whisper' && executable === WHISPER_PYTHON && fs.existsSync(WHISPER_CLI)) finalArgs = [WHISPER_CLI, ...args];
   if (command === 'yt-dlp' && executable === WHISPER_PYTHON) finalArgs = ['-m', 'yt_dlp', ...args];
-  const result = spawnSync(executable, finalArgs, { stdio: 'inherit', shell: false, windowsHide: true });
-  if (result.status !== 0) throw new Error(`${command} 执行失败，退出码 ${result.status}`);
+  const capture = Boolean(options.capture);
+  const result = spawnSync(executable, finalArgs, capture
+    ? { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, shell: false, windowsHide: true }
+    : { stdio: 'inherit', shell: false, windowsHide: true });
+  if (capture) {
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+  }
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const exitCode = signedWindowsExitCode(result.status);
+    const detail = processFailureDetail(result.stderr, result.stdout);
+    const suffix = Number(result.status) !== exitCode ? `（Windows 原始值 ${result.status}）` : '';
+    const error = new Error(`${command} 执行失败，退出码 ${exitCode}${suffix}${detail ? `\n${detail}` : ''}`);
+    error.exitCode = exitCode;
+    error.rawExitCode = result.status;
+    error.stderr = String(result.stderr || '');
+    if (isNoAudioStreamError(error)) error.code = 'NO_AUDIO_STREAM';
+    throw error;
+  }
+  return result;
+}
+
+function signedWindowsExitCode(value) {
+  const number = Number(value);
+  return process.platform === 'win32' && number > 0x7fffffff ? number - 0x100000000 : number;
+}
+
+function processFailureDetail(stderr, stdout) {
+  const text = `${String(stdout || '')}\n${String(stderr || '')}`.trim();
+  if (!text) return '';
+  return text.split(/\r?\n/).filter(Boolean).slice(-24).join('\n').slice(-4000);
+}
+
+function isNoAudioStreamError(error) {
+  const text = `${String(error?.code || '')}\n${String(error?.message || error || '')}\n${String(error?.stderr || '')}`;
+  return /NO_AUDIO_STREAM|Output file does not contain any stream|matches no streams|does not contain an audio stream/i.test(text);
 }
 
 function findFirst(dir, pattern) {
@@ -680,4 +741,4 @@ function* walk(root) {
   }
 }
 
-module.exports = { assessSubtitle, normalizeVideoUrl, resolveCommand };
+module.exports = { assessSubtitle, buildBundle, isNoAudioStreamError, normalizeVideoUrl, prepareAudio, resolveCommand, writeNoAudioStatus };

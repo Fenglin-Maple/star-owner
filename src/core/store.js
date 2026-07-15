@@ -557,7 +557,7 @@ function defaultTools() {
       description: '一次性准备总结素材：元数据、站内字幕、合轨视频、关键帧、ASR 字幕、热评前三条和 manifest。',
       apiUsage: 'app://tools/material-bundle (internal workflow only)',
       internalCommand: 'node tools/video-tool.js bundle <videoUrl> --out <artifactDir> --cookies <cookieFile> --frames 12 --asr --comments --comment-limit 3',
-      agentPrompt: '通过工具运行 API 优先调用本模块。ASR 完成后优先读取 asr/transcript.srt 或 asr/asr-result.json 的真实起止时间，不要根据纯文本顺序猜测视频位置。失败时查看 run.log，再拆分调用其它模块。',
+      agentPrompt: '通过工具运行 API 优先调用本模块。ASR 完成后优先读取 asr/transcript.srt 或 asr/asr-result.json 的真实起止时间，不要根据纯文本顺序猜测视频位置。若 asr-result.json 标记 noAudioStream=true，表示源视频没有音轨，应使用站内字幕与关键帧继续总结。失败时查看 run.log，再拆分调用其它模块。',
       outputs: ['manifest.json', 'info.json', 'subtitles/', 'merged.mp4', 'frames/', 'asr/transcript.srt', 'asr/asr-transcript.txt', 'asr/asr-result.json', 'comments/comments.json'],
       projects: [
         { name: 'yt-dlp', url: 'https://github.com/yt-dlp/yt-dlp', role: '下载视频/字幕/元数据' },
@@ -589,10 +589,10 @@ function defaultTools() {
       category: 'transcript',
       enabled: true,
       order: 40,
-      description: '不管是否存在官方字幕，都运行一次多语言自动识别 ASR，生成带真实分段起止时间的 SRT、时间轴文本和 JSON，用于和官方/自动字幕比对及建立视频时间轴链接。',
+      description: '不管是否存在官方字幕，都检查并运行一次多语言 ASR；有音轨时生成带真实分段起止时间的 SRT、时间轴文本和 JSON，无音轨时生成明确的空诊断，供 Agent 改用字幕与关键帧。',
       apiUsage: 'app://tools/asr (internal workflow only)',
       internalCommand: 'node tools/video-tool.js asr <videoUrl> --out <artifactDir> --cookies <cookieFile>',
-      agentPrompt: '必须通过工具运行 API 调用，并在 Markdown 的“字幕比对”章节说明采用哪份字幕。默认自动检测中文、英文、日语等语言；优先读取 asr/transcript.srt，也要检查 asr/asr-result.json 的 language、languageProbability、diagnostics 与 start/end。asr/asr-transcript.txt 同样包含时间轴，不得猜测内容位置。',
+      agentPrompt: '必须通过工具运行 API 调用，并在 Markdown 的“字幕比对”章节说明采用哪份字幕。默认自动检测中文、英文、日语等语言；优先读取 asr/transcript.srt，也要检查 asr/asr-result.json 的 language、languageProbability、diagnostics 与 start/end。若 noAudioStream=true，应明确说明视频没有音轨并改用站内字幕、关键帧和多模态画面，不得猜测内容位置。',
       outputs: ['asr/transcript.srt', 'asr/asr-transcript.txt', 'asr/asr-result.json'],
       projects: [
         { name: 'faster-whisper', url: 'https://github.com/SYSTRAN/faster-whisper', role: '本地 Whisper ASR' },
