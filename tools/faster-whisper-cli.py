@@ -201,11 +201,15 @@ def choose_runtime(requested_device, requested_compute):
 
 def run_model(model_class, model_path, source, args, device, compute_type):
     model = model_class(str(model_path), device=device, compute_type=compute_type)
-    return model.transcribe(str(source), **transcription_options(args.language, args.beam_size, True, 448))
+    return model.transcribe(str(source), **transcription_options(args.language, args.beam_size, True))
 
 
-def transcription_options(language="auto", beam_size=5, condition_on_previous_text=True, max_new_tokens=448):
+def transcription_options(language="auto", beam_size=5, condition_on_previous_text=True, max_new_tokens=None):
     requested = str(language or "auto").strip().lower()
+    normalized_max_new_tokens = None
+    if max_new_tokens not in (None, ""):
+        # Previous-text prompts can occupy roughly half of Whisper's 448-token window.
+        normalized_max_new_tokens = max(32, min(220, int(max_new_tokens)))
     return {
         "language": None if requested in ("", "auto") else requested,
         "beam_size": max(1, min(10, int(beam_size or 5))),
@@ -218,7 +222,7 @@ def transcription_options(language="auto", beam_size=5, condition_on_previous_te
             "min_silence_duration_ms": 500,
             "speech_pad_ms": 400,
         },
-        "max_new_tokens": max(32, min(448, int(max_new_tokens or 448))),
+        "max_new_tokens": normalized_max_new_tokens,
         "hallucination_silence_threshold": 2.0,
         "word_timestamps": True,
         "condition_on_previous_text": bool(condition_on_previous_text),

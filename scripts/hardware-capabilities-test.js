@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { detectAsrHardware, evaluateAsrHardware } = require('../src/core/hardware-capabilities');
+const { isAsrInfrastructureFailure } = require('../src/core/tool-runner');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -48,6 +49,9 @@ function assert(condition, message) {
   const missingRuntime = await detectAsrHardware({ projectRoot: emptyProject, gpu: { available: false }, model: 'medium' });
   assert(!missingRuntime.localAsrSupported && !missingRuntime.runtime.pythonAvailable && missingRuntime.issues.some((item) => item.includes('Python')), 'missing project-local ASR runtime was not detected');
   fs.rmSync(emptyProject, { recursive: true, force: true });
+
+  const tokenWindowError = new Error('The length of the prompt is 3, and the max_new_tokens 448. This exceeds the max_length of the Whisper model: 448.');
+  assert(isAsrInfrastructureFailure(tokenWindowError, { ready: true, child: {} }), 'Whisper token-window configuration errors must stop a failing workflow');
   console.log('ASR hardware capability test passed');
 })().catch((error) => {
   console.error(error);

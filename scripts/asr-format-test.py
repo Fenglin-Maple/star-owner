@@ -21,8 +21,9 @@ def main():
     assert defaults.language == "auto" and defaults.beam_size == 5
     options = cli.transcription_options()
     assert options["language"] is None
-    assert options["beam_size"] == 5 and options["max_new_tokens"] == 448
+    assert options["beam_size"] == 5 and options["max_new_tokens"] is None
     assert options["condition_on_previous_text"] is True
+    assert cli.transcription_options(max_new_tokens=448)["max_new_tokens"] == 220
     raw = [SimpleNamespace(
         start=1.2,
         end=5.6,

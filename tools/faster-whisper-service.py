@@ -77,7 +77,7 @@ def transcribe(model, cli, args, request_id, request):
         requested_language,
         request.get("beamSize", 5),
         request.get("conditionOnPreviousText", True),
-        request.get("maxNewTokens", 448),
+        request.get("maxNewTokens"),
     ))
     total_duration = max(0.0, float(getattr(info, "duration", 0.0) or 0.0))
     emit({"event": "progress", "id": request_id, "phase": "audio-loaded", "progress": 0, "totalSeconds": total_duration})

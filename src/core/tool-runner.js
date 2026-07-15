@@ -424,16 +424,18 @@ class ToolRunner {
       this.appendLog(run.id, `[${new Date().toISOString()}] transcribe on ${service.id}, pid=${service.child?.pid || '-'}\n`);
       try {
         let lastProgressWrite = 0;
-        const result = await withTimeout(service.request({
+        const request = {
           id: run.id,
           action: 'transcribe',
           audio: audioFile,
           outputDir,
           language: run.options?.language || 'auto',
           beamSize: clampNumber(run.options?.beamSize, 1, 10, 5),
-          conditionOnPreviousText: run.options?.conditionOnPreviousText !== false,
-          maxNewTokens: clampNumber(run.options?.maxNewTokens, 32, 448, 448)
-        }, {
+          conditionOnPreviousText: run.options?.conditionOnPreviousText !== false
+        };
+        const maxNewTokens = optionalAsrMaxNewTokens(run.options?.maxNewTokens);
+        if (maxNewTokens !== undefined) request.maxNewTokens = maxNewTokens;
+        const result = await withTimeout(service.request(request, {
           onProgress: (progress) => {
             if (Date.now() - lastProgressWrite < 800 && Number(progress.progress || 0) < 1) return;
             lastProgressWrite = Date.now();
@@ -1295,6 +1297,12 @@ function emptyHardwareState() {
 function diagnoseAsrFailure(service, label) {
   const code = Number(service.lastExitCode);
   const message = String(service.lastError || '').toLowerCase();
+  if (message.includes('whisper model') && message.includes('max_new_tokens') && message.includes('max_length')) {
+    return [
+      'ASR 解码 token 预算与 Whisper 总窗口冲突',
+      '应用或旧版常驻服务传入了不兼容的 max_new_tokens 参数；重启应用并重试'
+    ];
+  }
   if ([3221225477, -1073741819].includes(code)) {
     return [
       '本地 CTranslate2、Microsoft Visual C++ 或 CUDA 原生 DLL 发生访问冲突',
@@ -1324,6 +1332,7 @@ function asrInfrastructureError(error, service) {
 function isAsrInfrastructureFailure(error, service) {
   if (!service?.ready || !service?.child) return true;
   const message = String(error?.message || error || '').toLowerCase();
+  if (message.includes('whisper model') && message.includes('max_new_tokens') && message.includes('max_length')) return true;
   return /(?:cuda|cudnn|cublas|ctranslate2|out of memory|memory allocation|dll|winerror|access violation|driver|device unavailable|failed to load|module not found|no module named|broken pipe|epipe|service exited|native runtime|model.+(?:missing|not installed|does not exist))/.test(message);
 }
 
@@ -1342,6 +1351,11 @@ function clampNumber(value, min, max, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(min, Math.min(max, Math.round(number)));
+}
+
+function optionalAsrMaxNewTokens(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  return clampNumber(value, 32, 220, 220);
 }
 
 function cancelledError(runId) {
