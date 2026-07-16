@@ -2,12 +2,12 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { buildBundle, resolveCommand } = require('../tools/video-tool');
+const { buildBundle, extractFrames, resolveCommand } = require('../tools/video-tool');
 const { ToolRunner } = require('../src/core/tool-runner');
 const { PROJECT_ROOT } = require('../src/core/workspace');
 
 (async () => {
-  const root = path.join(PROJECT_ROOT, 'workspace', '.star-note', 'media-edge-cases-test');
+  const root = path.join(PROJECT_ROOT, 'workspace', '.star-note', 'media-edge-cases-92%test');
   fs.rmSync(root, { recursive: true, force: true });
   fs.mkdirSync(root, { recursive: true });
   const ffmpeg = resolveCommand('ffmpeg');
@@ -24,6 +24,20 @@ const { PROJECT_ROOT } = require('../src/core/workspace');
   ], { windowsHide: true, stdio: 'ignore' });
   assert.strictEqual(generated.status, 0, 'Could not generate a video-only fixture.');
   fs.writeFileSync(path.join(root, 'info.json'), `${JSON.stringify({ duration: 1 })}\n`, 'utf8');
+
+  for (const sourceName of ['bili-favorite-92%', 'cached-favorite-99%', 'single-video-90%']) {
+    const sourceDir = path.join(root, sourceName);
+    fs.mkdirSync(sourceDir, { recursive: true });
+    fs.copyFileSync(merged, path.join(sourceDir, 'merged.mp4'));
+    fs.copyFileSync(path.join(root, 'info.json'), path.join(sourceDir, 'info.json'));
+    const extracted = extractFrames(sourceDir, 2);
+    assert(extracted.length >= 1 && extracted.every((item) => /^frames\/frame-\d{3}\.jpg$/.test(item)), `${sourceName} did not receive concrete numbered frames.`);
+    assert(!fs.existsSync(path.join(sourceDir, 'frames', 'frame-%03d.jpg')), `${sourceName} retained a literal FFmpeg frame placeholder.`);
+    for (const item of extracted) {
+      const bytes = fs.readFileSync(path.join(sourceDir, item));
+      assert(bytes[0] === 0xff && bytes[1] === 0xd8 && bytes.at(-2) === 0xff && bytes.at(-1) === 0xd9, `${sourceName} frame is not a complete JPEG.`);
+    }
+  }
 
   const audioCommand = spawnSync(process.execPath, [
     path.join(PROJECT_ROOT, 'tools', 'video-tool.js'), 'audio', 'BV1xx411c7mD', '--out', root
@@ -43,6 +57,7 @@ const { PROJECT_ROOT } = require('../src/core/workspace');
   assert.strictEqual(manifest.audio?.available, false, 'A video-only source was not classified as having no audio stream.');
   assert.strictEqual(manifest.audio?.reason, 'NO_AUDIO_STREAM');
   assert(fs.existsSync(path.join(root, 'audio', 'status.json')), 'No-audio status artifact is missing.');
+  assert(fs.existsSync(path.join(root, 'frames', 'frame-001.jpg')) && !fs.existsSync(path.join(root, 'frames', 'frame-%03d.jpg')), 'Bundle extraction failed when its artifact path contained a percent sign.');
 
   let toolRun = { id: 'no-audio-run', taskId: 'no-audio-task', artifactDir: root, logFile: path.join(root, 'run.log'), createdAt: new Date().toISOString() };
   const store = {

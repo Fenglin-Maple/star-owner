@@ -1362,7 +1362,9 @@ class InternalAgentManager {
 }
 
 function collectMaterials(artifactDir) {
-  const frames = listFiles(path.join(artifactDir, 'frames'), '.jpg').map((file) => `frames/${path.basename(file)}`);
+  const frames = listFiles(path.join(artifactDir, 'frames'), '.jpg')
+    .filter((file) => /^frame-\d{3,}\.jpg$/i.test(path.basename(file)))
+    .map((file) => `frames/${path.basename(file)}`);
   const asr = readTimedAsr(path.join(artifactDir, 'asr'));
   const station = readTimedStationSubtitles(path.join(artifactDir, 'subtitles'));
   return {
@@ -1547,6 +1549,7 @@ function injectFrameGallery(markdown, frames) {
 function normalizeGeneratedMarkdown(markdown, task, materials) {
   let result = String(markdown || '').trim();
   result = repairGeneratedFrameReferences(result, materials.frames || []);
+  result = normalizeLeadingSectionOrder(result);
   const mapBlock = `## 思维导图\n\n\`\`\`mermaid\nmindmap\n  root((${mermaidLabel(task.title || task.bvid || '视频知识')}))\n    核心内容\n    字幕核对\n    关键帧\n    评论反馈\n\`\`\``;
   const mapMatch = result.match(/^##\s+思维导图\s*$[\s\S]*?(?=^##\s+|$)/m);
   if (!mapMatch) {
@@ -1573,7 +1576,9 @@ function normalizeGeneratedMarkdown(markdown, task, materials) {
 }
 
 function repairGeneratedFrameReferences(markdown, frames) {
-  const available = (frames || []).map((item) => String(item || '').replace(/\\/g, '/')).filter(Boolean);
+  const available = (frames || [])
+    .map((item) => String(item || '').replace(/\\/g, '/'))
+    .filter((item) => /^frames\/frame-\d{3,}\.(?:jpe?g|png|webp)$/i.test(item));
   const replacement = available[0] || '';
   const placeholder = /frames\/frame-%(?:0?\d+)?d\.(?:jpe?g|png|webp)/gi;
   if (replacement) return String(markdown || '').replace(placeholder, replacement);
@@ -1591,7 +1596,7 @@ function normalizeLeadingSectionOrder(markdown) {
   }));
   const selected = new Map();
   for (const section of sections) {
-    const key = required.find((title) => section.title === title || section.title.startsWith(`${title}\uff08`) || section.title.startsWith(`${title} (`));
+    const key = required.find((title) => section.title.includes(title));
     if (key && !selected.has(key)) selected.set(key, section);
   }
   if (required.some((title) => !selected.has(title))) return markdown;

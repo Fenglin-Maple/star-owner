@@ -13,9 +13,11 @@ function assert(condition, message) {
   const normalized = normalizeGeneratedMarkdown('# Test\n\n## 小结\n\nSummary\n\n## 目录\n\n- Body\n\n## 正文\n\nContent\n\n## 处理记录\n\nDone', { bvid: 'BVTEST', title: 'Test video' }, { comments: [] });
   assert(normalized.indexOf('## 小结') < normalized.indexOf('## 思维导图') && normalized.indexOf('## 思维导图') < normalized.indexOf('## 目录'), 'generated Markdown opening was not normalized');
   assert(normalized.includes('```mermaid\nmindmap') && normalized.includes('## 评论分析'), 'generated Markdown required sections were not repaired');
-  const repairedOrderAndFrame = normalizeGeneratedMarkdown('# Test\n\n## 目录\n\n- Body\n\n## 小结\n\nSummary\n\n## 思维导图\n\n```mermaid\nmindmap\n  root((Test))\n```\n\n## 正文\n\n![frame](frames/frame-%03d.jpg)', { bvid: 'BVTEST', title: 'Test video' }, { comments: [], frames: ['frames/frame-001.jpg'] });
+  const repairedOrderAndFrame = normalizeGeneratedMarkdown('# Test\n\n## 1. 目录导航\n\n- Body\n\n## 核心小结\n\nSummary\n\n## 2. 思维导图（Mind Map）\n\n```mermaid\nmindmap\n  root((Test))\n```\n\n## 正文\n\n![frame](frames/frame-%03d.jpg)', { bvid: 'BVTEST', title: 'Test video' }, { comments: [], frames: ['frames/frame-001.jpg'] });
   assert(repairedOrderAndFrame.indexOf('## 小结') < repairedOrderAndFrame.indexOf('## 思维导图') && repairedOrderAndFrame.indexOf('## 思维导图') < repairedOrderAndFrame.indexOf('## 目录'), 'existing generated Markdown sections were not deterministically reordered');
   assert(repairedOrderAndFrame.includes('(frames/frame-001.jpg)') && !repairedOrderAndFrame.includes('frame-%03d'), 'generated frame filename placeholder was not repaired');
+  const rejectedPlaceholder = normalizeGeneratedMarkdown('# Test\n\n## 小结\n\nSummary\n\n## 思维导图\n\n```mermaid\nmindmap\n  root((Test))\n```\n\n## 目录\n\n- Body\n\n![frame](frames/frame-%03d.jpg)', { bvid: 'BVTEST', title: 'Test video' }, { comments: [], frames: ['frames/frame-%03d.jpg'] });
+  assert(!rejectedPlaceholder.includes('frame-%03d.jpg'), 'literal FFmpeg placeholder file was treated as a usable keyframe.');
   const oversizedPlan = planGenerationRequest({
     session: { workerId: 'worker-budget', modelId: 'small-context', taskRequirements: '保留事实。' },
     task: { bvid: 'BVBUDGET0001', title: '超长素材', owner: '测试 UP', duration: 7200 },

@@ -356,7 +356,45 @@ function extractFrames(outDir, count) {
   const wanted = Math.max(1, Math.min(60, Math.round(Number(count) || 12)));
   const duration = Math.max(0, Number(info.duration || 0));
   const interval = duration > 0 ? Math.max(0.5, duration / (wanted + 1)) : 30;
-  run('ffmpeg', ['-y', '-i', merged, '-vf', `fps=1/${interval.toFixed(3)}`, '-frames:v', String(wanted), path.join(framesDir, 'frame-%03d.jpg')]);
+  const executable = resolveCommand('ffmpeg');
+  const result = spawnSync(executable, [
+    '-hide_banner', '-loglevel', 'error', '-i', merged,
+    '-vf', `fps=1/${interval.toFixed(3)}`,
+    '-frames:v', String(wanted),
+    '-f', 'image2pipe', '-c:v', 'mjpeg', 'pipe:1'
+  ], {
+    encoding: null,
+    maxBuffer: 256 * 1024 * 1024,
+    shell: false,
+    windowsHide: true
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const exitCode = signedWindowsExitCode(result.status);
+    const detail = processFailureDetail(result.stderr?.toString('utf8'), '');
+    throw new Error(`ffmpeg 抽帧失败，退出码 ${exitCode}${detail ? `\n${detail}` : ''}`);
+  }
+  const frames = splitJpegStream(Buffer.from(result.stdout || []), wanted);
+  if (!frames.length) throw new Error('ffmpeg 抽帧结束，但没有返回可用的 JPEG 图片。');
+  frames.forEach((buffer, index) => {
+    fs.writeFileSync(path.join(framesDir, `frame-${String(index + 1).padStart(3, '0')}.jpg`), buffer);
+  });
+  return frames.map((_buffer, index) => `frames/frame-${String(index + 1).padStart(3, '0')}.jpg`);
+}
+
+function splitJpegStream(value, maximum = 60) {
+  const buffer = Buffer.from(value || []);
+  const frames = [];
+  let offset = 0;
+  while (offset < buffer.length && frames.length < maximum) {
+    const start = buffer.indexOf(Buffer.from([0xff, 0xd8]), offset);
+    if (start < 0) break;
+    const end = buffer.indexOf(Buffer.from([0xff, 0xd9]), start + 2);
+    if (end < 0) break;
+    frames.push(buffer.subarray(start, end + 2));
+    offset = end + 2;
+  }
+  return frames;
 }
 
 function cleanCache(target, args = {}) {
@@ -741,4 +779,4 @@ function* walk(root) {
   }
 }
 
-module.exports = { assessSubtitle, buildBundle, isNoAudioStreamError, normalizeVideoUrl, prepareAudio, resolveCommand, writeNoAudioStatus };
+module.exports = { assessSubtitle, buildBundle, extractFrames, isNoAudioStreamError, normalizeVideoUrl, prepareAudio, resolveCommand, splitJpegStream, writeNoAudioStatus };

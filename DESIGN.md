@@ -242,6 +242,8 @@ Unsupported GPU lanes are disabled. Unsupported CPU environments disable the CPU
 
 Every video passes through the ASR precondition and language-detection workflow. Sources with audio produce sentence-level SRT, readable timeline text, structured segments, language/probability, coverage and silence diagnostics. A video-only source produces a successful empty diagnostic with `noAudioStream=true`; the Agent continues with station subtitles and keyframes instead of retrying an impossible extraction.
 
+Keyframe extraction writes FFmpeg MJPEG output through an image pipe and then persists validated numbered JPEG files. It never exposes the artifact directory to FFmpeg's image-sequence pattern parser, so percent signs or other title metadata in Bilibili, cached-video, and single-video paths cannot corrupt `frame-001.jpg` naming. Material discovery accepts only concrete numbered frame files and ignores legacy pattern placeholders.
+
 ## 13. Markdown Validation
 
 Accepted output requires:
@@ -255,7 +257,7 @@ Accepted output requires:
 - comments section and processing record;
 - temporary media cleanup unless cache preservation is explicit.
 
-Before validation, deterministic normalization repairs frame filename placeholders against the real extracted frame inventory and orders Summary, Mind Map, and Contents. A remaining validation failure returns the task to pending and cannot be reclassified as a missing video.
+Before validation, deterministic normalization repairs frame filename placeholders against the real extracted frame inventory, rejects literal FFmpeg pattern files, canonicalizes decorated/numbered headings, and orders Summary, Mind Map, and Contents. A remaining validation failure returns the task to pending and cannot be reclassified as a missing video.
 
 Finalization applies metadata naming with Windows path budgeting, move retries, copy fallback, and a recoverable journal.
 
