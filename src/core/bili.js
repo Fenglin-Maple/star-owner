@@ -99,6 +99,7 @@ class BiliClient {
     const videos = [];
     const pageSize = 20;
     let reportedTotal = 0;
+    let completedPages = false;
     for (let page = 1; page <= 200; page += 1) {
       const url = `https://api.bilibili.com/x/v3/fav/resource/list?media_id=${encodeURIComponent(folderId)}&pn=${page}&ps=${pageSize}&keyword=&order=mtime&type=0&tid=0&platform=web`;
       const data = await this.fetchJson(url);
@@ -115,14 +116,22 @@ class BiliClient {
         progress: total ? Math.min(1, videos.length / total) : null,
         done: !hasMore || list.length === 0
       });
-      if (!hasMore || list.length === 0) break;
+      if (!hasMore || list.length === 0) {
+        completedPages = true;
+        break;
+      }
       if (page === 200) throw new Error(`Bilibili favorite pagination exceeded 200 pages (${videos.length} items loaded).`);
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    if (reportedTotal > 0 && videos.length < reportedTotal) {
-      throw new Error(`Bilibili favorite list was incomplete: expected ${reportedTotal}, received ${videos.length}. No local tasks were changed.`);
-    }
-    return videos;
+    const visibleCount = videos.length;
+    const visibilityGap = Math.max(0, reportedTotal - visibleCount);
+    return {
+      videos,
+      reportedTotal: reportedTotal || visibleCount,
+      visibleCount,
+      visibilityGap,
+      completedPages
+    };
   }
 
   async exportCookies(userName) {

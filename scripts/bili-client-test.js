@@ -46,6 +46,28 @@ const { BiliClient, isBilibiliCookieDomain, normalizeBilibiliAssetUrl } = requir
     })
   }));
   await assert.rejects(() => mismatchedAvatar.fetchImageDataUrl('https://i0.hdslb.com/not-a-jpeg.jpg'), /do not match image\/jpeg/);
+
+  global.fetch = async () => new Response(JSON.stringify({
+    code: 0,
+    data: {
+      info: { media_count: 3 },
+      has_more: false,
+      medias: [
+        { bvid: 'BVCLIENT0001', title: 'Visible A', upper: { name: 'UP A' } },
+        { bvid: 'BVCLIENT0002', title: 'Visible B', upper: { name: 'UP B' } }
+      ]
+    }
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
+  try {
+    const partialClient = new BiliClient(() => ({ cookies: { get: async () => [] } }));
+    const snapshot = await partialClient.listVideos('123');
+    assert.strictEqual(snapshot.videos.length, 2);
+    assert.strictEqual(snapshot.reportedTotal, 3);
+    assert.strictEqual(snapshot.visibilityGap, 1);
+    assert.strictEqual(snapshot.completedPages, true);
+  } finally {
+    global.fetch = originalFetch;
+  }
   console.log('Bilibili client normalization test passed');
 })().catch((error) => {
   console.error(error);

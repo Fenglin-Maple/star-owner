@@ -11,7 +11,7 @@ const {
 } = require('./collection-state');
 const { isVideoUnavailableMessage } = require('./media-errors');
 const { abortTaskAttempt, cleanupAttemptFiles } = require('./task-attempt');
-const { isUnavailableTask } = require('./unavailable-task');
+const { isUnavailableTask, recoverMisclassifiedUnavailableTasks } = require('./unavailable-task');
 const { collectionDirs, ensureDir, timestampForFile } = require('./workspace');
 
 class CollectionSyncService {
@@ -25,6 +25,7 @@ class CollectionSyncService {
     this.active = new Set();
     this.recoverInterruptedSyncs();
     this.recoverTombstoneCleanups();
+    recoverMisclassifiedUnavailableTasks({ store: this.store, onEvent: this.onEvent });
   }
 
   async sync(input = {}) {
@@ -88,7 +89,7 @@ class CollectionSyncService {
       syncId = `sync-${currentUser.mid}-${wanted.id}-${Date.now()}`;
       const expectedTotal = Number(wanted.mediaCount || 0);
       this.progress(syncId, wanted.name, { stage: 'fetching', loaded: 0, total: expectedTotal, progress: 0.05 });
-      const videos = await this.bili.listVideos(wanted.id, (progress) => {
+      const fetched = await this.bili.listVideos(wanted.id, (progress) => {
         const total = progress.total || expectedTotal || null;
         this.progress(syncId, wanted.name, {
           stage: progress.done ? 'indexing' : 'fetching',
@@ -98,14 +99,21 @@ class CollectionSyncService {
           progress: total ? Math.min(0.92, 0.05 + progress.loaded / total * 0.87) : Math.min(0.9, 0.05 + progress.page / Math.max(progress.page + 1, 2) * 0.85)
         });
       });
+      const snapshot = normalizeVideoSnapshot(fetched, expectedTotal);
+      const videos = snapshot.videos;
       this.assertCurrentUser(currentUser);
       const cookieFile = await this.bili.exportCookies(currentUser.name);
       this.assertCurrentUser(currentUser);
-      const result = this.applySnapshot({ currentUser, wanted, videos, workspace, dirs, cookieFile, label, transactionId });
+      const result = this.applySnapshot({ currentUser, wanted, snapshot, workspace, dirs, cookieFile, label, transactionId });
       transactionId = '';
-      this.writeExportSafe(result.collection, videos);
-      this.progress(syncId, result.collection.name, { stage: 'done', loaded: videos.length, total: videos.length, progress: 1 });
-      this.onEvent({ type: 'collection-synced', collection: result.collection, count: videos.length, summary: result.summary });
+      this.writeExportSafe(result.collection, videos, snapshot);
+      this.progress(syncId, result.collection.name, { stage: 'done', loaded: snapshot.visibleCount, total: snapshot.reportedTotal, progress: 1, visibilityGap: snapshot.visibilityGap });
+      this.onEvent({
+        type: snapshot.visibilityGap > 0 ? 'collection-synced-partial-visibility' : 'collection-synced',
+        collection: result.collection,
+        count: videos.length,
+        summary: result.summary
+      });
       return result;
     } catch (error) {
       if (transactionId) this.rollbackSync(transactionId, error.message || String(error));
@@ -172,7 +180,9 @@ class CollectionSyncService {
     }
   }
 
-  applySnapshot({ currentUser, wanted, videos, workspace, dirs, cookieFile, label, transactionId }) {
+  applySnapshot({ currentUser, wanted, snapshot, workspace, dirs, cookieFile, label, transactionId }) {
+    const videos = snapshot.videos;
+    const partialVisibility = snapshot.visibilityGap > 0;
     const collectionId = `${currentUser.mid}:${wanted.id}`;
     const current = this.store.getCollectionById(collectionId) || {};
     const now = new Date().toISOString();
@@ -180,7 +190,20 @@ class CollectionSyncService {
     const cleanup = [];
     const unavailableCleanup = [];
     const events = [];
-    const summary = { added: 0, updated: 0, restored: 0, removed: 0, archived: 0, unavailable: 0, workflowsStopped: true };
+    const summary = {
+      added: 0,
+      updated: 0,
+      restored: 0,
+      removed: 0,
+      archived: 0,
+      unavailable: 0,
+      preservedUnresolved: 0,
+      remoteReportedCount: snapshot.reportedTotal,
+      remoteVisibleCount: snapshot.visibleCount,
+      visibilityGap: snapshot.visibilityGap,
+      partialVisibility,
+      workflowsStopped: true
+    };
     let collection;
     this.store.transaction(() => {
       for (const video of videos) {
@@ -263,6 +286,10 @@ class CollectionSyncService {
 
       for (const task of this.store.listTasks({ collectionId })) {
         if (remoteIds.has(task.id)) continue;
+        if (partialVisibility) {
+          summary.preservedUnresolved += 1;
+          continue;
+        }
         if (task.status === 'done' && task.outputMarkdown) {
           const archived = {
             ...task,
@@ -302,9 +329,14 @@ class CollectionSyncService {
 
       const latestFavoriteAt = videos.reduce((latest, video) => String(video.favoriteAddedAt || '') > latest ? String(video.favoriteAddedAt) : latest, String(wanted.updatedAt || ''));
       collection = this.buildCollection({ currentUser, wanted, workspace, dirs, cookieFile, label, current, syncState: 'ready', syncReady: true, now });
+      const activeTaskCount = this.store.listTasks({ collectionId }).filter((task) => !task.removedFromFavorites && task.favoriteState !== 'removed' && task.favoriteState !== 'collection-deleted').length;
       Object.assign(collection, {
-        videoCount: videos.length - summary.unavailable,
-        remoteVideoCount: videos.length,
+        videoCount: activeTaskCount,
+        remoteVideoCount: snapshot.reportedTotal,
+        remoteReportedCount: snapshot.reportedTotal,
+        remoteVisibleCount: snapshot.visibleCount,
+        visibilityGap: snapshot.visibilityGap,
+        partialVisibility,
         archivedDocumentCount: summary.archived,
         latestFavoriteAt,
         biliDeleted: false,
@@ -529,11 +561,11 @@ class CollectionSyncService {
     if (tasks.length) this.store.save();
   }
 
-  writeExportSafe(collection, videos) {
+  writeExportSafe(collection, videos, snapshot = null) {
     try {
       const exportDir = ensureDir(collection.exportDir || path.join(collection.workspaceRoot, '.star-note', 'exports'));
       const file = path.join(exportDir, `sync-${timestampForFile()}.json`);
-      fs.writeFileSync(file, `${JSON.stringify({ collection, videos, exportedAt: new Date().toISOString() }, null, 2)}\n`, 'utf8');
+      fs.writeFileSync(file, `${JSON.stringify({ collection, snapshot: snapshot ? snapshotMetadata(snapshot) : null, videos, exportedAt: new Date().toISOString() }, null, 2)}\n`, 'utf8');
       return file;
     } catch (error) {
       this.onEvent({ type: 'collection-sync-export-failed', collectionId: collection.id, reason: error.message || String(error) });
@@ -582,4 +614,30 @@ function resolveRemoteFolder(folders, identifier, stableMediaId = '') {
   return named[0] || null;
 }
 
-module.exports = { CollectionSyncService };
+function normalizeVideoSnapshot(value, expectedTotal = 0) {
+  const source = Array.isArray(value) ? { videos: value, completedPages: true } : (value || {});
+  const videos = Array.isArray(source.videos) ? source.videos : [];
+  if (source.completedPages === false) {
+    throw new Error(`Bilibili favorite pagination did not finish (${videos.length} visible items loaded). No local tasks were changed.`);
+  }
+  const visibleCount = videos.length;
+  const reportedTotal = Math.max(visibleCount, Number(source.reportedTotal || 0), Number(expectedTotal || 0));
+  return {
+    videos,
+    reportedTotal,
+    visibleCount,
+    visibilityGap: Math.max(0, reportedTotal - visibleCount),
+    completedPages: true
+  };
+}
+
+function snapshotMetadata(snapshot) {
+  return {
+    reportedTotal: snapshot.reportedTotal,
+    visibleCount: snapshot.visibleCount,
+    visibilityGap: snapshot.visibilityGap,
+    completedPages: snapshot.completedPages
+  };
+}
+
+module.exports = { CollectionSyncService, normalizeVideoSnapshot };

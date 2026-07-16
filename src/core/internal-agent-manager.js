@@ -1546,6 +1546,7 @@ function injectFrameGallery(markdown, frames) {
 
 function normalizeGeneratedMarkdown(markdown, task, materials) {
   let result = String(markdown || '').trim();
+  result = repairGeneratedFrameReferences(result, materials.frames || []);
   const mapBlock = `## 思维导图\n\n\`\`\`mermaid\nmindmap\n  root((${mermaidLabel(task.title || task.bvid || '视频知识')}))\n    核心内容\n    字幕核对\n    关键帧\n    评论反馈\n\`\`\``;
   const mapMatch = result.match(/^##\s+思维导图\s*$[\s\S]*?(?=^##\s+|$)/m);
   if (!mapMatch) {
@@ -1556,7 +1557,7 @@ function normalizeGeneratedMarkdown(markdown, task, materials) {
   } else if (!/```mermaid\s+[\s\S]*?```/i.test(mapMatch[0])) {
     result = `${result.slice(0, mapMatch.index)}${mapBlock}\n\n${result.slice(mapMatch.index + mapMatch[0].length).trimStart()}`;
   }
-  result = promoteMindMap(result).trim();
+  result = normalizeLeadingSectionOrder(promoteMindMap(result)).trim();
   if (!/^##\s+评论分析\s*$/m.test(result)) {
     const comments = normalizeCommentItems(materials.comments).slice(0, 3);
     const body = comments.length
@@ -1569,6 +1570,40 @@ function normalizeGeneratedMarkdown(markdown, task, materials) {
       : `${result}\n\n${section}`;
   }
   return result;
+}
+
+function repairGeneratedFrameReferences(markdown, frames) {
+  const available = (frames || []).map((item) => String(item || '').replace(/\\/g, '/')).filter(Boolean);
+  const replacement = available[0] || '';
+  const placeholder = /frames\/frame-%(?:0?\d+)?d\.(?:jpe?g|png|webp)/gi;
+  if (replacement) return String(markdown || '').replace(placeholder, replacement);
+  return String(markdown || '').replace(/!\[[^\]]*]\([^)]*frames\/frame-%(?:0?\d+)?d\.(?:jpe?g|png|webp)[^)]*\)\s*/gi, '');
+}
+
+function normalizeLeadingSectionOrder(markdown) {
+  const required = ['\u5c0f\u7ed3', '\u601d\u7ef4\u5bfc\u56fe', '\u76ee\u5f55'];
+  const matches = [...String(markdown || '').matchAll(/^##\s+([^\r\n]+?)\s*$/gm)];
+  if (!matches.length) return markdown;
+  const sections = matches.map((match, index) => ({
+    title: String(match[1] || '').trim(),
+    start: match.index,
+    end: index + 1 < matches.length ? matches[index + 1].index : String(markdown || '').length
+  }));
+  const selected = new Map();
+  for (const section of sections) {
+    const key = required.find((title) => section.title === title || section.title.startsWith(`${title}\uff08`) || section.title.startsWith(`${title} (`));
+    if (key && !selected.has(key)) selected.set(key, section);
+  }
+  if (required.some((title) => !selected.has(title))) return markdown;
+  const prefix = String(markdown || '').slice(0, sections[0].start).trimEnd();
+  const selectedSections = new Set(selected.values());
+  const ordered = required.map((title) => {
+    const section = selected.get(title);
+    const body = String(markdown || '').slice(section.start, section.end).replace(/^##\s+[^\r\n]+/, `## ${title}`).trim();
+    return body;
+  });
+  const remaining = sections.filter((section) => !selectedSections.has(section)).map((section) => String(markdown || '').slice(section.start, section.end).trim());
+  return [prefix, ...ordered, ...remaining].filter(Boolean).join('\n\n');
 }
 
 function normalizeCommentItems(value) {

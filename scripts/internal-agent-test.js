@@ -13,6 +13,9 @@ function assert(condition, message) {
   const normalized = normalizeGeneratedMarkdown('# Test\n\n## 小结\n\nSummary\n\n## 目录\n\n- Body\n\n## 正文\n\nContent\n\n## 处理记录\n\nDone', { bvid: 'BVTEST', title: 'Test video' }, { comments: [] });
   assert(normalized.indexOf('## 小结') < normalized.indexOf('## 思维导图') && normalized.indexOf('## 思维导图') < normalized.indexOf('## 目录'), 'generated Markdown opening was not normalized');
   assert(normalized.includes('```mermaid\nmindmap') && normalized.includes('## 评论分析'), 'generated Markdown required sections were not repaired');
+  const repairedOrderAndFrame = normalizeGeneratedMarkdown('# Test\n\n## 目录\n\n- Body\n\n## 小结\n\nSummary\n\n## 思维导图\n\n```mermaid\nmindmap\n  root((Test))\n```\n\n## 正文\n\n![frame](frames/frame-%03d.jpg)', { bvid: 'BVTEST', title: 'Test video' }, { comments: [], frames: ['frames/frame-001.jpg'] });
+  assert(repairedOrderAndFrame.indexOf('## 小结') < repairedOrderAndFrame.indexOf('## 思维导图') && repairedOrderAndFrame.indexOf('## 思维导图') < repairedOrderAndFrame.indexOf('## 目录'), 'existing generated Markdown sections were not deterministically reordered');
+  assert(repairedOrderAndFrame.includes('(frames/frame-001.jpg)') && !repairedOrderAndFrame.includes('frame-%03d'), 'generated frame filename placeholder was not repaired');
   const oversizedPlan = planGenerationRequest({
     session: { workerId: 'worker-budget', modelId: 'small-context', taskRequirements: '保留事实。' },
     task: { bvid: 'BVBUDGET0001', title: '超长素材', owner: '测试 UP', duration: 7200 },
@@ -171,6 +174,8 @@ function assert(condition, message) {
   assert(isLoginRequiredMessage('This video is only available for registered users. Use --cookies.'), 'login-required classifier missed yt-dlp guidance');
   assert(!isLoginRequiredMessage('network timeout while downloading'), 'ordinary network failure was misclassified as login-required');
   assert(isVideoUnavailableMessage('ERROR: video is no longer available'), 'unavailable-video classifier missed yt-dlp output');
+  assert(isVideoUnavailableMessage('Bilibili API 62012: 仅UP主自己可见'), 'Bilibili terminal API code 62012 was not classified as unavailable');
+  assert(!isVideoUnavailableMessage('Referenced image (frames/frame-%03d.jpg) file does not exist'), 'Markdown validation failure was misclassified as an unavailable video');
   assert(!isVideoUnavailableMessage('HTTP 429: too many requests'), 'temporary network failure was misclassified as unavailable');
 
   forceContextLimitOnce = true;

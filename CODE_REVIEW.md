@@ -1,6 +1,6 @@
 # 星藏家代码审查记录
 
-审查日期：2026-07-15
+审查日期：2026-07-16
 
 目标版本：`0.10.0`
 
@@ -36,6 +36,10 @@
 14. **维护性：外部视频 API 字段和单视频版本模块继续制造错误契约。** 删除 Renderer 激活桥、Store 活动收藏夹方法、同步中的外部分发字段和未使用 `task-versions.js`；工具元数据改为应用内调用标识。
 15. **质量：启动页和工具页仍引导使用旧接口。** 启动页现在默认收起完整知识库接入提示词；Agent 工具状态页显示只读 API；工具模块说明只允许应用内调度。
 16. **高：无音轨视频被当作 FFmpeg 随机失败并反复派发。** 音频提取现在保留 FFmpeg stderr、规范化 Windows 负退出码，并把 `Output file does not contain any stream` 转换为 `NO_AUDIO_STREAM`；工作流生成空 ASR 诊断后继续使用字幕与关键帧。
+17. **高：B 站报告收藏数量与分页可见数量不一致时，整个收藏夹永久无法同步。** 同步现在区分报告数、可见数和可见性差值；部分可见快照合并可见更新但不推断缺席任务已移出，完整快照才执行移出与归档。
+18. **严重：通用 `does not exist` 把 Markdown 图片/元数据校验错误误判成视频失效。** 失效分类收紧到明确 B 站终止错误码和视频删除措辞；启动迁移会恢复历史误判任务并删除错误墓碑。
+19. **中：模型偶发输出错误章节顺序或 `frames/frame-%03d.jpg` 模板路径。** 提交前确定性重排“小结 -> 思维导图 -> 目录”，并用真实帧文件替换占位符，减少无意义的模型重试。
+20. **中：视频工具用 `process.exit(1)` 强制关闭时可能触发 Windows libuv `UV_HANDLE_CLOSING` 断言。** 改为设置标准退出码并让 Node 自然清理句柄；`62012` 同时按明确不可见视频处理。
 
 ## 延续有效的安全修复
 
@@ -68,7 +72,8 @@
 - `npm run test:hardware`：NVIDIA/CUDA、CPU 回退、模型显存/内存和缺失运行时；
 - `npm run test:internal-agent`：内部任务开关、单视频唯一覆盖与删除后新建；
 - `npm run test:document-lifecycle`：B 站恢复与本地永久删除矩阵；
-- `npm run test:media-edge`：无音轨视频识别、空 ASR 诊断和继续处理；
+- `npm run test:media-edge`：无音轨视频识别、空 ASR 诊断、继续处理和工具失败句柄清理；
+- `npm run test:collection-sync`：事务回滚、部分可见快照、缺席任务保留和错误墓碑恢复；
 - `npm run smoke`：端到端只读 API 和核心应用契约。
 
 总门禁还包含全部既有功能测试、JavaScript/Python 语法、双模型真实 ASR 服务和 `npm audit --audit-level=high`。

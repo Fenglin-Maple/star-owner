@@ -12,6 +12,11 @@ const { PROJECT_ROOT } = require('../src/core/workspace');
   fs.mkdirSync(root, { recursive: true });
   const ffmpeg = resolveCommand('ffmpeg');
   assert(ffmpeg, 'Project-local FFmpeg is missing.');
+  const gracefulFailure = spawnSync(process.execPath, [
+    path.join(PROJECT_ROOT, 'tools', 'video-tool.js'), 'not-a-command', 'BV1xx411c7mD'
+  ], { cwd: PROJECT_ROOT, windowsHide: true, encoding: 'utf8' });
+  assert.strictEqual(gracefulFailure.status, 1, 'Video tool failure did not expose a conventional exit status.');
+  assert(!/UV_HANDLE_CLOSING|Assertion failed/i.test(`${gracefulFailure.stdout || ''}\n${gracefulFailure.stderr || ''}`), 'Video tool failure closed libuv handles abruptly.');
   const merged = path.join(root, 'merged.mp4');
   const generated = spawnSync(ffmpeg, [
     '-y', '-f', 'lavfi', '-i', 'color=c=black:s=320x180:d=1',

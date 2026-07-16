@@ -1357,6 +1357,7 @@ function renderSyncProgress(event = {}) {
 function humanizeEvent(type) {
   const labels = {
     'collection-synced': '\u6536\u85cf\u5939\u5df2\u540c\u6b65',
+    'collection-synced-partial-visibility': '\u6536\u85cf\u5939\u5df2\u540c\u6b65\uff08\u90e8\u5206\u6761\u76ee\u6682\u4e0d\u53ef\u89c1\uff09',
     'collection-sync-rolled-back': '\u6536\u85cf\u5939\u540c\u6b65\u5df2\u56de\u6eda',
     'collection-workflows-stopped-for-sync': '\u6536\u85cf\u5939\u76f8\u5173 Agent \u5de5\u4f5c\u6d41\u5df2\u505c\u6b62',
     'collection-deleted-on-bilibili': 'B\u7ad9\u6536\u85cf\u5939\u5df2\u5220\u9664\uff0c\u672c\u5730\u4ea7\u7269\u5df2\u4fdd\u7559',
@@ -2769,8 +2770,8 @@ document.querySelector('#syncCollection').addEventListener('click', async () => 
     const summary = result.summary || {};
     const detail = result.deleted
       ? '\u8be5 B\u7ad9\u6536\u85cf\u5939\u5df2\u5220\u9664\uff0c\u672c\u5730\u5df2\u5b8c\u6210\u4ea7\u7269\u4ecd\u4fdd\u7559\u53ef\u7528\u3002'
-      : `\u65b0\u589e ${Number(summary.added || 0)} \u00b7 \u66f4\u65b0 ${Number(summary.updated || 0)} \u00b7 \u5df2\u79fb\u51fa ${Number(summary.removed || 0)} \u00b7 \u4fdd\u7559\u4ea7\u7269 ${Number(summary.archived || 0)}`;
-    showToast(TEXT.toastSuccess, `\u5df2\u540c\u6b65 ${result.collection?.name || collectionLabel || '-'}\uff1a${detail}`, 'success');
+      : `\u65b0\u589e ${Number(summary.added || 0)} \u00b7 \u66f4\u65b0 ${Number(summary.updated || 0)} \u00b7 \u5df2\u79fb\u51fa ${Number(summary.removed || 0)} \u00b7 \u4fdd\u7559\u4ea7\u7269 ${Number(summary.archived || 0)}${Number(summary.visibilityGap || 0) > 0 ? ` \u00b7 B\u7ad9\u6682\u4e0d\u53ef\u89c1 ${Number(summary.visibilityGap)} \u6761\uff0c\u5df2\u4fdd\u7559 ${Number(summary.preservedUnresolved || 0)} \u6761\u672c\u5730\u72b6\u6001` : ''}`;
+    showToast(TEXT.toastSuccess, `\u5df2\u540c\u6b65 ${result.collection?.name || collectionLabel || '-'}\uff1a${detail}`, Number(summary.visibilityGap || 0) > 0 ? 'info' : 'success');
   } catch (error) {
     renderSyncProgress({ stage: 'error', progress: 1 });
     collectionOutput.textContent = error.message || String(error);

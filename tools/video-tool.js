@@ -24,7 +24,7 @@ const MEDIA_CACHE_EXTENSIONS = new Set(['.mp4', '.mkv', '.webm', '.m4a', '.mp3',
 if (require.main === module) {
   main().catch((error) => {
     console.error(`[video-tool] ${error.message || String(error)}`);
-    process.exit(1);
+    process.exitCode = 1;
   });
 }
 

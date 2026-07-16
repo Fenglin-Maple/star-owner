@@ -32,8 +32,15 @@ function video(bvid, title, favoriteAddedAt) {
     exportCookies: async () => path.join(root, 'cookies.txt'),
     listVideos: async (_id, onProgress) => {
       if (videoError) throw videoError;
-      onProgress({ page: 1, loaded: videos.length, total: videos.length, done: true });
-      return videos;
+      const reportedTotal = Number(folders[0]?.mediaCount || videos.length);
+      onProgress({ page: 1, loaded: videos.length, total: reportedTotal, done: true });
+      return {
+        videos,
+        reportedTotal,
+        visibleCount: videos.length,
+        visibilityGap: Math.max(0, reportedTotal - videos.length),
+        completedPages: true
+      };
     }
   };
   const internalAgentManager = {
@@ -55,6 +62,37 @@ function video(bvid, title, favoriteAddedAt) {
   assert(store.listTasks({ collectionId: '100:7' }).length === 2, 'initial collection tasks were not persisted');
   assert(events.some((event) => event.type === 'collection-sync-progress' && event.stage === 'done'), 'completion progress event was not emitted');
   assert(fs.readdirSync(first.collection.exportDir).some((name) => /^sync-.*\.json$/.test(name)), 'collection export index was not written');
+
+  videos = [videos[0]];
+  const partial = await service.sync({ collectionName: '7' });
+  assert(partial.summary.visibilityGap === 1 && partial.summary.partialVisibility === true, 'partial-visibility snapshot was not reported');
+  assert(store.getTask('100:7:BV0987654321')?.status === 'pending', 'partial-visibility snapshot removed an unresolved local task');
+  assert(partial.collection.remoteReportedCount === 2 && partial.collection.remoteVisibleCount === 1 && partial.collection.syncReady === true, 'partial-visibility collection metadata is incorrect');
+  assert(events.some((event) => event.type === 'collection-synced-partial-visibility'), 'partial-visibility synchronization event was not emitted');
+  videos = [
+    video('BV1234567890', 'Video A', '2026-07-02T00:00:00.000Z'),
+    video('BV0987654321', 'Video B', '2026-07-03T00:00:00.000Z')
+  ];
+  await service.sync({ collectionName: '7' });
+
+  const validationTombstoneId = '100:7:BVMARKDOWN01';
+  store.set('unavailableTasks', validationTombstoneId, {
+    id: validationTombstoneId,
+    taskId: validationTombstoneId,
+    collectionId: '100:7',
+    bvid: 'BVMARKDOWN01',
+    title: 'Markdown validation recovery',
+    reason: 'Referenced image (frames/frame-%03d.jpg) file does not exist',
+    source: 'internal-agent',
+    removedAt: new Date().toISOString()
+  });
+  store.commit();
+  const migrationEvents = [];
+  new CollectionSyncService({ store, bili, getCurrentUser: () => null, onEvent: (event) => migrationEvents.push(event) });
+  assert(store.getTask(validationTombstoneId)?.status === 'pending' && !store.get('unavailableTasks', validationTombstoneId), 'Markdown validation tombstone was not restored to pending');
+  assert(migrationEvents.some((event) => event.type === 'misclassified-unavailable-restored'), 'Markdown validation tombstone recovery was not logged');
+  store.delete('tasks', validationTombstoneId);
+  store.commit();
 
   videos = [...videos, video('BVDEAD123456', '已失效视频', '2026-07-03T12:00:00.000Z')];
   folders = [{ ...folders[0], mediaCount: 3 }];

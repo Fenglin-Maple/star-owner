@@ -21,6 +21,8 @@ function isLoginRequiredMessage(value) {
 function isVideoUnavailableMessage(value) {
   const message = String(value || '').toLowerCase();
   if (!message || isLoginRequiredMessage(message)) return false;
+  if (/(?:bilibili api|error code|code\s*[=:])\s*["']?(?:-404|62002|62004|62012)\b/i.test(message)) return true;
+  if (/["']code["']\s*:\s*(?:-404|62002|62004|62012)\b/i.test(message)) return true;
   return [
     '"code":-404',
     "'code': -404",
@@ -41,8 +43,22 @@ function isVideoUnavailableMessage(value) {
     'video is no longer available',
     'this video is unavailable',
     'video unavailable',
-    'does not exist'
+    'video does not exist',
+    'video not found',
+    '视频已失效',
+    '视频不存在',
+    '稿件不可见',
+    '已被删除',
+    '已删除',
+    '已下架',
+    '被下架',
+    '仅up主自己可见'
   ].some((pattern) => message.includes(pattern));
+}
+
+function isSubmissionValidationMessage(value) {
+  const message = String(value || '');
+  return /Markdown section order must begin|Referenced image .* file does not exist|Markdown is missing|Mermaid fenced code block|提交校验失败|Markdown 未通过校验|Markdown 校验/i.test(message);
 }
 
 function loginRequiredError(detail) {
@@ -60,6 +76,7 @@ function videoUnavailableError(detail) {
 
 module.exports = {
   isLoginRequiredMessage,
+  isSubmissionValidationMessage,
   isVideoUnavailableMessage,
   loginRequiredError,
   videoUnavailableError

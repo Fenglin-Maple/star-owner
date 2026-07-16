@@ -114,8 +114,8 @@ Synchronization is a desktop-owned maintenance transaction:
 3. Mark the collection `syncing` and `syncReady=false`.
 4. Stop every internal queue Agent bound to the collection.
 5. Abort current attempts, cancel tools, remove attempt files, and invalidate work IDs.
-6. Fetch every remote page before changing inventory.
-7. Reconcile additions, removals, completed archives, unavailable tombstones, rename state, and counts in one SQLite transaction.
+6. Fetch every remote page before changing inventory and retain reported count, visible count, and visibility gap.
+7. Reconcile additions, completed archives, explicit unavailable tombstones, rename state, and counts in one SQLite transaction. Missing-item removal is allowed only for a zero-gap snapshot.
 8. Remove the recovery record only after commit.
 9. On interruption or startup recovery, restore the previous snapshot and log the rollback.
 
@@ -127,6 +127,8 @@ Reconciliation policy:
 - renamed folder -> update display/source name, retain storage identity;
 - deleted remote folder -> retain completed documents, mark collection deleted, remove unfinished work, block restart;
 - unavailable-video tombstone -> never recreate during later sync.
+- reported count exceeds visible pagination -> merge visible additions/updates, preserve every absent local task and artifact as unresolved, expose `remoteReportedCount`, `remoteVisibleCount`, `visibilityGap`, and `preservedUnresolved`;
+- a later zero-gap snapshot -> resume ordinary missing-item removal/archive reconciliation.
 
 ## 8. Internal Task Lifecycle
 
@@ -152,7 +154,7 @@ All interruption paths converge on `abortTaskAttempt`:
 - return eligible ordinary tasks to pending;
 - pause the internal Worker when required.
 
-Confirmed deleted/down/unavailable video errors use `removeUnavailableTask`, not ordinary rollback. They remove the task, clean artifacts, create a tombstone, and let queue workflows continue with another task.
+Confirmed deleted/down/unavailable video errors use `removeUnavailableTask`, not ordinary rollback. Classification requires explicit Bilibili terminal codes (`-404`, `62002`, `62004`, `62012`) or unambiguous video removal wording. Generic file-not-found, media, ASR, network, and Markdown validation errors never create unavailable tombstones. Startup recovery restores legacy validation-error tombstones to pending work.
 
 ## 9. Single-Video Lifecycle
 
@@ -252,6 +254,8 @@ Accepted output requires:
 - keyframe references that resolve to validated local images;
 - comments section and processing record;
 - temporary media cleanup unless cache preservation is explicit.
+
+Before validation, deterministic normalization repairs frame filename placeholders against the real extracted frame inventory and orders Summary, Mind Map, and Contents. A remaining validation failure returns the task to pending and cannot be reclassified as a missing video.
 
 Finalization applies metadata naming with Windows path budgeting, move retries, copy fallback, and a recoverable journal.
 
