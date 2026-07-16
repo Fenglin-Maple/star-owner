@@ -64,8 +64,10 @@ const syncProgress = document.querySelector('#syncProgress');
 const syncProgressLabel = document.querySelector('#syncProgressLabel');
 const syncProgressBar = document.querySelector('#syncProgressBar');
 const syncProgressPercent = document.querySelector('#syncProgressPercent');
+const syncSummary = document.querySelector('#syncSummary');
 const taskUserSelect = document.querySelector('#taskUserSelect');
 const taskCollectionSelect = document.querySelector('#taskCollectionSelect');
+const taskStatusFilters = document.querySelector('#taskStatusFilters');
 const taskSearch = document.querySelector('#taskSearch');
 const taskSort = document.querySelector('#taskSort');
 const taskDateFrom = document.querySelector('#taskDateFrom');
@@ -121,6 +123,7 @@ let documentContextTaskId = '';
 let documentDeleteTaskId = '';
 let filenameSettingsSaveTimer = null;
 let lastTaskCollectionId = '';
+let taskStatusFilter = 'all';
 let snapshotPromise = null;
 let snapshotRefreshTimer = null;
 let snapshotRevision = 0;
@@ -1139,6 +1142,7 @@ async function refreshSnapshot() {
     document.querySelector('#metricDone').textContent = snap.tasks.filter((task) => task.status === 'done').length;
     document.querySelector('#metricRuns').textContent = (snap.toolRuns || []).length;
     renderProfile(snap);
+    renderSelectedSyncSummary();
     renderTaskInventory();
     renderTools(snap.tools || []);
     renderRuns(snap.toolRuns || []);
@@ -1352,6 +1356,50 @@ function renderSyncProgress(event = {}) {
   syncProgressLabel.textContent = `${stages[event.stage] || TEXT.syncPreparing}${count}`;
   syncProgressPercent.textContent = `${Math.round(progress * 100)}%`;
   syncProgressBar.style.width = `${Math.round(progress * 100)}%`;
+  if (event.stage !== 'done' && syncSummary) syncSummary.hidden = true;
+}
+
+function renderSyncSummary(collection = null, summary = null) {
+  if (!syncSummary || !collection) {
+    if (syncSummary) syncSummary.hidden = true;
+    return;
+  }
+  const source = summary || collection.lastSyncSummary || {};
+  const reported = Number(source.remoteReportedCount ?? collection.remoteReportedCount ?? collection.remoteVideoCount ?? 0);
+  const visible = Number(source.remoteVisibleCount ?? collection.remoteVisibleCount ?? reported);
+  const gap = Number(source.visibilityGap ?? collection.visibilityGap ?? Math.max(0, reported - visible));
+  const unavailable = Number(source.unavailable ?? collection.lastSyncSummary?.unavailable ?? 0);
+  const validTasks = Number(collection.videoCount ?? Math.max(0, visible - unavailable));
+  const values = {
+    syncMetricReported: reported,
+    syncMetricVisible: visible,
+    syncMetricGap: gap,
+    syncMetricUnavailable: unavailable,
+    syncMetricTasks: validTasks
+  };
+  for (const [id, value] of Object.entries(values)) {
+    const element = document.querySelector(`#${id}`);
+    if (element) element.textContent = String(value);
+  }
+  syncSummary.hidden = false;
+}
+
+function renderSelectedSyncSummary() {
+  if (collectionSyncInFlight || !folderSelect?.value) return;
+  const mediaId = String(folderSelect.selectedOptions?.[0]?.dataset.folderId || '');
+  const userId = String(currentUser?.mid || currentUser?.id || '');
+  const collection = (lastSnapshot.collections || []).find((item) => String(item.mediaId || '') === mediaId
+    && (!userId || String(item.userId || '') === userId));
+  if (!collection?.lastSyncedAt || !collection.lastSyncSummary) {
+    syncProgress?.classList.remove('active', 'complete', 'error');
+    if (syncSummary) syncSummary.hidden = true;
+    return;
+  }
+  const summary = collection.lastSyncSummary || {};
+  const total = Number(summary.remoteReportedCount ?? collection.remoteReportedCount ?? collection.remoteVideoCount ?? 0);
+  const loaded = Number(summary.remoteVisibleCount ?? collection.remoteVisibleCount ?? total);
+  renderSyncProgress({ stage: 'done', progress: 1, loaded, total });
+  renderSyncSummary(collection, summary);
 }
 
 function humanizeEvent(type) {
@@ -1408,6 +1456,7 @@ function populateFolderSelect(items = profileFolders, selectedIdentity = '') {
     option.textContent = TEXT.readFoldersFirst;
     folderSelect.appendChild(option);
     updateSyncCollectionState();
+    renderSelectedSyncSummary();
     return;
   }
   for (const folder of items) {
@@ -1422,6 +1471,7 @@ function populateFolderSelect(items = profileFolders, selectedIdentity = '') {
   const fallbackIndex = wantedIndex >= 0 ? wantedIndex : options.findIndex((option) => option.value === previous);
   folderSelect.selectedIndex = fallbackIndex >= 0 ? fallbackIndex : 0;
   updateSyncCollectionState();
+  renderSelectedSyncSummary();
 }
 
 function setFolderInventory(items = [], selectedIdentity = '') {
@@ -1545,9 +1595,11 @@ function renderTaskInventory() {
   const collectionTasks = (lastSnapshot.tasks || []).filter((task) => task.collectionId === collectionId);
   if (collectionId !== lastTaskCollectionId) {
     lastTaskCollectionId = collectionId;
+    taskStatusFilter = 'all';
     resetDurationRange(collectionTasks);
     taskSelection.clear();
   }
+  renderTaskStatusFilters(collectionTasks);
   visibleTasks = filterTasks(collectionTasks);
   renderActiveCollection(collection);
   renderTaskAnalytics(collection, collectionTasks);
@@ -1585,6 +1637,37 @@ function resetDurationRange(tasks) {
   updateDurationLabel();
 }
 
+function taskStateGroup(task) {
+  if (task.enabled === false) return 'disabled';
+  if (task.status === 'done') return 'done';
+  if (task.status === 'claimed') return 'claimed';
+  if (['failed', 'rejected', 'error'].includes(task.status)) return 'failed';
+  return 'pending';
+}
+
+function renderTaskStatusFilters(tasks) {
+  if (!taskStatusFilters) return;
+  const counts = { all: tasks.length, pending: 0, claimed: 0, done: 0, failed: 0, disabled: 0 };
+  for (const task of tasks) counts[taskStateGroup(task)] += 1;
+  const outputIds = {
+    all: 'taskStatusAll',
+    pending: 'taskStatusPending',
+    claimed: 'taskStatusClaimed',
+    done: 'taskStatusDone',
+    failed: 'taskStatusFailed',
+    disabled: 'taskStatusDisabled'
+  };
+  for (const [status, id] of Object.entries(outputIds)) {
+    const value = document.querySelector(`#${id}`);
+    if (value) value.textContent = String(counts[status] || 0);
+  }
+  for (const button of taskStatusFilters.querySelectorAll('[data-task-status]')) {
+    const active = button.dataset.taskStatus === taskStatusFilter;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  }
+}
+
 function filterTasks(tasks) {
   const query = String(taskSearch?.value || '').trim().toLocaleLowerCase();
   const from = taskDateFrom?.value ? new Date(`${taskDateFrom.value}T00:00:00`).getTime() : 0;
@@ -1596,7 +1679,8 @@ function filterTasks(tasks) {
     const haystack = `${task.bvid || ''} ${task.owner || ''} ${task.title || ''}`.toLocaleLowerCase();
     const favoriteTime = Date.parse(task.favoriteAddedAt || task.createdAt || '') || 0;
     const duration = Number(task.duration || 0);
-    return (!query || haystack.includes(query)) && favoriteTime >= from && favoriteTime <= to && duration >= minDuration && duration <= maxDuration;
+    const matchesStatus = taskStatusFilter === 'all' || taskStateGroup(task) === taskStatusFilter;
+    return matchesStatus && (!query || haystack.includes(query)) && favoriteTime >= from && favoriteTime <= to && duration >= minDuration && duration <= maxDuration;
   }).sort((a, b) => {
     const aTime = Date.parse(a.favoriteAddedAt || a.createdAt || '') || 0;
     const bTime = Date.parse(b.favoriteAddedAt || b.createdAt || '') || 0;
@@ -1606,7 +1690,9 @@ function filterTasks(tasks) {
 
 function renderTaskRows(tasks) {
   taskList.innerHTML = '';
-  document.querySelector('#taskFilterSummary').textContent = `\u663e\u793a ${tasks.length} / ${(lastSnapshot.tasks || []).filter((task) => task.collectionId === taskCollectionSelect.value).length}`;
+  const total = (lastSnapshot.tasks || []).filter((task) => task.collectionId === taskCollectionSelect.value).length;
+  const activeStatusLabel = taskStatusFilters?.querySelector(`[data-task-status="${taskStatusFilter}"] span`)?.textContent || '';
+  document.querySelector('#taskFilterSummary').textContent = `\u663e\u793a ${tasks.length} / ${total}${taskStatusFilter === 'all' ? '' : ` \u00b7 ${activeStatusLabel}`}`;
   document.querySelector('#taskSelectionSummary').textContent = `\u5df2\u9009 ${taskSelection.size}`;
   if (!tasks.length) return taskList.appendChild(emptyRow(TEXT.noTasks, TEXT.noTasksHint));
   for (const task of tasks) {
@@ -2446,6 +2532,12 @@ taskCollectionSelect?.addEventListener('change', () => {
   renderTaskInventory();
   updatePromptTemplate();
 });
+taskStatusFilters?.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-task-status]');
+  if (!button || !taskStatusFilters.contains(button)) return;
+  taskStatusFilter = button.dataset.taskStatus || 'all';
+  renderTaskInventory();
+});
 document.querySelector('#taskFilterToggle')?.addEventListener('click', (event) => {
   const button = event.currentTarget;
   const panel = document.querySelector('#taskAdvancedFilters');
@@ -2768,6 +2860,13 @@ document.querySelector('#syncCollection').addEventListener('click', async () => 
     await refreshSnapshot();
     await refreshProfileFolders({ force: true });
     const summary = result.summary || {};
+    renderSyncProgress({
+      stage: 'done',
+      progress: 1,
+      loaded: Number(summary.remoteVisibleCount ?? result.count ?? 0),
+      total: Number(summary.remoteReportedCount ?? result.count ?? 0)
+    });
+    renderSyncSummary(result.collection, summary);
     const detail = result.deleted
       ? '\u8be5 B\u7ad9\u6536\u85cf\u5939\u5df2\u5220\u9664\uff0c\u672c\u5730\u5df2\u5b8c\u6210\u4ea7\u7269\u4ecd\u4fdd\u7559\u53ef\u7528\u3002'
       : `\u65b0\u589e ${Number(summary.added || 0)} \u00b7 \u66f4\u65b0 ${Number(summary.updated || 0)} \u00b7 \u5df2\u79fb\u51fa ${Number(summary.removed || 0)} \u00b7 \u4fdd\u7559\u4ea7\u7269 ${Number(summary.archived || 0)}${Number(summary.visibilityGap || 0) > 0 ? ` \u00b7 B\u7ad9\u6682\u4e0d\u53ef\u89c1 ${Number(summary.visibilityGap)} \u6761\uff0c\u5df2\u4fdd\u7559 ${Number(summary.preservedUnresolved || 0)} \u6761\u672c\u5730\u72b6\u6001` : ''}`;
@@ -2781,7 +2880,10 @@ document.querySelector('#syncCollection').addEventListener('click', async () => 
     updateSyncCollectionState();
   }
 });
-folderSelect?.addEventListener('change', updateSyncCollectionState);
+folderSelect?.addEventListener('change', () => {
+  updateSyncCollectionState();
+  renderSelectedSyncSummary();
+});
 
 document.querySelector('#refreshTasks')?.addEventListener('click', async () => {
   try {

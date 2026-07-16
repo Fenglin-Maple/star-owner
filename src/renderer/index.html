@@ -217,6 +217,13 @@
               <div id="syncProgress" class="sync-progress" aria-live="polite">
                 <div><span id="syncProgressLabel" data-i18n="syncPreparing"></span><strong id="syncProgressPercent">0%</strong></div>
                 <div class="sync-progress-track"><span id="syncProgressBar"></span></div>
+                <div id="syncSummary" class="sync-summary" hidden>
+                  <div><span>B站报告</span><strong id="syncMetricReported">0</strong></div>
+                  <div><span>接口可见</span><strong id="syncMetricVisible">0</strong></div>
+                  <div><span>暂不可见</span><strong id="syncMetricGap">0</strong></div>
+                  <div><span>失效记录</span><strong id="syncMetricUnavailable">0</strong></div>
+                  <div><span>有效任务</span><strong id="syncMetricTasks">0</strong></div>
+                </div>
               </div>
               <pre id="collectionOutput"></pre>
             </section>
@@ -245,6 +252,14 @@
                 <div class="progress-copy"><strong id="taskProgressPercent">0%</strong><span id="taskProgressLabel">0 / 0</span></div>
               </div>
               <div class="collection-progress"><span id="taskProgressBar"></span></div>
+              <div id="taskStatusFilters" class="task-status-filters" role="group" aria-label="按任务状态筛选">
+                <button type="button" class="active" data-task-status="all" aria-pressed="true"><span>全部</span><strong id="taskStatusAll">0</strong></button>
+                <button type="button" data-task-status="pending" aria-pressed="false"><span>待处理</span><strong id="taskStatusPending">0</strong></button>
+                <button type="button" data-task-status="claimed" aria-pressed="false"><span>处理中</span><strong id="taskStatusClaimed">0</strong></button>
+                <button type="button" data-task-status="done" aria-pressed="false"><span>已完成</span><strong id="taskStatusDone">0</strong></button>
+                <button type="button" data-task-status="failed" aria-pressed="false"><span>失败 / 打回</span><strong id="taskStatusFailed">0</strong></button>
+                <button type="button" data-task-status="disabled" aria-pressed="false"><span>已关闭</span><strong id="taskStatusDisabled">0</strong></button>
+              </div>
               <div class="metric-strip">
                 <div><span data-i18n="enabledTasks"></span><strong id="taskMetricEnabled">0</strong></div>
                 <div><span data-i18n="claimedTasks"></span><strong id="taskMetricClaimed">0</strong></div>

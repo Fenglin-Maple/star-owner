@@ -286,7 +286,7 @@ The application uses a custom frameless title bar, seven themes, a compact left 
     Agent 工具状态
 ```
 
-Task Overview has no external activation button. Its collection selector defines the inventory currently inspected, and row switches affect internal workflow claims.
+Favorite Sync keeps the last successful reported, visible, visibility-gap, unavailable, and valid-task counts under the progress bar. Task Overview has no external activation button. Its collection selector defines the inventory currently inspected, and row switches affect internal workflow claims. Mutually exclusive status segments show and filter all, pending, claimed, done, failed/rejected, and disabled tasks; text/date/duration filters compose with the selected status.
 
 Startup includes a collapsed external knowledge API prompt. Agent Tool Status includes the read-only protocol reference. Resource Scheduling displays ASR hardware compatibility and disables unsupported controls.
 

@@ -420,6 +420,12 @@ function verifyRendererContracts() {
   if (!index.includes('data-nav-group="settings"') || !index.includes('data-page="workers"') || !index.includes('data-page="agent-tool-status"')) {
     throw new Error('status pages are not available from the Settings submenu');
   }
+  if (!index.includes('id="syncSummary"') || !index.includes('id="taskStatusFilters"') || !index.includes('data-task-status="disabled"')) {
+    throw new Error('collection sync counts or task status filters are missing from the renderer');
+  }
+  if (!app.includes('function renderSyncSummary') || !app.includes('function taskStateGroup') || !app.includes("taskStatusFilter === 'all'")) {
+    throw new Error('collection/task status summaries are not wired into renderer filtering');
+  }
   if (index.includes('id="labelInput"') || app.includes('labelInput')) throw new Error('obsolete collection label input is still exposed');
   if (!preload.includes("ipcRenderer.invoke('documents:delete'") || !preload.includes("ipcRenderer.invoke('internal-agent:single-inspect'")) {
     throw new Error('document deletion or single-video inspection is missing from the preload bridge');
