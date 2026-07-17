@@ -426,6 +426,15 @@ function verifyRendererContracts() {
   if (!app.includes('function renderSyncSummary') || !app.includes('function taskStateGroup') || !app.includes("taskStatusFilter === 'all'")) {
     throw new Error('collection/task status summaries are not wired into renderer filtering');
   }
+  if (!index.includes('id="firstRunGuide"') || !index.includes('data-navigate-page="ai-models"') || !index.includes('data-navigate-page="internal-agents"')) {
+    throw new Error('the startup first-run journey or its navigation targets are missing');
+  }
+  if (!app.includes('/api/health') || !app.includes('favorite-desc') || !app.includes('lineCount 单次支持 1～1000 行')) {
+    throw new Error('the external knowledge Agent prompt is missing health, sorting, or exact-content guidance');
+  }
+  if (!app.includes("new CustomEvent('star:page-changed'") || !fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'ai.js'), 'utf8').includes("window.addEventListener('star:page-changed'")) {
+    throw new Error('page navigation does not refresh AI state consistently across sidebar and onboarding entry points');
+  }
   if (index.includes('id="labelInput"') || app.includes('labelInput')) throw new Error('obsolete collection label input is still exposed');
   if (!preload.includes("ipcRenderer.invoke('documents:delete'") || !preload.includes("ipcRenderer.invoke('internal-agent:single-inspect'")) {
     throw new Error('document deletion or single-video inspection is missing from the preload bridge');

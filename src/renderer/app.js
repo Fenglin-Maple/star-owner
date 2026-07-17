@@ -177,7 +177,7 @@ const TEXT = {
   toolChecking: '\u68c0\u67e5\u4e2d',
   recentStatus: '\u6700\u8fd1\u72b6\u6001',
   quickStart: '\u5916\u90e8 Agent \u77e5\u8bc6\u5e93\u63a5\u5165\u63d0\u793a\u8bcd',
-  quickStartHint: '\u5c55\u5f00\u67e5\u770b\u53ea\u8bfb\u77e5\u8bc6\u5e93 API \u7684\u76ee\u5f55\u7b5b\u9009\u3001\u539f\u6587\u5206\u9875\u3001\u641c\u7d22\u548c\u56fe\u7247\u8bfb\u53d6\u6d41\u7a0b\u3002',
+  quickStartHint: '\u5c55\u5f00\u590d\u5236\u5b8c\u6574\u7684\u672c\u673a\u77e5\u8bc6\u5e93\u63a5\u5165\u534f\u8bae\uff0c\u5305\u542b\u76ee\u5f55\u7b5b\u9009\u3001\u539f\u6587\u5206\u9875\u3001\u56fe\u7247\u8bfb\u53d6\u3001\u5f15\u7528\u4e0e\u9519\u8bef\u6062\u590d\u89c4\u5219\u3002',
   agentPromptTitle: '\u4ea4\u7ed9 Codex\u3001Claude Code\u3001OpenCode \u6216\u5176\u5b83 Agent',
   copyPrompt: '\u590d\u5236\u63d0\u793a\u8bcd',
   copy: '\u590d\u5236',
@@ -1062,6 +1062,7 @@ function setPage(name, sourceItem = null) {
     updateSyncCollectionState();
   }
   if (name === 'readme') loadReadme().catch((error) => showToast(TEXT.toastError, error.message || String(error), 'error'));
+  window.dispatchEvent(new CustomEvent('star:page-changed', { detail: { page: name } }));
 }
 
 function setNavGroupOpen(target, open) {
@@ -2994,33 +2995,59 @@ function updatePromptTemplate() {
 }
 function buildKnowledgeAgentPrompt(apiUrl) {
   return [
-    '你正在通过「星藏家」的本机只读 API 查阅用户已经完成的视频 Markdown 知识库。',
+    '你正在作为外部知识库 Agent，通过「星藏家」本机只读 HTTP API 查阅用户已经完成的视频 Markdown 知识库。',
     '',
-    '【目标】',
-    '先读取目录和元数据，自行筛选与当前问题有关的用户、收藏夹和文档；再按需逐页读取原始 Markdown 与图片。回答必须以实际读取到的内容为依据，不要把搜索摘要或目录字段当成完整原文。',
+    '【工作目标】',
+    '理解用户的问题后，先从目录和元数据缩小候选范围，再读取相关文档的原始 Markdown；问题涉及画面时，还要实际取得并检查原始图片。回答必须以接口返回的真实内容为依据，并让用户能够追溯到文档标题、BV 号和收藏夹。',
     '',
     '【访问边界】',
     '- Base URL：' + apiUrl,
     '- API 仅监听 127.0.0.1，供本机 Codex、Claude Code、OpenCode 或其它非浏览器 Agent 使用。',
-    '- 默认可读取全部已完成 Markdown，不限制用户或收藏夹；接口没有写入、删除、接单、工具执行或提交能力。',
+    '- 默认可读取全部已完成且产物仍存在的 Markdown，不限制用户或收藏夹；未完成任务不会出现在知识库接口中。',
+    '- 接口没有写入、删除、接单、工具执行或提交能力。不要尝试绕过只读边界，也不要把本机接口转发或暴露到局域网/公网。',
     '- 不要调用旧的 /api/workers、/api/tasks、/api/tools、/api/tool-runs 等视频工作流接口；这些接口已关闭并返回 HTTP 410。',
     '- 不要直接扫描、修改应用 workspace、SQLite 或索引文件。',
     '',
-    '【推荐流程】',
-    '1. GET ' + apiUrl + '/api/manifest，读取当前协议、能力和全部端点。',
-    '2. GET ' + apiUrl + '/api/knowledge/catalog，查看用户、收藏夹、文档数量和最近日期。',
-    '3. GET ' + apiUrl + '/api/knowledge/documents?offset=0&limit=100，分页读取文档目录。可用 userId、collectionId、bvid、title、owner、tag、publishedFrom/publishedTo、favoriteFrom/favoriteTo 与 sort 筛选。',
-    '4. GET ' + apiUrl + '/api/knowledge/documents/<documentId> 读取元数据。publishedAt 是视频发布日期，favoriteAddedAt 是收藏日期，favoriteMembership 表示当前收藏状态。',
-    '5. GET ' + apiUrl + '/api/knowledge/documents/<documentId>/content?startLine=1&lineCount=400，逐行读取未经摘要的 Markdown 原文。nextStartLine 不为 null 时继续请求。',
-    '6. GET ' + apiUrl + '/api/knowledge/documents/<documentId>/assets 列出图片；再使用返回的资产 URL 读取原图。资产 ID 是文档内不透明标识，不要自行拼接文件路径。',
-    '7. 跨库检索可用 GET ' + apiUrl + '/api/knowledge/search?q=<query>&limit=20。搜索只用于定位；partial=true 表示达到扫描预算，需缩小范围或继续精确读取。',
+    '【开始前】',
+    '1. GET ' + apiUrl + '/api/health，确认 ok=true、mode=knowledge-read-only。连接失败时向用户报告地址和错误，不要臆测知识库内容。',
+    '2. GET ' + apiUrl + '/api/manifest，读取实时协议版本、能力、端点与推荐流程；以 manifest 为准，不依赖记忆中的旧接口。',
+    '',
+    '【目录发现与筛选】',
+    '3. GET ' + apiUrl + '/api/knowledge/catalog，查看用户、收藏夹、文档数量以及最近完成、发布和收藏日期。',
+    '4. GET ' + apiUrl + '/api/knowledge/documents?offset=0&limit=100，分页读取文档目录。limit 支持 1～500；nextOffset 不为 null 时继续请求。',
+    '5. 目录支持 userId、collectionId、bvid、title、owner、tag、publishedFrom/publishedTo、favoriteFrom/favoriteTo 筛选。参数值与 documentId 都要做 URL 编码。',
+    '6. sort 使用“字段-方向”格式：favorite-desc、favorite-asc、published-desc、published-asc、completed-desc 或 completed-asc。不要写成 favorite_desc。',
+    '7. GET ' + apiUrl + '/api/knowledge/documents/<documentId> 读取单篇元数据。publishedAt 是视频发布日期，favoriteAddedAt 是收藏日期，completedAt 是总结完成日期，favoriteMembership 表示当前收藏状态。',
+    '',
+    '【读取原文】',
+    '8. GET ' + apiUrl + '/api/knowledge/documents/<documentId>/content?startLine=1&lineCount=400，读取未经摘要、未经改写的原始 Markdown。lineCount 单次支持 1～1000 行，默认 400 行。',
+    '9. 需要完整文章时，按照 nextStartLine 连续请求直到 null，并核对 totalLines、endLine 与 sha256；不要只读取开头摘要就声称看过全文。单篇 Markdown 读取上限为 16 MiB。',
+    '10. 只需回答局部问题时，可以先读取目录或相关章节，再补读上下文；引用原句时保留原意并说明来自哪篇文档。',
+    '',
+    '【读取图片】',
+    '11. GET ' + apiUrl + '/api/knowledge/documents/<documentId>/assets，列出经过验证的原始图片。',
+    '12. 使用列表返回的完整资产 URL 请求二进制原图。assetId 是文档作用域内的不透明标识，不要自行解码、拼路径或扫描文件系统。',
+    '13. 对支持视觉输入的模型：问题涉及界面、关键帧、图表或截图时，必须实际读取相关原图后再描述；需要展示给用户时，可使用客户端支持的图片附件或 Markdown 图片方式返回。不要根据文件名或文章图注假装看过像素。',
+    '',
+    '【搜索】',
+    '14. 跨库定位可用 GET ' + apiUrl + '/api/knowledge/search?q=<query>&limit=20，并可附加 userId、collectionId、bvid、tag。搜索会扫描元数据和 Markdown，但 snippet 只是定位线索。',
+    '15. partial=true 表示达到扫描预算；此时应缩小用户/收藏夹/BV/标签范围，或根据已有候选继续读取精确原文，不能把部分结果说成全库结论。',
     '',
     '【回答要求】',
-    '- 精确原文接口是事实来源。引用结论时标明文档标题、BV 号、用户/收藏夹；区分发布日期、收藏日期和完成日期。',
-    '- 比较多个视频时，先列出候选目录，再分别读取足够的原文页；不能只凭 snippet 下结论。',
-    '- 对支持视觉输入的模型，先列出资产并读取相关原图，再描述图片；不要臆造未读取图片的内容。',
-    '- 404 时重读目录确认 documentId；409 时说明托管产物缺失或无效；413 时缩小读取范围；410 时停止使用旧视频工作流接口。',
-    '- 找不到证据时明确说明知识库中没有足够信息。'
+    '- 精确原文接口是事实来源。目录、元数据和搜索结果用于发现文档，不等同于文章正文。',
+    '- 给出事实性结论时，至少标明文档标题和 BV 号；涉及跨用户/收藏夹比较时同时标明用户与收藏夹。',
+    '- 明确区分视频发布日期、加入收藏夹日期、总结完成日期，以及“仍在收藏夹 / 已移出 / 收藏夹已删除”等收藏状态。',
+    '- 比较多篇文档时，先确定候选集合，再分别读取足够原文；说明比较范围，不能把未扫描文档包含在结论中。',
+    '- 知识库内容可能记录视频作者的观点、字幕识别结果或历史时点数据；需要区分视频陈述、总结者判断和当前实时事实。',
+    '- 找不到证据、文章缺页或图片未能读取时，明确说明缺口，不要补写不存在的内容。',
+    '',
+    '【错误恢复】',
+    '- 404：目录可能已更新或 documentId 错误，重新读取 catalog/documents 后再定位。',
+    '- 409：托管 Markdown 或图片缺失、无效或不在受管 Workspace 中，报告具体错误并跳过该产物。',
+    '- 413：文档或资产超过接口安全上限，说明无法通过当前接口完整读取。',
+    '- 416：startLine 超出总行数，使用返回的 totalLines/先前分页信息修正范围。',
+    '- 410：调用了已停用的外部视频工作流接口，立即停止并改用 manifest 中的只读知识库端点。',
+    '- 连接中断或返回非 JSON：先重试一次 health；仍失败则向用户报告，不循环轰炸本机服务。'
   ].join('\n');
 }
 
@@ -3029,6 +3056,9 @@ function secureAgentApiText(value) { return String(value || ''); }
 function buildKnowledgeApiDocs(apiUrl) {
   return `Base URL: ${apiUrl}
 Mode: read-only knowledge access / all completed Markdown
+
+Health check
+GET ${apiUrl}/api/health
 
 Discover protocol
 GET ${apiUrl}/api/manifest
@@ -3040,19 +3070,22 @@ Paginated document directory
 GET ${apiUrl}/api/knowledge/documents?offset=0&limit=100
 Filters: userId, collectionId, bvid, title, owner, tag,
 publishedFrom, publishedTo, favoriteFrom, favoriteTo, sort
+Limit: 1-500. Sort examples: favorite-desc, published-asc, completed-desc.
+URL-encode filter values and document ids.
 
 One document metadata record
 GET ${apiUrl}/api/knowledge/documents/<documentId>
 
 Exact raw Markdown, paged by 1-based lines
 GET ${apiUrl}/api/knowledge/documents/<documentId>/content?startLine=1&lineCount=400
-Follow nextStartLine until null when the complete source is required.
+lineCount accepts 1-1000 lines. Follow nextStartLine until null when the complete source is required.
 
 List validated image assets
 GET ${apiUrl}/api/knowledge/documents/<documentId>/assets
 
 Read one image using the opaque URL returned by the asset list
 GET ${apiUrl}/api/knowledge/documents/<documentId>/assets/<assetId>
+Vision-capable callers must fetch the image bytes before describing or returning an image.
 
 Bounded metadata and Markdown search
 GET ${apiUrl}/api/knowledge/search?q=<query>&limit=20

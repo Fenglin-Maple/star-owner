@@ -690,9 +690,9 @@
       notify('无法启动依赖下载', error.message || String(error), 'error');
     }
   });
-  document.querySelector('[data-page="internal-agents"]')?.addEventListener('click', () => refreshAll({ quiet: initialized }));
-  document.querySelector('[data-page="single-agent"]')?.addEventListener('click', () => refreshAll({ quiet: initialized }));
-  document.querySelector('[data-page="ai-models"]')?.addEventListener('click', () => refreshAll({ quiet: initialized }));
+  window.addEventListener('star:page-changed', (event) => {
+    if (['internal-agents', 'single-agent', 'ai-models'].includes(event.detail?.page)) refreshAll({ quiet: initialized });
+  });
   window.orchestrator.onInternalAgentEvent(handleInternalEvent);
   window.orchestrator.onDependencyEvent((event) => {
     if (event.state) dependencyState = event.state;
