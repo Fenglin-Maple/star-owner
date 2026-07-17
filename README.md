@@ -240,7 +240,15 @@ workspace/
 
 ## 下载与部署
 
-Windows 用户可从 GitHub Releases 下载便携包。首次启动若缺少运行时或模型，应用会提示从本项目 Release 下载并显示进度；设置页可重新检查和下载。
+Windows 10/11 x64 用户可从 [GitHub Releases](https://github.com/Fenglin-Maple/star-owner/releases/latest) 下载便携包：
+
+1. 只需下载 `Star-Owner-v<version>-win-x64-core.zip`；同名 `.sha256` 文件用于校验下载完整性。
+2. 将 ZIP 完整解压到当前用户可写的目录，不要在压缩包预览窗口内直接运行。
+3. 双击解压目录根部的 `Start-StarOwner.cmd`。应用不要求全局安装 Node.js、Python、FFmpeg 或 SQLite。
+4. 首次启动若提示缺少 ASR 模型，允许应用从同一 Release 自动下载；默认推荐 `medium`，资源不足时可在设置中切换 `small`。
+5. 按启动页“第一次上手”依次完成模型配置、B站登录、收藏夹同步、任务检查和 Agent 工作流创建。
+
+运行时和模型 ZIP 是应用内依赖管理器使用的独立资产，普通用户不需要手动下载。设置页可以重新检查、下载或修复这些依赖。
 
 源码运行：
 

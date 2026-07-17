@@ -4,7 +4,7 @@ Version: `0.10.0`
 
 ## 1. Portable Release for Users
 
-Download the Windows x64 portable core archive from GitHub Releases, extract it to a writable local directory, and start `星藏家.exe` or the included shortcut.
+Download `Star-Owner-v<version>-win-x64-core.zip` from GitHub Releases, extract the complete archive to a writable local directory, and double-click `Start-StarOwner.cmd` in the extracted root. Do not run it from the ZIP preview. The portable archive does not require a global Node.js, Python, FFmpeg or SQLite installation.
 
 Do not install under a directory that the current user cannot modify. The portable application writes only to its project directory, registered Workspace libraries, and Electron user data required for the persistent Bilibili WebView partition.
 
