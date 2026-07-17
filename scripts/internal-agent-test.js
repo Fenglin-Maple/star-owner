@@ -101,6 +101,7 @@ function assert(condition, message) {
   store.upsertTask({ id: `${toggleCollection.id}:enabled`, collectionId: toggleCollection.id, bvid: 'BVENABLED001', title: '开启任务', status: 'pending', enabled: true, favoriteAddedAt: '2026-07-14T10:00:00.000Z' });
   store.commit();
   const toggleSession = manager.createSession({ title: '任务开关领取测试', collectionId: toggleCollection.id, providerId: 'provider-test', modelId: 'model-test' });
+  assert(toggleSession.collectionName === toggleCollection.name && toggleSession.collectionUserName === toggleCollection.userName, 'Agent session did not retain a stable user/collection display snapshot');
   const toggleClaim = manager.claimNextTask(toggleSession, new Set());
   assert(toggleClaim?.id === `${toggleCollection.id}:enabled`, 'internal Agent claimed a task disabled in Task Overview');
   manager.abortAttempt(toggleClaim.id, toggleSession.workerId, 'test cleanup', 'test');

@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { ApiServer } = require('../src/core/api-server');
-const { isAllowedBilibiliNavigation } = require('../src/core/desktop-security');
+const { isAllowedBilibiliNavigation, isBilibiliVideoNavigation } = require('../src/core/desktop-security');
 const { assertHiddenBrowserUrl } = require('../src/core/hidden-browser-policy');
 const { assertBilibiliUrl, isAllowedApiOrigin, isPrivateNetworkHost } = require('../src/core/network-policy');
 const { MAX_MARKDOWN_BYTES, validateSubmission } = require('../src/core/validation');
@@ -15,6 +15,10 @@ function assert(condition, message) {
   assert(isAllowedBilibiliNavigation('https://passport.bilibili.com/login'), 'Bilibili login navigation was rejected');
   assert(isAllowedBilibiliNavigation('https://b23.tv/abc'), 'Bilibili short link was rejected');
   assert(!isAllowedBilibiliNavigation('https://example.com/?bilibili=1'), 'non-Bilibili navigation was accepted');
+  assert(isBilibiliVideoNavigation('https://www.bilibili.com/video/BV1234567890'), 'ordinary Bilibili video navigation was not recognized');
+  assert(isBilibiliVideoNavigation('https://www.bilibili.com/bangumi/play/ep123456'), 'Bilibili episode navigation was not recognized');
+  assert(isBilibiliVideoNavigation('https://b23.tv/abc'), 'Bilibili short video navigation was not recognized');
+  assert(!isBilibiliVideoNavigation('https://www.bilibili.com/v/popular/all'), 'non-video Bilibili page was classified as a video navigation');
   assert(assertBilibiliUrl('https://www.bilibili.com/video/BV1234567890').hostname === 'www.bilibili.com', 'official Bilibili URL was not parsed');
   let embeddedBiliCredentialRejected = false;
   try { assertBilibiliUrl('https://user:password@www.bilibili.com/video/BV1234567890'); } catch { embeddedBiliCredentialRejected = true; }

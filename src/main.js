@@ -9,7 +9,7 @@ const { ApiServer } = require('./core/api-server');
 const { BiliClient, assertBilibiliImageUrl, isBilibiliCookieDomain, normalizeBilibiliAssetUrl } = require('./core/bili');
 const { CollectionSyncService } = require('./core/collection-sync-service');
 const { DependencyManager } = require('./core/dependency-manager');
-const { secureMainWindow } = require('./core/desktop-security');
+const { isAllowedBilibiliNavigation, secureMainWindow } = require('./core/desktop-security');
 const { deleteCompletedDocument } = require('./core/document-lifecycle');
 const { ensurePortableDesktopShortcut } = require('./core/desktop-shortcut');
 const { assertHiddenBrowserUrl, installHiddenBrowserRequestGuard } = require('./core/hidden-browser-policy');
@@ -43,6 +43,7 @@ app.setName(PRODUCT_NAME);
 app.setAppUserModelId('com.fenglin-maple.star-owner');
 
 let mainWindow = null;
+const biliVideoWindows = new Set();
 let apiServer = null;
 let store = null;
 let bili = null;
@@ -86,7 +87,9 @@ function createWindow() {
       webviewTag: true
     }
   });
-  secureMainWindow(mainWindow, RENDERER_FILE);
+  secureMainWindow(mainWindow, RENDERER_FILE, {
+    openBilibiliVideo: (url) => openBilibiliVideoWindow(url)
+  });
   mainWindow.once('ready-to-show', () => {
     if (!mainWindow) return;
     if (mainWindow.isMaximized()) mainWindow.unmaximize();
@@ -116,6 +119,52 @@ function createWindow() {
 
 function biliSession() {
   return session.fromPartition(BILI_SESSION);
+}
+
+function openBilibiliVideoWindow(value) {
+  if (!isAllowedBilibiliNavigation(value)) return null;
+  const target = String(value || '');
+  const browser = new BrowserWindow({
+    width: 1180,
+    height: 760,
+    minWidth: 760,
+    minHeight: 520,
+    show: false,
+    autoHideMenuBar: true,
+    title: 'Bilibili',
+    icon: path.join(__dirname, '..', 'assets', 'star-note.ico'),
+    backgroundColor: '#0d1117',
+    webPreferences: {
+      partition: BILI_SESSION,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true
+    }
+  });
+  biliVideoWindows.add(browser);
+  browser.webContents.setWindowOpenHandler(({ url }) => {
+    if (isAllowedBilibiliNavigation(url)) {
+      setImmediate(() => {
+        if (!browser.isDestroyed()) browser.loadURL(url).catch((error) => console.warn(`[bili-video-window] ${error.message || String(error)}`));
+      });
+    }
+    return { action: 'deny' };
+  });
+  const guard = (event, url) => {
+    if (!isAllowedBilibiliNavigation(url)) event.preventDefault();
+  };
+  browser.webContents.on('will-navigate', guard);
+  browser.webContents.on('will-redirect', guard);
+  browser.once('ready-to-show', () => {
+    if (!browser.isDestroyed()) browser.show();
+  });
+  browser.on('closed', () => biliVideoWindows.delete(browser));
+  browser.loadURL(target).catch((error) => {
+    console.warn(`[bili-video-window] ${error.message || String(error)}`);
+    if (!browser.isDestroyed()) browser.destroy();
+  });
+  return browser;
 }
 
 async function bootstrap() {

@@ -101,7 +101,7 @@ Collection display names may change, so path identity uses collection ID plus a 
 
 ## 6. Bilibili Login
 
-The Bilibili WebView uses `persist:bili-orchestrator`, Electron sandboxing, no Node bridge, official-domain navigation only, denied popups, and persistent login state. Successful login automatically synchronizes user ID, name, avatar, cookies, and favorite folders.
+The Bilibili WebView uses `persist:bili-orchestrator`, Electron sandboxing, no Node bridge, official-domain navigation only and persistent login state. Password, SMS and QR-code login converge on the same automatic synchronization of user ID, name, avatar, cookies and favorite folders. Video navigations are removed from the embedded login surface and opened in a separate sandboxed BrowserWindow using the same persistent partition; unrelated popups and non-Bilibili navigation remain denied.
 
 Saved account passwords require Electron `safeStorage`. Netscape cookie files remain plaintext because yt-dlp requires them and are stored under the user Workspace hierarchy with export time metadata.
 
@@ -144,6 +144,8 @@ Task claim requirements:
 - task is not excluded by the current loop.
 
 Every claim creates a new random `workId`, work directory, claim timestamp, and 15-minute lease. The persistent Worker ID belongs to the Agent session and is reused across videos; model messages are not.
+
+An Agent session stores collection ID plus user/collection display snapshots. Public session state prefers the live collection names and falls back to the snapshots, so event ordering, startup hydration and collection renames cannot produce an empty identity row in the workflow list.
 
 All interruption paths converge on `abortTaskAttempt`:
 

@@ -2,7 +2,7 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 const { isBilibiliHost, parseHttpUrl } = require('./network-policy');
 
-function secureMainWindow(window, rendererFile) {
+function secureMainWindow(window, rendererFile, options = {}) {
   const rendererUrl = pathToFileURL(path.resolve(rendererFile)).toString();
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', (event, url) => {
@@ -21,13 +21,43 @@ function secureMainWindow(window, rendererFile) {
     if (!isAllowedBilibiliNavigation(params.src)) event.preventDefault();
   });
   window.webContents.on('did-attach-webview', (_event, contents) => {
-    contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    contents.setWindowOpenHandler(({ url }) => {
+      if (isBilibiliVideoNavigation(url) && typeof options.openBilibiliVideo === 'function') {
+        options.openBilibiliVideo(url);
+      }
+      return { action: 'deny' };
+    });
     const guard = (event, url) => {
-      if (!isAllowedBilibiliNavigation(url)) event.preventDefault();
+      if (!isAllowedBilibiliNavigation(url)) {
+        event.preventDefault();
+        return;
+      }
+      if (isBilibiliVideoNavigation(url) && typeof options.openBilibiliVideo === 'function') {
+        event.preventDefault();
+        options.openBilibiliVideo(url);
+      }
     };
     contents.on('will-navigate', guard);
     contents.on('will-redirect', guard);
   });
+}
+
+function isBilibiliVideoNavigation(value) {
+  try {
+    const url = parseHttpUrl(value);
+    if (!isAllowedBilibiliNavigation(url.toString())) return false;
+    const hostname = url.hostname.toLowerCase().replace(/\.$/, '');
+    if (hostname === 'b23.tv' || hostname.endsWith('.b23.tv')) return true;
+    const pathname = url.pathname.toLowerCase();
+    return pathname.startsWith('/video/')
+      || pathname.startsWith('/bangumi/play/')
+      || pathname.startsWith('/bangumi/media/')
+      || pathname.startsWith('/cheese/play/')
+      || pathname.startsWith('/festival/')
+      || pathname.startsWith('/medialist/play/');
+  } catch {
+    return false;
+  }
 }
 
 function isAllowedBilibiliNavigation(value) {
@@ -39,4 +69,4 @@ function isAllowedBilibiliNavigation(value) {
   }
 }
 
-module.exports = { isAllowedBilibiliNavigation, secureMainWindow };
+module.exports = { isAllowedBilibiliNavigation, isBilibiliVideoNavigation, secureMainWindow };

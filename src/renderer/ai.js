@@ -125,7 +125,7 @@
     const pending = [...pendingSessionActions].some((key) => key.startsWith(`${session.id}:`));
     container.innerHTML = `<div class="ai-session-view" data-agent-session-view="${esc(session.id)}">
       <header class="ai-session-head">
-        <div class="ai-session-identity"><strong>${html(session.title)}</strong><span>${html(collection ? `${collection.userName} / ${collection.name}` : session.collectionId)} · ${html(providerName(session.providerId))} / ${html(session.modelId)} · ${html(session.workerId)}</span></div>
+        <div class="ai-session-identity"><strong>${html(session.title)}</strong><span>${html(sessionCollectionLabel(session))} · ${html(providerName(session.providerId))} / ${html(session.modelId)} · ${html(session.workerId)}</span></div>
         <div class="ai-session-actions">
           ${session.mode === 'single' && output ? `<button class="secondary-button compact-button" data-agent-action="open-output"><svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v10H4z"/></svg><span>打开产物</span></button>` : ''}
           ${collectionUnavailable ? `<button class="primary-button compact-button" type="button" disabled title="${esc(session.collectionUnavailableReason || '收藏夹任务不可用')}">收藏夹不可用</button>` : (modelUnavailable ? `<button class="primary-button compact-button" type="button" disabled title="${esc(session.modelUnavailableReason || 'AI 模型配置不可用')}">模型不可用</button>` : (canStart ? `<button class="primary-button compact-button" data-agent-action="start" ${pending ? 'disabled' : ''}>${startActionLabel(session)}</button>` : ''))}
@@ -187,10 +187,9 @@
   }
 
   function sessionButton(session, active) {
-    const collection = state.collections.find((item) => item.id === session.collectionId);
     const status = session.modelAvailable === false ? 'model-unavailable' : session.status;
     const summary = session.modelAvailable === false ? session.modelUnavailableReason : (session.currentTask ? `${session.currentTask.bvid} · ${session.phase}` : `${session.completed || 0} 完成 / ${session.failed || 0} 失败 / ${session.skipped || 0} 跳过`);
-    return `<button class="ai-agent-session ${active ? 'active' : ''}" type="button" data-agent-session="${esc(session.id)}"><div><strong>${html(session.title)}</strong><em class="ai-status ${esc(status)}" data-agent-role="list-status">${statusLabel(status)}</em></div><span>${html(collection ? `${collection.userName} / ${collection.name}` : session.collectionId)}</span><small data-agent-role="list-summary">${html(summary)}</small></button>`;
+    return `<button class="ai-agent-session ${active ? 'active' : ''}" type="button" data-agent-session="${esc(session.id)}"><div><strong>${html(session.title)}</strong><em class="ai-status ${esc(status)}" data-agent-role="list-status">${statusLabel(status)}</em></div><span data-agent-role="list-collection">${html(sessionCollectionLabel(session))}</span><small data-agent-role="list-summary">${html(summary)}</small></button>`;
   }
 
   function openAgentContextMenu(session, x, y) {
@@ -569,6 +568,8 @@
       status.className = `ai-status ${displayedStatus}`;
       status.textContent = statusLabel(displayedStatus);
     }
+    const collection = button.querySelector('[data-agent-role="list-collection"]');
+    if (collection) collection.textContent = sessionCollectionLabel(session);
     const summary = button.querySelector('[data-agent-role="list-summary"]');
     if (summary) summary.textContent = session.modelAvailable === false
       ? session.modelUnavailableReason
@@ -628,7 +629,15 @@
   }
 
   function sessionStructureKey(session) {
-    return [session.mode, session.status, Boolean(session.acceptNewTasks), session.title, session.collectionId, session.providerId, session.modelId, session.modelAvailable !== false, session.modelUnavailableReason || ''].join('|');
+    return [session.mode, session.status, Boolean(session.acceptNewTasks), session.title, session.collectionId, session.collectionUserName, session.collectionName, session.providerId, session.modelId, session.modelAvailable !== false, session.modelUnavailableReason || ''].join('|');
+  }
+
+  function sessionCollectionLabel(session) {
+    const collection = state.collections.find((item) => item.id === session.collectionId);
+    const userName = String(collection?.userName || session.collectionUserName || '').trim();
+    const collectionName = String(collection?.name || session.collectionName || '').trim();
+    const label = [userName, collectionName].filter(Boolean).join(' / ');
+    return label || String(session.collectionId || '').trim() || '收藏夹信息加载中';
   }
 
   function containerForSession(session) {

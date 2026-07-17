@@ -453,6 +453,8 @@ body.theme-claude .app-title { font-family: var(--font-display); font-size: 15px
   gap: 8px;
 }
 .button-row > button { min-width: 0; padding-inline: 8px; }
+.login-method-row > .primary-button,
+.login-method-row > .secondary-button { width: 100%; margin: 0; }
 
 .account-manager + .primary-button {
   margin-top: 4px;

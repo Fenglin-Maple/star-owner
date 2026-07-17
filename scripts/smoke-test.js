@@ -454,6 +454,9 @@ function verifyRendererContracts() {
   if (!index.includes('id="syncSummary"') || !index.includes('id="taskStatusFilters"') || !index.includes('data-task-status="disabled"')) {
     throw new Error('collection sync counts or task status filters are missing from the renderer');
   }
+  if (!index.includes('id="qrCodeLogin"') || !app.includes('function showQrCodeLogin') || !app.includes('function installBiliVideoLinkBridge')) {
+    throw new Error('Bilibili QR-code login or video-window bridge is missing from the renderer');
+  }
   if (!app.includes('function renderSyncSummary') || !app.includes('function taskStateGroup') || !app.includes("taskStatusFilter === 'all'")) {
     throw new Error('collection/task status summaries are not wired into renderer filtering');
   }

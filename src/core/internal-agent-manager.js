@@ -131,6 +131,8 @@ class InternalAgentManager {
       providerId: provider.id,
       modelId,
       collectionId: collection.id,
+      collectionName: String(collection.name || ''),
+      collectionUserName: String(collection.userName || ''),
       workerId: worker.id,
       status: 'idle',
       acceptNewTasks: input.acceptNewTasks !== false,
@@ -1290,10 +1292,13 @@ class InternalAgentManager {
 
   publicSession(session) {
     const task = session.currentTaskId ? this.store.getTask(session.currentTaskId) : null;
+    const collection = this.store.getCollectionById(String(session.collectionId || ''));
     const modelAvailability = this.modelAvailability(session);
     const collectionAvailability = this.collectionAvailability(session);
     return {
       ...session,
+      collectionName: String(collection?.name || session.collectionName || ''),
+      collectionUserName: String(collection?.userName || session.collectionUserName || ''),
       modelAvailable: modelAvailability.available,
       modelUnavailableReason: modelAvailability.reason,
       collectionAvailable: collectionAvailability.available,

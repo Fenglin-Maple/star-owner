@@ -45,6 +45,7 @@ const credentialUsername = document.querySelector('#credentialUsername');
 const credentialPassword = document.querySelector('#credentialPassword');
 const credentialNote = document.querySelector('#credentialNote');
 const biliView = document.querySelector('#biliView');
+const qrCodeLoginButton = document.querySelector('#qrCodeLogin');
 const oneClickLoginButton = document.querySelector('#oneClickLogin');
 const toastViewport = document.querySelector('#toastViewport');
 const bootstrapPanel = document.querySelector('#bootstrapPanel');
@@ -195,6 +196,7 @@ const TEXT = {
   accountNote: '\u5907\u6ce8',
   saveAccount: '\u4fdd\u5b58',
   deleteAccount: '\u5220\u9664',
+  qrCodeLogin: '\u626b\u7801\u767b\u5f55',
   oneClickLogin: '\u4e00\u952e\u767b\u5f55',
   smsTitle: '\u624b\u673a\u9a8c\u8bc1',
   smsWaiting: '\u7b49\u5f85\u9a8c\u8bc1\u7801',
@@ -556,6 +558,47 @@ async function oneClickLogin() {
   return result;
 }
 
+async function showQrCodeLogin() {
+  const result = await biliView.executeJavaScript(`
+    (async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const compact = (value) => String(value || '').replace(/\\s+/g, '').trim();
+      const visible = (el) => {
+        if (!el) return false;
+        const style = getComputedStyle(el);
+        const box = el.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
+      };
+      const candidates = [...document.querySelectorAll('button, a, div, span, li, [role="tab"], [role="button"]')]
+        .filter(visible)
+        .map((el) => ({ el, text: compact(el.innerText || el.textContent || '') }))
+        .filter((item) => item.text && item.text.length <= 18)
+        .sort((left, right) => left.text.length - right.text.length);
+      const trigger = candidates.find((item) => /^(扫码登录|二维码登录|手机扫码登录|扫码)$/.test(item.text))
+        || candidates.find((item) => /扫码登录|二维码登录/.test(item.text));
+      if (trigger) {
+        trigger.el.click();
+        await sleep(500);
+      }
+      const visuals = [...document.querySelectorAll('canvas, img, svg, [class*="qr" i], [id*="qr" i], [class*="code" i]')].filter((el) => {
+        if (!visible(el)) return false;
+        const box = el.getBoundingClientRect();
+        if (box.width < 80 || box.height < 80) return false;
+        const root = el.closest('[class*="qr" i], [id*="qr" i], [class*="login" i]') || el.parentElement;
+        const signature = compact([el.id, el.className, el.getAttribute?.('src'), root?.innerText, root?.className].join(' '));
+        return /qr|qrcode|二维码|扫码|手机哔哩哔哩/i.test(signature);
+      });
+      const pageText = compact(document.body?.innerText || document.body?.textContent || '');
+      const qr = visuals[0] || null;
+      const ready = Boolean(qr || /扫码登录|二维码登录|打开.{0,12}哔哩哔哩.{0,12}扫码/.test(pageText));
+      (qr || trigger?.el)?.scrollIntoView?.({ block: 'center', inline: 'center' });
+      return { ready, clicked: Boolean(trigger), href: location.href };
+    })();
+  `);
+  if (!result?.ready) throw new Error('B站登录页已经打开，但暂未检测到二维码，请等待网页加载后重试。');
+  return result;
+}
+
 function ensureLoginPage(forceReload = false) {
   return new Promise((resolve, reject) => {
     const target = 'https://passport.bilibili.com/login';
@@ -651,11 +694,30 @@ async function openLoginWorkspace() {
     stopLoginWatch();
     setSmsChallenge(null);
     setLoginEndpointReady(false, TEXT.loginSessionKept);
+    await installBiliVideoLinkBridge();
     return;
   }
   await ensureLoginPage();
+  await installBiliVideoLinkBridge();
   scheduleLoginEndpointProbe();
   startLoginWatch();
+}
+
+async function prepareBiliAccountSwitch() {
+  accountGeneration += 1;
+  profileFoldersRequestSerial += 1;
+  profileFoldersLoading = false;
+  profileFoldersLoadingUserId = '';
+  stopLoginWatch();
+  setSmsChallenge(null);
+  await window.orchestrator.prepareAccountSwitch();
+  activeCredentialId = '';
+  localStorage.removeItem('activeCredentialId');
+  currentUser = null;
+  lastLoggedInMid = '';
+  profileFolders = [];
+  profileFoldersUpdatedAt = 0;
+  renderProfile(lastSnapshot);
 }
 
 async function switchToCredential(id) {
@@ -665,25 +727,12 @@ async function switchToCredential(id) {
     showToast(TEXT.toastInfo, TEXT.loginSessionKept, 'info');
     return;
   }
-    accountSwitchInFlight = true;
-    accountGeneration += 1;
-    profileFoldersRequestSerial += 1;
-    profileFoldersLoading = false;
-    profileFoldersLoadingUserId = '';
+  accountSwitchInFlight = true;
   credentialSelect.disabled = true;
   pendingCredentialId = id;
   try {
     showToast(TEXT.toastInfo, '\u6b63\u5728\u5207\u6362 B \u7ad9\u8d26\u53f7...', 'info');
-    stopLoginWatch();
-    setSmsChallenge(null);
-    await window.orchestrator.prepareAccountSwitch();
-    activeCredentialId = '';
-    localStorage.removeItem('activeCredentialId');
-    currentUser = null;
-    lastLoggedInMid = '';
-    profileFolders = [];
-    profileFoldersUpdatedAt = 0;
-    renderProfile(lastSnapshot);
+    await prepareBiliAccountSwitch();
     await ensureLoginPage(true);
     if (!await waitForLoginEndpoint()) throw new Error('\u672a\u68c0\u6d4b\u5230 B \u7ad9\u5bc6\u7801\u767b\u5f55\u8868\u5355');
     const result = await oneClickLogin();
@@ -723,6 +772,38 @@ function fitBiliWebView() {
       `).catch(() => {});
     }
   } catch {}
+}
+
+function installBiliVideoLinkBridge() {
+  if (!biliView) return Promise.resolve(false);
+  return biliView.executeJavaScript(`
+    (() => {
+      if (window.__starOwnerVideoLinkBridge) return true;
+      window.__starOwnerVideoLinkBridge = true;
+      document.addEventListener('click', (event) => {
+        if (event.button !== 0 || event.defaultPrevented) return;
+        const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+        const anchor = target?.closest?.('a[href]');
+        if (!anchor) return;
+        let url;
+        try { url = new URL(anchor.href, location.href); } catch { return; }
+        const hostname = url.hostname.toLowerCase().replace(/\\.$/, '');
+        const pathname = url.pathname.toLowerCase();
+        const video = hostname === 'b23.tv' || hostname.endsWith('.b23.tv')
+          || pathname.startsWith('/video/')
+          || pathname.startsWith('/bangumi/play/')
+          || pathname.startsWith('/bangumi/media/')
+          || pathname.startsWith('/cheese/play/')
+          || pathname.startsWith('/festival/')
+          || pathname.startsWith('/medialist/play/');
+        if (!video) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        location.assign(url.href);
+      }, true);
+      return true;
+    })();
+  `).catch(() => false);
 }
 
 function showToast(title, message = '', type = 'info') {
@@ -2752,6 +2833,7 @@ biliView?.addEventListener('did-start-loading', () => setLoginEndpointReady(fals
 for (const eventName of ['dom-ready', 'did-finish-load', 'did-navigate', 'did-navigate-in-page']) {
   biliView?.addEventListener(eventName, () => {
     fitBiliWebView();
+    installBiliVideoLinkBridge();
     if (currentUser?.isLogin) {
       setLoginEndpointReady(false, TEXT.loginSessionKept);
       return;
@@ -2815,6 +2897,32 @@ document.querySelector('#deleteCredential')?.addEventListener('click', async () 
   } catch (error) {
     loginOutput.textContent = error.message || String(error);
     showToast(TEXT.toastError, error.message || String(error), 'error');
+  }
+});
+qrCodeLoginButton?.addEventListener('click', async () => {
+  if (accountSwitchInFlight) return;
+  const switchingAccount = Boolean(currentUser?.isLogin);
+  accountSwitchInFlight = true;
+  qrCodeLoginButton.disabled = true;
+  credentialSelect.disabled = true;
+  pendingCredentialId = '';
+  try {
+    if (switchingAccount) {
+      showToast(TEXT.toastInfo, '正在退出当前 B站账号并准备扫码登录...', 'info');
+      await prepareBiliAccountSwitch();
+    }
+    await ensureLoginPage(switchingAccount);
+    await showQrCodeLogin();
+    showToast(TEXT.toastSuccess, 'B站扫码登录二维码已就绪', 'success');
+    startLoginWatch();
+    setTimeout(pollLoginFlow, 800);
+  } catch (error) {
+    loginOutput.textContent = error.message || String(error);
+    showToast(TEXT.toastError, error.message || String(error), 'error');
+  } finally {
+    qrCodeLoginButton.disabled = false;
+    credentialSelect.disabled = false;
+    accountSwitchInFlight = false;
   }
 });
 oneClickLoginButton?.addEventListener('click', async () => {
