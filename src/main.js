@@ -11,6 +11,7 @@ const { CollectionSyncService } = require('./core/collection-sync-service');
 const { DependencyManager } = require('./core/dependency-manager');
 const { secureMainWindow } = require('./core/desktop-security');
 const { deleteCompletedDocument } = require('./core/document-lifecycle');
+const { ensurePortableDesktopShortcut } = require('./core/desktop-shortcut');
 const { assertHiddenBrowserUrl, installHiddenBrowserRequestGuard } = require('./core/hidden-browser-policy');
 const { InternalAgentManager } = require('./core/internal-agent-manager');
 const { loadClipboardImage } = require('./core/image-clipboard');
@@ -39,6 +40,7 @@ try {
 }
 
 app.setName(PRODUCT_NAME);
+app.setAppUserModelId('com.fenglin-maple.star-owner');
 
 let mainWindow = null;
 let apiServer = null;
@@ -214,6 +216,20 @@ async function bootstrap() {
   const apiUrl = await apiServer.start();
   backendReady = true;
   emitBootstrap('Ready.', 1, 'ready');
+  try {
+    const shortcut = ensurePortableDesktopShortcut({
+      projectRoot: path.resolve(__dirname, '..'),
+      desktopPath: app.getPath('desktop'),
+      executablePath: process.execPath,
+      version: PACKAGE_VERSION,
+      store,
+      writeShortcutLink: (shortcutPath, operation, details) => shell.writeShortcutLink(shortcutPath, operation, details)
+    });
+    if (shortcut.status === 'created') publishEvent({ type: 'desktop-shortcut-created', shortcutPath: shortcut.shortcutPath });
+  } catch (error) {
+    console.warn(`[desktop-shortcut] ${error.message || String(error)}`);
+    publishEvent({ type: 'desktop-shortcut-failed', error: error.message || String(error) });
+  }
   sendRuntime();
 }
 

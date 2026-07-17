@@ -292,7 +292,7 @@ Startup is an independently scrollable page. It includes a five-step first-run j
 
 ## 17. Startup and Dependencies
 
-The main window appears before heavy initialization. Bootstrap progress covers database, dependencies, models, resource pools, ASR health, knowledge API and login synchronization. Tool probes run during startup and report online/degraded/offline state. Startup uses content-height rows and its own vertical scroll container so onboarding, health, prompt and the bounded 500-event log remain reachable at the default and reduced window sizes.
+The main window appears before heavy initialization. Bootstrap progress covers database, dependencies, models, resource pools, ASR health, knowledge API and login synchronization. Tool probes run during startup and report online/degraded/offline state. Startup uses content-height rows and its own vertical scroll container so onboarding, health, prompt and the bounded 500-event log remain reachable at the default and reduced window sizes. Once a Windows portable backend first reaches Ready, it creates a Desktop shortcut that targets the bundled Electron executable with the current portable root as its application argument, working directory and icon source. A per-installation SQLite record prevents repeated creation; failures are non-fatal and reported in the UI.
 
 Project-local runtime and models may be installed from GitHub Release assets. Installation uses staging, backup, SHA-256 verification, a transaction journal and startup rollback. Archives may write only below `runtime/`.
 

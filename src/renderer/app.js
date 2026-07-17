@@ -142,6 +142,8 @@ let backendSnapshotLoaded = false;
 const SNAPSHOT_IGNORED_EVENTS = new Set([
   'asr-progress',
   'asr-service-log',
+  'desktop-shortcut-created',
+  'desktop-shortcut-failed',
   'video-cache-job-updated',
   'video-cache-queue-updated'
 ]);
@@ -2965,6 +2967,12 @@ window.orchestrator.onEvent((event) => {
   if (event.type === 'collection-sync-progress') {
     renderSyncProgress(event);
     return;
+  }
+  if (event.type === 'desktop-shortcut-created') {
+    showToast('桌面快捷方式已创建', '以后可以从桌面的“星藏家”图标启动应用。', 'success');
+  }
+  if (event.type === 'desktop-shortcut-failed') {
+    showToast('未能创建桌面快捷方式', event.error || '请继续使用 Start-StarOwner.cmd 启动。', 'error');
   }
   if (SNAPSHOT_IGNORED_EVENTS.has(event.type)) return;
   if (event.type !== 'snapshot-invalidated') log(event.type || JSON.stringify(event));

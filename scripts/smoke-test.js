@@ -12,6 +12,7 @@ const { assessSubtitle } = require('../tools/video-tool');
 const { validateSubmission } = require('../src/core/validation');
 const { promoteMindMap } = require('../src/core/markdown');
 const { DependencyManager } = require('../src/core/dependency-manager');
+const { ensurePortableDesktopShortcut } = require('../src/core/desktop-shortcut');
 const { repairPortablePythonHome } = require('../src/core/portable-runtime');
 
 (async () => {
@@ -46,6 +47,31 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   const portableRepair = repairPortablePythonHome(portableFixture);
   if (!portableRepair.changed || !fs.readFileSync(portableConfig, 'utf8').includes(`home = ${portablePythonHome}`)) throw new Error('portable Python home repair failed');
   if (repairPortablePythonHome(portableFixture).changed) throw new Error('portable Python home repair was not idempotent');
+  const shortcutFixture = path.join(dependencyRoot, 'shortcut-fixture');
+  const shortcutDesktop = path.join(shortcutFixture, 'desktop');
+  fs.mkdirSync(path.join(shortcutFixture, 'assets'), { recursive: true });
+  fs.mkdirSync(shortcutDesktop, { recursive: true });
+  fs.writeFileSync(path.join(shortcutFixture, 'portable-manifest.json'), '{}');
+  fs.writeFileSync(path.join(shortcutFixture, 'electron.exe'), 'fixture');
+  fs.writeFileSync(path.join(shortcutFixture, 'assets', 'star-note.ico'), 'fixture');
+  const shortcutSettings = new Map();
+  const shortcutStore = {
+    get: (scope, id) => shortcutSettings.get(`${scope}:${id}`) || null,
+    set: (scope, id, value) => shortcutSettings.set(`${scope}:${id}`, value),
+    save: () => {}
+  };
+  const shortcutWrites = [];
+  const shortcutResult = ensurePortableDesktopShortcut({
+    projectRoot: shortcutFixture,
+    desktopPath: shortcutDesktop,
+    executablePath: path.join(shortcutFixture, 'electron.exe'),
+    version: '9.9.9',
+    store: shortcutStore,
+    writeShortcutLink: (...args) => { shortcutWrites.push(args); return true; },
+    platform: 'win32'
+  });
+  if (shortcutResult.status !== 'created' || shortcutWrites.length !== 1 || shortcutWrites[0][1] !== 'create' || !shortcutWrites[0][2].args.includes(shortcutFixture)) throw new Error('portable desktop shortcut creation failed');
+  if (ensurePortableDesktopShortcut({ projectRoot: shortcutFixture, desktopPath: shortcutDesktop, executablePath: path.join(shortcutFixture, 'electron.exe'), version: '9.9.9', store: shortcutStore, writeShortcutLink: () => { throw new Error('duplicate shortcut write'); }, platform: 'win32' }).reason !== 'already-completed') throw new Error('portable desktop shortcut first-run guard failed');
   const dependencyManager = new DependencyManager({ store, projectRoot: dependencyRoot, version: '9.9.9' });
   const missingDependencies = dependencyManager.state();
   if (missingDependencies.ready || !missingDependencies.needsPrompt || !missingDependencies.missingRequired.includes('runtime-base') || !missingDependencies.missingRequired.includes('model-small') || !missingDependencies.missingRequired.includes('model-medium')) throw new Error('dependency availability detection failed');

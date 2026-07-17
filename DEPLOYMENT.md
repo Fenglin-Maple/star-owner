@@ -12,10 +12,11 @@ On first launch:
 
 1. The main window opens immediately.
 2. SQLite and the default Workspace initialize.
-3. The application checks project-local runtime, faster-whisper, both model packages, FFmpeg, yt-dlp and VC++ runtime.
-4. Missing required packages trigger an in-app download prompt.
-5. Downloads come from this repository's Release assets, show progress, verify SHA-256 when available, stage extraction, and commit under `runtime/`.
-6. Interrupted installation rolls back on next startup.
+3. After the portable backend first becomes ready, the application creates a `星藏家.lnk` shortcut on the current user's Desktop. It records completion in SQLite and does not recreate a shortcut deleted by the user; moving the complete portable directory allows the new location to replace the old shortcut on its next successful launch.
+4. The application checks project-local runtime, faster-whisper, both model packages, FFmpeg, yt-dlp and VC++ runtime.
+5. Missing required packages trigger an in-app download prompt.
+6. Downloads come from this repository's Release assets, show progress, verify SHA-256 when available, stage extraction, and commit under `runtime/`.
+7. Interrupted installation rolls back on next startup.
 
 Release dependency assets:
 

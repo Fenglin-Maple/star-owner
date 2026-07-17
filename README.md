@@ -14,7 +14,7 @@
 
 1. 打开 [最新 GitHub Release](https://github.com/Fenglin-Maple/star-owner/releases/latest)，下载 `Star-Owner-v<version>-win-x64-core.zip`；建议同时下载同名 `.sha256` 校验文件。
 2. 将 ZIP 完整解压到当前用户可写的目录，不要在压缩包预览窗口内直接运行。
-3. 双击解压目录根部的 `Start-StarOwner.cmd`。
+3. 双击解压目录根部的 `Start-StarOwner.cmd`。便携包首次成功启动后会在当前用户桌面自动创建“星藏家”快捷方式，以后可直接使用桌面图标启动；同一安装目录不会反复创建。
 4. 核心包包含 Electron、Python、faster-whisper、FFmpeg、yt-dlp、CUDA/VC++ 运行依赖，但不包含 ASR 模型权重。全新安装首次启动会列出缺失的 `small` 和 `medium` 模型；点击“同意并开始下载”后，应用从本项目 Release 下载、校验并安装它们。也可以选择“稍后处理”，再到“设置 -> 应用设置 -> 项目依赖包”逐个下载。
 5. 在启动页按照“第一次上手”依次完成：`配置 AI 模型 -> 登录 B站 -> 同步收藏夹 -> 检查任务 -> 创建 Agent 视频总结工作流`。
 
