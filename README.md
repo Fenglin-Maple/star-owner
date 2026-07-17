@@ -8,6 +8,18 @@
 
 > `0.10.0` 的边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
 
+## 快速安装与第一次使用
+
+适用于 Windows 10/11 x64。普通用户不需要预先安装 Node.js、Python、FFmpeg、SQLite 或 faster-whisper。
+
+1. 打开 [最新 GitHub Release](https://github.com/Fenglin-Maple/star-owner/releases/latest)，下载 `Star-Owner-v<version>-win-x64-core.zip`；建议同时下载同名 `.sha256` 校验文件。
+2. 将 ZIP 完整解压到当前用户可写的目录，不要在压缩包预览窗口内直接运行。
+3. 双击解压目录根部的 `Start-StarOwner.cmd`。
+4. 核心包包含 Electron、Python、faster-whisper、FFmpeg、yt-dlp、CUDA/VC++ 运行依赖，但不包含 ASR 模型权重。全新安装首次启动会列出缺失的 `small` 和 `medium` 模型；点击“同意并开始下载”后，应用从本项目 Release 下载、校验并安装它们。也可以选择“稍后处理”，再到“设置 -> 应用设置 -> 项目依赖包”逐个下载。
+5. 在启动页按照“第一次上手”依次完成：`配置 AI 模型 -> 登录 B站 -> 同步收藏夹 -> 检查任务 -> 创建 Agent 视频总结工作流`。
+
+默认 ASR 模型为多语言 `medium`；显存或内存不足时可在设置中切换到 `small`。建议为核心包、模型、缓存和视频产物预留至少 10 GB 可用空间。
+
 ## 核心能力
 
 - 使用独立、持久化、沙箱化 WebView 登录 Bilibili，不复用系统浏览器登录态。
