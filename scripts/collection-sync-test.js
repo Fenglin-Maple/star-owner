@@ -63,6 +63,15 @@ function video(bvid, title, favoriteAddedAt) {
   assert(events.some((event) => event.type === 'collection-sync-progress' && event.stage === 'done'), 'completion progress event was not emitted');
   assert(fs.readdirSync(first.collection.exportDir).some((name) => /^sync-.*\.json$/.test(name)), 'collection export index was not written');
 
+  videos = [...videos, { aid: 'pgc-1', bvid: '', title: '特殊视频条目', owner: 'Bilibili', duration: 120, favoriteAddedAt: '2026-07-03T12:00:00.000Z', publishedAt: '2026-06-01T00:00:00.000Z', url: 'https://www.bilibili.com/bangumi/play/ep123456' }];
+  folders = [{ ...folders[0], mediaCount: 3 }];
+  await service.sync({ collectionName: '7' });
+  const specialTask = store.getTask('100:7:aid-pgc-1');
+  assert(specialTask?.unsupportedVideo && specialTask.enabled === false && specialTask.unsupportedKind === 'missing-bvid', 'Bilibili favorite without a BV was not retained as a disabled unsupported task');
+  videos = videos.filter((item) => item.aid !== 'pgc-1');
+  folders = [{ ...folders[0], mediaCount: 2 }];
+  await service.sync({ collectionName: '7' });
+
   videos = [videos[0]];
   const partial = await service.sync({ collectionName: '7' });
   assert(partial.summary.visibilityGap === 1 && partial.summary.partialVisibility === true, 'partial-visibility snapshot was not reported');

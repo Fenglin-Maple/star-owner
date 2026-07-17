@@ -43,6 +43,7 @@ class InternalAgentManager {
     this.ensureInternalUser();
     this.recoverInterruptedSessions();
     this.purgeKnownUnavailableTasks();
+    this.disableUnsupportedInventory();
   }
 
   state() {
@@ -647,6 +648,43 @@ class InternalAgentManager {
           if (forced) this.log(latest, `${forced.reason} 当前视频缓存已清理，任务已退回待领取。`);
           return;
         }
+        if (error.code === 'UNSUPPORTED_VIDEO_TYPE') {
+          const reason = error.message || '当前版本暂不支持该视频类型。';
+          this.abortAttempt(task.id, latest.workerId, reason, 'unsupported-video');
+          const disabled = this.store.getTask(task.id);
+          Object.assign(disabled, {
+            status: 'pending',
+            enabled: false,
+            unsupportedVideo: true,
+            unsupportedKind: error.unsupportedKind || (reason.includes('多 P') ? 'multi-part' : 'special-video'),
+            unsupportedReason: reason,
+            unsupportedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          });
+          this.store.upsertTask(disabled);
+          this.store.commit();
+          this.store.recordTaskEvent(task.id, 'unsupported', { collectionId: task.collectionId, workerId: latest.workerId, reason, unsupportedKind: disabled.unsupportedKind });
+          latest.skipped = Number(latest.skipped || 0) + 1;
+          latest.currentTaskId = '';
+          latest.currentRunId = '';
+          latest.lastError = reason;
+          latest.phase = '视频类型暂不支持，任务已关闭';
+          this.saveSession(latest);
+          this.log(latest, `跳过并关闭 ${task.bvid || task.title}：${reason}`);
+          this.emit({ type: 'video-unsupported', sessionId: latest.id, taskId: task.id, bvid: task.bvid, reason, unsupportedKind: disabled.unsupportedKind });
+          if (latest.mode === 'single') {
+            latest.content = `## 当前版本暂不支持该视频\n\n${reason}\n\n任务缓存已经清理，任务不会再次派发。`;
+            this.finishSession(latest, 'unsupported', '视频类型暂不支持，任务已关闭');
+            return;
+          }
+          if (!latest.acceptNewTasks) {
+            this.finishSession(latest, 'paused', '已暂停');
+            return;
+          }
+          latest.status = 'running';
+          this.saveSession(latest);
+          continue;
+        }
         if (error.code === 'BILIBILI_VIDEO_UNAVAILABLE' || isVideoUnavailableMessage(error.message)) {
           const removal = removeUnavailableTask({ store: this.store, toolRunner: this.toolRunner, taskId: task.id, reason: error.message, source: 'internal-agent' });
           latest.skipped = Number(latest.skipped || 0) + 1;
@@ -742,7 +780,7 @@ class InternalAgentManager {
     if (collectionReason) throw new Error(collectionReason);
     this.reclaimExpired(collection.id);
     const task = this.store.listTasks({ collectionId: collection.id }).find((item) => {
-      if (excluded.has(item.id) || item.enabled === false) return false;
+      if (excluded.has(item.id) || item.enabled === false || item.unsupportedVideo) return false;
       if (session.mode === 'single' && item.id !== session.singleTaskId) return false;
       return item.status === 'pending' || item.status === 'failed' || (item.status === 'rejected' && !item.workId && !item.claimedBy);
     });
@@ -858,6 +896,7 @@ class InternalAgentManager {
           const error = new Error(message);
           error.code = run.errorCode || '';
           error.failureKind = run.failureKind || '';
+          error.unsupportedKind = run.unsupportedKind || '';
           error.possibleCauses = Array.isArray(run.possibleCauses) ? run.possibleCauses : [];
           throw error;
         }
@@ -1340,6 +1379,25 @@ class InternalAgentManager {
       this.reclassifyUnavailableHistory(task);
       removeUnavailableTask({ store: this.store, toolRunner: this.toolRunner, taskId: task.id, reason: `同步条目已标记为“${task.title}”。`, source: 'startup-migration' });
     }
+  }
+
+  disableUnsupportedInventory() {
+    let changed = 0;
+    const now = new Date().toISOString();
+    for (const task of this.store.listTasks()) {
+      if (task.status === 'done' || String(task.bvid || '').trim() || task.unsupportedVideo) continue;
+      this.store.set('tasks', task.id, {
+        ...task,
+        enabled: false,
+        unsupportedVideo: true,
+        unsupportedKind: 'missing-bvid',
+        unsupportedReason: '当前版本只支持普通 BV 视频；该任务没有 BV 号，已关闭且不会派发给 Agent。',
+        unsupportedAt: task.unsupportedAt || now,
+        updatedAt: now
+      });
+      changed += 1;
+    }
+    if (changed) this.store.save();
   }
 
   reclassifyUnavailableHistory(task) {

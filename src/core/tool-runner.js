@@ -4,10 +4,11 @@ const { execFile, spawn, spawnSync } = require('child_process');
 const { promisify } = require('util');
 const { AsrService } = require('./asr-service');
 const { detectAsrHardware } = require('./hardware-capabilities');
-const { isVideoUnavailableMessage, videoUnavailableError } = require('./media-errors');
+const { isVideoUnavailableMessage, unsupportedVideoError, videoUnavailableError } = require('./media-errors');
 const { ResourceScheduler } = require('./resource-scheduler');
 const { abortTaskAttempt, recoverPendingAttemptCleanups } = require('./task-attempt');
 const { removeUnavailableTask } = require('./unavailable-task');
+const { inspectVideoSupport } = require('./video-support');
 const { PROJECT_ROOT, assertInside, ensureDir, safeName } = require('./workspace');
 
 const execFileAsync = promisify(execFile);
@@ -319,12 +320,13 @@ class ToolRunner {
         this.publish({ type: 'video-unavailable', taskId: task.id, collectionId: task.collectionId, bvid: task.bvid, reason: terminalError.message, removed: removal.removed });
         error = terminalError;
       }
-      const status = error.code === 'BILIBILI_VIDEO_UNAVAILABLE' ? 'skipped' : (error.code === 'TOOL_TIMEOUT' ? 'timeout' : 'failed');
+      const status = ['BILIBILI_VIDEO_UNAVAILABLE', 'UNSUPPORTED_VIDEO_TYPE'].includes(error.code) ? 'skipped' : (error.code === 'TOOL_TIMEOUT' ? 'timeout' : 'failed');
       const finished = this.finishRun(state, status, {
         signal: status === 'timeout' ? 'TIMEOUT' : '',
         error: error.message || String(error),
         errorCode: error.code || '',
         failureKind: error.failureKind || '',
+        unsupportedKind: error.unsupportedKind || '',
         possibleCauses: Array.isArray(error.possibleCauses) ? error.possibleCauses : [],
         stage: 'error'
       });
@@ -369,6 +371,9 @@ class ToolRunner {
       if (!fs.existsSync(path.join(run.artifactDir, 'info.json'))) {
         throw new Error('Required video metadata is missing after the material bundle metadata stage.');
       }
+      const info = JSON.parse(fs.readFileSync(path.join(run.artifactDir, 'info.json'), 'utf8'));
+      const support = inspectVideoSupport(info);
+      if (!support.supported) throw unsupportedVideoError(support.reason, support.kind);
       const optionalCalls = [];
       if (!options.skipSubtitles) optionalCalls.push(['subtitles', this.buildArgs({ task, action: 'subtitles', collection, artifactDir: run.artifactDir, options })]);
       if (!options.skipComments && options.comments !== false && Number(options.commentLimit ?? 3) > 0) {

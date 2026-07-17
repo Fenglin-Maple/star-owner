@@ -2,8 +2,9 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
-const { isLoginRequiredMessage, isVideoUnavailableMessage } = require('./media-errors');
+const { isLoginRequiredMessage, isVideoUnavailableMessage, unsupportedVideoError } = require('./media-errors');
 const { assertBilibiliUrl } = require('./network-policy');
+const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('./video-support');
 const { assertInside, collectionDirs, ensureDir, normalizeTags, safeName } = require('./workspace');
 
 const CACHE_USER_ID = 'builtin-agent-user';
@@ -320,6 +321,8 @@ class VideoCacheManager {
       job = this.updateJob(job, { currentRunId: infoRun.id, phase: '读取视频元数据', progress: 0.1 });
       await this.waitForRun(infoRun.id);
       const info = readJson(path.join(baseDir, 'info.json'));
+      const support = inspectVideoSupport(info);
+      if (!support.supported) throw unsupportedVideoError(support.reason, support.kind);
       const metadata = normalizeInfo(info, job.bvid, baseDir);
       Object.assign(task, metadata, { updatedAt: new Date().toISOString() });
       this.store.upsertTask(task);
@@ -374,6 +377,26 @@ class VideoCacheManager {
       const detail = error.message || String(error);
       if (this.stopped) {
         this.updateJob(job, { status: 'queued', phase: '应用已关闭，等待下次启动恢复', currentRunId: '', error: '', updatedAt: new Date().toISOString() }, false);
+      } else if (error.code === 'UNSUPPORTED_VIDEO_TYPE') {
+        if (!acceptedDocument) {
+          try { this.safeRemoveTaskArtifact(task, collection); } catch {}
+          Object.assign(task, {
+            status: 'pending',
+            enabled: false,
+            workId: '',
+            claimedBy: '',
+            artifactDir: '',
+            unsupportedVideo: true,
+            unsupportedKind: error.unsupportedKind || 'unsupported-video',
+            unsupportedReason: detail.slice(0, 1200),
+            unsupportedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          });
+          this.store.upsertTask(task);
+          this.store.commit();
+        }
+        this.updateJob(job, { status: 'skipped', phase: '当前版本暂不支持该视频类型', currentRunId: '', error: detail.slice(0, 2000), finishedAt: new Date().toISOString() });
+        this.emitState('video-cache-download-skipped', { jobId: job.id, bvid: job.bvid, reason: detail.slice(0, 500), unsupported: true });
       } else if (error.code === 'BILIBILI_VIDEO_UNAVAILABLE' || isVideoUnavailableMessage(detail)) {
         this.updateJob(job, { status: 'skipped', phase: '视频已删除、下架或不可用', currentRunId: '', error: detail.slice(0, 2000), finishedAt: new Date().toISOString() });
         this.emitState('video-cache-download-skipped', { jobId: job.id, bvid: job.bvid, reason: detail.slice(0, 500) });
@@ -520,9 +543,13 @@ function parseInputs(value) {
 }
 
 async function resolveBvid(value, fetchImpl = global.fetch) {
+  const inputReason = unsupportedBilibiliUrlReason(value);
+  if (inputReason) throw unsupportedVideoError(inputReason, 'special-video');
   const direct = String(value || '').match(/BV[0-9A-Za-z]{10}/i)?.[0];
   if (direct) return direct;
   let url = assertBilibiliUrl(value);
+  const normalizedReason = unsupportedBilibiliUrlReason(url);
+  if (normalizedReason) throw unsupportedVideoError(normalizedReason, 'special-video');
   let response;
   for (let redirects = 0; redirects <= 5; redirects += 1) {
     response = await fetchImpl(url.toString(), { redirect: 'manual', headers: { 'user-agent': 'Mozilla/5.0 StarOwner/0.8' }, signal: AbortSignal.timeout(20000) });
@@ -530,10 +557,14 @@ async function resolveBvid(value, fetchImpl = global.fetch) {
     const location = response.headers?.get?.('location');
     if (!location) throw new Error('Bilibili 短链接返回了无目标的重定向。');
     url = assertBilibiliUrl(new URL(location, url).toString());
+    const redirectReason = unsupportedBilibiliUrlReason(url);
+    if (redirectReason) throw unsupportedVideoError(redirectReason, 'special-video');
     if (redirects === 5) throw new Error('Bilibili 链接重定向次数过多。');
   }
   if (!response) throw new Error(`无法读取视频链接：${value}`);
   if (response.ok === false) throw new Error(`Bilibili 链接请求失败：HTTP ${response.status}`);
+  const responseReason = unsupportedBilibiliUrlReason(response.url || url);
+  if (responseReason) throw unsupportedVideoError(responseReason, 'special-video');
   const fromUrl = String(response.url || '').match(/BV[0-9A-Za-z]{10}/i)?.[0];
   if (fromUrl) return fromUrl;
   const body = await response.text();

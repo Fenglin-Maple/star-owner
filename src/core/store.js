@@ -152,6 +152,7 @@ class Store {
     for (const id of [...new Set((ids || []).map(String))]) {
       const task = this.getTask(id);
       if (!task) continue;
+      if (enabled && task.unsupportedVideo) continue;
       task.enabled = Boolean(enabled);
       task.updatedAt = now;
       this.upsertTask(task);

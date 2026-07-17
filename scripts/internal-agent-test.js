@@ -68,6 +68,7 @@ function assert(condition, message) {
   let forceLoginFailure = false;
   let forceInfrastructureFailure = false;
   let forceUnavailableFailure = false;
+  let forceUnsupportedFailure = false;
   let holdToolRuns = false;
   let infrastructureArtifactDir = '';
   const toolRunner = {
@@ -77,10 +78,11 @@ function assert(condition, message) {
       const loginBlocked = forceLoginFailure && tool.id === 'material-bundle' && !runCollection?.cookieFile;
       const infrastructureBlocked = forceInfrastructureFailure && tool.id === 'material-bundle';
       const unavailable = forceUnavailableFailure && tool.id === 'material-bundle';
-      if (tool.id === 'material-bundle' && !loginBlocked && !unavailable) writeMaterials(task.artifactDir);
+      const unsupported = forceUnsupportedFailure && tool.id === 'material-bundle';
+      if (tool.id === 'material-bundle' && !loginBlocked && !unavailable && !unsupported) writeMaterials(task.artifactDir);
       if (infrastructureBlocked) infrastructureArtifactDir = task.artifactDir;
       const waiting = holdToolRuns && tool.id === 'material-bundle';
-      store.createToolRun({ id, taskId: task.id, collectionId: task.collectionId, toolId: tool.id, toolName: tool.name, workerId, status: waiting ? 'running' : (loginBlocked || infrastructureBlocked || unavailable ? 'failed' : 'succeeded'), stage: waiting ? 'test-hold' : (loginBlocked || infrastructureBlocked || unavailable ? 'error' : 'complete'), error: loginBlocked ? 'This video is only available for registered users. Use --cookies.' : (infrastructureBlocked ? 'GPU ASR 常驻服务连续 3 次启动失败，应用已停止相关 Agent。' : (unavailable ? 'Bilibili 视频已删除、下架或不可用：已失效视频' : '')), errorCode: infrastructureBlocked ? 'ASR_INFRASTRUCTURE_FAILURE' : (unavailable ? 'BILIBILI_VIDEO_UNAVAILABLE' : ''), failureKind: infrastructureBlocked ? 'infrastructure' : (unavailable ? 'terminal-video' : ''), possibleCauses: infrastructureBlocked ? ['CTranslate2 原生运行库访问冲突', '项目依赖损坏'] : [], createdAt: new Date().toISOString(), finishedAt: waiting ? '' : new Date().toISOString() });
+      store.createToolRun({ id, taskId: task.id, collectionId: task.collectionId, toolId: tool.id, toolName: tool.name, workerId, status: waiting ? 'running' : (unsupported ? 'skipped' : (loginBlocked || infrastructureBlocked || unavailable ? 'failed' : 'succeeded')), stage: waiting ? 'test-hold' : (loginBlocked || infrastructureBlocked || unavailable || unsupported ? 'error' : 'complete'), error: loginBlocked ? 'This video is only available for registered users. Use --cookies.' : (infrastructureBlocked ? 'GPU ASR 常驻服务连续 3 次启动失败，应用已停止相关 Agent。' : (unavailable ? 'Bilibili 视频已删除、下架或不可用：已失效视频' : (unsupported ? '当前版本暂不支持多 P 视频（检测到 2 个分 P），任务已关闭。' : ''))), errorCode: infrastructureBlocked ? 'ASR_INFRASTRUCTURE_FAILURE' : (unavailable ? 'BILIBILI_VIDEO_UNAVAILABLE' : (unsupported ? 'UNSUPPORTED_VIDEO_TYPE' : '')), failureKind: infrastructureBlocked ? 'infrastructure' : (unavailable ? 'terminal-video' : (unsupported ? 'unsupported-video' : '')), unsupportedKind: unsupported ? 'multi-part' : '', possibleCauses: infrastructureBlocked ? ['CTranslate2 原生运行库访问冲突', '项目依赖损坏'] : [], createdAt: new Date().toISOString(), finishedAt: waiting ? '' : new Date().toISOString() });
       return store.getToolRun(id);
     },
     cancel: (runId) => {
@@ -242,6 +244,16 @@ function assert(condition, message) {
   assert(infrastructureArtifactDir && !fs.existsSync(infrastructureArtifactDir), 'infrastructure failure left partial task files behind');
   assert(events.some((event) => event.type === 'infrastructure-stopped' && event.sessionId === blocked.id), 'infrastructure stop event was not emitted');
   forceInfrastructureFailure = false;
+  forceUnsupportedFailure = true;
+  const unsupportedSession = await manager.createSingleTask({ video: 'BVMULTIP0001', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  await manager.start(unsupportedSession.id);
+  const unsupported = await waitForStatus(manager, unsupportedSession.id, 'unsupported');
+  const unsupportedTask = store.getTask(unsupportedSession.singleTaskId);
+  assert(unsupported.skipped === 1 && unsupported.failed === 0, 'unsupported video was counted as an Agent failure');
+  assert(unsupportedTask?.enabled === false && unsupportedTask.unsupportedKind === 'multi-part' && unsupportedTask.status === 'pending', 'unsupported multi-part task was not permanently disabled');
+  assert(!unsupportedTask.workId && !unsupportedTask.claimedBy && !unsupportedTask.artifactDir, 'unsupported multi-part task kept its attempt state or cache');
+  assert(events.some((event) => event.type === 'video-unsupported' && event.sessionId === unsupported.id), 'unsupported-video event was not emitted');
+  forceUnsupportedFailure = false;
   forceUnavailableFailure = true;
   const unavailableSession = await manager.createSingleTask({ video: 'BVDELETED001', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
   await manager.start(unavailableSession.id);

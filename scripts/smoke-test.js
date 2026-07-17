@@ -14,6 +14,7 @@ const { promoteMindMap } = require('../src/core/markdown');
 const { DependencyManager } = require('../src/core/dependency-manager');
 const { ensurePortableDesktopShortcut } = require('../src/core/desktop-shortcut');
 const { repairPortablePythonHome } = require('../src/core/portable-runtime');
+const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/core/video-support');
 
 (async () => {
   verifyRendererContracts();
@@ -21,6 +22,10 @@ const { repairPortablePythonHome } = require('../src/core/portable-runtime');
   if (assessSubtitle([{ from: 0, to: 9 }], 120).reason !== 'SUBTITLE_COVERAGE_TOO_LOW') throw new Error('subtitle coverage validation failed');
   if (assessSubtitle([{ from: 0, to: 60 }, { from: 60, to: 120 }, { from: 120, to: 300 }], 120).reason !== 'SUBTITLE_DURATION_MISMATCH') throw new Error('subtitle duration validation failed');
   if (!assessSubtitle([{ from: 0, to: 10 }, { from: 10, to: 20 }, { from: 20, to: 60 }], 120).valid) throw new Error('valid subtitle was rejected');
+  if (!inspectVideoSupport({ bvid: 'BV1234567890', pages: [{ page: 1 }] }).supported) throw new Error('ordinary single-part video was rejected');
+  const multiPartSupport = inspectVideoSupport({ bvid: 'BV1234567890', pages: [{ page: 1 }, { page: 2 }] });
+  if (multiPartSupport.supported || multiPartSupport.kind !== 'multi-part' || multiPartSupport.pageCount !== 2) throw new Error('multi-part video was not blocked');
+  if (!unsupportedBilibiliUrlReason('https://www.bilibili.com/bangumi/play/ep123456')) throw new Error('Bilibili PGC episode URL was not blocked');
   const legacyMarkdown = '# Title\n\n## 小结\n\nSummary\n\n## 目录\n\nContents\n\n## 正文\n\nBody\n\n## 思维导图\n\n```mermaid\nmindmap\n  root((Test))\n```\n\n## 处理记录\n\nDone\n';
   const promotedMarkdown = promoteMindMap(legacyMarkdown);
   if (!(promotedMarkdown.indexOf('## 小结') < promotedMarkdown.indexOf('## 思维导图') && promotedMarkdown.indexOf('## 思维导图') < promotedMarkdown.indexOf('## 目录'))) throw new Error('legacy mind-map promotion failed');

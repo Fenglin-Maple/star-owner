@@ -246,12 +246,17 @@ class CollectionSyncService {
         const existing = this.store.getTask(key);
         const restoredMembership = Boolean(existing?.removedFromFavorites || existing?.favoriteState === 'removed' || existing?.favoriteState === 'collection-deleted');
         const restoredEnabled = restoredMembership ? existing?.enabledBeforeRemoval !== false : existing?.enabled !== false;
+        const missingBvid = !String(video.bvid || '').trim();
+        const preserveDetectedUnsupported = Boolean(existing?.unsupportedVideo && existing?.unsupportedKind !== 'missing-bvid');
+        const unsupportedVideo = missingBvid || preserveDetectedUnsupported;
+        const unsupportedReason = missingBvid
+          ? '当前版本只支持普通 BV 视频；该收藏条目没有 BV 号，已关闭且不会派发给 Agent。'
+          : (preserveDetectedUnsupported ? existing.unsupportedReason : '');
         if (!existing) summary.added += 1;
         else if (restoredMembership) summary.restored += 1;
         else summary.updated += 1;
         this.store.set('videos', key, { ...(this.store.get('videos', key) || {}), key, collectionId, ...video, favoriteState: 'active', removedFromFavorites: false, removedFromFavoritesAt: '', syncedAt: now });
         this.store.set('tasks', key, {
-          enabled: restoredEnabled,
           ...(existing || {}),
           id: key,
           collectionId,
@@ -268,7 +273,7 @@ class CollectionSyncService {
           removedFromFavorites: false,
           removedFromFavoritesAt: '',
           enabledBeforeRemoval: undefined,
-          enabled: restoredEnabled,
+          enabled: unsupportedVideo ? false : restoredEnabled,
           status: existing?.status || 'pending',
           claimedBy: existing?.claimedBy || '',
           claimedAt: existing?.claimedAt || '',
@@ -278,6 +283,10 @@ class CollectionSyncService {
           artifactDir: existing?.artifactDir || '',
           outputMarkdown: existing?.outputMarkdown || '',
           validatorErrors: existing?.validatorErrors || [],
+          unsupportedVideo,
+          unsupportedKind: unsupportedVideo ? (missingBvid ? 'missing-bvid' : existing.unsupportedKind) : '',
+          unsupportedReason,
+          unsupportedAt: unsupportedVideo ? (existing?.unsupportedAt || now) : '',
           createdAt: existing?.createdAt || now,
           updatedAt: now
         });

@@ -434,6 +434,8 @@ async function getVideoInfo(videoUrl, args) {
     duration: data.duration,
     dimension: data.dimension || null,
     pages: data.pages || [],
+    redirectUrl: data.redirect_url || '',
+    rights: data.rights || {},
     stat: data.stat || {},
     tags: await getTags(data.bvid || bvid, args).catch(() => []),
     url: videoUrl,

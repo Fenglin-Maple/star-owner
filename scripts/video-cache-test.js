@@ -51,6 +51,10 @@ function assert(condition, message) {
   manager.initialize();
   const defaultCollection = store.getCollectionById(DEFAULT_CACHE_COLLECTION_ID);
   assert(defaultCollection?.protected && defaultCollection.collectionKind === 'video-cache', 'protected default cache collection was not created');
+  let specialRejected = false;
+  try { await resolveBvid('https://www.bilibili.com/bangumi/play/ep123456', async () => { throw new Error('special URL must be rejected before fetch'); }); }
+  catch (error) { specialRejected = error.code === 'UNSUPPORTED_VIDEO_TYPE'; }
+  assert(specialRejected, 'special Bilibili URL was not rejected before cache submission');
 
   store.createToolRun({
     id: 'cache-run-interrupted',

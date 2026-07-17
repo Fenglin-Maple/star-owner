@@ -74,10 +74,19 @@ function videoUnavailableError(detail) {
   return error;
 }
 
+function unsupportedVideoError(detail, kind = 'unsupported-video') {
+  const error = new Error(String(detail || '当前版本暂不支持该视频类型。').slice(0, 1200));
+  error.code = 'UNSUPPORTED_VIDEO_TYPE';
+  error.failureKind = 'unsupported-video';
+  error.unsupportedKind = String(kind || 'unsupported-video');
+  return error;
+}
+
 module.exports = {
   isLoginRequiredMessage,
   isSubmissionValidationMessage,
   isVideoUnavailableMessage,
   loginRequiredError,
+  unsupportedVideoError,
   videoUnavailableError
 };

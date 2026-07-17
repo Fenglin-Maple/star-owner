@@ -704,7 +704,7 @@
   });
 
   function providerName(id) { return state.providers.find((item) => item.id === id)?.name || '未配置供应商'; }
-  function statusLabel(status) { return ({ idle: '等待任务', running: '工作中', draining: '即将暂停', paused: '已暂停', blocked: '故障停止', 'waiting-login': '等待登录', stopping: '停止中', stopped: '已停止', completed: '已完成', error: '失败', unavailable: '视频不可用', 'model-unavailable': '模型不可用', 'collection-unavailable': '收藏夹不可用' })[status] || status || '未知'; }
+  function statusLabel(status) { return ({ idle: '等待任务', running: '工作中', draining: '即将暂停', paused: '已暂停', blocked: '故障停止', 'waiting-login': '等待登录', stopping: '停止中', stopped: '已停止', completed: '已完成', error: '失败', unavailable: '视频不可用', unsupported: '视频类型暂不支持', 'model-unavailable': '模型不可用', 'collection-unavailable': '收藏夹不可用' })[status] || status || '未知'; }
   function startActionLabel(session) {
     if (session.mode === 'single') {
       if (session.status === 'waiting-login') return '登录后重试';

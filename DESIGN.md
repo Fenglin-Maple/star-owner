@@ -296,7 +296,11 @@ The main window appears before heavy initialization. Bootstrap progress covers d
 
 Project-local runtime and models may be installed from GitHub Release assets. Installation uses staging, backup, SHA-256 verification, a transaction journal and startup rollback. Archives may write only below `runtime/`.
 
-## 18. Security and Reliability
+## 18. Supported Video Boundary
+
+The stable workflow accepts ordinary Bilibili BV videos with exactly one page. Metadata inspection is mandatory before media download: more than one `pages` entry produces `UNSUPPORTED_VIDEO_TYPE`, cleans the current attempt, disables the task and records a skipped rather than failed Agent outcome. Inputs under Bilibili bangumi (`ep/ss/md`), cheese, festival, audio and live routes are rejected before URL-to-BV resolution. Favorite entries without a BV are retained as disabled inventory records with a visible reason. A future multi-part implementation must be developed on a separate Git branch and may merge only after per-part download, ASR, frame, cache, rollback and `?p=<page>&t=<seconds>` link tests pass.
+
+## 19. Security and Reliability
 
 - Electron main and WebView run with sandbox boundaries and strict navigation policies.
 - Credentials require safeStorage; cookies remain local plaintext only where tools require it.
@@ -306,7 +310,7 @@ Project-local runtime and models may be installed from GitHub Release assets. In
 - Application shutdown and restart recovery abort active video attempts rather than resuming partial state.
 - SQLite and dependency installation use recoverable writes.
 
-## 19. Verification
+## 20. Verification
 
 `npm run verify:release` checks package/lock versions, machine-specific paths, JavaScript/Python syntax, all integration tests, both ASR models and npm audit.
 
