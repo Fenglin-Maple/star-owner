@@ -77,7 +77,7 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   });
   if (shortcutResult.status !== 'created' || shortcutWrites.length !== 1 || shortcutWrites[0][1] !== 'create' || !shortcutWrites[0][2].args.includes(shortcutFixture)) throw new Error('portable desktop shortcut creation failed');
   if (ensurePortableDesktopShortcut({ projectRoot: shortcutFixture, desktopPath: shortcutDesktop, executablePath: path.join(shortcutFixture, 'electron.exe'), version: '9.9.9', store: shortcutStore, writeShortcutLink: () => { throw new Error('duplicate shortcut write'); }, platform: 'win32' }).reason !== 'already-completed') throw new Error('portable desktop shortcut first-run guard failed');
-  const dependencyManager = new DependencyManager({ store, projectRoot: dependencyRoot, version: '9.9.9' });
+  const dependencyManager = new DependencyManager({ store, projectRoot: dependencyRoot, version: '9.9.9', retryBaseDelayMs: 0 });
   const missingDependencies = dependencyManager.state();
   if (missingDependencies.ready || !missingDependencies.needsPrompt || !missingDependencies.missingRequired.includes('runtime-base') || !missingDependencies.missingRequired.includes('model-small') || !missingDependencies.missingRequired.includes('model-medium')) throw new Error('dependency availability detection failed');
   dependencyManager.acknowledgePrompt(false);
@@ -91,6 +91,41 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   if (duplicateDownloadCalls !== 1) throw new Error('duplicate dependency request downloaded the same package more than once');
   dependencyManager.downloadNow = originalDownloadNow;
   const originalFetch = global.fetch;
+  const checksumValue = 'a'.repeat(64);
+  let checksumAttempts = 0;
+  global.fetch = async () => {
+    checksumAttempts += 1;
+    if (checksumAttempts === 1) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' } });
+    return new Response(`${checksumValue}  fixture.zip\n`, { status: 200 });
+  };
+  try {
+    const checksum = await dependencyManager.fetchChecksum({ release: { assets: [{ name: 'fixture.zip.sha256', browser_download_url: 'https://example.test/fixture.zip.sha256' }] } }, 'fixture.zip');
+    if (checksum !== checksumValue || checksumAttempts !== 2) throw new Error('dependency checksum request did not retry a transient connection failure');
+  } finally {
+    global.fetch = originalFetch;
+  }
+  let digestFallbackRequests = 0;
+  global.fetch = async () => { digestFallbackRequests += 1; throw new Error('digest should avoid checksum download'); };
+  try {
+    const digestChecksum = await dependencyManager.resolveChecksum({ asset: { digest: `sha256:${checksumValue}` }, release: { assets: [] } }, 'fixture.zip');
+    if (digestChecksum !== checksumValue || digestFallbackRequests !== 0) throw new Error('dependency manager did not prefer the GitHub asset digest');
+  } finally {
+    global.fetch = originalFetch;
+  }
+  const resumeTarget = path.join(dependencyRoot, 'runtime', '.downloads', 'resume-test.partial');
+  fs.writeFileSync(resumeTarget, 'abc');
+  let requestedRange = '';
+  global.fetch = async (_url, options = {}) => {
+    requestedRange = options.headers?.range || '';
+    return new Response('def', { status: 206, headers: { 'content-length': '3', 'content-range': 'bytes 3-5/6' } });
+  };
+  try {
+    await dependencyManager.downloadFile('https://example.test/resume.bin', resumeTarget, 'model-small');
+    if (requestedRange !== 'bytes=3-' || fs.readFileSync(resumeTarget, 'utf8') !== 'abcdef') throw new Error('dependency download did not resume from the retained partial file');
+  } finally {
+    global.fetch = originalFetch;
+    fs.rmSync(resumeTarget, { force: true });
+  }
   const dependencyRequests = [];
   global.fetch = async (url) => {
     dependencyRequests.push(String(url));

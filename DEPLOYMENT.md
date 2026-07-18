@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.0.1`
+Version: `1.0.2`
 
 ## 1. Portable Release for Users
 
@@ -15,9 +15,9 @@ On first launch:
 3. After the portable backend first becomes ready, the application creates a `星藏家.lnk` shortcut on the current user's Desktop. It records completion in SQLite and does not recreate a shortcut deleted by the user; moving the complete portable directory allows the new location to replace the old shortcut on its next successful launch.
 4. The application checks project-local runtime, faster-whisper, both model packages, FFmpeg, yt-dlp and VC++ runtime.
 5. Missing required packages trigger an in-app download prompt.
-6. Downloads come from this repository's Release assets, show progress, verify SHA-256 when available, stage extraction, and commit under `runtime/`.
-7. If the unauthenticated GitHub API is rate-limited, the current version falls back to its predictable Release download URLs and still requires the matching `.sha256` asset before installation.
-8. Interrupted installation rolls back on next startup.
+6. Downloads come from this repository's Release assets, show progress, retain `.partial` files, retry transient failures with backoff, and resume with HTTP Range requests.
+7. Verification prefers the SHA-256 digest in GitHub Release asset metadata. If the unauthenticated API is unavailable, the predictable direct URL fallback fetches the matching `.sha256` before downloading the large archive. A complete archive is retained across checksum-network failures and reused on retry; unverified content is never installed.
+8. Verified archives extract into staging and commit atomically below `runtime/`. Successful installation deletes the archive, refreshes ASR and tool health immediately, and an interrupted installation rolls back on next startup.
 
 Release dependency assets:
 
@@ -30,7 +30,7 @@ Star-Owner-v<dependency-version>-model-medium.zip
 Star-Owner-v<dependency-version>-model-medium.zip.sha256
 ```
 
-The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs and exact asset names. Version `1.0.1` uses the unchanged `v1.0.0` runtime, small and medium assets; users do not need to redownload packages already installed and healthy.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs and exact asset names. Version `1.0.2` uses the unchanged `v1.0.0` runtime, small and medium assets; users do not need to redownload packages already installed and healthy.
 
 ## 2. Hardware and ASR
 

@@ -230,6 +230,7 @@ async function bootstrap() {
       if (packageId === 'model-small' || packageId === 'model-medium' || packageId === 'runtime-base') {
         try { await toolRunner.ensureGpuAsr(); } catch (error) { publishEvent({ type: 'asr-reload-required', error: error.message }); }
       }
+      await refreshToolHealth();
       sendRuntime();
     }
   });
@@ -995,6 +996,28 @@ function sendRuntime() {
     videoCache: videoCacheManager?.state() || null,
     backendReady,
     bootstrap: bootstrapState
+  });
+}
+
+async function refreshToolHealth() {
+  if (!store || !toolRunner) return;
+  const registeredTools = store.listTools();
+  const current = new Map(toolHealth.map((item) => [item.toolId, item]));
+  toolHealth = registeredTools.map((tool) => current.get(tool.id) || ({
+    toolId: tool.id,
+    toolName: tool.name,
+    action: tool.action,
+    order: tool.order,
+    enabled: tool.enabled !== false,
+    apiUsage: tool.apiUsage,
+    status: 'checking',
+    responded: false,
+    message: '等待健康检查',
+    dependencies: []
+  }));
+  await toolRunner.probeTools(registeredTools, (result) => {
+    toolHealth = toolHealth.map((item) => item.toolId === result.toolId ? result : item);
+    sendRuntime();
   });
 }
 

@@ -10,7 +10,7 @@ const { ensureDir } = require('./workspace');
 const REPOSITORY = 'Fenglin-Maple/star-owner';
 
 class DependencyManager {
-  constructor({ store, projectRoot, version, dependencyVersion, emit, onInstalled, acquireInstall }) {
+  constructor({ store, projectRoot, version, dependencyVersion, emit, onInstalled, acquireInstall, retryBaseDelayMs = 1000, maxNetworkAttempts = 5 }) {
     this.store = store;
     this.projectRoot = path.resolve(projectRoot);
     this.version = version;
@@ -18,6 +18,8 @@ class DependencyManager {
     this.emit = emit || (() => {});
     this.onInstalled = onInstalled || (async () => {});
     this.acquireInstall = acquireInstall || (async () => async () => {});
+    this.retryBaseDelayMs = Math.max(0, Number(retryBaseDelayMs) || 0);
+    this.maxNetworkAttempts = Math.max(1, Math.min(10, Number(maxNetworkAttempts) || 5));
     this.downloadRoot = ensureDir(path.join(this.projectRoot, 'runtime', '.downloads'));
     this.progress = new Map();
     this.pendingPackages = new Map();
@@ -139,25 +141,44 @@ class DependencyManager {
     const release = await this.resolveReleaseAsset(definition);
     const archive = path.join(this.downloadRoot, release.asset.name);
     const partial = `${archive}.partial`;
-    this.update(definition.id, { status: 'downloading', source: release.asset.browser_download_url, progress: 0.02, message: `正在下载 ${release.asset.name}` });
+    this.update(definition.id, { status: 'resolving', source: release.asset.browser_download_url, progress: 0.015, message: '正在获取 SHA-256 校验信息' });
+    let expectedChecksum;
     try {
-      await this.downloadFile(release.asset.browser_download_url, partial, definition.id);
+      expectedChecksum = await this.resolveChecksum(release, release.asset.name);
     } catch (error) {
-      if (fs.existsSync(partial)) fs.rmSync(partial, { force: true });
-      throw error;
+      const retained = fs.existsSync(archive) ? '完整依赖包已保留；下次重试将继续校验' : '尚未开始下载依赖包';
+      throw new Error(`SHA-256 校验信息获取失败，${retained}：${networkErrorMessage(error)}`);
     }
-    if (fs.existsSync(archive)) fs.rmSync(archive, { force: true });
-    fs.renameSync(partial, archive);
-    this.update(definition.id, { status: 'verifying', progress: 0.9, message: '正在校验 SHA-256' });
-    const checksum = await this.fetchChecksum(release, release.asset.name);
-    const actual = await sha256(archive);
-    if (!checksum) {
-      fs.rmSync(archive, { force: true });
-      throw new Error(`Release 缺少有效的 ${release.asset.name}.sha256，已拒绝安装未校验依赖包。`);
+    if (!expectedChecksum) {
+      throw new Error(`Release 缺少有效的 ${release.asset.name} SHA-256，已拒绝下载或安装未经校验的依赖。`);
     }
-    if (checksum !== actual) {
-      fs.rmSync(archive, { force: true });
-      throw new Error(`依赖包 SHA-256 不匹配：${actual}`);
+    let checksum = '';
+    let verified = false;
+    if (fs.existsSync(archive)) {
+      this.update(definition.id, { status: 'verifying', source: release.asset.browser_download_url, progress: 0.89, message: '检测到已下载的依赖包，正在继续校验 SHA-256' });
+      const cached = await this.verifyArchive(archive, expectedChecksum);
+      if (cached.checksum === cached.actual) {
+        checksum = cached.checksum;
+        verified = true;
+        const bytes = fs.statSync(archive).size;
+        this.update(definition.id, { status: 'verifying', progress: 0.91, downloadedBytes: bytes, totalBytes: bytes, message: '已复用完整下载包，SHA-256 校验通过' });
+      } else {
+        fs.rmSync(archive, { force: true });
+        this.update(definition.id, { status: 'downloading', progress: 0.02, message: '已有下载包校验不匹配，正在重新下载' });
+      }
+    }
+    if (!verified) {
+      this.update(definition.id, { status: 'downloading', source: release.asset.browser_download_url, progress: 0.02, message: `正在下载 ${release.asset.name}` });
+      await this.downloadFile(release.asset.browser_download_url, partial, definition.id);
+      if (fs.existsSync(archive)) fs.rmSync(archive, { force: true });
+      fs.renameSync(partial, archive);
+      this.update(definition.id, { status: 'verifying', progress: 0.9, message: '正在校验 SHA-256' });
+      const downloaded = await this.verifyArchive(archive, expectedChecksum);
+      checksum = downloaded.checksum;
+      if (checksum !== downloaded.actual) {
+        fs.rmSync(archive, { force: true });
+        throw new Error(`依赖包 SHA-256 不匹配：${downloaded.actual}`);
+      }
     }
     let releaseInstall = null;
     try {
@@ -220,30 +241,98 @@ class DependencyManager {
   async fetchChecksum(resolved, assetName) {
     const checksumAsset = (resolved.release.assets || []).find((item) => item.name === `${assetName}.sha256`);
     if (!checksumAsset) return '';
-    const response = await fetch(checksumAsset.browser_download_url, { headers: githubHeaders(), signal: AbortSignal.timeout(30000) });
+    const response = await this.fetchWithRetry(checksumAsset.browser_download_url, () => ({
+      headers: githubHeaders(),
+      redirect: 'follow',
+      signal: AbortSignal.timeout(30000)
+    }));
     if (!response.ok) return '';
     return (await response.text()).match(/[0-9a-f]{64}/i)?.[0]?.toLowerCase() || '';
   }
 
-  async downloadFile(url, target, packageId) {
-    const response = await fetch(url, { headers: githubHeaders(), redirect: 'follow', signal: AbortSignal.timeout(6 * 60 * 60 * 1000) });
-    if (!response.ok || !response.body) throw new Error(`依赖下载失败 (${response.status})`);
-    const total = Number(response.headers.get('content-length') || 0);
-    let downloaded = 0;
-    const manager = this;
-    let lastProgressAt = 0;
-    const meter = new Transform({
-      transform(chunk, _encoding, callback) {
-        downloaded += chunk.length;
-        if (Date.now() - lastProgressAt >= 200 || (total && downloaded >= total)) {
-          lastProgressAt = Date.now();
-          const fraction = total ? downloaded / total : Math.min(0.85, 0.08 + Math.log10(1 + downloaded) * 0.06);
-          manager.update(packageId, { status: 'downloading', progress: Math.min(0.88, 0.03 + fraction * 0.85), downloadedBytes: downloaded, totalBytes: total, message: total ? `已下载 ${formatBytes(downloaded)} / ${formatBytes(total)}` : `已下载 ${formatBytes(downloaded)}` });
-        }
-        callback(null, chunk);
+  async resolveChecksum(resolved, assetName) {
+    const digest = String(resolved.asset?.digest || '').match(/^sha256:([0-9a-f]{64})$/i)?.[1]?.toLowerCase();
+    return digest || this.fetchChecksum(resolved, assetName);
+  }
+
+  async verifyArchive(archive, checksum) {
+    return { checksum, actual: await sha256(archive) };
+  }
+
+  async fetchWithRetry(url, optionsFactory) {
+    let lastError;
+    for (let attempt = 1; attempt <= this.maxNetworkAttempts; attempt += 1) {
+      try {
+        const response = await fetch(url, optionsFactory());
+        if (!isRetryableStatus(response.status) || attempt === this.maxNetworkAttempts) return response;
+        lastError = new Error(`HTTP ${response.status}`);
+      } catch (error) {
+        lastError = error;
       }
-    });
-    await pipeline(Readable.fromWeb(response.body), meter, fs.createWriteStream(target));
+      await this.waitForRetry(attempt);
+    }
+    throw lastError || new Error('网络请求失败');
+  }
+
+  async downloadFile(url, target, packageId) {
+    let lastError;
+    for (let attempt = 1; attempt <= this.maxNetworkAttempts; attempt += 1) {
+      let existing = fs.existsSync(target) ? fs.statSync(target).size : 0;
+      const headers = githubHeaders();
+      if (existing > 0) headers.range = `bytes=${existing}-`;
+      try {
+        const response = await fetch(url, { headers, redirect: 'follow', signal: AbortSignal.timeout(6 * 60 * 60 * 1000) });
+        if (response.status === 416 && existing > 0) {
+          const total = parseUnsatisfiedRangeTotal(response.headers.get('content-range'));
+          if (total && existing === total) return;
+          fs.truncateSync(target, 0);
+          throw new Error('服务器拒绝断点位置，已从头重新下载');
+        }
+        if (!response.ok || !response.body) throw new Error(`依赖下载失败 (${response.status})`);
+        const contentRange = parseContentRange(response.headers.get('content-range'));
+        const resumed = existing > 0 && response.status === 206 && contentRange?.start === existing;
+        if (existing > 0 && response.status === 206 && !resumed) {
+          fs.truncateSync(target, 0);
+          throw new Error('服务器返回了不一致的断点范围，已从头重新下载');
+        }
+        if (!resumed) existing = 0;
+        const remaining = Number(response.headers.get('content-length') || 0);
+        const total = Number(contentRange?.total || (remaining ? existing + remaining : 0));
+        let downloaded = existing;
+        const manager = this;
+        let lastProgressAt = 0;
+        const meter = new Transform({
+          transform(chunk, _encoding, callback) {
+            downloaded += chunk.length;
+            if (Date.now() - lastProgressAt >= 200 || (total && downloaded >= total)) {
+              lastProgressAt = Date.now();
+              const fraction = total ? downloaded / total : Math.min(0.85, 0.08 + Math.log10(1 + downloaded) * 0.06);
+              manager.update(packageId, { status: 'downloading', progress: Math.min(0.88, 0.03 + fraction * 0.85), downloadedBytes: downloaded, totalBytes: total, message: `${resumed ? '断点续传' : '已下载'} ${formatBytes(downloaded)}${total ? ` / ${formatBytes(total)}` : ''}` });
+            }
+            callback(null, chunk);
+          }
+        });
+        await pipeline(Readable.fromWeb(response.body), meter, fs.createWriteStream(target, { flags: resumed ? 'a' : 'w' }));
+        if (total && downloaded !== total) throw new Error(`下载长度不完整：${formatBytes(downloaded)} / ${formatBytes(total)}`);
+        return;
+      } catch (error) {
+        lastError = error;
+        const saved = fs.existsSync(target) ? fs.statSync(target).size : 0;
+        if (attempt >= this.maxNetworkAttempts) break;
+        this.update(packageId, {
+          status: 'downloading',
+          message: `连接中断，已保留 ${formatBytes(saved)}，即将进行第 ${attempt + 1}/${this.maxNetworkAttempts} 次断点续传：${networkErrorMessage(error)}`
+        });
+        await this.waitForRetry(attempt);
+      }
+    }
+    const saved = fs.existsSync(target) ? fs.statSync(target).size : 0;
+    throw new Error(`依赖下载失败，已保留 ${formatBytes(saved)} 供下次断点续传：${networkErrorMessage(lastError)}`);
+  }
+
+  async waitForRetry(attempt) {
+    const delayMs = Math.min(15000, this.retryBaseDelayMs * (2 ** Math.max(0, attempt - 1)));
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 
   async extractArchive(archive, definition, fallback = false) {
@@ -417,6 +506,27 @@ function movePath(source, destination) {
 
 function githubHeaders() {
   return { accept: 'application/vnd.github+json', 'user-agent': 'star-owner-dependency-manager' };
+}
+
+function isRetryableStatus(status) {
+  return [408, 425, 429, 500, 502, 503, 504].includes(Number(status));
+}
+
+function parseContentRange(value) {
+  const match = String(value || '').match(/^bytes\s+(\d+)-(\d+)\/(\d+)$/i);
+  if (!match) return null;
+  return { start: Number(match[1]), end: Number(match[2]), total: Number(match[3]) };
+}
+
+function parseUnsatisfiedRangeTotal(value) {
+  const match = String(value || '').match(/^bytes\s+\*\/(\d+)$/i);
+  return match ? Number(match[1]) : 0;
+}
+
+function networkErrorMessage(error) {
+  if (!error) return '未知网络错误';
+  const detail = error.cause?.message || error.cause?.code || '';
+  return [error.message || String(error), detail].filter(Boolean).join(' / ');
 }
 
 function directDependencyReleaseAsset(version, definition) {
