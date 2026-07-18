@@ -82,6 +82,38 @@ function Set-PortableVenvHome([string]$stageRoot) {
   Set-Content -LiteralPath $config -Value $content -Encoding UTF8 -NoNewline
 }
 
+function Remove-NonPortableVenvActivationScripts([string]$stageRoot) {
+  $scriptsRoot = Join-Path $stageRoot "runtime\faster-whisper\Scripts"
+  foreach ($name in @("activate", "activate.bat", "activate.csh", "activate.fish", "activate.nu")) {
+    $candidate = Join-Path $scriptsRoot $name
+    if (Test-Path -LiteralPath $candidate) {
+      Remove-Item -LiteralPath $candidate -Force
+    }
+  }
+}
+
+function Assert-NoBuilderPaths([string]$stageRoot) {
+  $forbidden = @($root, $env:USERPROFILE) |
+    Where-Object { $_ } |
+    ForEach-Object { [System.IO.Path]::GetFullPath($_).TrimEnd('\') } |
+    Select-Object -Unique
+  $textExtensions = @("", ".bat", ".cfg", ".cmd", ".cjs", ".css", ".html", ".ini", ".js", ".json", ".md", ".mjs", ".nu", ".ps1", ".py", ".txt", ".xml", ".yaml", ".yml")
+  foreach ($file in Get-ChildItem -LiteralPath $stageRoot -Recurse -File) {
+    if ($file.Length -gt 8MB -or $file.Extension.ToLowerInvariant() -notin $textExtensions) { continue }
+    try {
+      $content = [System.IO.File]::ReadAllText($file.FullName)
+    } catch {
+      continue
+    }
+    foreach ($path in $forbidden) {
+      if ($content.IndexOf($path, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $relative = $file.FullName.Substring([System.IO.Path]::GetFullPath($stageRoot).TrimEnd('\').Length + 1)
+        throw "Builder-specific path leaked into staged release: $relative"
+      }
+    }
+  }
+}
+
 Remove-GeneratedProjectCaches
 & (Join-Path $PSScriptRoot "verify-release.ps1")
 Remove-GeneratedProjectCaches
@@ -108,6 +140,7 @@ Copy-Item -LiteralPath (Join-Path $root "runtime\python") -Destination (Join-Pat
 Copy-Item -LiteralPath (Join-Path $root "runtime\faster-whisper") -Destination (Join-Path $runtimeTarget "faster-whisper") -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $root "runtime\vc-runtime") -Destination (Join-Path $runtimeTarget "vc-runtime") -Recurse -Force
 Set-PortableVenvHome $stage
+Remove-NonPortableVenvActivationScripts $stage
 if (-not $SeparateModelAsset -and $ModelBundle -in @("small", "all")) {
   Copy-Item -LiteralPath (Join-Path $root "runtime\models\small") -Destination (Join-Path $runtimeTarget "models\small") -Recurse -Force
 }
@@ -130,6 +163,7 @@ $manifest = [ordered]@{
   bundled = @("Electron", "Node dependencies", "FFmpeg", "yt-dlp", "Python 3.12", "Microsoft Visual C++ runtime", "faster-whisper", "CTranslate2", "CUDA runtime", "Mermaid") + $(if ($splitModels.Count -eq 0 -and $ModelBundle -ne "none") { @("ASR model: $ModelBundle") } else { @() })
 }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $stage "portable-manifest.json") -Encoding utf8
+Assert-NoBuilderPaths $stage
 
 if (-not $NoArchive) {
   $archive = Join-Path $distRoot "$folderName.zip"

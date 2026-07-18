@@ -152,7 +152,7 @@ Build the portable archives:
 npm run package:portable
 ```
 
-The builder verifies required runtime files, model files, license notices, package version consistency and machine-specific path hygiene before producing assets.
+The builder verifies required runtime files, model files, license notices, package version consistency and machine-specific path hygiene before producing assets. It removes virtual-environment activation scripts that embed the build location and rejects staged text files containing the builder's project or user-profile path. At application startup, the bundled Python home is repaired to the current extraction directory.
 
 ## 6. Release Checklist
 
