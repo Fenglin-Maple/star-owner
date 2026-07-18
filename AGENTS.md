@@ -67,8 +67,8 @@ The service binds to `127.0.0.1`, accepts origin-less local process requests, re
 
 - Dependency archives are GitHub Release assets, not Git-tracked runtime files.
 - Archives may install only under `runtime/`; extraction rejects absolute paths and `..` traversal.
-- Required assets use `Star-Owner-v<version>-runtime-win-x64.zip`, `Star-Owner-v<version>-model-small.zip`, and `Star-Owner-v<version>-model-medium.zip`, with matching SHA-256 assets.
-- A code-only Release may reuse unchanged dependency assets from recent Releases.
+- Required assets use `Star-Owner-v<dependency-version>-runtime-win-x64.zip`, `Star-Owner-v<dependency-version>-model-small.zip`, and `Star-Owner-v<dependency-version>-model-medium.zip`, with matching SHA-256 assets.
+- `package.json.dependencyReleaseVersion` is the explicit compatibility contract shared by the dependency manager and portable manifest. A code-only Release keeps it pinned and uploads only the new core ZIP plus checksum.
 - Never change probes or layouts without updating dependency manager, packaging, deployment docs, and regression tests.
 
 ## Required Tests

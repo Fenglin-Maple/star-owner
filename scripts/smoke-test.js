@@ -115,6 +115,22 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   } finally {
     global.fetch = originalFetch;
   }
+  const pinnedDependencyManager = new DependencyManager({ store, projectRoot: dependencyRoot, version: '10.0.0', dependencyVersion: '9.9.8' });
+  global.fetch = async (url) => String(url).includes('/tags/v9.9.8')
+    ? new Response(JSON.stringify({ message: 'API rate limit exceeded' }), { status: 403 })
+    : new Response(JSON.stringify({ id: 1000, tag_name: 'v10.0.0', assets: [
+      { name: 'Star-Owner-v10.0.0-model-medium.zip', browser_download_url: 'https://example.test/incompatible-model.zip', size: 123 },
+      { name: 'Star-Owner-v10.0.0-win-x64-core.zip', browser_download_url: 'https://example.test/incompatible-core.zip', size: 456 }
+    ] }), { status: 200 });
+  try {
+    const pinnedState = pinnedDependencyManager.state();
+    const pinnedDefinition = pinnedDependencyManager.definitions().find((item) => item.id === 'model-medium');
+    const pinnedModel = await pinnedDependencyManager.resolveReleaseAsset(pinnedDefinition);
+    if (pinnedState.dependencyReleaseVersion !== '9.9.8' || pinnedDefinition.assetName !== 'Star-Owner-v9.9.8-model-medium.zip') throw new Error('dependency release version was not pinned independently from the application version');
+    if (!pinnedModel.directFallback || !pinnedModel.asset.browser_download_url.endsWith('/releases/download/v9.9.8/Star-Owner-v9.9.8-model-medium.zip')) throw new Error('rate-limit fallback did not use the pinned dependency release');
+  } finally {
+    global.fetch = originalFetch;
+  }
   const runtimeDefinition = dependencyManager.definitions().find((item) => item.id === 'runtime-base');
   const archiveSource = path.join(dependencyRoot, 'archive-source');
   const portableRoot = path.join(archiveSource, 'Star-Owner-v0.3.0-win-x64-core');

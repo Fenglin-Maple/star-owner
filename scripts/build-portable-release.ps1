@@ -2,6 +2,7 @@ param(
   [ValidateSet("none", "small", "medium", "all")]
   [string]$ModelBundle = "all",
   [switch]$SeparateModelAsset,
+  [switch]$CoreOnly,
   [switch]$NoArchive
 )
 
@@ -9,6 +10,10 @@ $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $distRoot = Join-Path $root "dist"
 $package = Get-Content -LiteralPath (Join-Path $root "package.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+$dependencyVersion = if ($package.dependencyReleaseVersion) { [string]$package.dependencyReleaseVersion } else { [string]$package.version }
+if ($CoreOnly -and -not $SeparateModelAsset) {
+  throw "CoreOnly requires SeparateModelAsset so models remain external."
+}
 $splitModels = @()
 if ($SeparateModelAsset) {
   if ($ModelBundle -in @("small", "all")) { $splitModels += "small" }
@@ -154,10 +159,11 @@ New-Item -ItemType Directory -Path (Join-Path $stage "workspace\.star-note") -Fo
 $manifest = [ordered]@{
   product = $package.productName
   version = $package.version
+  dependencyReleaseVersion = $dependencyVersion
   platform = "win-x64"
   modelBundle = if ($splitModels.Count -gt 0) { "external" } else { $ModelBundle }
-  requiredModelAssets = @($splitModels | ForEach-Object { "Star-Owner-v$($package.version)-model-$_.zip" })
-  requiredRuntimeAssets = @("Star-Owner-v$($package.version)-runtime-win-x64.zip")
+  requiredModelAssets = @($splitModels | ForEach-Object { "Star-Owner-v$dependencyVersion-model-$_.zip" })
+  requiredRuntimeAssets = @("Star-Owner-v$dependencyVersion-runtime-win-x64.zip")
   builtAt = (Get-Date).ToUniversalTime().ToString("o")
   launcher = "Start-StarOwner.cmd"
   bundled = @("Electron", "Node dependencies", "FFmpeg", "yt-dlp", "Python 3.12", "Microsoft Visual C++ runtime", "faster-whisper", "CTranslate2", "CUDA runtime", "Mermaid") + $(if ($splitModels.Count -eq 0 -and $ModelBundle -ne "none") { @("ASR model: $ModelBundle") } else { @() })
@@ -170,13 +176,15 @@ Assert-NoBuilderPaths $stage
 if (-not $NoArchive) {
   $archive = Join-Path $distRoot "$folderName.zip"
   Write-ReleaseArchive $archive $distRoot $folderName "Portable core"
-  if ($SeparateModelAsset) {
+  if ($SeparateModelAsset -and -not $CoreOnly) {
     $runtimeArchive = Join-Path $distRoot "Star-Owner-v$($package.version)-runtime-win-x64.zip"
     Write-RuntimeArchive $runtimeArchive
   }
-  foreach ($model in $splitModels) {
-    $modelArchive = Join-Path $distRoot "Star-Owner-v$($package.version)-model-$model.zip"
-    Write-ReleaseArchive $modelArchive $root "runtime\models\$model" "Model $model"
+  if (-not $CoreOnly) {
+    foreach ($model in $splitModels) {
+      $modelArchive = Join-Path $distRoot "Star-Owner-v$($package.version)-model-$model.zip"
+      Write-ReleaseArchive $modelArchive $root "runtime\models\$model" "Model $model"
+    }
   }
 }
 

@@ -5,6 +5,9 @@ $package = Get-Content -LiteralPath (Join-Path $root "package.json") -Raw -Encod
 if ($package.name -ne "star-owner" -or -not $package.productName -or -not $package.version) {
   throw "package.json UTF-8 metadata validation failed."
 }
+if (-not $package.dependencyReleaseVersion -or $package.dependencyReleaseVersion -notmatch '^\d+\.\d+\.\d+$') {
+  throw "package.json dependencyReleaseVersion must be an explicit semantic version."
+}
 
 function Require-Path([string]$relative) {
   $target = Join-Path $root $relative

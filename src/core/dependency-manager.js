@@ -10,10 +10,11 @@ const { ensureDir } = require('./workspace');
 const REPOSITORY = 'Fenglin-Maple/star-owner';
 
 class DependencyManager {
-  constructor({ store, projectRoot, version, emit, onInstalled, acquireInstall }) {
+  constructor({ store, projectRoot, version, dependencyVersion, emit, onInstalled, acquireInstall }) {
     this.store = store;
     this.projectRoot = path.resolve(projectRoot);
     this.version = version;
+    this.dependencyVersion = dependencyVersion || version;
     this.emit = emit || (() => {});
     this.onInstalled = onInstalled || (async () => {});
     this.acquireInstall = acquireInstall || (async () => async () => {});
@@ -32,7 +33,7 @@ class DependencyManager {
         name: '媒体与 ASR 基础运行时',
         description: '项目内 Python、Microsoft VC++、faster-whisper、CTranslate2、FFmpeg、yt-dlp 与 CUDA 运行库。',
         required: true,
-        assetName: `Star-Owner-v${this.version}-runtime-win-x64.zip`,
+        assetName: `Star-Owner-v${this.dependencyVersion}-runtime-win-x64.zip`,
         assetPattern: /Star-Owner-v[\d.]+-runtime-win-x64\.zip$/i,
         fallbackAssetPattern: /Star-Owner-v[\d.]+-win-x64-core\.zip$/i,
         probes: [
@@ -47,7 +48,7 @@ class DependencyManager {
         name: 'faster-whisper small 模型',
         description: '内置轻量多语言 ASR 模型，速度更快、显存占用更低。',
         required: true,
-        assetName: `Star-Owner-v${this.version}-model-small.zip`,
+        assetName: `Star-Owner-v${this.dependencyVersion}-model-small.zip`,
         assetPattern: /Star-Owner-v[\d.]+-model-small\.zip$/i,
         probes: ['runtime/models/small/model.bin', 'runtime/models/small/config.json']
       },
@@ -56,7 +57,7 @@ class DependencyManager {
         name: 'faster-whisper medium 模型',
         description: '默认内置多语言 ASR 模型，在准确率、速度和 8GB 显存之间更均衡。',
         required: true,
-        assetName: `Star-Owner-v${this.version}-model-medium.zip`,
+        assetName: `Star-Owner-v${this.dependencyVersion}-model-medium.zip`,
         assetPattern: /Star-Owner-v[\d.]+-model-medium\.zip$/i,
         probes: ['runtime/models/medium/model.bin', 'runtime/models/medium/config.json']
       }
@@ -83,6 +84,7 @@ class DependencyManager {
     return {
       repository: `https://github.com/${REPOSITORY}`,
       releasePage: `https://github.com/${REPOSITORY}/releases`,
+      dependencyReleaseVersion: this.dependencyVersion,
       packages,
       missingRequired: missingRequired.map((item) => item.id),
       ready: missingRequired.length === 0,
@@ -181,10 +183,12 @@ class DependencyManager {
 
   async resolveReleaseAsset(definition) {
     const candidates = [];
-    for (const url of [
+    const releaseUrls = [...new Set([
+      `https://api.github.com/repos/${REPOSITORY}/releases/tags/v${this.dependencyVersion}`,
       `https://api.github.com/repos/${REPOSITORY}/releases/tags/v${this.version}`,
       `https://api.github.com/repos/${REPOSITORY}/releases/latest`
-    ]) {
+    ])];
+    for (const url of releaseUrls) {
       try {
         const response = await fetch(url, { headers: githubHeaders(), signal: AbortSignal.timeout(30000) });
         if (response.ok) candidates.push(await response.json());
@@ -201,14 +205,16 @@ class DependencyManager {
         }
       }
     } catch { /* handled below */ }
+    const allowVersionFallback = this.dependencyVersion === this.version;
     for (const release of candidates) {
       const assets = Array.isArray(release.assets) ? release.assets : [];
-      const asset = assets.find((item) => item.name === definition.assetName) || assets.find((item) => definition.assetPattern.test(item.name));
+      const asset = assets.find((item) => item.name === definition.assetName)
+        || (allowVersionFallback && assets.find((item) => definition.assetPattern.test(item.name)));
       if (asset) return { release, asset, fallback: false };
-      const fallback = definition.fallbackAssetPattern && assets.find((item) => definition.fallbackAssetPattern.test(item.name));
+      const fallback = allowVersionFallback && definition.fallbackAssetPattern && assets.find((item) => definition.fallbackAssetPattern.test(item.name));
       if (fallback) return { release, asset: fallback, fallback: true };
     }
-    return directCurrentReleaseAsset(this.version, definition);
+    return directDependencyReleaseAsset(this.dependencyVersion, definition);
   }
 
   async fetchChecksum(resolved, assetName) {
@@ -413,7 +419,7 @@ function githubHeaders() {
   return { accept: 'application/vnd.github+json', 'user-agent': 'star-owner-dependency-manager' };
 }
 
-function directCurrentReleaseAsset(version, definition) {
+function directDependencyReleaseAsset(version, definition) {
   const tag = `v${version}`;
   const base = `https://github.com/${REPOSITORY}/releases/download/${encodeURIComponent(tag)}`;
   const asset = {

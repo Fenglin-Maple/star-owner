@@ -6,11 +6,11 @@
 
 **Built with OpenAI Codex.** 用户负责产品方向与真实工作流判断，Codex 参与架构、Electron UI、任务状态机、资源调度、GPU ASR、测试和发布工程化。
 
-> `1.0.0` 正式版边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
+> `1.0.1` 正式版边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
 >
 > 当前稳定版只处理普通 BV 单 P 视频。多 P 视频会在元数据阶段被识别、清理本次缓存并关闭任务；`ep/ss/md`、课程、活动聚合、音频和直播等特殊页面会在输入阶段直接拒绝。这样可以避免把只处理第一 P 的结果误标为完整总结。完整多 P 支持将在独立 Git 分支完成并通过专项测试后再合并。
 
-`1.0.0` 是星藏家的首个稳定正式版，应用显示、Git 标签、npm 包元数据和 Release 资产统一使用该版本。
+`1.0.1` 是当前稳定维护版。应用核心使用 `1.0.1`，项目内运行时与 faster-whisper `small` / `medium` 权重固定复用 `v1.0.0` Release 依赖基线；只有依赖内容或目录契约实际变化时才发布新的依赖包。
 
 ## 快速安装与第一次使用
 
@@ -296,7 +296,7 @@ npm run test:internal-agent
 npm run test:document-lifecycle
 ```
 
-本版本只提交源码与文档时无需重新上传未变化的 Release 依赖包。
+常规代码版本使用 `npm run package:core` 只生成核心 ZIP，并复用 `package.json` 中 `dependencyReleaseVersion` 指定的 Release 依赖。只有 Python、CUDA、faster-whisper、FFmpeg、yt-dlp、VC++ 运行库、模型权重或依赖目录契约变化时，才更新依赖版本并重新上传 runtime/small/medium。
 
 ## 项目结构
 

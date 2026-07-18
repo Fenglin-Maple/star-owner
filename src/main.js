@@ -27,7 +27,9 @@ const { initWorkspace, timestampForFile, videoArtifactName, WORKSPACE_ROOT } = r
 
 const BILI_SESSION = 'persist:bili-orchestrator';
 const PRODUCT_NAME = '星藏家';
-const PACKAGE_VERSION = require('../package.json').version;
+const PACKAGE_METADATA = require('../package.json');
+const PACKAGE_VERSION = PACKAGE_METADATA.version;
+const DEPENDENCY_RELEASE_VERSION = PACKAGE_METADATA.dependencyReleaseVersion || PACKAGE_VERSION;
 const DEFAULT_WINDOW = { width: 1350, height: 836 };
 const README_FILE = path.join(__dirname, '..', 'README.md');
 const RENDERER_FILE = path.join(__dirname, 'renderer', 'index.html');
@@ -221,6 +223,7 @@ async function bootstrap() {
     store,
     projectRoot: path.resolve(__dirname, '..'),
     version: PACKAGE_VERSION,
+    dependencyVersion: DEPENDENCY_RELEASE_VERSION,
     emit: publishDependencyEvent,
     acquireInstall: (packageId, onWait) => toolRunner.acquireMaintenance(`dependency package ${packageId}`, onWait),
     onInstalled: async (packageId) => {

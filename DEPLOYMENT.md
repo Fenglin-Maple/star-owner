@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.0.0`
+Version: `1.0.1`
 
 ## 1. Portable Release for Users
 
@@ -22,15 +22,15 @@ On first launch:
 Release dependency assets:
 
 ```text
-Star-Owner-v<version>-runtime-win-x64.zip
-Star-Owner-v<version>-runtime-win-x64.zip.sha256
-Star-Owner-v<version>-model-small.zip
-Star-Owner-v<version>-model-small.zip.sha256
-Star-Owner-v<version>-model-medium.zip
-Star-Owner-v<version>-model-medium.zip.sha256
+Star-Owner-v<dependency-version>-runtime-win-x64.zip
+Star-Owner-v<dependency-version>-runtime-win-x64.zip.sha256
+Star-Owner-v<dependency-version>-model-small.zip
+Star-Owner-v<dependency-version>-model-small.zip.sha256
+Star-Owner-v<dependency-version>-model-medium.zip
+Star-Owner-v<dependency-version>-model-medium.zip.sha256
 ```
 
-A code-only Release may reuse unchanged dependency assets from one of the recent Releases; users do not need to redownload packages already installed and healthy.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs and exact asset names. Version `1.0.1` uses the unchanged `v1.0.0` runtime, small and medium assets; users do not need to redownload packages already installed and healthy.
 
 ## 2. Hardware and ASR
 
@@ -153,6 +153,14 @@ Build the portable archives:
 npm run package:portable
 ```
 
+For an ordinary code-only maintenance Release, build only the core archive:
+
+```powershell
+npm run package:core
+```
+
+`package:core` omits new runtime/model archives and records the pinned dependency Release in the portable manifest. Use `package:portable` only when publishing a new dependency baseline.
+
 The builder verifies required runtime files, model files, license notices, package version consistency and machine-specific path hygiene before producing assets. It removes virtual-environment activation scripts that embed the build location and rejects staged text files containing the builder's project or user-profile path. At application startup, the bundled Python home is repaired to the current extraction directory.
 
 ## 6. Release Checklist
@@ -164,7 +172,7 @@ The builder verifies required runtime files, model files, license notices, packa
 5. Build portable archives only when a Release is requested.
 6. Verify archive extraction in a clean directory.
 7. Check shortcuts, icon, first-run dependency prompt, login persistence, both themes and one real video workflow.
-8. Upload only changed Release assets. Unchanged model/runtime assets may remain from a compatible recent Release.
+8. For a code-only Release, upload only the core ZIP and checksum. Keep `dependencyReleaseVersion` pinned to the compatible dependency Release; publish new model/runtime assets only when their content or layout changes.
 
 ## 7. Verification Commands
 
