@@ -1,6 +1,6 @@
 # 星藏家 Design
 
-Version: `0.10.0`
+Version: `1.0.0`
 
 ## 1. Product Goal
 

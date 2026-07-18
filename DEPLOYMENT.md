@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `0.10.0`
+Version: `1.0.0`
 
 ## 1. Portable Release for Users
 
