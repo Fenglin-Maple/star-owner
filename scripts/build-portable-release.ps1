@@ -162,7 +162,9 @@ $manifest = [ordered]@{
   launcher = "Start-StarOwner.cmd"
   bundled = @("Electron", "Node dependencies", "FFmpeg", "yt-dlp", "Python 3.12", "Microsoft Visual C++ runtime", "faster-whisper", "CTranslate2", "CUDA runtime", "Mermaid") + $(if ($splitModels.Count -eq 0 -and $ModelBundle -ne "none") { @("ASR model: $ModelBundle") } else { @() })
 }
-$manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $stage "portable-manifest.json") -Encoding utf8
+$manifestJson = $manifest | ConvertTo-Json -Depth 5
+$utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText((Join-Path $stage "portable-manifest.json"), $manifestJson, $utf8WithoutBom)
 Assert-NoBuilderPaths $stage
 
 if (-not $NoArchive) {
