@@ -16,7 +16,8 @@ On first launch:
 4. The application checks project-local runtime, faster-whisper, both model packages, FFmpeg, yt-dlp and VC++ runtime.
 5. Missing required packages trigger an in-app download prompt.
 6. Downloads come from this repository's Release assets, show progress, verify SHA-256 when available, stage extraction, and commit under `runtime/`.
-7. Interrupted installation rolls back on next startup.
+7. If the unauthenticated GitHub API is rate-limited, the current version falls back to its predictable Release download URLs and still requires the matching `.sha256` asset before installation.
+8. Interrupted installation rolls back on next startup.
 
 Release dependency assets:
 

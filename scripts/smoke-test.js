@@ -106,6 +106,15 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   } finally {
     global.fetch = originalFetch;
   }
+  global.fetch = async () => new Response(JSON.stringify({ message: 'API rate limit exceeded' }), { status: 403 });
+  try {
+    const modelDefinition = dependencyManager.definitions().find((item) => item.id === 'model-medium');
+    const directModel = await dependencyManager.resolveReleaseAsset(modelDefinition);
+    if (!directModel.directFallback || !directModel.asset.browser_download_url.endsWith('/releases/download/v9.9.9/Star-Owner-v9.9.9-model-medium.zip')) throw new Error('dependency resolver did not provide a current-release direct URL when GitHub API was unavailable');
+    if (!directModel.release.assets.some((item) => item.name === 'Star-Owner-v9.9.9-model-medium.zip.sha256')) throw new Error('direct dependency fallback omitted the checksum asset');
+  } finally {
+    global.fetch = originalFetch;
+  }
   const runtimeDefinition = dependencyManager.definitions().find((item) => item.id === 'runtime-base');
   const archiveSource = path.join(dependencyRoot, 'archive-source');
   const portableRoot = path.join(archiveSource, 'Star-Owner-v0.3.0-win-x64-core');

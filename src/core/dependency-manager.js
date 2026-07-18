@@ -166,7 +166,8 @@ class DependencyManager {
       await this.extractArchive(archive, definition, release.fallback);
       const available = definition.probes.every((probe) => fs.existsSync(path.join(this.projectRoot, probe)));
       if (!available) throw new Error(`依赖包已解压，但缺少预期文件：${definition.probes.join(', ')}`);
-      this.update(definition.id, { status: 'available', progress: 1, message: '安装完成', downloadedBytes: release.asset.size, totalBytes: release.asset.size });
+      const installedBytes = Number(release.asset.size || fs.statSync(archive).size || 0);
+      this.update(definition.id, { status: 'available', progress: 1, message: '安装完成', downloadedBytes: installedBytes, totalBytes: installedBytes });
     } finally {
       await releaseInstall?.();
     }
@@ -207,7 +208,7 @@ class DependencyManager {
       const fallback = definition.fallbackAssetPattern && assets.find((item) => definition.fallbackAssetPattern.test(item.name));
       if (fallback) return { release, asset: fallback, fallback: true };
     }
-    throw new Error(`GitHub Release 中未找到 ${definition.assetName}。请由发布者上传对应依赖资产。`);
+    return directCurrentReleaseAsset(this.version, definition);
   }
 
   async fetchChecksum(resolved, assetName) {
@@ -410,6 +411,27 @@ function movePath(source, destination) {
 
 function githubHeaders() {
   return { accept: 'application/vnd.github+json', 'user-agent': 'star-owner-dependency-manager' };
+}
+
+function directCurrentReleaseAsset(version, definition) {
+  const tag = `v${version}`;
+  const base = `https://github.com/${REPOSITORY}/releases/download/${encodeURIComponent(tag)}`;
+  const asset = {
+    name: definition.assetName,
+    browser_download_url: `${base}/${encodeURIComponent(definition.assetName)}`,
+    size: 0
+  };
+  const checksum = {
+    name: `${definition.assetName}.sha256`,
+    browser_download_url: `${base}/${encodeURIComponent(`${definition.assetName}.sha256`)}`,
+    size: 0
+  };
+  return {
+    release: { tag_name: tag, assets: [asset, checksum], directFallback: true },
+    asset,
+    fallback: false,
+    directFallback: true
+  };
 }
 
 function run(file, args, cwd) {
