@@ -1,4 +1,19 @@
-# 星藏家
+<p align="center">
+  <img src="assets/star-note.png" width="148" alt="星藏家图标">
+</p>
+
+<h1 align="center">星藏家</h1>
+
+<p align="center">
+  <strong>把“稍后再看”变成真正可用的视频知识库</strong><br>
+  面向 Bilibili 收藏夹的本地 AI 视频知识整理桌面应用
+</p>
+
+<p align="center">
+  <a href="https://github.com/Fenglin-Maple/star-owner/releases/latest"><img src="https://img.shields.io/github/v/release/Fenglin-Maple/star-owner?label=version&amp;color=ff6699" alt="最新版本"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-20b8cd" alt="支持 Windows 10 和 Windows 11">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-1d2939" alt="GPL-3.0-or-later 许可证"></a>
+</p>
 
 星藏家是一个面向 Bilibili 收藏夹的本地视频知识整理桌面应用。它负责收藏夹同步、视频缓存、ASR、关键帧、字幕比较、AI 视频总结、Markdown 文档库、RAG 对话和知识库导出。
 
