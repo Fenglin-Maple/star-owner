@@ -4,7 +4,7 @@
 
 项目主页与源码：[Fenglin-Maple/star-owner](https://github.com/Fenglin-Maple/star-owner)
 
-**Built with OpenAI Codex.** 用户负责产品方向与真实工作流判断，Codex 参与架构、Electron UI、任务状态机、资源调度、GPU ASR、测试和发布工程化。
+**Built with OpenAI Codex.**
 
 > `1.0.2` 正式版边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
 >
