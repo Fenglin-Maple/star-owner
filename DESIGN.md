@@ -1,6 +1,6 @@
 # 星藏家 Design
 
-Version: `1.0.2`
+Version: `1.0.3`
 
 ## 1. Product Goal
 
@@ -296,7 +296,7 @@ Startup is an independently scrollable page. It includes a five-step first-run j
 
 The main window appears before heavy initialization. Bootstrap progress covers database, dependencies, models, resource pools, ASR health, knowledge API and login synchronization. Tool probes run during startup and report online/degraded/offline state. Startup uses content-height rows and its own vertical scroll container so onboarding, health, prompt and the bounded 500-event log remain reachable at the default and reduced window sizes. Once a Windows portable backend first reaches Ready, it creates a Desktop shortcut that targets the bundled Electron executable with the current portable root as its application argument, working directory and icon source. A per-installation SQLite record prevents repeated creation; failures are non-fatal and reported in the UI.
 
-Project-local runtime and models may be installed from GitHub Release assets. Downloads use bounded retry with backoff and HTTP Range continuation while retaining `.partial` data. Verification prefers the Release asset SHA-256 digest; direct-URL fallback obtains the matching `.sha256` before transferring the large archive. Complete archives survive transient checksum-network failures, but unverified content is never installed. Installation uses staging, backup, a transaction journal and startup rollback, then refreshes ASR and tool health without requiring an application restart. Archives may write only below `runtime/`. Application and dependency versions are independent: `package.json.dependencyReleaseVersion` is the compatibility contract used by the manager, portable manifest and API-rate-limit direct fallback. Version `1.0.2` pins the unchanged runtime, small and medium assets from dependency baseline `1.0.0`.
+Project-local runtime and models may be installed from GitHub Release assets. Downloads use bounded retry with backoff and HTTP Range continuation while retaining `.partial` data. Verification prefers the Release asset SHA-256 digest; direct-URL fallback obtains the matching `.sha256` before transferring the large archive. Complete archives survive transient checksum-network failures, but unverified content is never installed. Installation uses staging, backup, a transaction journal and startup rollback, then refreshes ASR and tool health without requiring an application restart. Archives may write only below `runtime/`. Application and dependency versions are independent: `package.json.dependencyReleaseVersion` is the compatibility contract used by the manager, portable manifest and API-rate-limit direct fallback. Version `1.0.3` pins the unchanged runtime, small and medium assets from dependency baseline `1.0.0`.
 
 ## 18. Supported Video Boundary
 

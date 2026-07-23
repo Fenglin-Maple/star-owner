@@ -27,9 +27,25 @@
   let streamStructuralRender = false;
   let initialized = false;
   let modelSaveTimer = null;
+  let modelSavePromise = Promise.resolve();
   const pendingSessionActions = new Set();
   let agentContextMenu = null;
   let duplicateDecisionResolver = null;
+
+  function applyInternalAgentState(nextState) {
+    if (!nextState) return null;
+    state = nextState;
+    modelState = { providers: nextState.providers || [] };
+    if (!activeAgentId || !state.sessions.some((item) => item.id === activeAgentId && item.mode === 'queue')) activeAgentId = state.sessions.find((item) => item.mode === 'queue')?.id || '';
+    if (!activeSingleId || !state.sessions.some((item) => item.id === activeSingleId && item.mode === 'single')) activeSingleId = state.sessions.find((item) => item.mode === 'single')?.id || '';
+    persistActiveIds();
+    return state;
+  }
+
+  async function refreshInternalAgentStateAfterModelSave() {
+    await flushPendingModelSave();
+    return applyInternalAgentState(await window.orchestrator.internalAgentState());
+  }
 
   async function refreshAll({ quiet = false } = {}) {
     const sequence = ++refreshSequence;
@@ -39,17 +55,15 @@
         window.orchestrator.dependencyState()
       ]);
       if (sequence !== refreshSequence) return;
-      state = nextState;
-      modelState = { providers: nextState.providers || [] };
+      applyInternalAgentState(nextState);
       dependencyState = nextDependencyState;
-      if (!activeAgentId || !state.sessions.some((item) => item.id === activeAgentId && item.mode === 'queue')) activeAgentId = state.sessions.find((item) => item.mode === 'queue')?.id || '';
-      if (!activeSingleId || !state.sessions.some((item) => item.id === activeSingleId && item.mode === 'single')) activeSingleId = state.sessions.find((item) => item.mode === 'single')?.id || '';
-      persistActiveIds();
       renderAll();
       initialized = true;
       maybeShowDependencyPrompt();
+      return state;
     } catch (error) {
       if (!quiet) notify('AI 工作台尚未就绪', error.message || String(error), 'error');
+      return null;
     }
   }
 
@@ -90,7 +104,7 @@
   }
 
   function renderSinglePage() {
-    populateProviderSelect(elements.singleProvider, elements.singleModel, elements.singleProvider.value || state.providers[0]?.id || '', elements.singleModel.value);
+    populateProviderSelect(elements.singleProvider, elements.singleModel, elements.singleProvider.value || state.providers.find((item) => item.enabledModels?.length)?.id || state.providers[0]?.id || '', elements.singleModel.value);
     const previousCollection = elements.singleCollection.value;
     elements.singleCollection.innerHTML = '<option value="">选择内置收藏夹</option>' + state.internalCollections.map((item) => `<option value="${esc(item.id)}">${html(item.name)}</option>`).join('');
     elements.singleCollection.value = state.internalCollections.some((item) => item.id === previousCollection) ? previousCollection : (state.internalCollections[0]?.id || '');
@@ -238,17 +252,31 @@
     agentContextMenu = null;
   }
 
-  function openCreateModal() {
-    if (!state.providers.some((item) => item.enabledModels?.length)) {
-      notify('请先配置可用模型', '在 AI 模型配置中保存供应商并启用至少一个模型。', 'info');
-      document.querySelector('[data-page="ai-models"]')?.click();
-      return;
+  async function openCreateModal() {
+    if (elements.newAgent.disabled) return;
+    elements.newAgent.disabled = true;
+    try {
+      const latestState = await refreshInternalAgentStateAfterModelSave();
+      if (!latestState) {
+        notify('暂时无法读取模型配置', '后台状态尚未就绪，请稍候再试。', 'error');
+        return;
+      }
+      renderAll();
+      if (!state.providers.some((item) => item.enabledModels?.length)) {
+        notify('请先配置可用模型', '在 AI 模型配置中保存供应商并启用至少一个模型。', 'info');
+        document.querySelector('[data-page="ai-models"]')?.click();
+        return;
+      }
+      elements.createModal.hidden = false;
+      elements.agentTitle.value = '';
+      elements.agentRequirements.value = '';
+      populateProviderSelect(elements.agentProvider, elements.agentModel, state.providers.find((item) => item.enabledModels?.length)?.id || '', '');
+      elements.agentCollection.innerHTML = '<option value="">选择任务收藏夹</option>' + state.collections.map((item) => `<option value="${esc(item.id)}" ${item.collectionAvailable === false ? 'disabled' : ''}>${html(item.userName)} / ${html(item.name)} · ${item.collectionAvailable === false ? '任务不可用' : `待处理 ${item.pending}`}</option>`).join('');
+    } catch (error) {
+      notify('无法读取 Agent 配置', error.message || String(error), 'error');
+    } finally {
+      elements.newAgent.disabled = false;
     }
-    elements.createModal.hidden = false;
-    elements.agentTitle.value = '';
-    elements.agentRequirements.value = '';
-    populateProviderSelect(elements.agentProvider, elements.agentModel, state.providers.find((item) => item.enabledModels?.length)?.id || '', '');
-    elements.agentCollection.innerHTML = '<option value="">选择任务收藏夹</option>' + state.collections.map((item) => `<option value="${esc(item.id)}" ${item.collectionAvailable === false ? 'disabled' : ''}>${html(item.userName)} / ${html(item.name)} · ${item.collectionAvailable === false ? '任务不可用' : `待处理 ${item.pending}`}</option>`).join('');
   }
 
   function closeCreateModal() { elements.createModal.hidden = true; }
@@ -268,7 +296,8 @@
   function populateProviderSelect(providerSelect, modelSelect, providerId, modelId) {
     const providers = state.providers || [];
     providerSelect.innerHTML = '<option value="">选择供应商</option>' + providers.map((provider) => `<option value="${esc(provider.id)}">${html(provider.name)}</option>`).join('');
-    const selectedProvider = providers.find((item) => item.id === providerId) || providers.find((item) => item.enabledModels?.length) || providers[0];
+    const requestedProvider = providers.find((item) => item.id === providerId);
+    const selectedProvider = (requestedProvider?.enabledModels?.length ? requestedProvider : null) || providers.find((item) => item.enabledModels?.length) || requestedProvider || providers[0];
     providerSelect.value = selectedProvider?.id || '';
     modelSelect.innerHTML = '<option value="">选择模型</option>' + (selectedProvider?.enabledModels || []).map((model) => `<option value="${esc(model.id)}">${html(model.name || model.id)}</option>`).join('');
     modelSelect.value = (selectedProvider?.enabledModels || []).some((item) => item.id === modelId) ? modelId : (selectedProvider?.enabledModels?.[0]?.id || '');
@@ -298,6 +327,14 @@
   async function startSingleTask() {
     elements.singleStart.disabled = true;
     try {
+      const latestState = await refreshInternalAgentStateAfterModelSave();
+      if (!latestState) throw new Error('后台状态尚未就绪，请稍候再试。');
+      renderSinglePage();
+      elements.singleStart.disabled = true;
+      const selectedProvider = state.providers.find((provider) => provider.id === elements.singleProvider.value);
+      if (!selectedProvider?.enabledModels?.some((model) => model.id === elements.singleModel.value)) {
+        throw new Error('当前没有可用模型，请在 AI 模型配置中启用模型后重试。');
+      }
       const payload = {
         video: elements.singleVideo.value,
         collectionId: elements.singleCollection.value,
@@ -400,14 +437,32 @@
     const provider = await window.orchestrator.ragSaveProvider({ id: elements.modelProviderId.value || undefined, name: elements.modelProviderName.value, type: elements.modelProviderType.value, baseUrl: elements.modelProviderBaseUrl.value, apiKey: elements.modelProviderApiKey.value, temperature: Number(elements.modelProviderTemperature.value), maxOutputTokens: Number(elements.modelProviderMaxTokens.value), extraHeaders: elements.modelProviderHeaders.value });
     editingProviderId = provider.id;
     await refreshAll({ quiet: true });
+    dispatchModelConfigChanged();
     return provider;
   }
 
   function scheduleModelSave() {
     clearTimeout(modelSaveTimer);
     modelSaveTimer = setTimeout(() => {
-      saveEnabledModels().catch((error) => notify('模型配置自动保存失败', error.message || String(error), 'error'));
+      modelSaveTimer = null;
+      queueModelSave().catch((error) => notify('模型配置自动保存失败', error.message || String(error), 'error'));
     }, 260);
+  }
+
+  function queueModelSave() {
+    modelSavePromise = modelSavePromise.catch(() => {}).then(() => saveEnabledModels());
+    return modelSavePromise;
+  }
+
+  function flushPendingModelSave() {
+    if (!modelSaveTimer) return modelSavePromise;
+    clearTimeout(modelSaveTimer);
+    modelSaveTimer = null;
+    return queueModelSave();
+  }
+
+  function dispatchModelConfigChanged() {
+    window.dispatchEvent(new CustomEvent('star:model-config-changed'));
   }
 
   async function saveEnabledModels() {
@@ -421,6 +476,7 @@
     });
     await window.orchestrator.ragUpdateModels({ providerId: editingProviderId, models });
     await refreshAll({ quiet: true });
+    dispatchModelConfigChanged();
   }
 
   async function fetchModels() {
@@ -441,7 +497,7 @@
       setTimeout(() => { button.dataset.confirm = ''; button.textContent = '删除'; }, 2600);
       return;
     }
-    try { await window.orchestrator.ragDeleteProvider(editingProviderId); editingProviderId = ''; await refreshAll({ quiet: true }); }
+    try { await window.orchestrator.ragDeleteProvider(editingProviderId); editingProviderId = ''; await refreshAll({ quiet: true }); dispatchModelConfigChanged(); }
     catch (error) { notify('无法删除供应商', error.message || String(error), 'error'); }
   }
 
@@ -700,8 +756,10 @@
     }
   });
   window.addEventListener('star:page-changed', (event) => {
+    if (event.detail?.page !== 'ai-models') flushPendingModelSave().catch((error) => notify('模型配置自动保存失败', error.message || String(error), 'error'));
     if (['internal-agents', 'single-agent', 'ai-models'].includes(event.detail?.page)) refreshAll({ quiet: initialized });
   });
+  window.starFlushModelConfig = flushPendingModelSave;
   window.orchestrator.onInternalAgentEvent(handleInternalEvent);
   window.orchestrator.onDependencyEvent((event) => {
     if (event.state) dependencyState = event.state;

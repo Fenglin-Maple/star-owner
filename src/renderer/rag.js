@@ -16,7 +16,7 @@
     imageLightbox: $('#ragImageLightbox'), imageLightboxImage: $('#ragImageLightboxImage'), imageLightboxLabel: $('#ragImageLightboxLabel'), imageLightboxCopy: $('#ragImageLightboxCopy'), imageLightboxClose: $('#ragImageLightboxClose')
   };
 
-  let state = { providers: [], sessions: [], activeSession: null, knowledgeCatalog: [], modelUsage: [] };
+  let state = { loading: true, providers: [], sessions: [], activeSession: null, knowledgeCatalog: [], modelUsage: [] };
   let activeSessionId = localStorage.getItem('ragActiveSessionId') || '';
   let pendingAttachments = [];
   const streamingBySession = new Map();
@@ -29,6 +29,7 @@
   let refreshSequence = 0;
   let renderedMessageSessionId = '';
   let initialized = false;
+  let creatingSession = false;
 
   async function refresh(sessionId = activeSessionId, { quiet = false } = {}) {
     const sequence = ++refreshSequence;
@@ -39,18 +40,44 @@
       if (nextState.loading) {
         renderAll();
         setTimeout(() => refresh(activeSessionId, { quiet: true }), 500);
-        return;
+        return nextState;
       }
       activeSessionId = state.activeSession?.id || state.sessions[0]?.id || '';
       if (activeSessionId) localStorage.setItem('ragActiveSessionId', activeSessionId);
       pendingAttachments = unsentAttachments(state.activeSession);
       renderAll();
       initialized = true;
+      return state;
     } catch (error) {
       if (sequence !== refreshSequence) return;
       if (!quiet) notify('RAG 知识库助手尚未就绪', error.message || String(error), 'error');
       if (!initialized) setTimeout(() => refresh(activeSessionId, { quiet: true }), 1200);
+      return null;
     }
+  }
+
+  function firstEnabledProvider() {
+    return state.providers.find((item) => item.enabledModels?.length) || null;
+  }
+
+  function applyReadyState(nextState) {
+    state = nextState;
+    activeSessionId = state.activeSession?.id || state.sessions[0]?.id || '';
+    if (activeSessionId) localStorage.setItem('ragActiveSessionId', activeSessionId);
+    pendingAttachments = unsentAttachments(state.activeSession);
+    renderAll();
+    initialized = true;
+    return state;
+  }
+
+  async function loadReadyStateForSessionCreation() {
+    if (typeof window.starFlushModelConfig === 'function') await window.starFlushModelConfig();
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const nextState = await window.orchestrator.ragState('');
+      if (!nextState.loading) return applyReadyState(nextState);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+    return null;
   }
 
   function activeStreaming() {
@@ -114,7 +141,11 @@
     elements.createSandbox.disabled = !enabled || streaming;
     elements.compact.disabled = !enabled || streaming || !session?.modelCapabilities?.supportsCompression || (session?.messages?.length || 0) < 4;
     elements.chatTitle.textContent = session?.title || '选择或创建会话';
-    elements.chatMeta.textContent = session ? `${providerName(session.providerId)} / ${session.modelId || '未选择模型'}` : '尚未配置模型';
+    elements.chatMeta.textContent = session
+      ? `${providerName(session.providerId)} / ${session.modelId || '未选择模型'}`
+      : (state.loading || !initialized
+        ? '正在读取模型配置'
+        : (firstEnabledProvider() ? '尚未创建会话' : (state.providers.length ? '尚未启用可用模型' : '尚未配置模型')));
     elements.sessionTitleInput.value = session?.title || '';
     elements.sessionTitleInput.disabled = !enabled || streaming;
     const percent = Number(session?.contextPercent || 0);
@@ -316,7 +347,15 @@
     const sessionId = session?.id || '';
     const streaming = streamingBySession.get(sessionId) || null;
     if (!session?.messages?.length && !streaming) {
-      elements.messages.innerHTML = '<div class="rag-empty-state"><svg viewBox="0 0 24 24"><path d="M4 5h16v12H8l-4 4zM8 9h8M8 13h5"/></svg><strong>让知识库真正参与对话</strong><span>配置供应商、选择模型和收藏夹知识库后，可进行跨文档查阅、整理与分析。</span></div>';
+      const hasSession = Boolean(session);
+      const knowledgeCount = session?.knowledgeCollectionIds?.length || 0;
+      const title = !hasSession
+        ? (firstEnabledProvider() ? '新建会话后开始普通问答' : '配置可用模型后开始对话')
+        : (knowledgeCount ? `已连接 ${knowledgeCount} 个知识库` : '直接开始普通问答');
+      const description = !hasSession
+        ? (firstEnabledProvider() ? '点击左侧“新建会话”；无需启用视频总结工作流，也无需选择知识库。' : '保存供应商并至少启用一个模型；知识库并非必选。')
+        : (knowledgeCount ? '可以查阅、比较和整理已选知识库，也可以继续普通问答。' : '当前没有选择知识库，仍可直接提问；需要查阅文档时再从顶部添加。');
+      elements.messages.innerHTML = `<div class="rag-empty-state"><svg viewBox="0 0 24 24"><path d="M4 5h16v12H8l-4 4zM8 9h8M8 13h5"/></svg><strong>${escapeHtml(title)}</strong><span>${escapeHtml(description)}</span></div>`;
       return;
     }
     const switchedSession = renderedMessageSessionId !== sessionId;
@@ -488,17 +527,33 @@
   }
 
   async function createSession() {
-    const provider = state.providers.find((item) => item.enabledModels?.length) || state.providers[0];
-    if (!provider) {
-      openAiModelCenter();
-      notify('先配置模型供应商', '已为你打开 AI 模型配置，保存供应商并启用至少一个模型。', 'info');
-      return;
+    if (creatingSession) return null;
+    creatingSession = true;
+    try {
+      const latestState = await loadReadyStateForSessionCreation();
+      if (!latestState) {
+        notify('模型配置仍在加载', '后端准备完成后会自动读取已保存的供应商，请稍候再试。', 'info');
+        return null;
+      }
+      const provider = firstEnabledProvider();
+      if (!provider) {
+        openAiModelCenter();
+        notify(
+          state.providers.length ? '还没有启用可用模型' : '先配置模型供应商',
+          state.providers.length ? '供应商已经保存，请至少勾选并启用一个模型。' : '已为你打开 AI 模型配置，保存供应商并启用至少一个模型。',
+          'info'
+        );
+        return null;
+      }
+      const session = await window.orchestrator.ragCreateSession({ providerId: provider.id, modelId: provider.enabledModels[0].id });
+      activeSessionId = session.id;
+      pendingAttachments = [];
+      await refresh(session.id, { quiet: true });
+      elements.input.focus();
+      return session;
+    } finally {
+      creatingSession = false;
     }
-    const session = await window.orchestrator.ragCreateSession({ providerId: provider.id, modelId: provider.enabledModels?.[0]?.id || '' });
-    activeSessionId = session.id;
-    pendingAttachments = [];
-    await refresh(session.id, { quiet: true });
-    elements.input.focus();
   }
 
   function openAiModelCenter() {
@@ -972,6 +1027,7 @@
   elements.imageLightbox.addEventListener('click', (event) => { if (event.target === elements.imageLightbox || event.target.closest('.rag-image-lightbox-stage') && event.target !== elements.imageLightboxImage) closeImageLightbox(); });
   elements.imageLightboxImage.addEventListener('contextmenu', (event) => { event.preventDefault(); copyConversationImage(elements.imageLightbox.dataset.source); });
   document.querySelector('[data-page="rag"]')?.addEventListener('click', () => refresh(activeSessionId, { quiet: initialized }));
+  window.addEventListener('star:model-config-changed', () => refresh(activeSessionId, { quiet: true }));
   window.orchestrator.onRagEvent(handleEvent);
 
   function providerName(id) { return state.providers.find((item) => item.id === id)?.name || '未配置供应商'; }

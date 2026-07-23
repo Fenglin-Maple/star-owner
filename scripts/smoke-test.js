@@ -505,6 +505,7 @@ function verifyRendererContracts() {
   const index = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
   const preload = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const rag = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'rag.js'), 'utf8');
   if (!index.includes('id="singleDuplicateModal"') || !index.includes('id="documentDeleteModal"') || !index.includes('id="documentContextMenu"')) {
     throw new Error('single-video/document lifecycle dialogs are missing from the renderer');
   }
@@ -528,6 +529,16 @@ function verifyRendererContracts() {
   }
   if (!app.includes("new CustomEvent('star:page-changed'") || !fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'ai.js'), 'utf8').includes("window.addEventListener('star:page-changed'")) {
     throw new Error('page navigation does not refresh AI state consistently across sidebar and onboarding entry points');
+  }
+  const ai = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'ai.js'), 'utf8');
+  if (!index.includes('普通问答无需选择知识库') || !rag.includes('尚未创建会话') || !rag.includes('loadReadyStateForSessionCreation') || !rag.includes('star:model-config-changed') || !rag.includes('当前没有选择知识库，仍可直接提问') || !ai.includes('window.starFlushModelConfig = flushPendingModelSave')) {
+    throw new Error('RAG session creation must refresh model configuration and keep knowledge selection optional');
+  }
+  if (!ai.includes('async function openCreateModal()') || !ai.includes('refreshInternalAgentStateAfterModelSave()')) {
+    throw new Error('Agent workflow creation must refresh persisted providers and enabled models before opening the dialog');
+  }
+  if (!ai.includes('async function startSingleTask()') || !ai.includes("throw new Error('当前没有可用模型，请在 AI 模型配置中启用模型后重试。')") || !ai.includes('requestedProvider?.enabledModels?.length')) {
+    throw new Error('single-video summarization must refresh and validate the latest enabled model before creating a task');
   }
   if (index.includes('id="labelInput"') || app.includes('labelInput')) throw new Error('obsolete collection label input is still exposed');
   if (!preload.includes("ipcRenderer.invoke('documents:delete'") || !preload.includes("ipcRenderer.invoke('internal-agent:single-inspect'")) {

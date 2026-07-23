@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.0.2`
+Version: `1.0.3`
 
 ## 1. Portable Release for Users
 
@@ -30,7 +30,7 @@ Star-Owner-v<dependency-version>-model-medium.zip
 Star-Owner-v<dependency-version>-model-medium.zip.sha256
 ```
 
-The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs and exact asset names. Version `1.0.2` uses the unchanged `v1.0.0` runtime, small and medium assets; users do not need to redownload packages already installed and healthy.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs and exact asset names. Version `1.0.3` uses the unchanged `v1.0.0` runtime, small and medium assets; users do not need to redownload packages already installed and healthy.
 
 ## 2. Hardware and ASR
 

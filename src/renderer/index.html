@@ -609,7 +609,7 @@
 
               <section class="rag-chat-pane">
                 <header class="rag-chat-head">
-                  <div class="rag-chat-identity"><strong id="ragChatTitle">选择或创建会话</strong><span id="ragChatMeta">尚未配置模型</span></div>
+                  <div class="rag-chat-identity"><strong id="ragChatTitle">选择或创建会话</strong><span id="ragChatMeta">正在读取模型配置</span></div>
                   <div class="rag-knowledge-picker rag-head-knowledge-picker">
                     <button id="ragHeadKnowledgeToggle" class="rag-head-knowledge-toggle" type="button" aria-expanded="false" disabled title="选择当前会话使用的知识库">
                       <svg viewBox="0 0 24 24"><path d="M4 6c0-1.1 3.6-2 8-2s8 .9 8 2-3.6 2-8 2-8-.9-8-2zM4 6v6c0 1.1 3.6 2 8 2s8-.9 8-2V6M4 12v6c0 1.1 3.6 2 8 2s8-.9 8-2v-6"/></svg>
@@ -628,13 +628,13 @@
                   <button id="ragDeleteSession" class="icon-action danger-icon" type="button" title="删除会话" aria-label="删除会话" disabled><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/></svg></button>
                 </header>
                 <div id="ragMessages" class="rag-messages" aria-live="polite">
-                  <div class="rag-empty-state"><svg viewBox="0 0 24 24"><path d="M4 5h16v12H8l-4 4zM8 9h8M8 13h5"/></svg><strong>让知识库真正参与对话</strong><span>配置 OpenAI 或 NewAPI 兼容供应商，选择收藏夹知识库后开始分析。</span></div>
+                  <div class="rag-empty-state"><svg viewBox="0 0 24 24"><path d="M4 5h16v12H8l-4 4zM8 9h8M8 13h5"/></svg><strong>正在准备助手</strong><span>普通问答无需选择知识库；需要查阅文档时再添加知识库即可。</span></div>
                 </div>
                 <div id="ragRunStatus" class="rag-run-status" aria-live="polite"></div>
                 <div id="ragPendingAttachments" class="rag-pending-attachments"></div>
                 <form id="ragComposer" class="rag-composer">
                   <button id="ragAttach" class="icon-action" type="button" title="添加文件" aria-label="添加文件" disabled><svg viewBox="0 0 24 24"><path d="M21 11.5l-8.5 8.5a6 6 0 0 1-8.5-8.5l9-9a4 4 0 0 1 5.7 5.7l-9 9a2 2 0 1 1-2.8-2.8l8.2-8.2"/></svg></button>
-                  <textarea id="ragInput" rows="1" placeholder="询问、整理或分析已选知识库..." disabled></textarea>
+                  <textarea id="ragInput" rows="1" placeholder="输入问题；未选择知识库时进行普通问答..." disabled></textarea>
                   <div class="rag-composer-controls">
                     <label title="切换本会话供应商"><span>供应商</span><select id="ragComposerProviderSelect"></select></label>
                     <label title="切换本会话模型"><span>模型</span><select id="ragComposerModelSelect"></select></label>
