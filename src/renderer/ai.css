@@ -136,7 +136,7 @@
 .ai-create-form { display: grid; gap: 10px; padding: 16px; }
 .ai-create-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 
-.dependency-list { display: grid; gap: 6px; max-height: 230px; overflow: auto; }
+.dependency-list { display: grid; gap: 6px; max-height: 264px; overflow: auto; }
 .dependency-item { min-width: 0; min-height: 82px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; gap: 10px; padding: 8px 9px; border: 1px solid var(--line); border-radius: 6px; background: color-mix(in srgb, var(--row) 54%, transparent); }
 .dependency-main { min-width: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 3px; }
 .dependency-main > div { min-width: 0; display: flex; align-items: center; gap: 7px; }
