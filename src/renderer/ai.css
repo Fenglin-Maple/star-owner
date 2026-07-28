@@ -155,7 +155,6 @@
 .dependency-recovery-warning p { margin: 4px 0 0; color: var(--muted); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
 .dependency-actions { align-self: center; display: grid; grid-template-columns: 1fr; gap: 5px; min-width: 92px; }
 .dependency-actions > button { width: 100%; min-width: 92px; }
-.dependency-import-button { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 34%, var(--line)); background: color-mix(in srgb, var(--accent-soft) 64%, transparent); }
 .dependency-prompt-body { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 12px; padding: 18px; }
 .dependency-prompt-icon { width: 48px; height: 48px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line)); border-radius: 7px; color: var(--accent); background: var(--accent-soft); }
 .dependency-prompt-icon svg { width: 24px; height: 24px; }
