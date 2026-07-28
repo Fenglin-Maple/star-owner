@@ -512,8 +512,25 @@
     const recoveryWarning = dependencyState.recovery?.warning
       ? `<div class="dependency-recovery-warning"><strong>依赖恢复记录已隔离</strong><p>${html(dependencyState.recovery.warning)}</p></div>`
       : '';
-    elements.dependencyList.innerHTML = recoveryWarning + dependencyState.packages.map((item) => `<div class="dependency-item"><div class="dependency-main"><div><strong>${html(item.name)}</strong><span class="dependency-state ${esc(item.status)}">${dependencyStatus(item)}</span></div><p>${html(item.message || item.description)}</p><div class="dependency-progress"><span style="width:${Math.round(Number(item.progress || 0) * 100)}%"></span></div></div><button class="secondary-button compact-button" type="button" data-download-dependency="${esc(item.id)}" ${['downloading', 'waiting-install', 'installing', 'verifying', 'resolving'].includes(item.status) ? 'disabled' : ''}>${item.available ? '重新下载' : '下载'}</button></div>`).join('');
+    elements.dependencyList.innerHTML = recoveryWarning + dependencyState.packages.map((item) => {
+      const busy = dependencyBusy(item.status);
+      return `<div class="dependency-item">
+        <div class="dependency-main">
+          <div><button class="dependency-name-link" type="button" data-dependency-release="${esc(item.releaseUrl || dependencyState.dependencyReleasePage)}" title="打开正确版本 Release">${html(item.name)}</button><span class="dependency-state ${esc(item.status)}">${dependencyStatus(item)}</span></div>
+          <p>${html(item.message || item.description)}</p>
+          <div class="dependency-progress"><span style="width:${Math.round(Number(item.progress || 0) * 100)}%"></span></div>
+        </div>
+        <div class="dependency-actions">
+          <button class="secondary-button compact-button" type="button" data-download-dependency="${esc(item.id)}" ${busy ? 'disabled' : ''}>${item.available ? '重新下载' : '下载'}</button>
+          ${item.localImport ? `<button class="secondary-button compact-button dependency-import-button" type="button" data-import-dependency="${esc(item.id)}" ${busy ? 'disabled' : ''}>从本地导入</button>` : ''}
+        </div>
+      </div>`;
+    }).join('');
     for (const button of elements.dependencyList.querySelectorAll('[data-download-dependency]')) button.addEventListener('click', () => downloadDependency(button.dataset.downloadDependency, button));
+    for (const button of elements.dependencyList.querySelectorAll('[data-import-dependency]')) button.addEventListener('click', () => importDependency(button.dataset.importDependency, button));
+    for (const button of elements.dependencyList.querySelectorAll('[data-dependency-release]')) button.addEventListener('click', () => {
+      window.orchestrator.openExternal(button.dataset.dependencyRelease).catch((error) => notify('无法打开 Release', error.message || String(error), 'error'));
+    });
   }
 
   function maybeShowDependencyPrompt() {
@@ -538,9 +555,32 @@
 
   async function downloadDependency(id, button) {
     button.disabled = true;
-    try { await window.orchestrator.dependencyDownload(id); dependencyState = await window.orchestrator.dependencyState(); renderDependencies(); notify('依赖安装完成', '运行时状态已经重新检查。', 'success'); }
+    try {
+      const result = await window.orchestrator.dependencyDownload(id);
+      dependencyState = await window.orchestrator.dependencyState();
+      renderDependencies();
+      if (result?.cancelled) notify('自动下载已中止', '已切换或可切换为本地模型包导入。', 'info');
+      else notify('依赖安装完成', '运行时状态已经重新检查。', 'success');
+    }
     catch (error) { notify('依赖下载失败', error.message || String(error), 'error'); dependencyState = await window.orchestrator.dependencyState(); renderDependencies(); }
     finally { button.disabled = false; }
+  }
+
+  async function importDependency(id, button) {
+    button.disabled = true;
+    try {
+      const response = await window.orchestrator.dependencyImport(id);
+      dependencyState = response?.state || await window.orchestrator.dependencyState();
+      renderDependencies();
+      if (response?.canceled) return;
+      if (response?.ok) notify('本地模型导入完成', 'ASR 与工具状态已经重新检查。', 'success');
+    } catch (error) {
+      notify('无法导入本地模型', error.message || String(error), 'error');
+      dependencyState = await window.orchestrator.dependencyState();
+      renderDependencies();
+    } finally {
+      button.disabled = false;
+    }
   }
 
   function handleInternalEvent(event) {
@@ -810,9 +850,10 @@
     return session.status === 'idle' ? '开始接单' : '重新开始接单';
   }
   function dependencyStatus(item) {
-    const active = { resolving: '查询中', downloading: `${Math.round(item.progress * 100)}%`, verifying: '校验中', 'waiting-install': '等待工具空闲', installing: '安装中' };
+    const active = { resolving: '查询中', downloading: `${Math.round(item.progress * 100)}%`, cancelling: '正在中止', importing: '本地导入', verifying: '校验中', 'waiting-install': '等待工具空闲', installing: '安装中' };
     return active[item.status] || (item.available ? '可用' : ({ failed: '失败', missing: item.required ? '必需缺失' : '可选未装' })[item.status] || item.status);
   }
+  function dependencyBusy(status) { return ['resolving', 'downloading', 'cancelling', 'importing', 'verifying', 'waiting-install', 'installing'].includes(status); }
   function formatTokens(value) { return new Intl.NumberFormat('zh-CN', { notation: Number(value) > 999999 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(Number(value || 0)); }
   function time(value) { try { return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(value)); } catch { return ''; } }
   function formatDate(value) { try { return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)); } catch { return value || '-'; } }

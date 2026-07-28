@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.0.4`
+Version: `1.0.5`
 
 ## 1. Portable Release for Users
 
@@ -18,6 +18,7 @@ On first launch:
 6. Downloads come from this repository's Release assets, show progress, retain `.partial` files, retry transient failures with backoff, and resume with HTTP Range requests.
 7. Verification prefers the SHA-256 digest in GitHub Release asset metadata. If the unauthenticated API is unavailable, the predictable direct URL fallback fetches the matching `.sha256` before downloading the large archive. A complete archive is retained across checksum-network failures and reused on retry; unverified content is never installed.
 8. Verified archives extract into staging and commit atomically below `runtime/`. Successful installation deletes the archive, refreshes ASR and tool health immediately, and an interrupted installation rolls back on next startup.
+9. Users may instead download a model ZIP manually and choose `设置 -> 应用设置 -> 项目依赖包 -> 从本地导入`. The application cancels the same model's automatic download, validates the exact baseline filename, official SHA-256 and archive layout, then uses the same atomic installer. Do not extract the ZIP manually.
 
 Release dependency assets:
 
@@ -30,7 +31,7 @@ Star-Owner-v<dependency-version>-model-medium.zip
 Star-Owner-v<dependency-version>-model-medium.zip.sha256
 ```
 
-The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs and exact asset names. Version `1.0.4` uses the unchanged `v1.0.0` runtime, small and medium assets; users do not need to redownload packages already installed and healthy.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.0.5` uses the unchanged `v1.0.0` runtime, small and medium assets; users do not need to redownload packages already installed and healthy.
 
 ## 2. Hardware and ASR
 
@@ -193,6 +194,10 @@ npm run test:asr-service
 The aggregate verifier also runs scheduler, RAG, task rollback, video cache, image clipboard, persistence, Bilibili client, ASR timestamp format, analytics, JavaScript/Python syntax and `npm audit --audit-level=high`.
 
 ## 8. Troubleshooting
+
+### Automatic ASR model download is slow
+
+Open the dependency Release linked by the `small` or `medium` model name in Settings. For version `1.0.5`, download `Star-Owner-v1.0.0-model-small.zip` or `Star-Owner-v1.0.0-model-medium.zip`, keep the ZIP intact, and click `从本地导入` on the matching row. The application stops an active automatic download for that model and removes its managed cache. A wrong version, wrong model, damaged file, modified archive or unexpected layout is rejected with the correct Release URL; an already healthy model remains installed.
 
 ### Windows reports a path-too-long risk
 

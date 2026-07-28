@@ -140,7 +140,9 @@
 .dependency-item { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 8px 9px; border: 1px solid var(--line); border-radius: 6px; background: color-mix(in srgb, var(--row) 54%, transparent); }
 .dependency-main { min-width: 0; display: grid; gap: 3px; }
 .dependency-main > div { min-width: 0; display: flex; align-items: center; gap: 7px; }
-.dependency-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.dependency-name-link { min-width: 0; padding: 0; overflow: hidden; border: 0; color: var(--text); background: transparent; font: inherit; font-size: 11px; font-weight: 650; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; transition: color .16s ease; }
+.dependency-name-link:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.dependency-name-link:focus-visible { border-radius: 3px; outline: 2px solid color-mix(in srgb, var(--accent) 48%, transparent); outline-offset: 2px; }
 .dependency-main p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
 .dependency-state { flex: 0 0 auto; color: var(--muted); font-size: 10px; }
 .dependency-state.available { color: var(--green); }
@@ -151,7 +153,9 @@
 .dependency-recovery-warning { padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--line)); border-radius: 6px; background: color-mix(in srgb, var(--warning) 9%, transparent); }
 .dependency-recovery-warning strong { color: var(--warning); font-size: 11px; }
 .dependency-recovery-warning p { margin: 4px 0 0; color: var(--muted); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
-.dependency-item > button { align-self: center; min-width: 78px; }
+.dependency-actions { align-self: center; display: grid; grid-template-columns: 1fr; gap: 5px; min-width: 92px; }
+.dependency-actions > button { width: 100%; min-width: 92px; }
+.dependency-import-button { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 34%, var(--line)); background: color-mix(in srgb, var(--accent-soft) 64%, transparent); }
 .dependency-prompt-body { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 12px; padding: 18px; }
 .dependency-prompt-icon { width: 48px; height: 48px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line)); border-radius: 7px; color: var(--accent); background: var(--accent-soft); }
 .dependency-prompt-icon svg { width: 24px; height: 24px; }

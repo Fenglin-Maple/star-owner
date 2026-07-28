@@ -71,6 +71,7 @@ contextBridge.exposeInMainWorld('orchestrator', {
   dependencyState: () => ipcRenderer.invoke('dependencies:state'),
   dependencyAcknowledge: (payload) => ipcRenderer.invoke('dependencies:acknowledge', payload),
   dependencyDownload: (packageId) => ipcRenderer.invoke('dependencies:download', packageId),
+  dependencyImport: (packageId) => ipcRenderer.invoke('dependencies:import-local', packageId),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximizeWindow: () => ipcRenderer.invoke('window:maximize-toggle'),
   closeWindow: () => ipcRenderer.invoke('window:close'),

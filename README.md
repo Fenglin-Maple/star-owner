@@ -21,11 +21,11 @@
 
 **Built with OpenAI Codex.**
 
-> `1.0.4` 正式版边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
+> `1.0.5` 正式版边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
 >
 > 当前稳定版只处理普通 BV 单 P 视频。多 P 视频会在元数据阶段被识别、清理本次缓存并关闭任务；`ep/ss/md`、课程、活动聚合、音频和直播等特殊页面会在输入阶段直接拒绝。这样可以避免把只处理第一 P 的结果误标为完整总结。完整多 P 支持将在独立 Git 分支完成并通过专项测试后再合并。
 
-`1.0.4` 是当前代码维护版，项目内运行时与 faster-whisper `small` / `medium` 权重继续复用 `v1.0.0` Release 依赖基线。本版完善 Windows 路径安全：视频名会按最终 Markdown、字幕和工具日志的最深路径自动缩短，至少保留 24 个字符；仍无法满足 259 字符安全上限时给出明确迁移说明。启动时会先检查负责新产物的默认 Workspace，路径风险提示优先于 ASR 依赖下载。SQLite 在整个便携项目移动后会自动重定位默认 Workspace 内的任务、缓存、日志和 RAG 路径。工具执行固定使用项目内 Electron/Node，Python、yt-dlp、FFmpeg 与 ASR 子进程统一使用 UTF-8，避免误用全局 Node 和中文日志乱码。RAG 同时清理失效的前端会话 ID，不再把空白副本误报为找不到旧 Session。
+`1.0.5` 是当前代码维护版，项目内运行时与 faster-whisper `small` / `medium` 权重继续复用 `v1.0.0` Release 依赖基线。设置页新增 ASR 模型 ZIP 本地导入：应用会锁定依赖版本、官方文件名和 SHA-256，检查模型目录与必需文件，再通过 staging/backup 原子安装；切换导入时会先中止同一模型的自动下载并清理其缓存，错误包不会替换健康模型。`1.0.4` 的 Windows 长路径、便携路径重定位、项目内 Node 和 UTF-8 日志修复继续有效。
 
 ## 快速安装与第一次使用
 
@@ -34,7 +34,7 @@
 1. 打开 [最新 GitHub Release](https://github.com/Fenglin-Maple/star-owner/releases/latest)，下载 `Star-Owner-v<version>-win-x64-core.zip`；建议同时下载同名 `.sha256` 校验文件。
 2. 将 ZIP 完整解压到当前用户可写且路径较短的目录，例如 `D:\Star-Owner`；不要在压缩包预览窗口内直接运行。
 3. 双击解压目录根部的 `Start-StarOwner.cmd`。便携包首次成功启动后会在当前用户桌面自动创建“星藏家”快捷方式，以后可直接使用桌面图标启动；同一安装目录不会反复创建。
-4. 核心包包含 Electron、Python、faster-whisper、FFmpeg、yt-dlp、CUDA/VC++ 运行依赖，但不包含 ASR 模型权重。全新安装首次启动会列出缺失的 `small` 和 `medium` 模型；点击“同意并开始下载”后，应用从本项目 Release 下载、校验并安装它们。下载遇到临时断线会自动重试并从 `.partial` 断点续传，完整 ZIP 会保留到 SHA-256 校验和安装成功，成功后自动删除。也可以选择“稍后处理”，再到“设置 -> 应用设置 -> 项目依赖包”逐个下载。
+4. 核心包包含 Electron、Python、faster-whisper、FFmpeg、yt-dlp、CUDA/VC++ 运行依赖，但不包含 ASR 模型权重。全新安装首次启动会列出缺失的 `small` 和 `medium` 模型；可让应用自动下载，也可从 `v1.0.0` Release 手动下载对应 ZIP，然后在“设置 -> 应用设置 -> 项目依赖包”点击“从本地导入”。ZIP 不需要自行解压；应用会核对版本、文件名、官方 SHA-256 和包结构。
 5. 在启动页按照“第一次上手”依次完成：`配置 AI 模型 -> 登录 B站 -> 同步收藏夹 -> 检查任务 -> 创建 Agent 视频总结工作流`。
 
 默认 ASR 模型为多语言 `medium`；显存或内存不足时可在设置中切换到 `small`。建议为核心包、模型、缓存和视频产物预留至少 10 GB 可用空间。
@@ -298,10 +298,10 @@ Windows 10/11 x64 用户可从 [GitHub Releases](https://github.com/Fenglin-Mapl
 1. 只需下载 `Star-Owner-v<version>-win-x64-core.zip`；同名 `.sha256` 文件用于校验下载完整性。
 2. 将 ZIP 完整解压到当前用户可写的目录，不要在压缩包预览窗口内直接运行。
 3. 双击解压目录根部的 `Start-StarOwner.cmd`。应用固定使用便携包内 Electron/Node、Python、FFmpeg、yt-dlp 和 SQLite，不读取全局 Node 来执行媒体工具。
-4. 首次启动若提示缺少 ASR 模型，允许应用从同一 Release 自动下载；默认推荐 `medium`，资源不足时可在设置中切换 `small`。
+4. 首次启动若提示缺少 ASR 模型，可允许应用自动下载；也可在设置的“项目依赖包”中点击模型名称打开正确 Release，下载完整 ZIP 后直接“从本地导入”。默认推荐 `medium`，资源不足时可切换 `small`。
 5. 按启动页“第一次上手”依次完成模型配置、B站登录、收藏夹同步、任务检查和 Agent 工作流创建。
 
-运行时和模型 ZIP 是应用内依赖管理器使用的独立资产，普通用户不需要手动下载。设置页可以重新检查、下载或修复这些依赖。依赖管理器优先使用 GitHub Release 资产自带的 SHA-256 digest；API 降级为直链时会在下载前取得同名 `.sha256`，网络中断自动退避重试并保留断点，未经校验的包不会安装。
+运行时和模型 ZIP 是应用内依赖管理器使用的独立资产。设置页可以重新检查、下载或修复依赖，并可导入手动下载的 `small` / `medium` ZIP。当前 `1.0.5` 只接受 `v1.0.0` 基线的 `Star-Owner-v1.0.0-model-small.zip` 与 `Star-Owner-v1.0.0-model-medium.zip`；以后依赖基线变化时，界面链接与接受的文件名会自动切换。依赖管理器核对 GitHub Release SHA-256、模型类型和目录结构，未经校验的包不会安装，错误导入不会损伤原有健康模型。
 
 源码运行：
 

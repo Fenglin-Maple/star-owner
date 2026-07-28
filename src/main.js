@@ -882,6 +882,39 @@ ipcMain.handle('dependencies:download', async (_event, packageId) => {
   return dependencyManager.download(packageId);
 });
 
+ipcMain.handle('dependencies:import-local', async (_event, packageId) => {
+  assertBackendReady();
+  const definition = dependencyManager.state().packages.find((item) => item.id === String(packageId || '') && item.localImport);
+  if (!definition) throw new Error('只允许从本地导入 small 或 medium ASR 模型包。');
+  const selected = await dialog.showOpenDialog(mainWindow, {
+    title: `导入 ${definition.name}`,
+    buttonLabel: '验证并导入',
+    properties: ['openFile'],
+    filters: [{ name: definition.assetName, extensions: ['zip'] }]
+  });
+  if (selected.canceled || !selected.filePaths?.[0]) return { ok: false, canceled: true, state: dependencyManager.state() };
+  try {
+    const result = await dependencyManager.importLocal(definition.id, selected.filePaths[0]);
+    sendRuntime();
+    return { ok: true, canceled: false, result, state: dependencyManager.state() };
+  } catch (error) {
+    const releaseUrl = error.releaseUrl || dependencyManager.releaseUrl();
+    const response = await dialog.showMessageBox(mainWindow, {
+      type: 'error',
+      title: 'ASR 模型导入失败',
+      message: error.message || String(error),
+      detail: `请从依赖基线 v${DEPENDENCY_RELEASE_VERSION} 下载 ${definition.assetName}。\n${releaseUrl}`,
+      buttons: ['打开正确版本 Release', '关闭'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true
+    });
+    if (response.response === 0) await openExternalUrl(releaseUrl);
+    sendRuntime();
+    return { ok: false, canceled: false, error: error.message || String(error), releaseUrl, state: dependencyManager.state() };
+  }
+});
+
 ipcMain.handle('window:minimize', async () => mainWindow?.minimize());
 ipcMain.handle('window:maximize-toggle', async () => {
   if (!mainWindow) return false;

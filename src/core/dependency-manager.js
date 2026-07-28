@@ -24,6 +24,8 @@ class DependencyManager {
     this.downloadRoot = ensureDir(path.join(this.projectRoot, 'runtime', '.downloads'));
     this.progress = new Map();
     this.pendingPackages = new Map();
+    this.pendingImports = new Map();
+    this.downloadControllers = new Map();
     this.queue = Promise.resolve();
     this.installJournal = path.join(this.projectRoot, 'runtime', '.install-transaction.json');
     this.recovery = this.recoverInterruptedInstall();
@@ -79,7 +81,9 @@ class DependencyManager {
         downloadedBytes: Number(progress.downloadedBytes || 0),
         totalBytes: Number(progress.totalBytes || 0),
         message: progress.message || (available ? '已安装并通过路径检查' : '未检测到完整依赖'),
-        source: progress.source || ''
+        source: progress.source || '',
+        releaseUrl: this.releaseUrl(),
+        localImport: definition.id === 'model-small' || definition.id === 'model-medium'
       };
     });
     const prompt = this.store.get('settings', 'dependencyPrompt') || {};
@@ -87,6 +91,7 @@ class DependencyManager {
     return {
       repository: `https://github.com/${REPOSITORY}`,
       releasePage: `https://github.com/${REPOSITORY}/releases`,
+      dependencyReleasePage: this.releaseUrl(),
       dependencyReleaseVersion: this.dependencyVersion,
       packages,
       missingRequired: missingRequired.map((item) => item.id),
@@ -95,6 +100,10 @@ class DependencyManager {
       promptVersion: prompt.version || '',
       recovery: this.recovery || { recovered: false }
     };
+  }
+
+  releaseUrl() {
+    return `https://github.com/${REPOSITORY}/releases/tag/v${this.dependencyVersion}`;
   }
 
   acknowledgePrompt(download) {
@@ -113,10 +122,21 @@ class DependencyManager {
   download(packageId) {
     const id = String(packageId || '');
     if (this.pendingPackages.has(id)) return this.pendingPackages.get(id);
+    if (this.pendingImports.has(id)) return this.pendingImports.get(id);
+    const controller = new AbortController();
+    this.downloadControllers.set(id, controller);
     const pending = this.enqueue(async () => {
-      try { return await this.downloadNow(packageId); }
+      try { return await this.downloadNow(packageId, { signal: controller.signal }); }
       catch (error) {
         const installed = this.state().packages.find((item) => item.id === id)?.available;
+        if (isDependencyCancellation(error)) {
+          this.update(packageId, {
+            status: installed ? 'available' : 'missing',
+            progress: installed ? 1 : 0,
+            message: installed ? '自动下载已中止，现有模型保持可用' : '自动下载已中止，可重新下载或从本地导入'
+          });
+          return { id, cancelled: true, state: this.state() };
+        }
         this.update(packageId, {
           status: installed ? 'available' : 'failed',
           progress: installed ? 1 : undefined,
@@ -124,9 +144,95 @@ class DependencyManager {
         });
         throw error;
       }
-    }).finally(() => this.pendingPackages.delete(id));
+    }).finally(() => {
+      this.pendingPackages.delete(id);
+      if (this.downloadControllers.get(id) === controller) this.downloadControllers.delete(id);
+    });
     this.pendingPackages.set(id, pending);
     return pending;
+  }
+
+  async cancelDownload(packageId) {
+    const id = String(packageId || '');
+    const pending = this.pendingPackages.get(id);
+    if (!pending) return { id, cancelled: false };
+    this.update(id, { status: 'cancelling', message: '正在中止应用自动下载并等待任务退出' });
+    this.downloadControllers.get(id)?.abort(dependencyCancellationError('已切换为本地导入'));
+    await pending;
+    return { id, cancelled: true };
+  }
+
+  async importLocal(packageId, sourceFile) {
+    const id = String(packageId || '');
+    const definition = this.definitions().find((item) => item.id === id && ['model-small', 'model-medium'].includes(item.id));
+    if (!definition) throw localImportError(`不支持从本地导入该依赖包：${id}`, this.releaseUrl());
+    const source = path.resolve(String(sourceFile || ''));
+    if (!fs.existsSync(source) || !fs.statSync(source).isFile()) throw localImportError('选择的模型包文件不存在或不可读取。', this.releaseUrl(), definition.assetName);
+    if (path.basename(source) !== definition.assetName) {
+      throw localImportError(`模型包版本或类型不正确。当前版本只接受 ${definition.assetName}。`, this.releaseUrl(), definition.assetName);
+    }
+    if (this.pendingImports.has(id)) return this.pendingImports.get(id);
+    const pending = (async () => {
+      await this.cancelDownload(id);
+      this.clearPackageArtifacts(id, { preserve: [source] });
+      return this.enqueue(() => this.importLocalNow(definition, source));
+    })().finally(() => this.pendingImports.delete(id));
+    this.pendingImports.set(id, pending);
+    return pending;
+  }
+
+  async importLocalNow(definition, source) {
+    const managedArchive = path.join(this.downloadRoot, `.import-${definition.id}-${crypto.randomBytes(6).toString('hex')}.zip`);
+    let releaseInstall = null;
+    try {
+      this.update(definition.id, { status: 'importing', progress: 0.03, source, message: `正在复制并验证 ${definition.assetName}` });
+      await fs.promises.copyFile(source, managedArchive);
+      this.update(definition.id, { status: 'resolving', progress: 0.08, message: '正在读取正确版本 Release 的校验信息' });
+      let release;
+      let expectedChecksum;
+      try {
+        release = await this.resolveReleaseAsset(definition);
+        if (release.asset.name !== definition.assetName) throw new Error(`Release 中未找到 ${definition.assetName}`);
+        expectedChecksum = await this.resolveChecksum(release, definition.assetName);
+      } catch (error) {
+        throw localImportError(`无法验证模型包对应的 Release：${networkErrorMessage(error)}`, this.releaseUrl(), definition.assetName);
+      }
+      if (!expectedChecksum) throw localImportError(`正确版本 Release 缺少 ${definition.assetName} 的 SHA-256，已拒绝安装。`, this.releaseUrl(), definition.assetName);
+      this.update(definition.id, { status: 'verifying', progress: 0.32, message: '正在校验本地模型包 SHA-256' });
+      const verified = await this.verifyArchive(managedArchive, expectedChecksum);
+      if (verified.actual !== expectedChecksum) {
+        throw localImportError(`模型包 SHA-256 不匹配，文件可能损坏、版本错误或不是官方依赖包。`, this.releaseUrl(), definition.assetName);
+      }
+      this.update(definition.id, { status: 'verifying', progress: 0.58, message: '正在检查模型包目录结构和必需文件' });
+      const inspection = await this.inspectArchive(managedArchive, definition, false);
+      releaseInstall = await this.acquireInstall(definition.id, () => {
+        this.update(definition.id, { status: 'waiting-install', progress: 0.75, message: '本地包验证通过，正在等待 Agent 工具与 ASR 队列空闲' });
+      });
+      this.update(definition.id, { status: 'installing', progress: 0.8, message: '资源窗口已锁定，正在原子安装本地模型包' });
+      await this.extractArchive(managedArchive, definition, false, inspection);
+      const available = definition.probes.every((probe) => fs.existsSync(path.join(this.projectRoot, probe)));
+      if (!available) throw new Error(`模型包已解压，但缺少预期文件：${definition.probes.join(', ')}`);
+      const bytes = fs.statSync(managedArchive).size;
+      this.update(definition.id, { status: 'available', progress: 1, message: '本地模型包导入完成', downloadedBytes: bytes, totalBytes: bytes });
+      const releaseMaintenance = releaseInstall;
+      releaseInstall = null;
+      await releaseMaintenance?.();
+      await this.onInstalled(definition.id);
+      this.clearPackageArtifacts(definition.id);
+      return { id: definition.id, checksum: expectedChecksum, imported: true, state: this.state() };
+    } catch (error) {
+      const installed = definition.probes.every((probe) => fs.existsSync(path.join(this.projectRoot, probe)));
+      const normalized = error.releaseUrl ? error : localImportError(error.message || String(error), this.releaseUrl(), definition.assetName);
+      this.update(definition.id, {
+        status: installed ? 'available' : 'failed',
+        progress: installed ? 1 : 0,
+        message: installed ? `导入失败，原有模型保持可用：${normalized.message}` : normalized.message
+      });
+      throw normalized;
+    } finally {
+      await releaseInstall?.();
+      fs.rmSync(managedArchive, { force: true });
+    }
   }
 
   enqueue(operation) {
@@ -135,18 +241,20 @@ class DependencyManager {
     return next;
   }
 
-  async downloadNow(packageId) {
+  async downloadNow(packageId, { signal } = {}) {
     const definition = this.definitions().find((item) => item.id === packageId);
     if (!definition) throw new Error(`未知依赖包：${packageId}`);
+    throwIfDependencyCancelled(signal);
     this.update(definition.id, { status: 'resolving', progress: 0.01, message: '正在查询 GitHub Release 资源' });
-    const release = await this.resolveReleaseAsset(definition);
+    const release = await this.resolveReleaseAsset(definition, signal);
     const archive = path.join(this.downloadRoot, release.asset.name);
     const partial = `${archive}.partial`;
     this.update(definition.id, { status: 'resolving', source: release.asset.browser_download_url, progress: 0.015, message: '正在获取 SHA-256 校验信息' });
     let expectedChecksum;
     try {
-      expectedChecksum = await this.resolveChecksum(release, release.asset.name);
+      expectedChecksum = await this.resolveChecksum(release, release.asset.name, signal);
     } catch (error) {
+      throwIfDependencyCancelled(signal);
       const retained = fs.existsSync(archive) ? '完整依赖包已保留；下次重试将继续校验' : '尚未开始下载依赖包';
       throw new Error(`SHA-256 校验信息获取失败，${retained}：${networkErrorMessage(error)}`);
     }
@@ -170,7 +278,8 @@ class DependencyManager {
     }
     if (!verified) {
       this.update(definition.id, { status: 'downloading', source: release.asset.browser_download_url, progress: 0.02, message: `正在下载 ${release.asset.name}` });
-      await this.downloadFile(release.asset.browser_download_url, partial, definition.id);
+      await this.downloadFile(release.asset.browser_download_url, partial, definition.id, signal);
+      throwIfDependencyCancelled(signal);
       if (fs.existsSync(archive)) fs.rmSync(archive, { force: true });
       fs.renameSync(partial, archive);
       this.update(definition.id, { status: 'verifying', progress: 0.9, message: '正在校验 SHA-256' });
@@ -203,7 +312,7 @@ class DependencyManager {
     return { id: definition.id, checksum, state: this.state() };
   }
 
-  async resolveReleaseAsset(definition) {
+  async resolveReleaseAsset(definition, signal) {
     const candidates = [];
     const releaseUrls = [...new Set([
       `https://api.github.com/repos/${REPOSITORY}/releases/tags/v${this.dependencyVersion}`,
@@ -212,12 +321,17 @@ class DependencyManager {
     ])];
     for (const url of releaseUrls) {
       try {
-        const response = await fetch(url, { headers: githubHeaders(), signal: AbortSignal.timeout(30000) });
+        throwIfDependencyCancelled(signal);
+        const response = await fetch(url, { headers: githubHeaders(), signal: requestSignal(signal, 30000) });
         if (response.ok) candidates.push(await response.json());
-      } catch { /* try the next release source */ }
+      } catch (error) {
+        throwIfDependencyCancelled(signal);
+        /* try the next release source */
+      }
     }
     try {
-      const response = await fetch(`https://api.github.com/repos/${REPOSITORY}/releases?per_page=10`, { headers: githubHeaders(), signal: AbortSignal.timeout(30000) });
+      throwIfDependencyCancelled(signal);
+      const response = await fetch(`https://api.github.com/repos/${REPOSITORY}/releases?per_page=10`, { headers: githubHeaders(), signal: requestSignal(signal, 30000) });
       if (response.ok) {
         const known = new Set(candidates.map((release) => String(release.id || release.tag_name || '')));
         for (const release of await response.json()) {
@@ -226,7 +340,10 @@ class DependencyManager {
           if (key) known.add(key);
         }
       }
-    } catch { /* handled below */ }
+    } catch (error) {
+      throwIfDependencyCancelled(signal);
+      /* handled below */
+    }
     const allowVersionFallback = this.dependencyVersion === this.version;
     for (const release of candidates) {
       const assets = Array.isArray(release.assets) ? release.assets : [];
@@ -239,50 +356,53 @@ class DependencyManager {
     return directDependencyReleaseAsset(this.dependencyVersion, definition);
   }
 
-  async fetchChecksum(resolved, assetName) {
+  async fetchChecksum(resolved, assetName, signal) {
     const checksumAsset = (resolved.release.assets || []).find((item) => item.name === `${assetName}.sha256`);
     if (!checksumAsset) return '';
     const response = await this.fetchWithRetry(checksumAsset.browser_download_url, () => ({
       headers: githubHeaders(),
       redirect: 'follow',
-      signal: AbortSignal.timeout(30000)
-    }));
+      signal: requestSignal(signal, 30000)
+    }), signal);
     if (!response.ok) return '';
     return (await response.text()).match(/[0-9a-f]{64}/i)?.[0]?.toLowerCase() || '';
   }
 
-  async resolveChecksum(resolved, assetName) {
+  async resolveChecksum(resolved, assetName, signal) {
     const digest = String(resolved.asset?.digest || '').match(/^sha256:([0-9a-f]{64})$/i)?.[1]?.toLowerCase();
-    return digest || this.fetchChecksum(resolved, assetName);
+    return digest || this.fetchChecksum(resolved, assetName, signal);
   }
 
   async verifyArchive(archive, checksum) {
     return { checksum, actual: await sha256(archive) };
   }
 
-  async fetchWithRetry(url, optionsFactory) {
+  async fetchWithRetry(url, optionsFactory, signal) {
     let lastError;
     for (let attempt = 1; attempt <= this.maxNetworkAttempts; attempt += 1) {
+      throwIfDependencyCancelled(signal);
       try {
         const response = await fetch(url, optionsFactory());
         if (!isRetryableStatus(response.status) || attempt === this.maxNetworkAttempts) return response;
         lastError = new Error(`HTTP ${response.status}`);
       } catch (error) {
+        throwIfDependencyCancelled(signal);
         lastError = error;
       }
-      await this.waitForRetry(attempt);
+      await this.waitForRetry(attempt, signal);
     }
     throw lastError || new Error('网络请求失败');
   }
 
-  async downloadFile(url, target, packageId) {
+  async downloadFile(url, target, packageId, signal) {
     let lastError;
     for (let attempt = 1; attempt <= this.maxNetworkAttempts; attempt += 1) {
+      throwIfDependencyCancelled(signal);
       let existing = fs.existsSync(target) ? fs.statSync(target).size : 0;
       const headers = githubHeaders();
       if (existing > 0) headers.range = `bytes=${existing}-`;
       try {
-        const response = await fetch(url, { headers, redirect: 'follow', signal: AbortSignal.timeout(6 * 60 * 60 * 1000) });
+        const response = await fetch(url, { headers, redirect: 'follow', signal: requestSignal(signal, 6 * 60 * 60 * 1000) });
         if (response.status === 416 && existing > 0) {
           const total = parseUnsatisfiedRangeTotal(response.headers.get('content-range'));
           if (total && existing === total) return;
@@ -317,6 +437,7 @@ class DependencyManager {
         if (total && downloaded !== total) throw new Error(`下载长度不完整：${formatBytes(downloaded)} / ${formatBytes(total)}`);
         return;
       } catch (error) {
+        throwIfDependencyCancelled(signal);
         lastError = error;
         const saved = fs.existsSync(target) ? fs.statSync(target).size : 0;
         if (attempt >= this.maxNetworkAttempts) break;
@@ -324,30 +445,37 @@ class DependencyManager {
           status: 'downloading',
           message: `连接中断，已保留 ${formatBytes(saved)}，即将进行第 ${attempt + 1}/${this.maxNetworkAttempts} 次断点续传：${networkErrorMessage(error)}`
         });
-        await this.waitForRetry(attempt);
+        await this.waitForRetry(attempt, signal);
       }
     }
     const saved = fs.existsSync(target) ? fs.statSync(target).size : 0;
     throw new Error(`依赖下载失败，已保留 ${formatBytes(saved)} 供下次断点续传：${networkErrorMessage(lastError)}`);
   }
 
-  async waitForRetry(attempt) {
+  async waitForRetry(attempt, signal) {
     const delayMs = Math.min(15000, this.retryBaseDelayMs * (2 ** Math.max(0, attempt - 1)));
-    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    if (delayMs > 0) await abortableDelay(delayMs, signal);
   }
 
-  async extractArchive(archive, definition, fallback = false) {
+  async inspectArchive(archive, definition, fallback = false) {
     const listing = await run('tar.exe', ['-tf', archive], this.projectRoot);
     const verboseListing = await run('tar.exe', ['-tvf', archive], this.projectRoot);
     if (verboseListing.split(/\r?\n/).some((line) => /^[lh]/i.test(line.trim()))) {
       throw new Error('依赖包包含符号链接或硬链接，已拒绝解压。');
     }
     const entries = listing.split(/\r?\n/).filter(Boolean);
+    if (!entries.length) throw new Error('依赖包为空，未找到可安装内容。');
     for (const entry of entries) {
       const normalized = entry.replaceAll('\\', '/');
       if (path.posix.isAbsolute(normalized) || normalized.split('/').includes('..')) throw new Error(`依赖包包含不安全路径：${entry}`);
       if (!fallback && !normalized.startsWith('runtime/')) throw new Error(`依赖包包含非 runtime 路径：${entry}`);
     }
+    if (!fallback) validateArchivePayload(definition, entries);
+    return { entries };
+  }
+
+  async extractArchive(archive, definition, fallback = false, inspection = null) {
+    const { entries } = inspection || await this.inspectArchive(archive, definition, fallback);
     const stagingRoot = path.join(this.projectRoot, 'runtime', `.install-staging-${definition.id}-${crypto.randomBytes(4).toString('hex')}`);
     ensureDir(stagingRoot);
     try {
@@ -371,6 +499,44 @@ class DependencyManager {
       if (fs.existsSync(stagingRoot)) fs.rmSync(stagingRoot, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
     }
     this.update(definition.id, { status: 'installing', progress: 0.98, message: fallback ? '已从兼容核心包提取运行时，正在检查' : '正在检查安装结果' });
+  }
+
+  clearPackageArtifacts(packageId, { preserve = [] } = {}) {
+    const id = String(packageId || '');
+    const definition = this.definitions().find((item) => item.id === id);
+    if (!definition) return;
+    const preserved = new Set(preserve.map((item) => path.resolve(String(item || '')).toLowerCase()));
+    recoverAtomicFile(this.installJournal);
+    if (fs.existsSync(this.installJournal)) {
+      try {
+        const journal = JSON.parse(fs.readFileSync(this.installJournal, 'utf8'));
+        validateInstallJournal(journal);
+        if (journal.id === id) this.rollbackInstall(journal);
+      } catch { /* startup recovery owns malformed journals */ }
+    }
+    if (fs.existsSync(this.downloadRoot)) {
+      for (const name of fs.readdirSync(this.downloadRoot)) {
+        if (!isPackageDownloadArtifact(name, definition)) continue;
+        const target = path.resolve(this.downloadRoot, name);
+        if (preserved.has(target.toLowerCase())) continue;
+        assertInsideDirectory(this.downloadRoot, target);
+        fs.rmSync(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
+      }
+    }
+    const runtimeRoot = path.join(this.projectRoot, 'runtime');
+    for (const name of fs.readdirSync(runtimeRoot)) {
+      if (!name.startsWith(`.install-staging-${id}-`) && !name.startsWith(`.install-backup-${id}-`)) continue;
+      const target = path.resolve(runtimeRoot, name);
+      assertInstallPath(this.projectRoot, target);
+      fs.rmSync(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
+    }
+    const available = definition.probes.every((probe) => fs.existsSync(path.join(this.projectRoot, probe)));
+    if (!available && (id === 'model-small' || id === 'model-medium')) {
+      for (const relative of managedRuntimePaths(id)) {
+        const target = assertInstallPath(this.projectRoot, path.join(this.projectRoot, relative));
+        if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
+      }
+    }
   }
 
   update(id, patch) {
@@ -474,6 +640,36 @@ function managedRuntimePaths(packageId) {
   return [];
 }
 
+function validateArchivePayload(definition, entries) {
+  const allowed = managedRuntimePaths(definition.id).map((item) => item.replaceAll('\\', '/').replace(/\/$/, ''));
+  if (!allowed.length) throw new Error(`依赖包没有受支持的安装目标：${definition.id}`);
+  const normalizedEntries = entries.map((entry) => entry.replaceAll('\\', '/').replace(/\/$/, '')).filter(Boolean);
+  for (const entry of normalizedEntries) {
+    const permitted = allowed.some((root) => entry === root || entry.startsWith(`${root}/`) || root.startsWith(`${entry}/`));
+    if (!permitted) throw new Error(`依赖包包含不属于 ${definition.id} 的路径：${entry}`);
+  }
+  const missing = definition.probes.filter((probe) => !normalizedEntries.includes(probe.replaceAll('\\', '/')));
+  if (missing.length) throw new Error(`依赖包缺少必需模型文件：${missing.join(', ')}`);
+}
+
+function isPackageDownloadArtifact(name, definition) {
+  const value = String(name || '');
+  if (value === definition.assetName || value === `${definition.assetName}.partial`) return true;
+  if (value.startsWith(`.import-${definition.id}-`) && value.endsWith('.zip')) return true;
+  if (definition.id === 'model-small') return /^Star-Owner-v[\d.]+-model-small\.zip(?:\.partial)?$/i.test(value);
+  if (definition.id === 'model-medium') return /^Star-Owner-v[\d.]+-model-medium\.zip(?:\.partial)?$/i.test(value);
+  if (definition.id === 'runtime-base') return /^Star-Owner-v[\d.]+-runtime-win-x64\.zip(?:\.partial)?$/i.test(value);
+  return false;
+}
+
+function assertInsideDirectory(root, value) {
+  const resolvedRoot = path.resolve(root);
+  const target = path.resolve(value);
+  const relative = path.relative(resolvedRoot, target);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error(`Refusing to remove dependency artifact outside its managed directory: ${target}`);
+  return target;
+}
+
 function validateInstallJournal(journal) {
   if (!journal || typeof journal !== 'object' || Array.isArray(journal)) throw new Error('journal root must be an object');
   if (!Array.isArray(journal.entries) || !journal.entries.length) throw new Error('journal entries are missing');
@@ -507,6 +703,53 @@ function movePath(source, destination) {
 
 function githubHeaders() {
   return { accept: 'application/vnd.github+json', 'user-agent': 'star-owner-dependency-manager' };
+}
+
+function dependencyCancellationError(message = '依赖下载已中止') {
+  const error = new Error(message);
+  error.code = 'DEPENDENCY_DOWNLOAD_CANCELLED';
+  return error;
+}
+
+function isDependencyCancellation(error) {
+  return error?.code === 'DEPENDENCY_DOWNLOAD_CANCELLED';
+}
+
+function throwIfDependencyCancelled(signal) {
+  if (!signal?.aborted) return;
+  if (isDependencyCancellation(signal.reason)) throw signal.reason;
+  throw dependencyCancellationError(signal.reason?.message || '依赖下载已中止');
+}
+
+function requestSignal(signal, timeoutMs) {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+function abortableDelay(delayMs, signal) {
+  throwIfDependencyCancelled(signal);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, delayMs);
+    function done() {
+      signal?.removeEventListener('abort', cancelled);
+      resolve();
+    }
+    function cancelled() {
+      clearTimeout(timer);
+      try { throwIfDependencyCancelled(signal); }
+      catch (error) { reject(error); }
+    }
+    signal?.addEventListener('abort', cancelled, { once: true });
+  });
+}
+
+function localImportError(message, releaseUrl, expectedAsset = '') {
+  const suffix = expectedAsset ? ` 正确文件：${expectedAsset}。` : '';
+  const error = new Error(`${message}${suffix} 正确版本 Release：${releaseUrl}`);
+  error.code = 'DEPENDENCY_LOCAL_IMPORT_INVALID';
+  error.releaseUrl = releaseUrl;
+  error.expectedAsset = expectedAsset;
+  return error;
 }
 
 function isRetryableStatus(status) {

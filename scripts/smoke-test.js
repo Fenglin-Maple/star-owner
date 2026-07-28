@@ -1,4 +1,5 @@
 const fs = require('fs');
+const crypto = require('crypto');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { initWorkspace, WORKSPACE_ROOT } = require('../src/core/workspace');
@@ -166,6 +167,85 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   } finally {
     global.fetch = originalFetch;
   }
+  const smallDefinition = dependencyManager.definitions().find((item) => item.id === 'model-small');
+  const smallState = dependencyManager.state().packages.find((item) => item.id === 'model-small');
+  if (!smallState.localImport || smallState.releaseUrl !== 'https://github.com/Fenglin-Maple/star-owner/releases/tag/v9.9.9') throw new Error('local model import did not expose the pinned dependency release');
+  const manualDownloads = path.join(dependencyRoot, 'manual-downloads');
+  fs.mkdirSync(manualDownloads, { recursive: true });
+  const wrongVersionArchive = path.join(manualDownloads, 'Star-Owner-v9.9.8-model-small.zip');
+  fs.writeFileSync(wrongVersionArchive, 'wrong version');
+  let wrongVersionRejected = false;
+  try { await dependencyManager.importLocal('model-small', wrongVersionArchive); } catch (error) {
+    wrongVersionRejected = error.expectedAsset === smallDefinition.assetName && error.releaseUrl?.endsWith('/releases/tag/v9.9.9');
+  }
+  if (!wrongVersionRejected) throw new Error('local model import accepted a package from the wrong dependency release');
+  const incompleteMedium = path.join(dependencyRoot, 'runtime', 'models', 'medium');
+  fs.mkdirSync(incompleteMedium, { recursive: true });
+  fs.writeFileSync(path.join(incompleteMedium, 'model.bin'), 'incomplete automatic install');
+  dependencyManager.clearPackageArtifacts('model-medium');
+  if (fs.existsSync(incompleteMedium)) throw new Error('local import cleanup retained an unusable model directory');
+
+  const healthySmall = path.join(dependencyRoot, 'runtime', 'models', 'small');
+  fs.mkdirSync(healthySmall, { recursive: true });
+  fs.writeFileSync(path.join(healthySmall, 'model.bin'), 'known-good-old-model');
+  fs.writeFileSync(path.join(healthySmall, 'config.json'), '{"version":"old"}');
+  const validSource = path.join(dependencyRoot, 'local-import-valid');
+  fs.mkdirSync(path.join(validSource, 'runtime', 'models', 'small'), { recursive: true });
+  fs.writeFileSync(path.join(validSource, 'runtime', 'models', 'small', 'model.bin'), 'verified-new-model');
+  fs.writeFileSync(path.join(validSource, 'runtime', 'models', 'small', 'config.json'), '{"version":"new"}');
+  const validArchive = path.join(manualDownloads, smallDefinition.assetName);
+  createArchive(validArchive, validSource, 'runtime');
+  const validChecksum = sha256File(validArchive);
+  const originalResolveReleaseAsset = dependencyManager.resolveReleaseAsset.bind(dependencyManager);
+  const resolvedLocalAsset = (checksum) => ({ release: { tag_name: 'v9.9.9', assets: [] }, asset: { name: smallDefinition.assetName, digest: `sha256:${checksum}`, size: fs.statSync(validArchive).size }, fallback: false });
+  dependencyManager.resolveReleaseAsset = async () => resolvedLocalAsset(validChecksum);
+  const originalDownloadForImport = dependencyManager.downloadNow.bind(dependencyManager);
+  dependencyManager.downloadNow = async (_id, { signal } = {}) => new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+  const interruptedPartial = path.join(dependencyManager.downloadRoot, `${smallDefinition.assetName}.partial`);
+  const staleStaging = path.join(dependencyRoot, 'runtime', '.install-staging-model-small-stale');
+  const staleBackup = path.join(dependencyRoot, 'runtime', '.install-backup-model-small-stale');
+  fs.writeFileSync(interruptedPartial, 'partial download');
+  fs.mkdirSync(staleStaging, { recursive: true });
+  fs.mkdirSync(staleBackup, { recursive: true });
+  const automaticDownload = dependencyManager.download('model-small');
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const imported = await dependencyManager.importLocal('model-small', validArchive);
+  const cancelledDownload = await automaticDownload;
+  if (!cancelledDownload.cancelled || !imported.imported) throw new Error('local import did not cancel the in-flight automatic download');
+  if (fs.existsSync(interruptedPartial) || fs.existsSync(staleStaging) || fs.existsSync(staleBackup)) throw new Error('local import did not clean model download or transaction residue');
+  if (fs.readFileSync(path.join(healthySmall, 'model.bin'), 'utf8') !== 'verified-new-model' || !dependencyManager.state().packages.find((item) => item.id === 'model-small')?.available) throw new Error('verified local model package was not installed');
+  dependencyManager.downloadNow = originalDownloadForImport;
+
+  const wrongTypeArchive = path.join(manualDownloads, 'Star-Owner-v9.9.9-model-medium.zip');
+  fs.copyFileSync(validArchive, wrongTypeArchive);
+  let wrongTypeRejected = false;
+  try { await dependencyManager.importLocal('model-small', wrongTypeArchive); } catch (error) { wrongTypeRejected = error.expectedAsset === smallDefinition.assetName; }
+  if (!wrongTypeRejected) throw new Error('local model import accepted a medium package for the small slot');
+
+  const corruptArchiveRoot = path.join(dependencyRoot, 'local-import-corrupt');
+  fs.mkdirSync(corruptArchiveRoot, { recursive: true });
+  const corruptArchive = path.join(corruptArchiveRoot, smallDefinition.assetName);
+  fs.writeFileSync(corruptArchive, 'not the official archive');
+  dependencyManager.resolveReleaseAsset = async () => resolvedLocalAsset('0'.repeat(64));
+  let checksumRejected = false;
+  try { await dependencyManager.importLocal('model-small', corruptArchive); } catch (error) { checksumRejected = /SHA-256 不匹配/.test(error.message); }
+  if (!checksumRejected || fs.readFileSync(path.join(healthySmall, 'model.bin'), 'utf8') !== 'verified-new-model') throw new Error('bad local checksum damaged or replaced the healthy model');
+
+  const wrongStructureRoot = path.join(dependencyRoot, 'local-import-wrong-structure');
+  fs.mkdirSync(path.join(wrongStructureRoot, 'runtime', 'models', 'medium'), { recursive: true });
+  fs.writeFileSync(path.join(wrongStructureRoot, 'runtime', 'models', 'medium', 'model.bin'), 'wrong model');
+  fs.writeFileSync(path.join(wrongStructureRoot, 'runtime', 'models', 'medium', 'config.json'), '{}');
+  const wrongStructureArchive = path.join(wrongStructureRoot, smallDefinition.assetName);
+  createArchive(wrongStructureArchive, wrongStructureRoot, 'runtime');
+  dependencyManager.resolveReleaseAsset = async () => resolvedLocalAsset(sha256File(wrongStructureArchive));
+  let structureRejected = false;
+  try { await dependencyManager.importLocal('model-small', wrongStructureArchive); } catch (error) { structureRejected = /不属于 model-small/.test(error.message); }
+  if (!structureRejected || fs.readFileSync(path.join(healthySmall, 'model.bin'), 'utf8') !== 'verified-new-model') throw new Error('wrong local archive structure damaged or replaced the healthy model');
+  dependencyManager.resolveReleaseAsset = originalResolveReleaseAsset;
+
   const runtimeDefinition = dependencyManager.definitions().find((item) => item.id === 'runtime-base');
   const archiveSource = path.join(dependencyRoot, 'archive-source');
   const portableRoot = path.join(archiveSource, 'Star-Owner-v0.3.0-win-x64-core');
@@ -496,6 +576,10 @@ function createArchive(archive, sourceRoot, item) {
   if (result.status !== 0) throw new Error(`Could not create dependency fixture: ${result.stderr || result.stdout}`);
 }
 
+function sha256File(file) {
+  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+}
+
 function listCorruptJournals(root) {
   const runtime = path.join(root, 'runtime');
   return fs.existsSync(runtime) ? fs.readdirSync(runtime).filter((name) => name.startsWith('.install-transaction.corrupt-')) : [];
@@ -543,5 +627,8 @@ function verifyRendererContracts() {
   if (index.includes('id="labelInput"') || app.includes('labelInput')) throw new Error('obsolete collection label input is still exposed');
   if (!preload.includes("ipcRenderer.invoke('documents:delete'") || !preload.includes("ipcRenderer.invoke('internal-agent:single-inspect'")) {
     throw new Error('document deletion or single-video inspection is missing from the preload bridge');
+  }
+  if (!preload.includes("ipcRenderer.invoke('dependencies:import-local'") || !ai.includes('data-import-dependency') || !ai.includes('data-dependency-release') || !ai.includes('if (response?.canceled) return')) {
+    throw new Error('local ASR model import, Release links, or file-picker cancellation recovery is missing from the renderer contract');
   }
 }
