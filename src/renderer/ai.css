@@ -158,6 +158,11 @@
 .dependency-prompt-body strong { font-size: 13px; }
 .dependency-prompt-body p { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .dependency-prompt-body .chip-row { grid-column: 1 / -1; }
+.path-safety-body > div > code { display: block; max-height: 72px; margin-top: 10px; padding: 8px 10px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; color: var(--text); background: var(--bg); font-size: 11px; white-space: normal; overflow-wrap: anywhere; }
+.path-safety-body ol code { padding: 1px 4px; border-radius: 4px; color: var(--text); background: var(--bg); font-size: 11px; }
+.path-safety-body ol { grid-column: 1 / -1; margin: 2px 0 0; padding: 14px 14px 14px 36px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: color-mix(in srgb, var(--bg) 44%, transparent); font-size: 12px; line-height: 1.75; }
+.path-safety-body li + li { margin-top: 4px; }
+.path-warning-icon { color: var(--danger, #e45a63); border-color: color-mix(in srgb, var(--danger, #e45a63) 42%, var(--line)); background: color-mix(in srgb, var(--danger, #e45a63) 12%, transparent); }
 .single-login-body { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 13px; align-items: center; padding: 18px; }
 .single-login-body strong { display: block; margin-bottom: 5px; color: var(--text); }
 .single-login-body p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }

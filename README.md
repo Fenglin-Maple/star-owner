@@ -21,18 +21,18 @@
 
 **Built with OpenAI Codex.**
 
-> `1.0.3` 正式版边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
+> `1.0.4` 正式版边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
 >
 > 当前稳定版只处理普通 BV 单 P 视频。多 P 视频会在元数据阶段被识别、清理本次缓存并关闭任务；`ep/ss/md`、课程、活动聚合、音频和直播等特殊页面会在输入阶段直接拒绝。这样可以避免把只处理第一 P 的结果误标为完整总结。完整多 P 支持将在独立 Git 分支完成并通过专项测试后再合并。
 
-`1.0.3` 是当前稳定维护版。应用核心使用 `1.0.3`，项目内运行时与 faster-whisper `small` / `medium` 权重固定复用 `v1.0.0` Release 依赖基线；只有依赖内容或目录契约实际变化时才发布新的依赖包。本版修复 AI 模型配置保存后的跨页面状态同步：RAG 新建会话、Agent 新建工作流和单视频总结在执行前都会等待模型配置落库并重新读取后台状态，不再因前端旧缓存误判为尚未配置模型。RAG 不选择知识库时仍可作为普通 AI 助手使用。
+`1.0.4` 是当前代码维护版，项目内运行时与 faster-whisper `small` / `medium` 权重继续复用 `v1.0.0` Release 依赖基线。本版完善 Windows 路径安全：视频名会按最终 Markdown、字幕和工具日志的最深路径自动缩短，至少保留 24 个字符；仍无法满足 259 字符安全上限时给出明确迁移说明。启动时会先检查负责新产物的默认 Workspace，路径风险提示优先于 ASR 依赖下载。SQLite 在整个便携项目移动后会自动重定位默认 Workspace 内的任务、缓存、日志和 RAG 路径。工具执行固定使用项目内 Electron/Node，Python、yt-dlp、FFmpeg 与 ASR 子进程统一使用 UTF-8，避免误用全局 Node 和中文日志乱码。RAG 同时清理失效的前端会话 ID，不再把空白副本误报为找不到旧 Session。
 
 ## 快速安装与第一次使用
 
 适用于 Windows 10/11 x64。普通用户不需要预先安装 Node.js、Python、FFmpeg、SQLite 或 faster-whisper。
 
 1. 打开 [最新 GitHub Release](https://github.com/Fenglin-Maple/star-owner/releases/latest)，下载 `Star-Owner-v<version>-win-x64-core.zip`；建议同时下载同名 `.sha256` 校验文件。
-2. 将 ZIP 完整解压到当前用户可写的目录，不要在压缩包预览窗口内直接运行。
+2. 将 ZIP 完整解压到当前用户可写且路径较短的目录，例如 `D:\Star-Owner`；不要在压缩包预览窗口内直接运行。
 3. 双击解压目录根部的 `Start-StarOwner.cmd`。便携包首次成功启动后会在当前用户桌面自动创建“星藏家”快捷方式，以后可直接使用桌面图标启动；同一安装目录不会反复创建。
 4. 核心包包含 Electron、Python、faster-whisper、FFmpeg、yt-dlp、CUDA/VC++ 运行依赖，但不包含 ASR 模型权重。全新安装首次启动会列出缺失的 `small` 和 `medium` 模型；点击“同意并开始下载”后，应用从本项目 Release 下载、校验并安装它们。下载遇到临时断线会自动重试并从 `.partial` 断点续传，完整 ZIP 会保留到 SHA-256 校验和安装成功，成功后自动删除。也可以选择“稍后处理”，再到“设置 -> 应用设置 -> 项目依赖包”逐个下载。
 5. 在启动页按照“第一次上手”依次完成：`配置 AI 模型 -> 登录 B站 -> 同步收藏夹 -> 检查任务 -> 创建 Agent 视频总结工作流`。
@@ -287,13 +287,17 @@ workspace/
 
 设置页可以注册多个 Workspace 库，但必须指定一个默认库。知识库 API 只读取已注册 Workspace 内、状态为 `done` 且文件仍存在的 Markdown，不暴露本机绝对路径。
 
+Windows 产物路径按传统 259 字符安全上限预算。标题包含 `\ / : * ? " < > |`、控制字符、尾随点/空格或保留设备名时会自动清理；标题过长时保留可辨识前缀和稳定哈希，最低保留 24 个字符。若 Workspace 本身过深，应用启动时会先于依赖下载弹出迁移提示，任务执行时也会返回 `WINDOWS_PATH_TOO_LONG`，不会把它误判为视频或 AI 失败。
+
+安全迁移便携安装：停止 Agent 并关闭应用，将**整个项目目录**复制到较短位置（推荐 `D:\Star-Owner`），从新位置启动并确认任务、文档、登录状态正常后再删除旧目录。不要只移动 `workspace/`。数据库会自动把旧默认 Workspace 下的受管绝对路径重定位到新目录；用户另外注册的外部 Workspace 不会被改写。
+
 ## 下载与部署
 
 Windows 10/11 x64 用户可从 [GitHub Releases](https://github.com/Fenglin-Maple/star-owner/releases/latest) 下载便携包：
 
 1. 只需下载 `Star-Owner-v<version>-win-x64-core.zip`；同名 `.sha256` 文件用于校验下载完整性。
 2. 将 ZIP 完整解压到当前用户可写的目录，不要在压缩包预览窗口内直接运行。
-3. 双击解压目录根部的 `Start-StarOwner.cmd`。应用不要求全局安装 Node.js、Python、FFmpeg 或 SQLite。
+3. 双击解压目录根部的 `Start-StarOwner.cmd`。应用固定使用便携包内 Electron/Node、Python、FFmpeg、yt-dlp 和 SQLite，不读取全局 Node 来执行媒体工具。
 4. 首次启动若提示缺少 ASR 模型，允许应用从同一 Release 自动下载；默认推荐 `medium`，资源不足时可在设置中切换 `small`。
 5. 按启动页“第一次上手”依次完成模型配置、B站登录、收藏夹同步、任务检查和 Agent 工作流创建。
 
@@ -327,6 +331,7 @@ npm run test:knowledge-api
 npm run test:hardware
 npm run test:internal-agent
 npm run test:document-lifecycle
+npm run test:runtime-node
 ```
 
 常规代码版本使用 `npm run package:core` 只生成核心 ZIP，并复用 `package.json` 中 `dependencyReleaseVersion` 指定的 Release 依赖。只有 Python、CUDA、faster-whisper、FFmpeg、yt-dlp、VC++ 运行库、模型权重或依赖目录契约变化时，才更新依赖版本并重新上传 runtime/small/medium。

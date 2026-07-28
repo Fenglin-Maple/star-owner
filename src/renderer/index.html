@@ -814,6 +814,13 @@
         <footer><button id="dependencyPromptLater" class="secondary-button" type="button">稍后处理</button><span></span><span></span><button id="dependencyPromptDownload" class="primary-button" type="button">同意并开始下载</button></footer>
       </section>
     </div>
+    <div id="pathSafetyModal" class="rag-modal path-safety-modal" hidden>
+      <section class="rag-modal-dialog compact" role="alertdialog" aria-modal="true" aria-labelledby="pathSafetyTitle">
+        <header><div><h2 id="pathSafetyTitle">项目路径过深，可能无法生成产物</h2><p id="pathSafetySummary">Windows 路径长度检查未通过。</p></div></header>
+        <div class="dependency-prompt-body path-safety-body"><div class="dependency-prompt-icon path-warning-icon"><svg viewBox="0 0 24 24"><path d="M12 3L2 21h20L12 3zM12 9v5M12 18h.01"/></svg></div><div><strong>请迁移到更短的工作路径</strong><p id="pathSafetyMessage"></p><code id="pathSafetyPath"></code></div><ol><li>先停止所有 Agent 并关闭星藏家。</li><li id="pathSafetyMoveStep">将整个项目文件夹复制到较短位置，例如 <code>D:\Star-Owner</code>。</li><li>从新位置启动，确认任务、文档和登录状态正常后，再删除旧目录。</li></ol></div>
+        <footer><button id="pathSafetyOpenProject" class="secondary-button" type="button">打开当前项目目录</button><span></span><span></span><button id="pathSafetyAcknowledge" class="primary-button" type="button">我知道了</button></footer>
+      </section>
+    </div>
     <div id="ragSessionSettingsModal" class="rag-modal" hidden>
       <section class="rag-modal-dialog rag-session-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="ragSessionSettingsTitle">
         <header><div><h2 id="ragSessionSettingsTitle">会话设置</h2><p>模型、知识库、沙盒与权限</p></div><div class="rag-modal-head-actions"><button id="ragOpenProviders" class="secondary-button compact-button" type="button">修改 AI 模型配置</button><button id="ragCloseSessionSettings" class="icon-action" type="button" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M5 5l14 14M19 5L5 19"/></svg></button></div></header>

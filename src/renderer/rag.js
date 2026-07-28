@@ -44,6 +44,7 @@
       }
       activeSessionId = state.activeSession?.id || state.sessions[0]?.id || '';
       if (activeSessionId) localStorage.setItem('ragActiveSessionId', activeSessionId);
+      else localStorage.removeItem('ragActiveSessionId');
       pendingAttachments = unsentAttachments(state.activeSession);
       renderAll();
       initialized = true;
@@ -64,6 +65,7 @@
     state = nextState;
     activeSessionId = state.activeSession?.id || state.sessions[0]?.id || '';
     if (activeSessionId) localStorage.setItem('ragActiveSessionId', activeSessionId);
+    else localStorage.removeItem('ragActiveSessionId');
     pendingAttachments = unsentAttachments(state.activeSession);
     renderAll();
     initialized = true;

@@ -10,6 +10,7 @@
     singleVideo: $('#singleVideoInput'), singleCollection: $('#singleCollectionSelect'), singleCreateCollection: $('#singleCreateCollection'), singleOpenCollection: $('#singleOpenCollection'), singleProvider: $('#singleProviderSelect'), singleModel: $('#singleModelSelect'), singleFrames: $('#singleFrames'), singleComments: $('#singleComments'), singleRequirements: $('#singleRequirements'), singleKeepVideoCache: $('#singleKeepVideoCache'), singleStart: $('#singleStart'), singleSession: $('#singleSessionSelect'), singleDetail: $('#singleAgentDetail'),
     modelNew: $('#aiModelNewProvider'), modelProviderList: $('#aiModelProviderList'), modelProviderId: $('#aiModelProviderId'), modelProviderName: $('#aiModelProviderName'), modelProviderType: $('#aiModelProviderType'), modelProviderBaseUrl: $('#aiModelProviderBaseUrl'), modelProviderApiKey: $('#aiModelProviderApiKey'), modelProviderTemperature: $('#aiModelProviderTemperature'), modelProviderMaxTokens: $('#aiModelProviderMaxTokens'), modelProviderHeaders: $('#aiModelProviderHeaders'), modelDelete: $('#aiModelDeleteProvider'), modelSave: $('#aiModelSaveProvider'), modelFetch: $('#aiModelFetchModels'), modelCount: $('#aiModelRemoteCount'), modelRemote: $('#aiModelRemoteModels'),
     dependencyList: $('#dependencyList'), dependencyRefresh: $('#dependencyRefresh'), dependencyModal: $('#dependencyPromptModal'), dependencyMissing: $('#dependencyPromptMissing'), dependencyLater: $('#dependencyPromptLater'), dependencyDownload: $('#dependencyPromptDownload'),
+    pathSafetyModal: $('#pathSafetyModal'), pathSafetySummary: $('#pathSafetySummary'), pathSafetyMessage: $('#pathSafetyMessage'), pathSafetyPath: $('#pathSafetyPath'), pathSafetyMoveStep: $('#pathSafetyMoveStep'), pathSafetyOpenProject: $('#pathSafetyOpenProject'), pathSafetyAcknowledge: $('#pathSafetyAcknowledge'),
     loginRequiredModal: $('#singleLoginRequiredModal'), loginRequiredVideo: $('#singleLoginRequiredVideo'), loginRequiredReason: $('#singleLoginRequiredReason'), loginLater: $('#singleLoginLater'), goLogin: $('#singleGoLogin'),
     duplicateModal: $('#singleDuplicateModal'), duplicateMessage: $('#singleDuplicateMessage'), duplicateVideo: $('#singleDuplicateVideo'), duplicateMeta: $('#singleDuplicateMeta'), duplicateCancel: $('#singleDuplicateCancel'), duplicateRegenerate: $('#singleDuplicateRegenerate')
   };
@@ -17,6 +18,8 @@
   let state = { providers: [], sessions: [], collections: [], internalCollections: [] };
   let modelState = { providers: [] };
   let dependencyState = null;
+  let pathSafetyState = null;
+  let pathSafetyAcknowledged = false;
   let activeAgentId = localStorage.getItem('internalAgentActiveId') || '';
   let activeSingleId = localStorage.getItem('singleAgentActiveId') || '';
   let editingProviderId = '';
@@ -50,15 +53,18 @@
   async function refreshAll({ quiet = false } = {}) {
     const sequence = ++refreshSequence;
     try {
-      const [nextState, nextDependencyState] = await Promise.all([
+      const [nextState, nextDependencyState, nextRuntime] = await Promise.all([
         window.orchestrator.internalAgentState(),
-        window.orchestrator.dependencyState()
+        window.orchestrator.dependencyState(),
+        window.orchestrator.getRuntime()
       ]);
       if (sequence !== refreshSequence) return;
       applyInternalAgentState(nextState);
       dependencyState = nextDependencyState;
+      pathSafetyState = nextRuntime?.pathSafety || pathSafetyState;
       renderAll();
       initialized = true;
+      maybeShowPathSafetyPrompt();
       maybeShowDependencyPrompt();
       return state;
     } catch (error) {
@@ -512,8 +518,22 @@
 
   function maybeShowDependencyPrompt() {
     if (!dependencyState?.needsPrompt || !initialized) return;
+    if (pathSafetyState?.safe === false && !pathSafetyAcknowledged) return;
     elements.dependencyMissing.innerHTML = dependencyState.packages.filter((item) => dependencyState.missingRequired.includes(item.id)).map((item) => `<span>${html(item.name)}</span>`).join('');
     elements.dependencyModal.hidden = false;
+  }
+
+  function maybeShowPathSafetyPrompt() {
+    if (pathSafetyState?.safe !== false || pathSafetyAcknowledged || !initialized) return;
+    const issue = pathSafetyState.unsafe?.[0] || pathSafetyState.longest || {};
+    elements.pathSafetySummary.textContent = `预计最深路径 ${Number(issue.length || 0)} 个字符，Windows 安全上限为 ${Number(pathSafetyState.limit || 259)}。`;
+    elements.pathSafetyMessage.textContent = pathSafetyState.message || '当前安装位置过深，视频标题即使缩短到 24 个字符仍可能处理失败。';
+    elements.pathSafetyPath.textContent = issue.path || issue.workspaceRoot || '';
+    elements.pathSafetyMoveStep.innerHTML = issue.workspaceId === 'default'
+      ? '将整个项目文件夹复制到较短位置，例如 <code>D:\\Star-Owner</code>，不要只移动 workspace。'
+      : '这是自定义工作库：在设置中新建较短目录并设为默认，再从新库继续未完成任务。';
+    elements.dependencyModal.hidden = true;
+    elements.pathSafetyModal.hidden = false;
   }
 
   async function downloadDependency(id, button) {
@@ -759,6 +779,15 @@
     if (event.detail?.page !== 'ai-models') flushPendingModelSave().catch((error) => notify('模型配置自动保存失败', error.message || String(error), 'error'));
     if (['internal-agents', 'single-agent', 'ai-models'].includes(event.detail?.page)) refreshAll({ quiet: initialized });
   });
+  elements.pathSafetyOpenProject.addEventListener('click', async () => {
+    try { await window.orchestrator.openProjectPath(''); }
+    catch (error) { notify('无法打开项目目录', error.message || String(error), 'error'); }
+  });
+  elements.pathSafetyAcknowledge.addEventListener('click', () => {
+    pathSafetyAcknowledged = true;
+    elements.pathSafetyModal.hidden = true;
+    maybeShowDependencyPrompt();
+  });
   window.starFlushModelConfig = flushPendingModelSave;
   window.orchestrator.onInternalAgentEvent(handleInternalEvent);
   window.orchestrator.onDependencyEvent((event) => {
@@ -767,6 +796,7 @@
     renderDependencies();
   });
   window.orchestrator.onRuntime((runtime) => {
+    if (runtime?.pathSafety) { pathSafetyState = runtime.pathSafety; maybeShowPathSafetyPrompt(); }
     if (runtime?.dependencies) { dependencyState = runtime.dependencies; renderDependencies(); maybeShowDependencyPrompt(); }
   });
 

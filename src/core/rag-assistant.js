@@ -7,8 +7,10 @@ const { pathToFileURL } = require('url');
 const MarkdownIt = require('markdown-it');
 const pdf = require('pdf-parse');
 const mammoth = require('mammoth');
+const { utf8ChildEnvironment } = require('./child-process-io');
 const { favoriteStatus } = require('./collection-state');
 const { isPrivateNetworkHost, parseHttpUrl } = require('./network-policy');
+const { assertSafeWindowsPath, ensureDir: ensureWorkspaceDir } = require('./workspace');
 
 const TEXT_EXTENSIONS = new Set([
   '.txt', '.md', '.markdown', '.json', '.jsonl', '.csv', '.tsv', '.xml', '.yaml', '.yml',
@@ -62,7 +64,10 @@ class RagAssistant {
 
   state(sessionId = '') {
     const sessions = this.listSessions();
-    const activeId = sessionId || sessions[0]?.id || '';
+    const requestedId = String(sessionId || '');
+    const activeId = sessions.some((session) => session.id === requestedId)
+      ? requestedId
+      : (sessions[0]?.id || '');
     return {
       providers: this.listProviders(),
       sessions,
@@ -800,7 +805,8 @@ class RagAssistant {
         signal?.removeEventListener('abort', onAbort);
         callback();
       };
-      const child = execFile('cmd.exe', ['/d', '/s', '/c', String(command)], { cwd: workingDirectory, windowsHide: true, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
+      const utf8Command = `chcp 65001>nul & ${String(command)}`;
+      const child = execFile('cmd.exe', ['/d', '/s', '/c', utf8Command], { cwd: workingDirectory, encoding: 'utf8', env: utf8ChildEnvironment(), windowsHide: true, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
         if (aborted) return finish(() => reject(abortError()));
         if (timedOut) return finish(() => reject(new Error('Command timed out after 120 seconds.')));
         if (error) return finish(() => reject(new Error(`${error.message}\n${stderr || stdout}`.trim())));
@@ -1505,8 +1511,7 @@ function uniqueStrings(values) {
 }
 
 function ensureDir(directory) {
-  fs.mkdirSync(directory, { recursive: true });
-  return path.resolve(directory);
+  return ensureWorkspaceDir(directory);
 }
 
 function existingAncestor(target) {
@@ -1551,9 +1556,9 @@ function safeFilename(value) {
 function uniqueFile(directory, name) {
   const extension = path.extname(name);
   const base = path.basename(name, extension);
-  let candidate = path.join(directory, name);
+  let candidate = assertSafeWindowsPath(path.join(directory, name), 'RAG 附件路径');
   let index = 2;
-  while (fs.existsSync(candidate)) candidate = path.join(directory, `${base}-${index++}${extension}`);
+  while (fs.existsSync(candidate)) candidate = assertSafeWindowsPath(path.join(directory, `${base}-${index++}${extension}`), 'RAG 附件路径');
   return candidate;
 }
 

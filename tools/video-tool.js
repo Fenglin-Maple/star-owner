@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { utf8ChildEnvironment } = require('../src/core/child-process-io');
 const { repairPortablePythonHome } = require('../src/core/portable-runtime');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -629,7 +630,7 @@ function srtTime(value) {
 }
 
 function safeFilePart(value) {
-  return String(value || 'subtitle').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'subtitle';
+  return (String(value || 'subtitle').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'subtitle').slice(0, 48);
 }
 
 function parseArgs(rest) {
@@ -682,7 +683,7 @@ function dependencyStatus(command) {
   const executable = resolveCommand(command);
   if (!executable) return { command, available: false, source: '' };
   if (command === 'yt-dlp' && executable === WHISPER_PYTHON) {
-    const probe = spawnSync(executable, ['-m', 'yt_dlp', '--version'], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    const probe = spawnSync(executable, ['-m', 'yt_dlp', '--version'], { encoding: 'utf8', env: utf8ChildEnvironment(), windowsHide: true, timeout: 15000 });
     return {
       command,
       available: probe.status === 0,
@@ -696,6 +697,7 @@ function dependencyStatus(command) {
   }
   const probe = spawnSync(executable, [WHISPER_CLI, '--health', '--model', 'medium'], {
     encoding: 'utf8',
+    env: utf8ChildEnvironment(),
     windowsHide: true,
     timeout: 15000
   });
@@ -730,8 +732,8 @@ function run(command, args, options = {}) {
   if (command === 'yt-dlp' && executable === WHISPER_PYTHON) finalArgs = ['-m', 'yt_dlp', ...args];
   const capture = Boolean(options.capture);
   const result = spawnSync(executable, finalArgs, capture
-    ? { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, shell: false, windowsHide: true }
-    : { stdio: 'inherit', shell: false, windowsHide: true });
+    ? { encoding: 'utf8', env: utf8ChildEnvironment(), maxBuffer: 16 * 1024 * 1024, shell: false, windowsHide: true }
+    : { stdio: 'inherit', env: utf8ChildEnvironment(), shell: false, windowsHide: true });
   if (capture) {
     if (result.stdout) process.stdout.write(result.stdout);
     if (result.stderr) process.stderr.write(result.stderr);

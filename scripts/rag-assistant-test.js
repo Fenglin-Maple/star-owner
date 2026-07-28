@@ -150,6 +150,8 @@ async function startFakeProvider() {
     });
 
     const migrated = assistant.rawProvider('legacy-provider');
+    const emptyStateWithStaleSession = assistant.state('rag-session-that-no-longer-exists');
+    assert(emptyStateWithStaleSession.activeSession === null && emptyStateWithStaleSession.sessions.length === 0, 'stale RAG session id did not fall back to the empty state');
     assert(assistant.knowledgeCatalog()[0].documentCount === 1, 'superseded single-video document was included in the default RAG catalog');
     assert(migrated.maxOutputTokens === DEFAULT_MAX_OUTPUT_TOKENS && migrated.enabledModels[0].contextWindow === 400000 && migrated.enabledModels[0].maxOutputTokens === 128000, 'legacy token defaults were not migrated');
     assert(normalizeModel({ id: 'unknown-modern-model' }).contextWindow === DEFAULT_CONTEXT_WINDOW, 'modern default context window is incorrect');
@@ -167,6 +169,7 @@ async function startFakeProvider() {
     assert(assistant.rawProvider(provider.id).resolvedBaseUrl === fake.url, 'NewAPI /v1 endpoint was not discovered');
     assistant.updateProviderModels(provider.id, [{ id: 'fake-agent', contextWindow: 4096, maxOutputTokens: 2048, supportsTools: true, supportsReasoning: true, supportsVision: true, supportsCompression: true, supportsSubagents: true }]);
     const session = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', knowledgeCollectionIds: ['rag-collection'] });
+    assert(assistant.state('rag-session-that-no-longer-exists').activeSession?.id === session.id, 'stale RAG session id did not fall back to the first available session');
 
     const attachmentFile = path.join(root, 'attachment.md');
     fs.writeFileSync(attachmentFile, '# 附件\n\n附件文字。', 'utf8');

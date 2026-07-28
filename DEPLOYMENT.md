@@ -1,10 +1,10 @@
 # Deployment Guide
 
-Version: `1.0.3`
+Version: `1.0.4`
 
 ## 1. Portable Release for Users
 
-Download `Star-Owner-v<version>-win-x64-core.zip` from GitHub Releases, extract the complete archive to a writable local directory, and double-click `Start-StarOwner.cmd` in the extracted root. Do not run it from the ZIP preview. The portable archive does not require a global Node.js, Python, FFmpeg or SQLite installation.
+Download `Star-Owner-v<version>-win-x64-core.zip` from GitHub Releases, extract the complete archive to a writable short local directory such as `D:\Star-Owner`, and double-click `Start-StarOwner.cmd` in the extracted root. Do not run it from the ZIP preview. The portable archive does not require a global Node.js, Python, FFmpeg or SQLite installation.
 
 Do not install under a directory that the current user cannot modify. The portable application writes only to its project directory, registered Workspace libraries, and Electron user data required for the persistent Bilibili WebView partition.
 
@@ -30,7 +30,7 @@ Star-Owner-v<dependency-version>-model-medium.zip
 Star-Owner-v<dependency-version>-model-medium.zip.sha256
 ```
 
-The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs and exact asset names. Version `1.0.3` uses the unchanged `v1.0.0` runtime, small and medium assets; users do not need to redownload packages already installed and healthy.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs and exact asset names. Version `1.0.4` uses the unchanged `v1.0.0` runtime, small and medium assets; users do not need to redownload packages already installed and healthy.
 
 ## 2. Hardware and ASR
 
@@ -88,7 +88,7 @@ runtime/models/small/
 runtime/models/medium/
 ```
 
-The application does not require a global FFmpeg, yt-dlp, Python virtual environment or SQLite native binary.
+The application does not require a global FFmpeg, yt-dlp, Python virtual environment or SQLite native binary. Desktop media tools also use the bundled Electron executable in Node mode and never resolve a global `node.exe` through `PATH`.
 
 ## 4. External Knowledge API
 
@@ -182,6 +182,7 @@ Focused gates:
 npm run smoke
 npm run test:knowledge-api
 npm run test:hardware
+npm run test:runtime-node
 npm run test:internal-agent
 npm run test:document-lifecycle
 npm run test:collection-sync
@@ -192,6 +193,14 @@ npm run test:asr-service
 The aggregate verifier also runs scheduler, RAG, task rollback, video cache, image clipboard, persistence, Bilibili client, ASR timestamp format, analytics, JavaScript/Python syntax and `npm audit --audit-level=high`.
 
 ## 8. Troubleshooting
+
+### Windows reports a path-too-long risk
+
+Stop every Agent and close the application. Copy the **entire extracted project directory** to a short location such as `D:\Star-Owner`, start it there, and verify tasks, documents and login state before deleting the old copy. Do not move only `workspace/`. On the first start from the new location, `workspace/orchestrator.sqlite` automatically relocates paths below the built-in Workspace; registered external libraries remain unchanged. Video names are automatically sanitized and shortened to at least 24 characters, but a Workspace that cannot fit even that minimum is rejected with `WINDOWS_PATH_TOO_LONG`.
+
+### Chinese child-process logs contain replacement characters
+
+Version `1.0.4` forces project Python tools to UTF-8 and uses streaming UTF-8 decoders for tool, dependency and ASR output. Characters already stored as `�` by an older version cannot be reconstructed; reproduce the command after upgrading to obtain a clean log.
 
 ### Application starts but video Agent cannot run
 

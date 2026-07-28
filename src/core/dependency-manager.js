@@ -5,6 +5,7 @@ const { spawn } = require('child_process');
 const { Readable, Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const { recoverAtomicFile, writeFileRecoverable } = require('./atomic-file');
+const { readUtf8, utf8ChildEnvironment } = require('./child-process-io');
 const { ensureDir } = require('./workspace');
 
 const REPOSITORY = 'Fenglin-Maple/star-owner';
@@ -552,11 +553,11 @@ function directDependencyReleaseAsset(version, definition) {
 
 function run(file, args, cwd) {
   return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(file, args, { cwd, env: utf8ChildEnvironment(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
-    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    readUtf8(child.stdout, (text) => { stdout += text; });
+    readUtf8(child.stderr, (text) => { stderr += text; });
     child.on('error', reject);
     child.on('close', (code) => code === 0 ? resolve(stdout) : reject(new Error(`${file} exited ${code}: ${stderr || stdout}`.trim())));
   });

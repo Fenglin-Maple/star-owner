@@ -4,6 +4,11 @@ const crypto = require('crypto');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const WORKSPACE_ROOT = path.join(PROJECT_ROOT, 'workspace');
+const WINDOWS_MAX_PATH = 259;
+const MIN_ARTIFACT_NAME_LENGTH = 24;
+const MAX_ARTIFACT_NAME_LENGTH = 180;
+const TOOL_ID_PATH_LENGTH = 32;
+const STARTUP_IDENTITY_SEGMENT_LENGTH = 48;
 const DEFAULT_FILENAME_METADATA = Object.freeze({
   bvid: true,
   title: true,
@@ -24,9 +29,27 @@ function safeName(value, fallback = 'untitled', maxLength = 120) {
   return cleaned.slice(0, Math.max(1, Number(maxLength) || 120)).replace(/[. ]+$/g, '') || fallback;
 }
 
+class PathSafetyError extends Error {
+  constructor(targetPath, context = '文件路径') {
+    const resolved = path.resolve(targetPath);
+    super(buildPathTooLongMessage(resolved, context));
+    this.name = 'PathSafetyError';
+    this.code = 'WINDOWS_PATH_TOO_LONG';
+    this.path = resolved;
+    this.pathLength = resolved.length;
+    this.maxPathLength = WINDOWS_MAX_PATH;
+  }
+}
+
 function ensureDir(dir) {
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
+  const resolved = assertSafeWindowsPath(dir, '目录');
+  try {
+    fs.mkdirSync(resolved, { recursive: true });
+  } catch (error) {
+    if (isPathLengthError(error, resolved)) throw new PathSafetyError(resolved, '目录');
+    throw error;
+  }
+  return resolved;
 }
 
 function timestampForFile(date = new Date()) {
@@ -92,24 +115,104 @@ function videoArtifactName(task = {}, collection = {}, filenameMetadata = DEFAUL
 }
 
 function videoArtifactDir(collectionDir, task = {}, collection = {}, filenameMetadata = DEFAULT_FILENAME_METADATA) {
-  const title = fitArtifactName(collectionDir, videoArtifactName(task, collection, filenameMetadata));
+  const sourceName = videoArtifactName(task, collection, filenameMetadata);
+  const title = fitArtifactName(collectionDir, sourceName);
   const direct = path.join(collectionDir, title);
   if (!fs.existsSync(direct)) return direct;
   for (let index = 2; index < 1000; index += 1) {
-    const candidate = path.join(collectionDir, safeName(`${title} (${index})`, 'video-summary', 180));
+    const candidateName = fitArtifactName(collectionDir, `${sourceName} (${index})`);
+    const candidate = path.join(collectionDir, candidateName);
     if (!fs.existsSync(candidate)) return candidate;
   }
   throw new Error(`Could not allocate a unique artifact directory for ${task.bvid || task.title || 'video'}.`);
 }
 
 function fitArtifactName(collectionDir, value) {
-  const rootLength = path.resolve(collectionDir).length;
-  // The leaf is used once as a directory and again as the Markdown basename.
-  const maxLength = Math.max(32, Math.min(180, Math.floor((238 - rootLength - 7) / 2)));
-  const name = safeName(value, 'video-summary', 180);
+  const root = path.resolve(collectionDir);
+  const maxLength = maximumArtifactNameLength(root);
+  if (maxLength < MIN_ARTIFACT_NAME_LENGTH) {
+    throw new PathSafetyError(deepestArtifactPath(root, 'v'.repeat(MIN_ARTIFACT_NAME_LENGTH)), '视频工作产物路径');
+  }
+  const name = safeName(value, 'video-summary', 4096);
   if (name.length <= maxLength) return name;
   const suffix = crypto.createHash('sha1').update(name).digest('hex').slice(0, 8);
   return safeName(`${name.slice(0, Math.max(1, maxLength - suffix.length - 1))}-${suffix}`, 'video-summary', maxLength);
+}
+
+function maximumArtifactNameLength(collectionDir) {
+  if (process.platform !== 'win32') return MAX_ARTIFACT_NAME_LENGTH;
+  for (let length = MAX_ARTIFACT_NAME_LENGTH; length >= MIN_ARTIFACT_NAME_LENGTH; length -= 1) {
+    if (deepestArtifactPaths(collectionDir, 'v'.repeat(length)).every((candidate) => candidate.length <= WINDOWS_MAX_PATH)) return length;
+  }
+  return 0;
+}
+
+function deepestArtifactPaths(collectionDir, artifactName) {
+  const artifactDir = path.join(path.resolve(collectionDir), artifactName);
+  return [
+    path.join(artifactDir, `${artifactName}.md`),
+    path.join(artifactDir, 'tool-runs', `${'0'.repeat(13)}-${'t'.repeat(TOOL_ID_PATH_LENGTH)}-${'f'.repeat(6)}.log`),
+    path.join(artifactDir, 'subtitles', `p99-${'s'.repeat(48)}.json`),
+    path.join(artifactDir, 'asr', 'asr-transcript.txt')
+  ];
+}
+
+function deepestArtifactPath(collectionDir, artifactName) {
+  return deepestArtifactPaths(collectionDir, artifactName).sort((left, right) => right.length - left.length)[0];
+}
+
+function assertSafeWindowsPath(targetPath, context = '文件路径') {
+  const resolved = path.resolve(targetPath);
+  if (process.platform === 'win32' && resolved.length > WINDOWS_MAX_PATH) throw new PathSafetyError(resolved, context);
+  return resolved;
+}
+
+function isPathLengthError(error, targetPath = '') {
+  if (process.platform !== 'win32') return error?.code === 'ENAMETOOLONG';
+  return String(targetPath || '').length > WINDOWS_MAX_PATH
+    || error?.code === 'ENAMETOOLONG'
+    || /path too long|filename or extension is too long/i.test(String(error?.message || ''));
+}
+
+function buildPathTooLongMessage(targetPath, context = '文件路径') {
+  return `${context}过长（${targetPath.length}/${WINDOWS_MAX_PATH} 个字符），Windows 无法可靠创建本次产物。请关闭星藏家并停止所有 Agent。项目内默认库应将整个项目复制到更短的位置（建议 D:\\Star-Owner），不要只移动 workspace；自定义工作库应在设置中新建更短的目录并设为默认。`;
+}
+
+function evaluateWorkspacePathSafety(workspaces = [], collections = []) {
+  if (process.platform !== 'win32') return { safe: true, platform: process.platform, limit: WINDOWS_MAX_PATH, checked: [] };
+  const checked = [];
+  const collectionList = Array.isArray(collections) ? collections : [];
+  const workspaceList = Array.isArray(workspaces) ? workspaces : [];
+  const defaultWorkspaces = workspaceList.filter((item) => item?.isDefault);
+  for (const workspace of defaultWorkspaces.length ? defaultWorkspaces : workspaceList.slice(0, 1)) {
+    const root = path.resolve(workspace?.root || WORKSPACE_ROOT);
+    const futureCollectionRoot = path.join(root, '用'.repeat(STARTUP_IDENTITY_SEGMENT_LENGTH), '收'.repeat(STARTUP_IDENTITY_SEGMENT_LENGTH));
+    checked.push(pathSafetyCandidate(workspace?.id || 'workspace', root, futureCollectionRoot, '未来收藏夹预留'));
+    for (const collection of collectionList.filter((item) => item.workspaceId ? item.workspaceId === workspace?.id : Boolean(workspace?.isDefault))) {
+      const collectionDir = collection.collectionRoot
+        ? path.resolve(collection.collectionRoot)
+        : path.join(root, safeName(collection.userName || collection.userId || 'unknown-user'), safeName(collection.name || 'favorite'));
+      checked.push(pathSafetyCandidate(workspace?.id || 'workspace', root, collectionDir, collection.name || collection.id || '已同步收藏夹'));
+    }
+  }
+  const unsafe = checked.filter((item) => !item.safe).sort((left, right) => right.length - left.length);
+  const longest = checked.slice().sort((left, right) => right.length - left.length)[0] || null;
+  return {
+    safe: unsafe.length === 0,
+    platform: process.platform,
+    limit: WINDOWS_MAX_PATH,
+    minimumArtifactNameLength: MIN_ARTIFACT_NAME_LENGTH,
+    checkedCount: checked.length,
+    longest,
+    unsafeCount: unsafe.length,
+    unsafe: unsafe.slice(0, 10),
+    message: unsafe.length ? buildPathTooLongMessage(unsafe[0].path, `${unsafe[0].label}的预计视频产物路径`) : ''
+  };
+}
+
+function pathSafetyCandidate(workspaceId, workspaceRoot, collectionDir, label) {
+  const candidate = deepestArtifactPath(collectionDir, 'v'.repeat(MIN_ARTIFACT_NAME_LENGTH));
+  return { workspaceId, workspaceRoot, collectionRoot: collectionDir, label, path: candidate, length: candidate.length, safe: candidate.length <= WINDOWS_MAX_PATH };
 }
 
 function metadataToken(label, value, maxValueLength = 32) {
@@ -151,12 +254,19 @@ function initWorkspace() {
 
 module.exports = {
   DEFAULT_FILENAME_METADATA,
+  MAX_ARTIFACT_NAME_LENGTH,
+  MIN_ARTIFACT_NAME_LENGTH,
+  PathSafetyError,
   PROJECT_ROOT,
+  TOOL_ID_PATH_LENGTH,
+  WINDOWS_MAX_PATH,
   WORKSPACE_ROOT,
+  assertSafeWindowsPath,
   assertInside,
   collectionDirs,
   collectionRoot,
   ensureDir,
+  evaluateWorkspacePathSafety,
   fitArtifactName,
   initWorkspace,
   libraryUserRoot,

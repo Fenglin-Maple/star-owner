@@ -23,7 +23,7 @@ const { Store } = require('./core/store');
 const { recoverPendingSubmissionFinalizations } = require('./core/submission-artifacts');
 const { ToolRunner } = require('./core/tool-runner');
 const { VideoCacheManager } = require('./core/video-cache-manager');
-const { initWorkspace, timestampForFile, videoArtifactName, WORKSPACE_ROOT } = require('./core/workspace');
+const { assertSafeWindowsPath, ensureDir, evaluateWorkspacePathSafety, fitArtifactName, initWorkspace, safeName, timestampForFile, videoArtifactName, WORKSPACE_ROOT } = require('./core/workspace');
 
 const BILI_SESSION = 'persist:bili-orchestrator';
 const PRODUCT_NAME = '星藏家';
@@ -61,6 +61,7 @@ let biliRefreshGeneration = -1;
 let biliRefreshPromise = null;
 let backendReady = false;
 let toolHealth = [];
+let pathSafety = null;
 let bootstrapStarted = false;
 const VOLATILE_ACTIVITY_TYPES = new Set(['collection-sync-progress', 'asr-progress', 'asr-service-log', 'video-cache-job-updated', 'video-cache-queue-updated']);
 const pendingRagApprovals = new Map();
@@ -174,6 +175,12 @@ async function bootstrap() {
   initWorkspace();
   emitBootstrap('Opening SQLite database...', 0.32);
   store = await Store.open();
+  if (store.portableRelocation) {
+    console.info(`[portable-workspace] relocated ${store.portableRelocation.updatedRecords} records from ${store.portableRelocation.oldRoot} to ${store.portableRelocation.newRoot}`);
+  }
+  pathSafety = refreshPathSafetyState();
+  if (!pathSafety.safe) console.warn(`[path-safety] ${pathSafety.message}`);
+  sendRuntime();
   const recoveredSubmissions = recoverPendingSubmissionFinalizations(store);
   for (const result of recoveredSubmissions) {
     if (!result.ok) console.warn(`[submission-recovery] ${result.taskId}: ${result.error}`);
@@ -318,6 +325,7 @@ ipcMain.handle('app:get-runtime', async () => ({
   filenameMetadata: store?.getFilenameMetadata() || null,
   dependencies: dependencyManager?.state() || null,
   videoCache: videoCacheManager?.state() || null,
+  pathSafety,
   backendReady,
   bootstrap: bootstrapState
 }));
@@ -559,7 +567,9 @@ ipcMain.handle('workspaces:add', async (_event, payload = {}) => {
   });
   if (result.canceled || !result.filePaths[0]) return { canceled: true };
   const workspace = store.addWorkspace({ name: payload.name, root: result.filePaths[0] });
+  refreshPathSafetyState();
   publishEvent({ type: 'workspace-added', workspaceId: workspace.id, root: workspace.root });
+  sendRuntime();
   return { canceled: false, workspace };
 });
 
@@ -567,6 +577,7 @@ ipcMain.handle('workspaces:set-default', async (_event, id) => {
   assertBackendReady();
   const workspace = store.setDefaultWorkspace(id);
   ragAssistant?.setWorkspaceRoot(workspace.root);
+  refreshPathSafetyState();
   publishEvent({ type: 'workspace-default-changed', workspaceId: workspace.id, root: workspace.root });
   sendRuntime();
   return workspace;
@@ -575,7 +586,9 @@ ipcMain.handle('workspaces:set-default', async (_event, id) => {
 ipcMain.handle('workspaces:remove', async (_event, id) => {
   assertBackendReady();
   const workspace = store.removeWorkspace(id);
+  refreshPathSafetyState();
   if (workspace) publishEvent({ type: 'workspace-removed', workspaceId: workspace.id });
+  sendRuntime();
   return { removed: Boolean(workspace) };
 });
 
@@ -650,7 +663,10 @@ ipcMain.handle('credentials:delete', async (_event, id) => {
 
 ipcMain.handle('api:sync-collection', async (_event, payload) => {
   assertBackendReady();
-  return collectionSyncService.sync(payload || {});
+  const result = await collectionSyncService.sync(payload || {});
+  refreshPathSafetyState();
+  sendRuntime();
+  return result;
 });
 
 ipcMain.handle('tools:list', async () => store ? store.listTools() : []);
@@ -745,7 +761,7 @@ ipcMain.handle('rag:create-sandbox', async () => {
   assertBackendReady();
   const root = store.getDefaultWorkspace()?.root || WORKSPACE_ROOT;
   const directory = path.join(root, '.star-note', 'rag-sandboxes', `sandbox-${timestampForFile()}`);
-  fs.mkdirSync(directory, { recursive: true });
+  ensureDir(directory);
   return { path: directory };
 });
 
@@ -994,9 +1010,16 @@ function sendRuntime() {
     filenameMetadata: store?.getFilenameMetadata() || null,
     dependencies: dependencyManager?.state() || null,
     videoCache: videoCacheManager?.state() || null,
+    pathSafety,
     backendReady,
     bootstrap: bootstrapState
   });
+}
+
+function refreshPathSafetyState() {
+  if (!store) return pathSafety;
+  pathSafety = evaluateWorkspacePathSafety(store.listWorkspaces(), store.listCollections());
+  return pathSafety;
 }
 
 async function refreshToolHealth() {
@@ -1117,8 +1140,7 @@ function publishDependencyEvent(event) {
 }
 
 function exportMarkdownTasks(directory, taskIds, filenameMetadata) {
-  const targetRoot = path.resolve(directory);
-  fs.mkdirSync(targetRoot, { recursive: true });
+  const targetRoot = ensureDir(path.resolve(directory));
   const exported = [];
   const skipped = [];
   const usedNames = new Set();
@@ -1130,7 +1152,7 @@ function exportMarkdownTasks(directory, taskIds, filenameMetadata) {
       continue;
     }
     const collection = store.getCollectionById(task.collectionId) || {};
-    const base = videoArtifactName(task, collection, filenameMetadata);
+    const base = fitArtifactName(targetRoot, videoArtifactName(task, collection, filenameMetadata));
     const filename = uniqueMarkdownName(base, targetRoot, usedNames);
     const targetFile = path.join(targetRoot, filename);
     try {
@@ -1175,40 +1197,40 @@ function copyMarkdownForExport(sourceFile, targetFile, targetRoot) {
     try { decoded = decodeURIComponent(reference.split('#')[0].split('?')[0]); } catch { return match; }
     const local = safeLocalDisplayAsset(sourceRoot, path.resolve(sourceRoot, decoded));
     if (!local) return match;
-    fs.mkdirSync(assetRoot, { recursive: true });
+    ensureDir(assetRoot);
     const targetName = uniqueAssetName(path.basename(local), assetRoot, used);
-    const target = path.join(assetRoot, targetName);
+    const target = assertSafeWindowsPath(path.join(assetRoot, targetName), '导出图片路径');
     fs.copyFileSync(local, target);
     const relative = path.relative(targetRoot, target).split(path.sep).join('/');
     assets.push({ source: local, exported: target, relative });
     return `${opening}<${relative}>${closing}`;
   });
-  fs.writeFileSync(targetFile, rewritten, 'utf8');
+  fs.writeFileSync(assertSafeWindowsPath(targetFile, '导出 Markdown 路径'), rewritten, 'utf8');
   return { assets };
 }
 
 function uniqueAssetName(name, directory, used) {
   const extension = path.extname(name);
-  const base = path.basename(name, extension);
+  const base = safeName(path.basename(name, extension), 'asset', 64);
   let index = 1;
-  let candidate = name;
-  while (used.has(candidate.toLowerCase()) || fs.existsSync(path.join(directory, candidate))) candidate = `${base}-${++index}${extension}`;
+  let candidate = `${base}${extension}`;
+  while (used.has(candidate.toLowerCase()) || fs.existsSync(assertSafeWindowsPath(path.join(directory, candidate), '导出图片路径'))) candidate = `${base}-${++index}${extension}`;
   used.add(candidate.toLowerCase());
   return candidate;
 }
 
 function uniqueExportManifest(directory) {
   const stem = `star-owner-rag-manifest-${timestampForFile()}`;
-  let candidate = path.join(directory, `${stem}.json`);
+  let candidate = assertSafeWindowsPath(path.join(directory, `${stem}.json`), '导出清单路径');
   let index = 2;
-  while (fs.existsSync(candidate)) candidate = path.join(directory, `${stem}-${index++}.json`);
+  while (fs.existsSync(candidate)) candidate = assertSafeWindowsPath(path.join(directory, `${stem}-${index++}.json`), '导出清单路径');
   return candidate;
 }
 
 function uniqueMarkdownName(base, directory, usedNames) {
   let counter = 1;
   let filename = `${base}.md`;
-  while (usedNames.has(filename.toLowerCase()) || fs.existsSync(path.join(directory, filename))) {
+  while (usedNames.has(filename.toLowerCase()) || fs.existsSync(assertSafeWindowsPath(path.join(directory, filename), '导出 Markdown 路径'))) {
     counter += 1;
     filename = `${base} (${counter}).md`;
   }

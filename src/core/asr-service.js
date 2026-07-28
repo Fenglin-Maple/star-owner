@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const { spawn } = require('child_process');
+const { readUtf8, utf8ChildEnvironment } = require('./child-process-io');
 const { PROJECT_ROOT } = require('./workspace');
 
 class AsrService {
@@ -66,6 +67,7 @@ class AsrService {
         reject(new Error(this.lastError));
       }, 120000);
 
+      child.stdout.setEncoding('utf8');
       const lines = readline.createInterface({ input: child.stdout });
       lines.on('line', (line) => {
         let message;
@@ -107,10 +109,10 @@ class AsrService {
         this.currentRequestId = '';
         message.ok ? pending.resolve(message) : pending.reject(new Error(message.error || 'ASR request failed.'));
       });
-      child.stderr.on('data', (chunk) => {
-        const message = String(chunk).trim();
+      readUtf8(child.stderr, (text) => {
+        const message = text.trim();
         if (message && !this.ready) this.lastError = message.slice(-2000);
-        this.onLog(this.id, String(chunk));
+        this.onLog(this.id, text);
       });
       child.on('error', (error) => {
         this.lastError = error.message;
@@ -234,10 +236,8 @@ function serviceEnvironment(projectRoot = PROJECT_ROOT) {
     .filter((item) => item && fs.existsSync(item));
   if (process.env.PATH) executablePaths.push(process.env.PATH);
   return {
-    ...process.env,
+    ...utf8ChildEnvironment(),
     VIRTUAL_ENV: venv,
-    PYTHONUTF8: '1',
-    PYTHONIOENCODING: 'utf-8',
     PYTHONPATH: [sitePackages, process.env.PYTHONPATH || ''].filter(Boolean).join(path.delimiter),
     PATH: executablePaths.join(path.delimiter)
   };

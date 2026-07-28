@@ -2,9 +2,11 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { PassThrough } = require('stream');
+const { nodeChildProcessSpec, readUtf8, utf8ChildEnvironment } = require('../src/core/child-process-io');
 const { buildBundle, extractFrames, resolveCommand } = require('../tools/video-tool');
 const { ToolRunner } = require('../src/core/tool-runner');
-const { PROJECT_ROOT } = require('../src/core/workspace');
+const { MIN_ARTIFACT_NAME_LENGTH, PROJECT_ROOT, PathSafetyError, evaluateWorkspacePathSafety, fitArtifactName, safeName } = require('../src/core/workspace');
 
 (async () => {
   const root = path.join(PROJECT_ROOT, 'workspace', '.star-note', 'media-edge-cases-92%test');
@@ -12,6 +14,30 @@ const { PROJECT_ROOT } = require('../src/core/workspace');
   fs.mkdirSync(root, { recursive: true });
   const ffmpeg = resolveCommand('ffmpeg');
   assert(ffmpeg, 'Project-local FFmpeg is missing.');
+  assert.strictEqual(utf8ChildEnvironment({ PATH: 'test' }).PYTHONIOENCODING, 'utf-8', 'Python child processes are not forced to UTF-8.');
+  const localNode = nodeChildProcessSpec({ PATH: path.join(root, 'fake-global-node'), ELECTRON_RUN_AS_NODE: 'stale' });
+  assert.strictEqual(path.resolve(localNode.executable), path.resolve(process.execPath), 'Tool child process can still resolve a global Node executable.');
+  if (!process.versions.electron) assert.strictEqual(localNode.env.ELECTRON_RUN_AS_NODE, undefined, 'Plain Node child inherited an Electron runtime flag.');
+  assert.strictEqual(safeName('标题\\带/非法:字符*?"<>|'), '标题带非法字符', 'Windows-reserved filename characters were not removed.');
+  if (process.platform === 'win32') {
+    const fittingRoot = `C:\\${'a'.repeat(156)}`;
+    const fitted = fitArtifactName(fittingRoot, '长标题'.repeat(100));
+    assert(fitted.length >= MIN_ARTIFACT_NAME_LENGTH, 'Recoverable long paths shortened the artifact below 24 characters.');
+    assert(path.join(fittingRoot, fitted, `${fitted}.md`).length <= 259, 'Final Markdown path still exceeds the Windows limit.');
+    assert(path.join(fittingRoot, fitted, 'tool-runs', `${'0'.repeat(13)}-${'t'.repeat(32)}-${'f'.repeat(6)}.log`).length <= 259, 'Tool log path still exceeds the Windows limit.');
+    assert.notStrictEqual(fitArtifactName('D:\\short', 'x'.repeat(180)), fitArtifactName('D:\\short', `${'x'.repeat(180)} (2)`), 'Duplicate suffix was truncated before unique artifact hashing.');
+    assert.throws(() => fitArtifactName(`C:\\${'a'.repeat(168)}`, '长标题'.repeat(100)), (error) => error instanceof PathSafetyError && error.code === 'WINDOWS_PATH_TOO_LONG');
+    assert.strictEqual(evaluateWorkspacePathSafety([{ id: 'short', root: 'D:\\Star-Owner\\workspace', isDefault: true }], []).safe, true, 'Short workspace path was incorrectly rejected.');
+    assert.strictEqual(evaluateWorkspacePathSafety([{ id: 'deep', root: `C:\\${'x'.repeat(100)}`, isDefault: true }], []).safe, false, 'Unsafe workspace path was not detected at startup.');
+  }
+  const splitUtf8 = new PassThrough();
+  let decodedUtf8 = '';
+  readUtf8(splitUtf8, (text) => { decodedUtf8 += text; });
+  const chinese = Buffer.from('中文路径与日志', 'utf8');
+  for (const byte of chinese) splitUtf8.write(Buffer.from([byte]));
+  splitUtf8.end();
+  await new Promise((resolve) => splitUtf8.once('end', resolve));
+  assert.strictEqual(decodedUtf8, '中文路径与日志', 'Split UTF-8 chunks produced replacement characters in logs.');
   const gracefulFailure = spawnSync(process.execPath, [
     path.join(PROJECT_ROOT, 'tools', 'video-tool.js'), 'not-a-command', 'BV1xx411c7mD'
   ], { cwd: PROJECT_ROOT, windowsHide: true, encoding: 'utf8' });

@@ -110,6 +110,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Read-only knowledge API test failed." }
   & npm run test:hardware
   if ($LASTEXITCODE -ne 0) { throw "ASR hardware capability test failed." }
+  & npm run test:runtime-node
+  if ($LASTEXITCODE -ne 0) { throw "Bundled Electron Node runtime test failed." }
   & npm run test:image-clipboard
   if ($LASTEXITCODE -ne 0) { throw "Image clipboard security test failed." }
   & npm run test:persistence

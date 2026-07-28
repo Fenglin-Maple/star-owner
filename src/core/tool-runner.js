@@ -3,13 +3,14 @@ const path = require('path');
 const { execFile, spawn, spawnSync } = require('child_process');
 const { promisify } = require('util');
 const { AsrService } = require('./asr-service');
+const { nodeChildProcessSpec, readUtf8, utf8ChildEnvironment } = require('./child-process-io');
 const { detectAsrHardware } = require('./hardware-capabilities');
 const { isVideoUnavailableMessage, unsupportedVideoError, videoUnavailableError } = require('./media-errors');
 const { ResourceScheduler } = require('./resource-scheduler');
 const { abortTaskAttempt, recoverPendingAttemptCleanups } = require('./task-attempt');
 const { removeUnavailableTask } = require('./unavailable-task');
 const { inspectVideoSupport } = require('./video-support');
-const { PROJECT_ROOT, assertInside, ensureDir, safeName } = require('./workspace');
+const { PROJECT_ROOT, TOOL_ID_PATH_LENGTH, assertInside, assertSafeWindowsPath, ensureDir, safeName } = require('./workspace');
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_TIMEOUT_MS = 2 * 60 * 60 * 1000;
@@ -199,9 +200,9 @@ class ToolRunner {
 
     const artifactDir = assertInside(task.allowedRoot, task.artifactDir);
     ensureDir(artifactDir);
-    const runId = `${Date.now()}-${safeName(tool.id)}-${Math.random().toString(16).slice(2, 8)}`;
+    const runId = `${Date.now()}-${safeName(tool.id, 'tool', TOOL_ID_PATH_LENGTH)}-${Math.random().toString(16).slice(2, 8)}`;
     const runDir = ensureDir(path.join(artifactDir, 'tool-runs'));
-    const logFile = path.join(runDir, `${runId}.log`);
+    const logFile = assertSafeWindowsPath(path.join(runDir, `${runId}.log`), '工具运行日志路径');
     const timeoutMs = clampNumber(options.timeoutMs, 60 * 1000, 12 * 60 * 60 * 1000, DEFAULT_TIMEOUT_MS);
     const now = new Date().toISOString();
     const callerId = workerId || agentName || task.claimedBy || 'unknown-worker';
@@ -552,8 +553,10 @@ class ToolRunner {
       const rememberOutput = (chunk) => {
         outputTail = `${outputTail}${String(chunk)}`.slice(-8000);
       };
-      const child = spawn('node', args, {
+      const node = nodeChildProcessSpec();
+      const child = spawn(node.executable, args, {
         cwd: PROJECT_ROOT,
+        env: node.env,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe']
       });
@@ -571,16 +574,15 @@ class ToolRunner {
         if (this.processes.get(state.runId) === child) this.processes.delete(state.runId);
         error ? reject(error) : resolve(result);
       };
-      child.stdout.on('data', (chunk) => {
-        const text = String(chunk);
+      readUtf8(child.stdout, (text) => {
         rememberOutput(text);
         this.appendLog(state.runId, text);
         const progress = parseDownloadProgress(text);
         if (progress) this.updateRun(state.runId, { downloadProgress: progress });
       });
-      child.stderr.on('data', (chunk) => {
-        rememberOutput(chunk);
-        this.appendLog(state.runId, String(chunk));
+      readUtf8(child.stderr, (text) => {
+        rememberOutput(text);
+        this.appendLog(state.runId, text);
       });
       child.on('error', (error) => finish(error));
       child.on('close', (code, signal) => {
@@ -1195,13 +1197,19 @@ function probeTool(tool) {
       settled = true;
       resolve({ ...base, durationMs: Date.now() - startedAt, ...result });
     };
-    const child = spawn('node', [script, 'health', tool.action], { cwd: PROJECT_ROOT, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const node = nodeChildProcessSpec();
+    const child = spawn(node.executable, [script, 'health', tool.action], {
+      cwd: PROJECT_ROOT,
+      env: node.env,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
     const timer = setTimeout(() => {
       killProcessTree(child);
       finish({ status: 'offline', responded: false, message: '健康检查 15 秒内未响应', dependencies: [] });
     }, 15000);
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    readUtf8(child.stdout, (text) => { stdout += text; });
+    readUtf8(child.stderr, (text) => { stderr += text; });
     child.on('error', (error) => {
       clearTimeout(timer);
       finish({ status: 'offline', responded: false, message: error.message, dependencies: [] });

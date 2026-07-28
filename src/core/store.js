@@ -11,6 +11,8 @@ class Store {
   constructor(SQL, file = DB_FILE) {
     this.SQL = SQL;
     this.file = file;
+    this.portableWorkspaceRoot = portableWorkspaceRootForDatabase(file);
+    this.portableRelocation = null;
     ensureDir(path.dirname(file));
     recoverAtomicFile(file);
     try {
@@ -20,6 +22,7 @@ class Store {
       this.db = new SQL.Database(fs.readFileSync(file));
     }
     this.initSchema();
+    this.portableRelocation = this.relocatePortableWorkspacePaths();
     this.initDefaultWorkspace();
     this.initDefaultTools();
     this.migrateLegacyTasks();
@@ -414,7 +417,7 @@ class Store {
       this.set('workspaces', 'default', {
         id: 'default',
         name: '默认工作库',
-        root: WORKSPACE_ROOT,
+        root: this.portableWorkspaceRoot,
         isDefault: true,
         createdAt: now,
         updatedAt: now
@@ -425,6 +428,28 @@ class Store {
       const first = workspaces[0];
       this.set('workspaces', first.id, { ...first, isDefault: true, updatedAt: new Date().toISOString() });
     }
+  }
+
+  relocatePortableWorkspacePaths() {
+    const portable = this.get('workspaces', 'default');
+    if (!portable?.root) return null;
+    const oldRoot = path.resolve(portable.root);
+    const newRoot = path.resolve(this.portableWorkspaceRoot);
+    if (sameFilesystemPath(oldRoot, newRoot)) return null;
+
+    const stmt = this.db.prepare('SELECT scope, id, data FROM kv ORDER BY scope, id');
+    const rows = [];
+    while (stmt.step()) rows.push(stmt.getAsObject());
+    stmt.free();
+    let updatedRecords = 0;
+    for (const row of rows) {
+      const value = JSON.parse(row.data);
+      const relocated = relocatePortableValue(value, oldRoot, newRoot);
+      if (!relocated.changed) continue;
+      this.set(row.scope, row.id, relocated.value);
+      updatedRecords += 1;
+    }
+    return { oldRoot, newRoot, updatedRecords, movedAt: new Date().toISOString() };
   }
 
   listWorkspaces() {
@@ -527,6 +552,46 @@ function isPathInside(root, candidate) {
   if (!candidate) return false;
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function portableWorkspaceRootForDatabase(file) {
+  return path.basename(String(file || '')).toLowerCase() === 'orchestrator.sqlite'
+    ? path.resolve(path.dirname(file))
+    : WORKSPACE_ROOT;
+}
+
+function relocatePortableValue(value, oldRoot, newRoot) {
+  if (typeof value === 'string') {
+    if (!path.isAbsolute(value) || !isPathInside(oldRoot, value)) return { value, changed: false };
+    const relative = path.relative(oldRoot, path.resolve(value));
+    return { value: path.join(newRoot, relative), changed: true };
+  }
+  if (Array.isArray(value)) {
+    let changed = false;
+    const next = value.map((item) => {
+      const relocated = relocatePortableValue(item, oldRoot, newRoot);
+      changed ||= relocated.changed;
+      return relocated.value;
+    });
+    return { value: changed ? next : value, changed };
+  }
+  if (value && typeof value === 'object') {
+    let changed = false;
+    const next = {};
+    for (const [key, item] of Object.entries(value)) {
+      const relocated = relocatePortableValue(item, oldRoot, newRoot);
+      changed ||= relocated.changed;
+      next[key] = relocated.value;
+    }
+    return { value: changed ? next : value, changed };
+  }
+  return { value, changed: false };
+}
+
+function sameFilesystemPath(left, right) {
+  const a = path.resolve(left);
+  const b = path.resolve(right);
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
 function defaultTools() {

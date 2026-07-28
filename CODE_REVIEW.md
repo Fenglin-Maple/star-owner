@@ -1,8 +1,8 @@
 # 星藏家代码审查记录
 
-审查日期：2026-07-24
+审查日期：2026-07-29
 
-目标版本：`1.0.3`
+目标版本：`1.0.4`
 
 ## 审查范围
 
@@ -19,6 +19,16 @@
 - 依赖安装、便携打包、文档、版本、测试和发布门禁。
 
 ## 本版本修复
+
+### 1.0.4 路径、运行时与日志审查
+
+- **高：Release 工具子进程通过 `spawn('node')` 依赖用户全局 Node。** 改为 `process.execPath`；Electron 主进程设置 `ELECTRON_RUN_AS_NODE=1`，普通 Node 测试使用当前项目进程。新增回归测试会清空有效 `PATH` 后调用项目内 Electron 24 / Node 24.18.0，工具健康检查仍须成功。
+- **高：长标题只按最终 Markdown 粗略缩短，工具日志可能更深，Workspace 过深时仍会越过 Windows 上限。** 新预算同时覆盖同名 Markdown、`tool-runs`、字幕和 ASR；非法字符与保留名称统一清理，名称最低 24 字符，无法容纳时返回 `WINDOWS_PATH_TOO_LONG` 和整项目迁移步骤。启动预警先于 ASR 依赖提示。
+- **高：整体移动便携项目后，SQLite 仍保存旧默认 Workspace 绝对路径。** 数据库启动时以自身所在 `workspace/` 为新内置根，递归重定位任务、文档、缓存、日志、同步文件与 RAG 沙盒；外部 Workspace 保持原路径。持久化测试覆盖真实目录移动。
+- **中：子进程中文 UTF-8 字符跨数据块时会被 `String(chunk)` 解码成 `�`。** 工具、ASR、依赖安装和 RAG CMD 统一 UTF-8 环境与流式解码。历史已损失字符不可恢复，新日志和启动页事件不再产生同类乱码。
+- **中：RAG 前端 localStorage 残留已删除 Session ID。** 后端状态会回退到首个有效会话或空状态，前端同步清除陈旧 ID，便携副本不再显示误导性的 Session 不存在错误。
+- **低：Mermaid 间接依赖 DOMPurify 3.4.11 命中自定义元素清理绕过公告。** 锁文件升级到 DOMPurify 3.4.12，`npm audit --audit-level=low` 为 0 项。
+- Issue `BV1qY411c7K4` 已完成真实下载、合并、字幕、评论、音频、12 帧和 `medium + CUDA` ASR（3611 秒、260 个时间戳片段），并在 Node 20.20.2、22.23.1、24.15.0 与 Electron Node 24.18.0 路径测试中成功，未复现 `0xC0000409`。报告路径约 169 字符，不是本例直接原因；若报告者仍能复现，应继续收集 `node -v`、`where node` 和 Windows 事件查看器的故障模块。固定内置 Node 已消除项目侧最明确的环境漂移风险。
 
 ### 1.0.3 增补修复
 
@@ -83,6 +93,8 @@
 - `npm run test:internal-agent`：内部任务开关、单视频唯一覆盖与删除后新建；
 - `npm run test:document-lifecycle`：B 站恢复与本地永久删除矩阵；
 - `npm run test:media-edge`：无音轨视频识别、百分号路径下三种任务来源抽帧、空 ASR 诊断、继续处理和工具失败句柄清理；
+- `npm run test:persistence`：数据库原子恢复与便携项目整体移动后的路径重定位；
+- `npm run test:runtime-node`：无全局 PATH 时使用项目内 Electron Node 执行工具；
 - `npm run test:collection-sync`：事务回滚、部分可见快照、缺席任务保留和错误墓碑恢复；
 - `npm run smoke`：端到端只读 API 和核心应用契约。
 

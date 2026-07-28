@@ -1,6 +1,6 @@
 # 星藏家 Design
 
-Version: `1.0.3`
+Version: `1.0.4`
 
 ## 1. Product Goal
 
@@ -63,7 +63,7 @@ Important modules:
 
 ## 4. Persistence
 
-The database is `workspace/orchestrator.sqlite`. sql.js exports atomically through a temporary file, fsync, backup, and recovery path. Transaction save failure restores the pre-transaction database.
+The database is `workspace/orchestrator.sqlite`. sql.js exports atomically through a temporary file, fsync, backup, and recovery path. Transaction save failure restores the pre-transaction database. On portable-project relocation, the database location is authoritative for the built-in default Workspace: every absolute path below the old built-in root is recursively rewritten to the new root, while separately registered external Workspace paths remain unchanged.
 
 Main record scopes include:
 
@@ -98,6 +98,8 @@ At least one Workspace is always registered and one is default. New artifacts us
 ```
 
 Collection display names may change, so path identity uses collection ID plus a persistent `storageName`. The knowledge API accepts artifacts only inside a registered Workspace real path and rejects traversal and symlink escape.
+
+On Windows, managed paths target a 259-character compatibility ceiling. Artifact naming budgets the final repeated Markdown basename, bounded subtitle names, ASR files and a worst-case tool-run log. Metadata is sanitized for reserved characters, device names and trailing dots/spaces. A long name is reduced with a stable hash but never below 24 characters; if the minimum still cannot fit, `PathSafetyError/WINDOWS_PATH_TOO_LONG` stops the attempt with portable migration instructions. Startup evaluates the default Workspace, its existing collection roots and a conservative future collection shape before dependency prompting. RAG attachments and Markdown export paths use the same guard.
 
 ## 6. Bilibili Login
 
@@ -296,7 +298,9 @@ Startup is an independently scrollable page. It includes a five-step first-run j
 
 The main window appears before heavy initialization. Bootstrap progress covers database, dependencies, models, resource pools, ASR health, knowledge API and login synchronization. Tool probes run during startup and report online/degraded/offline state. Startup uses content-height rows and its own vertical scroll container so onboarding, health, prompt and the bounded 500-event log remain reachable at the default and reduced window sizes. Once a Windows portable backend first reaches Ready, it creates a Desktop shortcut that targets the bundled Electron executable with the current portable root as its application argument, working directory and icon source. A per-installation SQLite record prevents repeated creation; failures are non-fatal and reported in the UI.
 
-Project-local runtime and models may be installed from GitHub Release assets. Downloads use bounded retry with backoff and HTTP Range continuation while retaining `.partial` data. Verification prefers the Release asset SHA-256 digest; direct-URL fallback obtains the matching `.sha256` before transferring the large archive. Complete archives survive transient checksum-network failures, but unverified content is never installed. Installation uses staging, backup, a transaction journal and startup rollback, then refreshes ASR and tool health without requiring an application restart. Archives may write only below `runtime/`. Application and dependency versions are independent: `package.json.dependencyReleaseVersion` is the compatibility contract used by the manager, portable manifest and API-rate-limit direct fallback. Version `1.0.3` pins the unchanged runtime, small and medium assets from dependency baseline `1.0.0`.
+Project-local runtime and models may be installed from GitHub Release assets. Downloads use bounded retry with backoff and HTTP Range continuation while retaining `.partial` data. Verification prefers the Release asset SHA-256 digest; direct-URL fallback obtains the matching `.sha256` before transferring the large archive. Complete archives survive transient checksum-network failures, but unverified content is never installed. Installation uses staging, backup, a transaction journal and startup rollback, then refreshes ASR and tool health without requiring an application restart. Archives may write only below `runtime/`. Application and dependency versions are independent: `package.json.dependencyReleaseVersion` is the compatibility contract used by the manager, portable manifest and API-rate-limit direct fallback. Version `1.0.4` pins the unchanged runtime, small and medium assets from dependency baseline `1.0.0`.
+
+Media tool subprocesses never resolve `node` through the system `PATH`. Normal source tests use `process.execPath`; the desktop application launches its bundled Electron executable with `ELECTRON_RUN_AS_NODE=1`. Python processes receive `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`, and streamed stdout/stderr use incremental UTF-8 decoders so a multibyte Chinese character split across chunks is not replaced.
 
 ## 18. Supported Video Boundary
 
@@ -314,7 +318,7 @@ The stable workflow accepts ordinary Bilibili BV videos with exactly one page. M
 
 ## 20. Verification
 
-`npm run verify:release` checks package/lock versions, machine-specific paths, JavaScript/Python syntax, all integration tests, both ASR models and npm audit.
+`npm run verify:release` checks package/lock versions, machine-specific paths, JavaScript/Python syntax, all integration tests, both ASR models and npm audit. `test:runtime-node` deliberately removes the global `PATH` and verifies that the bundled Electron Node mode still executes the video tool.
 
 Protocol and lifecycle gates include:
 
