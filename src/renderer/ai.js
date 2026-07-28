@@ -521,8 +521,8 @@
           <div class="dependency-progress"><span style="width:${Math.round(Number(item.progress || 0) * 100)}%"></span></div>
         </div>
         <div class="dependency-actions">
-          <button class="primary-button compact-button" type="button" data-download-dependency="${esc(item.id)}" ${busy ? 'disabled' : ''}>${item.available ? '重新下载' : '下载'}</button>
           ${item.localImport ? `<button class="secondary-button compact-button" type="button" data-import-dependency="${esc(item.id)}" ${busy ? 'disabled' : ''}>从本地导入</button>` : ''}
+          <button class="primary-button compact-button" type="button" data-download-dependency="${esc(item.id)}" ${busy ? 'disabled' : ''}>${item.available ? '重新下载' : '下载'}</button>
         </div>
       </div>`;
     }).join('');
