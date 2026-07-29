@@ -5,6 +5,7 @@ const { spawn } = require('child_process');
 const { Readable, Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const { recoverAtomicFile, writeFileRecoverable } = require('./atomic-file');
+const { ASR_MODELS, getAsrModelByPackage, isAsrModelPackage } = require('./asr-models');
 const { readUtf8, utf8ChildEnvironment } = require('./child-process-io');
 const { ensureDir } = require('./workspace');
 
@@ -48,24 +49,16 @@ class DependencyManager {
           'runtime/vc-runtime/msvcp140.dll'
         ]
       },
-      {
-        id: 'model-small',
-        name: 'faster-whisper small 模型',
-        description: '内置轻量多语言 ASR 模型，速度更快、显存占用更低。',
-        required: true,
-        assetName: `Star-Owner-v${this.dependencyVersion}-model-small.zip`,
-        assetPattern: /Star-Owner-v[\d.]+-model-small\.zip$/i,
-        probes: ['runtime/models/small/model.bin', 'runtime/models/small/config.json']
-      },
-      {
-        id: 'model-medium',
-        name: 'faster-whisper medium 模型',
-        description: '默认内置多语言 ASR 模型，在准确率、速度和 8GB 显存之间更均衡。',
-        required: true,
-        assetName: `Star-Owner-v${this.dependencyVersion}-model-medium.zip`,
-        assetPattern: /Star-Owner-v[\d.]+-model-medium\.zip$/i,
-        probes: ['runtime/models/medium/model.bin', 'runtime/models/medium/config.json']
-      }
+      ...ASR_MODELS.map((model) => ({
+        id: model.packageId,
+        modelId: model.id,
+        name: `faster-whisper ${model.id} 模型`,
+        description: model.description,
+        required: model.required,
+        assetName: `Star-Owner-v${this.dependencyVersion}-model-${model.assetSlug}.zip`,
+        assetPattern: new RegExp(`Star-Owner-v[\\d.]+-model-${escapeRegex(model.assetSlug)}\\.zip$`, 'i'),
+        probes: [`runtime/models/${model.id}/model.bin`, `runtime/models/${model.id}/config.json`]
+      }))
     ];
   }
 
@@ -83,7 +76,7 @@ class DependencyManager {
         message: progress.message || (available ? '已安装并通过路径检查' : '未检测到完整依赖'),
         source: progress.source || '',
         releaseUrl: this.releaseUrl(),
-        localImport: definition.id === 'model-small' || definition.id === 'model-medium'
+        localImport: isAsrModelPackage(definition.id)
       };
     });
     const prompt = this.store.get('settings', 'dependencyPrompt') || {};
@@ -164,7 +157,7 @@ class DependencyManager {
 
   async importLocal(packageId, sourceFile) {
     const id = String(packageId || '');
-    const definition = this.definitions().find((item) => item.id === id && ['model-small', 'model-medium'].includes(item.id));
+    const definition = this.definitions().find((item) => item.id === id && isAsrModelPackage(item.id));
     if (!definition) throw localImportError(`不支持从本地导入该依赖包：${id}`, this.releaseUrl());
     const source = path.resolve(String(sourceFile || ''));
     if (!fs.existsSync(source) || !fs.statSync(source).isFile()) throw localImportError('选择的模型包文件不存在或不可读取。', this.releaseUrl(), definition.assetName);
@@ -531,7 +524,7 @@ class DependencyManager {
       fs.rmSync(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
     }
     const available = definition.probes.every((probe) => fs.existsSync(path.join(this.projectRoot, probe)));
-    if (!available && (id === 'model-small' || id === 'model-medium')) {
+    if (!available && isAsrModelPackage(id)) {
       for (const relative of managedRuntimePaths(id)) {
         const target = assertInstallPath(this.projectRoot, path.join(this.projectRoot, relative));
         if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
@@ -635,8 +628,8 @@ class DependencyManager {
 
 function managedRuntimePaths(packageId) {
   if (packageId === 'runtime-base') return ['runtime/python', 'runtime/faster-whisper', 'runtime/vc-runtime'];
-  if (packageId === 'model-small') return ['runtime/models/small'];
-  if (packageId === 'model-medium') return ['runtime/models/medium'];
+  const model = getAsrModelByPackage(packageId);
+  if (model) return [`runtime/models/${model.id}`];
   return [];
 }
 
@@ -656,8 +649,8 @@ function isPackageDownloadArtifact(name, definition) {
   const value = String(name || '');
   if (value === definition.assetName || value === `${definition.assetName}.partial`) return true;
   if (value.startsWith(`.import-${definition.id}-`) && value.endsWith('.zip')) return true;
-  if (definition.id === 'model-small') return /^Star-Owner-v[\d.]+-model-small\.zip(?:\.partial)?$/i.test(value);
-  if (definition.id === 'model-medium') return /^Star-Owner-v[\d.]+-model-medium\.zip(?:\.partial)?$/i.test(value);
+  const model = getAsrModelByPackage(definition.id);
+  if (model) return new RegExp(`^Star-Owner-v[\\d.]+-model-${escapeRegex(model.assetSlug)}\\.zip(?:\\.partial)?$`, 'i').test(value);
   if (definition.id === 'runtime-base') return /^Star-Owner-v[\d.]+-runtime-win-x64\.zip(?:\.partial)?$/i.test(value);
   return false;
 }
@@ -822,6 +815,10 @@ function formatBytes(value) {
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function escapeRegex(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 module.exports = { DependencyManager, REPOSITORY };

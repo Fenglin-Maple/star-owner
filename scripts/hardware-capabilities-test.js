@@ -37,6 +37,17 @@ function assert(condition, message) {
   });
   assert(smallModel.nvidia.supported && !mediumModel.localAsrSupported, 'model-specific GPU/RAM requirements were not enforced');
 
+  const turboModel = evaluateAsrHardware({
+    platform: 'win32', arch: 'x64', totalMemoryBytes: 8 * 1024 ** 3, cpuThreads: 4,
+    gpu: { available: true, name: '3GB NVIDIA', totalMiB: 3072 }, model: 'large-v3-turbo', pythonAvailable: true, runtimeHealth: runtime
+  });
+  const undersizedTurbo = evaluateAsrHardware({
+    platform: 'win32', arch: 'x64', totalMemoryBytes: 8 * 1024 ** 3, cpuThreads: 4,
+    gpu: { available: true, name: '2GB NVIDIA', totalMiB: 2048 }, model: 'large-v3-turbo', pythonAvailable: true, runtimeHealth: runtime
+  });
+  assert(turboModel.nvidia.supported && turboModel.model.gpuComputeType === 'int8_float16', 'large-v3-turbo low-VRAM CUDA policy was not accepted');
+  assert(!undersizedTurbo.nvidia.supported && undersizedTurbo.issues.some((item) => item.includes('3072')), 'large-v3-turbo minimum VRAM was not enforced');
+
   const unsupportedArchitecture = evaluateAsrHardware({
     platform: 'linux', arch: 'arm64', totalMemoryBytes: 32 * 1024 ** 3, cpuThreads: 16,
     gpu: { available: false }, model: 'medium', pythonAvailable: true, runtimeHealth: { ...runtime, cudaDevices: 0 }

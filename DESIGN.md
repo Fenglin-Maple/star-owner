@@ -1,6 +1,6 @@
 # 星藏家 Design
 
-Version: `1.0.5`
+Version: `1.0.6`
 
 ## 1. Product Goal
 
@@ -230,17 +230,22 @@ GPU ASR is a persistent faster-whisper service. CPU ASR is disabled by default a
 Hardware detection combines:
 
 - project-local Python and faster-whisper health process;
-- selected `small` or `medium` model files;
+- selected `small`, `medium`, or optional `large-v3-turbo` model files;
 - CTranslate2 version and CUDA device count;
 - `nvidia-smi` adapter name, total/free/used memory;
 - Windows x64 CPU runtime support, system memory, CPU thread count.
 
 Recommended thresholds:
 
-| Model | GPU total | CPU system memory |
-| --- | ---: | ---: |
-| small | 2048 MiB | 6144 MiB |
-| medium | 4096 MiB | 8192 MiB |
+| Model | CUDA compute | GPU total | Startup free | CPU system memory |
+| --- | --- | ---: | ---: | ---: |
+| small | `float16` | 2048 MiB | 1536 MiB | 6144 MiB |
+| medium | `float16` | 4096 MiB | 3072 MiB | 8192 MiB |
+| large-v3-turbo | `int8_float16` | 3072 MiB | 2048 MiB | 8192 MiB |
+
+`src/core/asr-models.js` is the single registry for model IDs, labels, package IDs, compute types and memory gates. ToolRunner configures both model path and compute type before every persistent service start, so switching from Turbo back to another model cannot leave the process on stale quantization. All GPU ASR requests still share one lane; adding a larger model does not add concurrent GPU residency. CPU remains `int8` and opt-in.
+
+Turbo keeps the same multilingual auto-detection, VAD, word timestamps, sentence materialization, SRT, timeline text and diagnostics as the existing models. A real RTX 4070 Laptop comparison over Chinese, English vertical-video and Japanese/music Bilibili audio measured about 1348 MiB Turbo peak allocation above baseline versus 2564 MiB for medium. The 3072 MiB total / 2048 MiB startup-free policy includes headroom beyond that observed peak and remains a capability gate rather than a universal performance guarantee.
 
 Unsupported GPU lanes are disabled. Unsupported CPU environments disable the CPU toggle and block workflow startup when no valid ASR path exists.
 
@@ -300,7 +305,9 @@ The main window appears before heavy initialization. Bootstrap progress covers d
 
 Project-local runtime and models may be installed from GitHub Release assets. Downloads use bounded retry with backoff and HTTP Range continuation while retaining `.partial` data. Verification prefers the Release asset SHA-256 digest; direct-URL fallback obtains the matching `.sha256` before transferring the large archive. Complete archives survive transient checksum-network failures, but unverified content is never installed. Installation uses staging, backup, a transaction journal and startup rollback, then refreshes ASR and tool health without requiring an application restart. Archives may write only below `runtime/`.
 
-`small` and `medium` also support local ZIP import. The accepted asset name is generated only from `dependencyReleaseVersion`; the selected file must exactly match that name and the official Release SHA-256. Archive inspection rejects links, traversal, foreign runtime paths, the wrong model directory and missing probes before maintenance mode or target replacement. Import cancels and joins an in-flight automatic download for the same model, removes its `.partial`, archive, staging, backup and transaction residue, then copies the selected file into a managed temporary location. Existing healthy model files remain untouched until verified staging commits atomically, and remain available after validation failure. Package-name links and error dialogs point to the exact dependency Release. Version `1.0.5` pins the unchanged runtime, small and medium assets from dependency baseline `1.0.0`.
+All three models support local ZIP import. The accepted asset name is generated only from `dependencyReleaseVersion`; the selected file must exactly match that name and the official Release SHA-256. Archive inspection rejects links, traversal, foreign runtime paths, the wrong model directory and missing probes before maintenance mode or target replacement. Import cancels and joins an in-flight automatic download for the same model, removes its `.partial`, archive, staging, backup and transaction residue, then copies the selected file into a managed temporary location. Existing healthy model files remain untouched until verified staging commits atomically, and remain available after validation failure. Package-name links and error dialogs point to the exact dependency Release.
+
+Version `1.0.6` keeps runtime, small and medium pinned to dependency baseline `1.0.0`. Turbo is an optional fourth dependency card and never enters `missingRequired`; its prepared asset contract is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`. This source update deliberately does not upload that asset. Packaging can build only this model with `npm run package:model:turbo`, while portable manifests distinguish required small/medium assets from optional Turbo.
 
 Media tool subprocesses never resolve `node` through the system `PATH`. Normal source tests use `process.execPath`; the desktop application launches its bundled Electron executable with `ELECTRON_RUN_AS_NODE=1`. Python processes receive `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`, and streamed stdout/stderr use incremental UTF-8 decoders so a multibyte Chinese character split across chunks is not replaced.
 

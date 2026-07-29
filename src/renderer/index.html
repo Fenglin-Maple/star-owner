@@ -709,9 +709,9 @@
                 <div class="scheduler-model-row">
                   <div>
                     <strong>faster-whisper 常驻模型</strong>
-                    <span id="asrModelHint">默认使用中等模型；切换前需要等待 ASR 队列空闲。</span>
+                    <span id="asrModelHint">默认使用中等模型；Turbo 使用低显存计算，切换前需要等待 ASR 队列空闲。</span>
                   </div>
-                  <label><span>识别模型</span><select id="asrModelSelect"><option value="medium">中等模型（默认）</option><option value="small">小模型（更快）</option></select></label>
+                  <label><span>识别模型</span><select id="asrModelSelect"><option value="medium">中等模型（默认）</option><option value="small">小模型（更快）</option><option value="large-v3-turbo">大模型 Turbo（低显存）</option></select></label>
                 </div>
                 <div class="gpu-memory-row">
                   <div><span id="gpuMemoryLabel">GPU 显存</span><strong id="gpuMemoryValue">检测中</strong></div>

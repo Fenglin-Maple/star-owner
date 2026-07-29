@@ -21,11 +21,11 @@
 
 **Built with OpenAI Codex.**
 
-> `1.0.5` 正式版边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
+> `1.0.6` 版本边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
 >
 > 当前稳定版只处理普通 BV 单 P 视频。多 P 视频会在元数据阶段被识别、清理本次缓存并关闭任务；`ep/ss/md`、课程、活动聚合、音频和直播等特殊页面会在输入阶段直接拒绝。这样可以避免把只处理第一 P 的结果误标为完整总结。完整多 P 支持将在独立 Git 分支完成并通过专项测试后再合并。
 
-`1.0.5` 是当前代码维护版，项目内运行时与 faster-whisper `small` / `medium` 权重继续复用 `v1.0.0` Release 依赖基线。设置页新增 ASR 模型 ZIP 本地导入：应用会锁定依赖版本、官方文件名和 SHA-256，检查模型目录与必需文件，再通过 staging/backup 原子安装；切换导入时会先中止同一模型的自动下载并清理其缓存，错误包不会替换健康模型。`1.0.4` 的 Windows 长路径、便携路径重定位、项目内 Node 和 UTF-8 日志修复继续有效。
+`1.0.6` 新增可选的多语言 `large-v3-turbo` ASR。它在 NVIDIA GPU 上使用 `int8_float16`，保留和现有模型相同的自动语言检测、VAD、逐句时间戳、覆盖率诊断、常驻服务与单通道排队；CPU 通道使用 `int8`。模型配置、显存门槛、计算类型与依赖包统一由模型注册表管理，切换模型会同步重启正确的计算类型。`small` / `medium` 仍是首次启动必需依赖，Turbo 独立包是可选项，不会阻塞原有用户。本次只更新源码，不上传 Release；Turbo 包契约已准备为 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`。
 
 ## 快速安装与第一次使用
 
@@ -34,10 +34,10 @@
 1. 打开 [最新 GitHub Release](https://github.com/Fenglin-Maple/star-owner/releases/latest)，下载 `Star-Owner-v<version>-win-x64-core.zip`；建议同时下载同名 `.sha256` 校验文件。
 2. 将 ZIP 完整解压到当前用户可写且路径较短的目录，例如 `D:\Star-Owner`；不要在压缩包预览窗口内直接运行。
 3. 双击解压目录根部的 `Start-StarOwner.cmd`。便携包首次成功启动后会在当前用户桌面自动创建“星藏家”快捷方式，以后可直接使用桌面图标启动；同一安装目录不会反复创建。
-4. 核心包包含 Electron、Python、faster-whisper、FFmpeg、yt-dlp、CUDA/VC++ 运行依赖，但不包含 ASR 模型权重。全新安装首次启动会列出缺失的 `small` 和 `medium` 模型；可让应用自动下载，也可从 `v1.0.0` Release 手动下载对应 ZIP，然后在“设置 -> 应用设置 -> 项目依赖包”点击“从本地导入”。ZIP 不需要自行解压；应用会核对版本、文件名、官方 SHA-256 和包结构。
+4. 核心包包含 Electron、Python、faster-whisper、FFmpeg、yt-dlp、CUDA/VC++ 运行依赖，但不包含 ASR 模型权重。全新安装首次启动会列出缺失的必需 `small` 和 `medium` 模型；可让应用自动下载，也可从 `v1.0.0` Release 手动下载对应 ZIP，然后在“设置 -> 应用设置 -> 项目依赖包”点击“从本地导入”。可选 Turbo 不影响首次启动，其独立包发布后也使用相同安装方式。ZIP 不需要自行解压；应用会核对版本、文件名、官方 SHA-256 和包结构。
 5. 在启动页按照“第一次上手”依次完成：`配置 AI 模型 -> 登录 B站 -> 同步收藏夹 -> 检查任务 -> 创建 Agent 视频总结工作流`。
 
-默认 ASR 模型为多语言 `medium`；显存或内存不足时可在设置中切换到 `small`。建议为核心包、模型、缓存和视频产物预留至少 10 GB 可用空间。
+默认 ASR 模型仍为多语言 `medium`；显存紧张时可选 `small`，也可安装 `large-v3-turbo` 以较低显存运行更大的 Turbo 模型。建议为核心包、三个模型、缓存和视频产物预留至少 12 GB 可用空间。
 
 ## 核心能力
 
@@ -75,7 +75,7 @@
 ### 视频缓存与本地运行保障
 
 - 下载队列与视频库支持合轨视频缓存、封面、横竖屏播放、条件筛选、文件缺失检测和确认删除；缓存视频收藏夹也可作为 AI 总结任务来源。
-- 自动检测 NVIDIA GPU、CTranslate2 CUDA、显存、项目内 Python 和 ASR 模型；可在 `small`、`medium` 模型间切换，并提供默认关闭的 CPU ASR 回退通道。
+- 自动检测 NVIDIA GPU、CTranslate2 CUDA、显存、项目内 Python 和 ASR 模型；可在 `small`、`medium`、`large-v3-turbo` 间切换，并提供默认关闭的 CPU ASR 回退通道。
 - 数据库、Cookie、模型配置、缓存、日志和最终产物默认保存在项目 `workspace/` 与用户注册的 Workspace 库中，便于迁移、备份和统一管理。
 
 ## 桌面导航
@@ -189,9 +189,11 @@ asr/asr-result.json
 - `api`：2 条通道，限制 Bilibili API 启动频率。
 - `media`：3 条通道，用于下载、FFmpeg、音频和关键帧。
 - `disk`：2 条通道，用于缓存清理。
-- `asr`：1 条 CUDA `float16` 通道；可手动开启 CPU `int8` 辅助通道。
+- `asr`：1 条 CUDA 常驻通道；`small` / `medium` 使用 `float16`，`large-v3-turbo` 使用低显存 `int8_float16`。可手动开启 CPU `int8` 辅助通道。
 
-设置页显示真实 ASR 兼容性。`medium` 建议至少 4096 MiB 显存或 8192 MiB 系统内存；`small` 建议至少 2048 MiB 显存或 6144 MiB 系统内存。CPU 通道仅在当前项目内置运行时支持的 Windows x64 环境开放，默认关闭。
+设置页显示真实 ASR 兼容性。`small` 建议至少 2048 MiB 总显存或 6144 MiB 系统内存；`medium` 建议至少 4096 MiB 总显存或 8192 MiB 系统内存；`large-v3-turbo` 建议至少 3072 MiB 总显存、启动时 2048 MiB 空闲显存或 8192 MiB 系统内存。CPU 通道仅在当前项目内置运行时支持的 Windows x64 环境开放，默认关闭。
+
+本机 RTX 4070 Laptop 实测同一组 59 秒中文、159 秒英文竖屏和 80 秒日语/背景音乐 Bilibili 音轨：Turbo 峰值显存增量约 1348 MiB，`medium float16` 约 2564 MiB；两者都正确检测三种语言并生成有效 SRT。该结果用于确定 3GB 显卡门槛，不代表所有驱动、音轨和显卡都有完全相同的占用或准确率。
 
 ## 外部知识库 API
 
@@ -298,10 +300,10 @@ Windows 10/11 x64 用户可从 [GitHub Releases](https://github.com/Fenglin-Mapl
 1. 只需下载 `Star-Owner-v<version>-win-x64-core.zip`；同名 `.sha256` 文件用于校验下载完整性。
 2. 将 ZIP 完整解压到当前用户可写的目录，不要在压缩包预览窗口内直接运行。
 3. 双击解压目录根部的 `Start-StarOwner.cmd`。应用固定使用便携包内 Electron/Node、Python、FFmpeg、yt-dlp 和 SQLite，不读取全局 Node 来执行媒体工具。
-4. 首次启动若提示缺少 ASR 模型，可允许应用自动下载；也可在设置的“项目依赖包”中点击模型名称打开正确 Release，下载完整 ZIP 后直接“从本地导入”。默认推荐 `medium`，资源不足时可切换 `small`。
+4. 首次启动若提示缺少 ASR 模型，可允许应用自动下载；也可在设置的“项目依赖包”中点击模型名称打开正确 Release，下载完整 ZIP 后直接“从本地导入”。默认推荐 `medium`，资源不足时可切换 `small`；可选 Turbo 独立包发布后可按需安装。
 5. 按启动页“第一次上手”依次完成模型配置、B站登录、收藏夹同步、任务检查和 Agent 工作流创建。
 
-运行时和模型 ZIP 是应用内依赖管理器使用的独立资产。设置页可以重新检查、下载或修复依赖，并可导入手动下载的 `small` / `medium` ZIP。当前 `1.0.5` 只接受 `v1.0.0` 基线的 `Star-Owner-v1.0.0-model-small.zip` 与 `Star-Owner-v1.0.0-model-medium.zip`；以后依赖基线变化时，界面链接与接受的文件名会自动切换。依赖管理器核对 GitHub Release SHA-256、模型类型和目录结构，未经校验的包不会安装，错误导入不会损伤原有健康模型。
+运行时和模型 ZIP 是应用内依赖管理器使用的独立资产。设置页可以重新检查、下载或修复依赖，并可导入手动下载的 `small`、`medium`、`large-v3-turbo` ZIP。`1.0.6` 继续使用 `v1.0.0` 依赖基线，接受精确名称 `Star-Owner-v1.0.0-model-small.zip`、`Star-Owner-v1.0.0-model-medium.zip` 和 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`；其中 Turbo 资产契约已实现，但本次不上传 Release。依赖管理器核对 GitHub Release SHA-256、模型类型和目录结构，未经校验的包不会安装，错误导入不会损伤原有健康模型。
 
 源码运行：
 
@@ -329,12 +331,13 @@ npm run verify:release
 ```powershell
 npm run test:knowledge-api
 npm run test:hardware
+npm run test:asr-models
 npm run test:internal-agent
 npm run test:document-lifecycle
 npm run test:runtime-node
 ```
 
-常规代码版本使用 `npm run package:core` 只生成核心 ZIP，并复用 `package.json` 中 `dependencyReleaseVersion` 指定的 Release 依赖。只有 Python、CUDA、faster-whisper、FFmpeg、yt-dlp、VC++ 运行库、模型权重或依赖目录契约变化时，才更新依赖版本并重新上传 runtime/small/medium。
+常规代码版本使用 `npm run package:core` 只生成核心 ZIP，并复用 `package.json` 中 `dependencyReleaseVersion` 指定的 Release 依赖。`npm run package:model:turbo` 可单独生成按依赖版本命名的 Turbo 模型 ZIP 与 SHA-256，不会同时生成核心包。只有 Python、CUDA、faster-whisper、FFmpeg、yt-dlp、VC++ 运行库、模型权重或依赖目录契约变化时，才更新或补充相应 runtime/model 资产。
 
 ## 项目结构
 
@@ -346,6 +349,7 @@ src/core/internal-agent-manager.js  应用内视频总结工作流
 src/core/collection-sync-service.js 收藏夹事务同步
 src/core/document-lifecycle.js      文档删除与任务恢复语义
 src/core/tool-runner.js             工具资源池与 ASR 常驻服务
+src/core/asr-models.js              ASR 模型、计算类型与资源门槛注册表
 src/core/hardware-capabilities.js   NVIDIA/CUDA/CPU ASR 能力检测
 src/core/rag-assistant.js           RAG 会话、工具与权限
 src/core/video-cache-manager.js     下载队列与视频缓存库

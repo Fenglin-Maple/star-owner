@@ -1335,6 +1335,17 @@ function renderScheduler(state = runtime.scheduler) {
   cpuAsrToggle.checked = Boolean(state.config?.cpuAsrEnabled);
   const hardware = state.hardware || {};
   cpuAsrToggle.disabled = schedulerUpdateInFlight || !runtime.backendReady || hardware.cpu?.supported === false;
+  const modelDefinitions = Array.isArray(state.models) && state.models.length
+    ? state.models
+    : [
+        { id: 'medium', label: '中等模型', optionLabel: '中等模型（默认）', gpuComputeType: 'float16' },
+        { id: 'small', label: '小模型', optionLabel: '小模型（更快）', gpuComputeType: 'float16' },
+        { id: 'large-v3-turbo', label: '大模型 Turbo', optionLabel: '大模型 Turbo（低显存）', gpuComputeType: 'int8_float16' }
+      ];
+  const optionIds = [...asrModelSelect.options].map((option) => option.value);
+  if (optionIds.join('|') !== modelDefinitions.map((model) => model.id).join('|')) {
+    asrModelSelect.innerHTML = modelDefinitions.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.optionLabel || model.label || model.id)}</option>`).join('');
+  }
   const modelPackages = new Map((runtime.dependencies?.packages || []).map((item) => [item.id, item]));
   for (const option of asrModelSelect.options) {
     const dependency = modelPackages.get(`model-${option.value}`);
@@ -1344,11 +1355,13 @@ function renderScheduler(state = runtime.scheduler) {
   const asrPool = state.pools?.asr;
   const asrBusy = Number(asrPool?.queued || 0) > 0 || (asrPool?.lanes || []).some((lane) => lane.busy || lane.checking);
   asrModelSelect.disabled = schedulerUpdateInFlight || !runtime.backendReady || asrBusy;
-  const modelLabel = asrModelSelect.value === 'small' ? '小模型' : '中等模型';
+  const selectedModel = modelDefinitions.find((model) => model.id === asrModelSelect.value) || modelDefinitions[0];
+  const modelLabel = selectedModel?.label || asrModelSelect.value;
+  const gpuComputeType = selectedModel?.gpuComputeType || state.services?.gpu?.computeType || '';
   const gpuModelState = state.services?.gpu?.state || 'stopped';
   asrModelHint.textContent = asrBusy
     ? `${modelLabel}正在服务，等待 ASR 队列空闲后可切换。`
-    : `当前 ${modelLabel}，GPU 服务 ${gpuModelState}${state.services?.gpu?.pid ? ` / PID ${state.services.gpu.pid}` : ''}。`;
+    : `当前 ${modelLabel} / GPU ${gpuComputeType}，服务 ${gpuModelState}${state.services?.gpu?.pid ? ` / PID ${state.services.gpu.pid}` : ''}。`;
   const cpuState = state.services?.cpu?.state || 'stopped';
   cpuAsrHint.textContent = hardware.cpu?.supported === false
     ? `\u5f53\u524d\u786c\u4ef6\u6216\u9879\u76ee\u8fd0\u884c\u65f6\u4e0d\u652f\u6301 ${modelLabel} CPU ASR\u3002`
@@ -2595,7 +2608,8 @@ asrModelSelect?.addEventListener('change', async (event) => {
     runtime.scheduler = state;
     renderScheduler(state);
     renderSettingsSummary();
-    showToast(TEXT.toastSuccess, `ASR 已切换为${requested === 'small' ? '小模型' : '中等模型'}`, 'success');
+    const label = state.models?.find((model) => model.id === requested)?.label || requested;
+    showToast(TEXT.toastSuccess, `ASR 已切换为${label}`, 'success');
   } catch (error) {
     event.target.value = previous;
     showToast(TEXT.toastError, error.message || String(error), 'error');

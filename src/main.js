@@ -9,6 +9,7 @@ const { ApiServer } = require('./core/api-server');
 const { BiliClient, assertBilibiliImageUrl, isBilibiliCookieDomain, normalizeBilibiliAssetUrl } = require('./core/bili');
 const { CollectionSyncService } = require('./core/collection-sync-service');
 const { DependencyManager } = require('./core/dependency-manager');
+const { isAsrModelPackage } = require('./core/asr-models');
 const { isAllowedBilibiliNavigation, secureMainWindow } = require('./core/desktop-security');
 const { deleteCompletedDocument } = require('./core/document-lifecycle');
 const { ensurePortableDesktopShortcut } = require('./core/desktop-shortcut');
@@ -234,7 +235,7 @@ async function bootstrap() {
     emit: publishDependencyEvent,
     acquireInstall: (packageId, onWait) => toolRunner.acquireMaintenance(`dependency package ${packageId}`, onWait),
     onInstalled: async (packageId) => {
-      if (packageId === 'model-small' || packageId === 'model-medium' || packageId === 'runtime-base') {
+      if (isAsrModelPackage(packageId) || packageId === 'runtime-base') {
         try { await toolRunner.ensureGpuAsr(); } catch (error) { publishEvent({ type: 'asr-reload-required', error: error.message }); }
       }
       await refreshToolHealth();
@@ -885,7 +886,7 @@ ipcMain.handle('dependencies:download', async (_event, packageId) => {
 ipcMain.handle('dependencies:import-local', async (_event, packageId) => {
   assertBackendReady();
   const definition = dependencyManager.state().packages.find((item) => item.id === String(packageId || '') && item.localImport);
-  if (!definition) throw new Error('只允许从本地导入 small 或 medium ASR 模型包。');
+  if (!definition) throw new Error('只允许从本地导入受支持的 ASR 模型包。');
   const selected = await dialog.showOpenDialog(mainWindow, {
     title: `导入 ${definition.name}`,
     buttonLabel: '验证并导入',

@@ -2,7 +2,7 @@
 
 审查日期：2026-07-29
 
-目标版本：`1.0.5`
+目标版本：`1.0.6`
 
 ## 审查范围
 
@@ -19,6 +19,13 @@
 - 依赖安装、便携打包、文档、版本、测试和发布门禁。
 
 ## 本版本修复
+
+### 1.0.6 large-v3-turbo 低显存适配
+
+- **高：仅替换模型目录会让常驻服务继续使用 medium 的 `float16` 策略。** 新增统一模型注册表，切换时同时更新 GPU/CPU 模型与计算类型；Turbo 固定使用 GPU `int8_float16`、CPU `int8`，并等待 ASR 队列空闲后重启服务。
+- **高：第三个模型散落硬编码会造成设置可选但硬件检测、导入或打包拒绝。** ToolRunner、硬件能力、依赖管理、Renderer、Python CLI、设置脚本和打包脚本均读取或覆盖同一三模型契约；测试覆盖未知配置回退、3GB/2GB 显存边界、可选依赖和计算类型。
+- **中：未发布的 Turbo 包若设为必需会破坏全新安装。** `model-large-v3-turbo` 为可选依赖，不进入首次启动缺失列表；独立 ZIP/校验文件名按 `dependencyReleaseVersion` 生成，本轮不上传 Release。
+- 真实测试使用 59 秒中文讲解、159 秒英文竖屏和 80 秒日语/背景音乐 Bilibili 音轨。Turbo 常驻进程复用同一 PID，三语检测、VAD、SRT、文本、结构化时间戳和诊断均通过；RTX 4070 Laptop 峰值增量约 1348 MiB，对照 `medium float16` 约 2564 MiB。另以 CPU `int8` 完成 15 秒中文样本。
 
 ### 1.0.5 ASR 模型本地导入审查
 
@@ -106,4 +113,4 @@
 - `npm run test:collection-sync`：事务回滚、部分可见快照、缺席任务保留和错误墓碑恢复；
 - `npm run smoke`：端到端只读 API 和核心应用契约。
 
-总门禁还包含全部既有功能测试、JavaScript/Python 语法、双模型真实 ASR 服务和 `npm audit --audit-level=high`。
+总门禁还包含全部既有功能测试、JavaScript/Python 语法、全部已安装模型的真实 ASR 服务和 `npm audit --audit-level=high`。

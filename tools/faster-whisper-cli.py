@@ -14,6 +14,10 @@ MODELS_ROOT = RUNTIME_ROOT / "models"
 HF_CACHE_ROOT = RUNTIME_ROOT / "cache" / "huggingface"
 VC_RUNTIME_ROOT = RUNTIME_ROOT / "vc-runtime"
 DEFAULT_MODEL = "medium"
+GPU_COMPUTE_TYPES = {
+    "large-v3-turbo": "int8_float16",
+    "turbo": "int8_float16",
+}
 DLL_HANDLES = []
 
 
@@ -147,7 +151,7 @@ def transcribe(args):
 
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    device, compute_type = choose_runtime(args.device, args.compute_type)
+    device, compute_type = choose_runtime(args.device, args.compute_type, args.model)
     print(f"Loading {target_model.name} on {device} ({compute_type})", file=sys.stderr)
 
     try:
@@ -187,7 +191,7 @@ def transcribe(args):
     return 0
 
 
-def choose_runtime(requested_device, requested_compute):
+def choose_runtime(requested_device, requested_compute, model_name=DEFAULT_MODEL):
     import ctranslate2
 
     device = requested_device
@@ -195,7 +199,7 @@ def choose_runtime(requested_device, requested_compute):
         device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
     compute_type = requested_compute
     if compute_type == "auto":
-        compute_type = "float16" if device == "cuda" else "int8"
+        compute_type = GPU_COMPUTE_TYPES.get(str(model_name).lower(), "float16") if device == "cuda" else "int8"
     return device, compute_type
 
 

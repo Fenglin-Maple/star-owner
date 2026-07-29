@@ -80,7 +80,9 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   if (ensurePortableDesktopShortcut({ projectRoot: shortcutFixture, desktopPath: shortcutDesktop, executablePath: path.join(shortcutFixture, 'electron.exe'), version: '9.9.9', store: shortcutStore, writeShortcutLink: () => { throw new Error('duplicate shortcut write'); }, platform: 'win32' }).reason !== 'already-completed') throw new Error('portable desktop shortcut first-run guard failed');
   const dependencyManager = new DependencyManager({ store, projectRoot: dependencyRoot, version: '9.9.9', retryBaseDelayMs: 0 });
   const missingDependencies = dependencyManager.state();
+  const optionalTurbo = missingDependencies.packages.find((item) => item.id === 'model-large-v3-turbo');
   if (missingDependencies.ready || !missingDependencies.needsPrompt || !missingDependencies.missingRequired.includes('runtime-base') || !missingDependencies.missingRequired.includes('model-small') || !missingDependencies.missingRequired.includes('model-medium')) throw new Error('dependency availability detection failed');
+  if (!optionalTurbo || optionalTurbo.required || !optionalTurbo.localImport || missingDependencies.missingRequired.includes(optionalTurbo.id)) throw new Error('optional Turbo dependency blocked required startup state');
   dependencyManager.acknowledgePrompt(false);
   if (dependencyManager.state().needsPrompt) throw new Error('dependency first-run acknowledgement failed');
   const originalDownloadNow = dependencyManager.downloadNow.bind(dependencyManager);

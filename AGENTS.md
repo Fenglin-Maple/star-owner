@@ -67,7 +67,8 @@ The service binds to `127.0.0.1`, accepts origin-less local process requests, re
 
 - Dependency archives are GitHub Release assets, not Git-tracked runtime files.
 - Archives may install only under `runtime/`; extraction rejects absolute paths and `..` traversal.
-- Required assets use `Star-Owner-v<dependency-version>-runtime-win-x64.zip`, `Star-Owner-v<dependency-version>-model-small.zip`, and `Star-Owner-v<dependency-version>-model-medium.zip`, with matching SHA-256 assets.
+- Required assets use `Star-Owner-v<dependency-version>-runtime-win-x64.zip`, `Star-Owner-v<dependency-version>-model-small.zip`, and `Star-Owner-v<dependency-version>-model-medium.zip`, with matching SHA-256 assets. Optional Turbo uses `Star-Owner-v<dependency-version>-model-large-v3-turbo.zip` and must never enter the first-launch required set.
+- Keep model IDs, compute types, package IDs and hardware thresholds centralized in `src/core/asr-models.js`; do not add model-specific ternaries back to ToolRunner or hardware detection.
 - `package.json.dependencyReleaseVersion` is the explicit compatibility contract shared by the dependency manager and portable manifest. A code-only Release keeps it pinned and uploads only the new core ZIP plus checksum.
 - Never change probes or layouts without updating dependency manager, packaging, deployment docs, and regression tests.
 
@@ -84,6 +85,7 @@ npm run test:video-cache
 npm run test:security
 npm run test:knowledge-api
 npm run test:hardware
+npm run test:asr-models
 npm run test:image-clipboard
 npm run test:persistence
 npm run test:collection-sync
@@ -94,4 +96,4 @@ npm run test:asr-service
 npm audit --audit-level=high
 ```
 
-`npm run verify:release` is the aggregate gate. The ASR service test loads both GPU models; stop another GPU ASR process first on memory-constrained systems.
+`npm run verify:release` is the aggregate gate. The ASR service test loads every installed GPU model, including optional Turbo when present; stop another GPU ASR process first on memory-constrained systems.

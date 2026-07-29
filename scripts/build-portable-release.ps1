@@ -1,8 +1,9 @@
 param(
-  [ValidateSet("none", "small", "medium", "all")]
+  [ValidateSet("none", "small", "medium", "large-v3-turbo", "all")]
   [string]$ModelBundle = "all",
   [switch]$SeparateModelAsset,
   [switch]$CoreOnly,
+  [switch]$ModelOnly,
   [switch]$NoArchive
 )
 
@@ -14,10 +15,17 @@ $dependencyVersion = if ($package.dependencyReleaseVersion) { [string]$package.d
 if ($CoreOnly -and -not $SeparateModelAsset) {
   throw "CoreOnly requires SeparateModelAsset so models remain external."
 }
+if ($CoreOnly -and $ModelOnly) { throw "CoreOnly and ModelOnly cannot be combined." }
+if ($ModelOnly -and (-not $SeparateModelAsset -or $ModelBundle -eq "none" -or $NoArchive)) {
+  throw "ModelOnly requires SeparateModelAsset, an explicit model bundle, and archive output."
+}
+$allModels = @("small", "medium", "large-v3-turbo")
+$requiredModels = @("small", "medium")
+$optionalModels = @("large-v3-turbo")
 $splitModels = @()
 if ($SeparateModelAsset) {
-  if ($ModelBundle -in @("small", "all")) { $splitModels += "small" }
-  if ($ModelBundle -in @("medium", "all")) { $splitModels += "medium" }
+  if ($ModelBundle -eq "all") { $splitModels = @($allModels) }
+  elseif ($ModelBundle -ne "none") { $splitModels = @($ModelBundle) }
 }
 $folderSuffix = if ($splitModels.Count -gt 0) { "core" } else { $ModelBundle }
 $folderName = "Star-Owner-v$($package.version)-win-x64-$folderSuffix"
@@ -124,6 +132,16 @@ Remove-GeneratedProjectCaches
 Remove-GeneratedProjectCaches
 
 New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
+if ($ModelOnly) {
+  foreach ($model in $splitModels) {
+    $sourceModel = Join-Path $root "runtime\models\$model"
+    if (-not (Test-Path -LiteralPath (Join-Path $sourceModel "model.bin"))) { throw "Requested ASR model is missing: $model" }
+    $modelArchive = Join-Path $distRoot "Star-Owner-v$dependencyVersion-model-$model.zip"
+    Write-ReleaseArchive $modelArchive $root "runtime\models\$model" "Model $model"
+  }
+  Write-Host "Model dependency archive complete." -ForegroundColor Green
+  exit 0
+}
 Assert-InsideDist $stage
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
@@ -146,11 +164,13 @@ Copy-Item -LiteralPath (Join-Path $root "runtime\faster-whisper") -Destination (
 Copy-Item -LiteralPath (Join-Path $root "runtime\vc-runtime") -Destination (Join-Path $runtimeTarget "vc-runtime") -Recurse -Force
 Set-PortableVenvHome $stage
 Remove-NonPortableVenvActivationScripts $stage
-if (-not $SeparateModelAsset -and $ModelBundle -in @("small", "all")) {
-  Copy-Item -LiteralPath (Join-Path $root "runtime\models\small") -Destination (Join-Path $runtimeTarget "models\small") -Recurse -Force
-}
-if (-not $SeparateModelAsset -and $ModelBundle -in @("medium", "all")) {
-  Copy-Item -LiteralPath (Join-Path $root "runtime\models\medium") -Destination (Join-Path $runtimeTarget "models\medium") -Recurse -Force
+if (-not $SeparateModelAsset) {
+  $bundledModels = if ($ModelBundle -eq "all") { @($allModels) } elseif ($ModelBundle -eq "none") { @() } else { @($ModelBundle) }
+  foreach ($model in $bundledModels) {
+    $sourceModel = Join-Path $root "runtime\models\$model"
+    if (-not (Test-Path -LiteralPath (Join-Path $sourceModel "model.bin"))) { throw "Requested ASR model is missing: $model" }
+    Copy-Item -LiteralPath $sourceModel -Destination (Join-Path $runtimeTarget "models\$model") -Recurse -Force
+  }
 }
 
 New-Item -ItemType Directory -Path (Join-Path $stage "workspace\users") -Force | Out-Null
@@ -162,7 +182,8 @@ $manifest = [ordered]@{
   dependencyReleaseVersion = $dependencyVersion
   platform = "win-x64"
   modelBundle = if ($splitModels.Count -gt 0) { "external" } else { $ModelBundle }
-  requiredModelAssets = @($splitModels | ForEach-Object { "Star-Owner-v$dependencyVersion-model-$_.zip" })
+  requiredModelAssets = @($splitModels | Where-Object { $_ -in $requiredModels } | ForEach-Object { "Star-Owner-v$dependencyVersion-model-$_.zip" })
+  optionalModelAssets = @($splitModels | Where-Object { $_ -in $optionalModels } | ForEach-Object { "Star-Owner-v$dependencyVersion-model-$_.zip" })
   requiredRuntimeAssets = @("Star-Owner-v$dependencyVersion-runtime-win-x64.zip")
   builtAt = (Get-Date).ToUniversalTime().ToString("o")
   launcher = "Start-StarOwner.cmd"
@@ -177,12 +198,14 @@ if (-not $NoArchive) {
   $archive = Join-Path $distRoot "$folderName.zip"
   Write-ReleaseArchive $archive $distRoot $folderName "Portable core"
   if ($SeparateModelAsset -and -not $CoreOnly) {
-    $runtimeArchive = Join-Path $distRoot "Star-Owner-v$($package.version)-runtime-win-x64.zip"
+    $runtimeArchive = Join-Path $distRoot "Star-Owner-v$dependencyVersion-runtime-win-x64.zip"
     Write-RuntimeArchive $runtimeArchive
   }
   if (-not $CoreOnly) {
     foreach ($model in $splitModels) {
-      $modelArchive = Join-Path $distRoot "Star-Owner-v$($package.version)-model-$model.zip"
+      $sourceModel = Join-Path $root "runtime\models\$model"
+      if (-not (Test-Path -LiteralPath (Join-Path $sourceModel "model.bin"))) { throw "Requested ASR model is missing: $model" }
+      $modelArchive = Join-Path $distRoot "Star-Owner-v$dependencyVersion-model-$model.zip"
       Write-ReleaseArchive $modelArchive $root "runtime\models\$model" "Model $model"
     }
   }

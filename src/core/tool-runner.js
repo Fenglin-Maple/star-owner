@@ -3,6 +3,7 @@ const path = require('path');
 const { execFile, spawn, spawnSync } = require('child_process');
 const { promisify } = require('util');
 const { AsrService } = require('./asr-service');
+const { DEFAULT_ASR_MODEL, asrComputeType, getAsrModel, normalizeAsrModel, publicAsrModels } = require('./asr-models');
 const { nodeChildProcessSpec, readUtf8, utf8ChildEnvironment } = require('./child-process-io');
 const { detectAsrHardware } = require('./hardware-capabilities');
 const { isVideoUnavailableMessage, unsupportedVideoError, videoUnavailableError } = require('./media-errors');
@@ -18,7 +19,7 @@ const ACTIVE_STATUSES = new Set(['queued', 'running']);
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'timeout', 'skipped']);
 const DEFAULT_CONFIG = Object.freeze({
   cpuAsrEnabled: false,
-  asrModel: 'medium',
+  asrModel: DEFAULT_ASR_MODEL,
   apiConcurrency: 2,
   apiStartIntervalMs: 850,
   mediaConcurrency: 3,
@@ -49,14 +50,16 @@ class ToolRunner {
     this.gpuAsr = new AsrService({
       id: 'asr-gpu',
       device: 'cuda',
-      computeType: 'float16',
+      computeType: asrComputeType(DEFAULT_ASR_MODEL, 'cuda'),
+      model: DEFAULT_ASR_MODEL,
       onEvent: (event) => this.publish(event),
       onLog: (id, message) => this.onEvent({ type: 'asr-service-log', serviceId: id, message: String(message).trim().slice(0, 500) })
     });
     this.cpuAsr = new AsrService({
       id: 'asr-cpu',
       device: 'cpu',
-      computeType: 'int8',
+      computeType: asrComputeType(DEFAULT_ASR_MODEL, 'cpu'),
+      model: DEFAULT_ASR_MODEL,
       onEvent: (event) => this.publish(event),
       onLog: (id, message) => this.onEvent({ type: 'asr-service-log', serviceId: id, message: String(message).trim().slice(0, 500) })
     });
@@ -66,8 +69,7 @@ class ToolRunner {
     if (this.initialized) return this.getState();
     this.shuttingDown = false;
     this.loadConfig();
-    this.gpuAsr.model = this.config.asrModel;
-    this.cpuAsr.model = this.config.asrModel;
+    this.configureAsrServices(this.config.asrModel);
     this.registerPools();
     const cleanupRecovery = recoverPendingAttemptCleanups(this.store);
     await this.refreshGpuState();
@@ -132,7 +134,7 @@ class ToolRunner {
   async ensureGpuAsr() {
     if (!this.initialized) return this.initialize();
     if (this.gpuAsr.ready && this.gpuAsr.child) return this.getState();
-    this.gpuAsr.model = this.config.asrModel;
+    this.configureAsrServices(this.config.asrModel);
     await this.refreshGpuState();
     this.hardware = await detectAsrHardware({ gpu: this.gpu, model: this.config.asrModel });
     this.scheduler.setLaneEnabled('asr', 'gpu', this.hardware.nvidia.supported);
@@ -150,8 +152,9 @@ class ToolRunner {
       ? saved
       : { ...saved, mediaConcurrency: Math.max(3, Number(saved.mediaConcurrency || 0)), resourcePolicyVersion: 2 };
     if (Number(migrated.asrModelPolicyVersion || 0) < 1) {
-      migrated = { ...migrated, asrModel: 'medium', asrModelPolicyVersion: 1 };
+      migrated = { ...migrated, asrModel: DEFAULT_ASR_MODEL };
     }
+    migrated.asrModelPolicyVersion = 2;
     this.config = normalizeConfig({ ...DEFAULT_CONFIG, ...migrated });
     this.store.set('settings', 'toolScheduler', { id: 'toolScheduler', ...this.config, updatedAt: new Date().toISOString() });
     this.store.commit();
@@ -958,8 +961,7 @@ class ToolRunner {
     }
 
     this.config = next;
-    this.gpuAsr.model = next.asrModel;
-    this.cpuAsr.model = next.asrModel;
+    this.configureAsrServices(next.asrModel);
     if (modelChanged) {
       await this.refreshGpuState();
       this.hardware = await detectAsrHardware({ gpu: this.gpu, model: next.asrModel });
@@ -1011,12 +1013,21 @@ class ToolRunner {
     return { ...this.config };
   }
 
+  configureAsrServices(model) {
+    const selected = normalizeAsrModel(model);
+    this.gpuAsr.model = selected;
+    this.gpuAsr.computeType = asrComputeType(selected, 'cuda');
+    this.cpuAsr.model = selected;
+    this.cpuAsr.computeType = asrComputeType(selected, 'cpu');
+  }
+
   getState() {
     const scheduler = this.scheduler.snapshot();
     const pools = scheduler.pools || {};
     return {
       ready: this.initialized && !this.shuttingDown,
       config: this.getConfig(),
+      models: publicAsrModels(),
       gpu: { ...this.gpu },
       hardware: JSON.parse(JSON.stringify(this.hardware)),
       services: { gpu: this.gpuAsr.status(), cpu: this.cpuAsr.status() },
@@ -1046,7 +1057,7 @@ class ToolRunner {
 
   syncHardwareGpuState() {
     if (!this.hardware?.nvidia) return;
-    const minimum = this.config.asrModel === 'small' ? 2048 : 4096;
+    const minimum = getAsrModel(this.config.asrModel).gpuTotalMiB;
     this.hardware.nvidia.detected = Boolean(this.gpu.available);
     this.hardware.nvidia.name = String(this.gpu.name || '');
     this.hardware.nvidia.totalMiB = Number(this.gpu.totalMiB || 0);
@@ -1267,17 +1278,18 @@ function initialStageForAction(action) {
 }
 
 function normalizeConfig(value) {
+  const asrModel = normalizeAsrModel(value.asrModel);
   return {
     resourcePolicyVersion: 2,
-    asrModelPolicyVersion: 1,
+    asrModelPolicyVersion: 2,
     cpuAsrEnabled: Boolean(value.cpuAsrEnabled),
-    asrModel: ['small', 'medium'].includes(String(value.asrModel)) ? String(value.asrModel) : DEFAULT_CONFIG.asrModel,
+    asrModel,
     apiConcurrency: clampNumber(value.apiConcurrency, 1, 4, DEFAULT_CONFIG.apiConcurrency),
     apiStartIntervalMs: clampNumber(value.apiStartIntervalMs, 250, 5000, DEFAULT_CONFIG.apiStartIntervalMs),
     mediaConcurrency: clampNumber(value.mediaConcurrency, 1, 4, DEFAULT_CONFIG.mediaConcurrency),
     diskConcurrency: clampNumber(value.diskConcurrency, 1, 4, DEFAULT_CONFIG.diskConcurrency),
     gpuReserveMiB: clampNumber(value.gpuReserveMiB, 256, 4096, DEFAULT_CONFIG.gpuReserveMiB),
-    gpuStartupReserveMiB: clampNumber(value.gpuStartupReserveMiB, 1536, 6144, DEFAULT_CONFIG.gpuStartupReserveMiB)
+    gpuStartupReserveMiB: getAsrModel(asrModel).gpuStartupFreeMiB
   };
 }
 
