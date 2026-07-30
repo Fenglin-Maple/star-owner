@@ -1,7 +1,7 @@
 {
   "name": "star-owner",
   "productName": "星藏家",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "dependencyReleaseVersion": "1.0.0",
   "private": true,
   "license": "GPL-3.0-or-later",
@@ -30,6 +30,7 @@
     "test:hardware": "node scripts/hardware-capabilities-test.js",
     "test:asr-models": "node scripts/asr-models-test.js",
     "test:v1-0-9-controls": "node scripts/v1-0-9-controls-test.js",
+    "test:v1-1-0-startup": "node scripts/v1-1-0-startup-test.js",
     "test:runtime-node": "node scripts/electron-node-runtime-test.js",
     "setup:asr": "powershell -ExecutionPolicy Bypass -File scripts/setup-faster-whisper.ps1",
     "verify:release": "powershell -ExecutionPolicy Bypass -File scripts/verify-release.ps1",

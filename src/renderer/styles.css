@@ -1840,6 +1840,21 @@ body.theme-endfield *::-webkit-scrollbar-thumb:hover { background: #191919; back
 .toast.leaving { animation: toast-out 0.18s ease-in forwards; }
 .toast strong { display: block; margin-bottom: 3px; font-size: 13px; font-weight: 650; }
 .toast span { display: block; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.toast.folder-count-notice { width: 100%; }
+.toast.folder-count-notice span { white-space: pre-line; }
+.toast.dismissible { grid-template-columns: 8px minmax(0, 1fr) 26px; }
+.toast-close {
+  width: 26px;
+  height: 26px;
+  margin: -4px -6px 0 0;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  font-size: 21px;
+  line-height: 1;
+  cursor: pointer;
+}
+.toast-close:hover { color: var(--text); }
 
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(12px) scale(0.98); }

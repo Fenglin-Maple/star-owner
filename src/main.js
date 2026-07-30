@@ -21,6 +21,7 @@ const { isPrivateNetworkHost } = require('./core/network-policy');
 const { repairPortablePythonHome } = require('./core/portable-runtime');
 const { RagAssistant } = require('./core/rag-assistant');
 const { Store } = require('./core/store');
+const { StartupFolderProbe } = require('./core/startup-folder-probe');
 const { recoverPendingSubmissionFinalizations } = require('./core/submission-artifacts');
 const { ToolRunner } = require('./core/tool-runner');
 const { UpdateManager } = require('./core/update-manager');
@@ -57,6 +58,7 @@ let internalAgentManager = null;
 let dependencyManager = null;
 let videoCacheManager = null;
 let collectionSyncService = null;
+let startupFolderProbe = null;
 let updateManager = null;
 let currentUser = null;
 let biliAccountGeneration = 0;
@@ -226,6 +228,11 @@ async function bootstrap() {
     internalAgentManager,
     getCurrentUser: () => currentUser,
     onEvent: publishEvent
+  });
+  startupFolderProbe = new StartupFolderProbe({
+    store,
+    bili,
+    getCurrentUser: () => currentUser
   });
   videoCacheManager = new VideoCacheManager({
     store,
@@ -453,6 +460,13 @@ ipcMain.handle('bili:list-folders', async () => {
   }
   await collectionSyncService.reconcileFolders(folders, user);
   return folders;
+});
+
+ipcMain.handle('bili:startup-folder-probe', async () => {
+  assertBackendReady();
+  if (!currentUser?.isLogin || !currentUser.id || !currentUser.cookieFile) await refreshBilibiliUser();
+  if (!currentUser?.isLogin) throw new Error('Not logged in.');
+  return startupFolderProbe.run();
 });
 
 function refreshBilibiliUser() {

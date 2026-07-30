@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('orchestrator', {
   checkLogin: () => ipcRenderer.invoke('bili:check-login'),
   prepareAccountSwitch: () => ipcRenderer.invoke('bili:prepare-account-switch'),
   listFolders: () => ipcRenderer.invoke('bili:list-folders'),
+  probeStartupFolders: () => ipcRenderer.invoke('bili:startup-folder-probe'),
   syncCollection: (payload) => ipcRenderer.invoke('api:sync-collection', payload),
   snapshot: () => ipcRenderer.invoke('store:snapshot'),
   setTasksEnabled: (payload) => ipcRenderer.invoke('tasks:set-enabled', payload),

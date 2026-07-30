@@ -116,6 +116,9 @@ let accountGeneration = 0;
 let smsChallenge = null;
 let lastLoggedInMid = '';
 let initialLoginCheckDone = false;
+let startupFolderProbeRequested = false;
+let startupFolderProbeNotice = null;
+let startupFolderProbeNoticeShown = false;
 let accountSwitchInFlight = false;
 let pendingCredentialId = '';
 let activeCredentialId = localStorage.getItem('activeCredentialId') || '';
@@ -614,7 +617,8 @@ function ensureLoginPage(forceReload = false) {
   return new Promise((resolve, reject) => {
     const target = 'https://passport.bilibili.com/login';
     const src = biliView.getURL?.() || '';
-    if (!forceReload && src.includes('passport.bilibili.com')) return resolve();
+    const alreadyOnLoginPage = src.includes('passport.bilibili.com/login');
+    if (!forceReload && alreadyOnLoginPage) return resolve();
     let settled = false;
     const finish = (error) => {
       if (settled) return;
@@ -628,7 +632,11 @@ function ensureLoginPage(forceReload = false) {
     const timer = setTimeout(() => finish(new Error('Bilibili 登录页加载超时，请检查网络后重试。')), 20000);
     biliView.addEventListener('dom-ready', done);
     try {
-      Promise.resolve(biliView.loadURL(target)).catch(finish);
+      if (forceReload && alreadyOnLoginPage && typeof biliView.reloadIgnoringCache === 'function') {
+        biliView.reloadIgnoringCache();
+      } else {
+        Promise.resolve(biliView.loadURL(target)).catch(finish);
+      }
     } catch (error) {
       finish(error);
     }
@@ -728,6 +736,8 @@ async function prepareBiliAccountSwitch() {
   lastLoggedInMid = '';
   profileFolders = [];
   profileFoldersUpdatedAt = 0;
+  startupFolderProbeNotice = null;
+  startupFolderProbeNoticeShown = false;
   renderProfile(lastSnapshot);
 }
 
@@ -817,17 +827,22 @@ function installBiliVideoLinkBridge() {
   `).catch(() => false);
 }
 
-function showToast(title, message = '', type = 'info') {
+function showToast(title, message = '', type = 'info', options = {}) {
   if (!toastViewport) return;
   const toast = document.createElement('div');
-  toast.className = `toast ${type}`;
-  toast.innerHTML = `<div><strong>${escapeHtml(title)}</strong>${message ? `<span>${escapeHtml(message)}</span>` : ''}</div>`;
+  toast.className = `toast ${type}${options.dismissible ? ' dismissible' : ''}${options.className ? ` ${options.className}` : ''}`;
+  toast.innerHTML = `<div><strong>${escapeHtml(title)}</strong>${message ? `<span>${escapeHtml(message)}</span>` : ''}</div>${options.dismissible ? '<button class="toast-close" type="button" aria-label="关闭提示" title="关闭提示">&times;</button>' : ''}`;
   toastViewport.appendChild(toast);
+  let closed = false;
   const close = () => {
+    if (closed) return;
+    closed = true;
     toast.classList.add('leaving');
     setTimeout(() => toast.remove(), 220);
   };
-  setTimeout(close, type === 'error' ? 5200 : 3200);
+  toast.querySelector('.toast-close')?.addEventListener('click', close);
+  const duration = Number(options.duration ?? (type === 'error' ? 5200 : 3200));
+  if (duration > 0) setTimeout(close, duration);
 }
 
 window.notify = showToast;
@@ -1019,7 +1034,7 @@ async function performSmsAction(action, code = '') {
   `);
 }
 
-async function synchronizeLogin({ manual = false } = {}) {
+async function synchronizeLogin({ manual = false, startupProbe = false } = {}) {
   let generation = accountGeneration;
   if (!runtime.backendReady || loginSyncInFlightGeneration === generation) return currentUser;
   loginSyncInFlightGeneration = generation;
@@ -1034,6 +1049,8 @@ async function synchronizeLogin({ manual = false } = {}) {
       profileFoldersRequestSerial += 1;
       profileFoldersLoading = false;
       profileFoldersLoadingUserId = '';
+      startupFolderProbeNotice = null;
+      startupFolderProbeNoticeShown = false;
     }
     currentUser = info;
     if (info?.isLogin) {
@@ -1054,7 +1071,19 @@ async function synchronizeLogin({ manual = false } = {}) {
       renderProfile(lastSnapshot);
       await refreshSnapshot();
       if (generation !== accountGeneration) return currentUser;
-      await refreshProfileFolders({ force: newlyDetected });
+      if (startupProbe && !startupFolderProbeRequested) {
+        startupFolderProbeRequested = true;
+        try {
+          const probe = await window.orchestrator.probeStartupFolders();
+          if (generation !== accountGeneration || String(probe?.userId || '') !== mid) return currentUser;
+          setFolderInventory(probe.folders || [], folderSelect?.value);
+          queueStartupFolderProbeNotice(probe);
+        } catch (error) {
+          console.warn(`[startup-folder-probe] ${error.message || String(error)}`);
+        }
+      } else {
+        await refreshProfileFolders({ force: newlyDetected });
+      }
       if (generation !== accountGeneration) return currentUser;
       loginOutput.textContent = JSON.stringify(info, null, 2);
       if (newlyDetected || manual) {
@@ -1154,6 +1183,7 @@ function setPage(name, sourceItem = null) {
   if (name === 'collections') {
     if (profileFolders.length) populateFolderSelect(profileFolders);
     updateSyncCollectionState();
+    showStartupFolderProbeNotice();
   }
   if (name === 'readme') loadReadme().catch((error) => showToast(TEXT.toastError, error.message || String(error), 'error'));
   window.dispatchEvent(new CustomEvent('star:page-changed', { detail: { page: name } }));
@@ -1709,6 +1739,35 @@ async function refreshProfileFolders({ force = false } = {}) {
     }
   }
   return profileFolders;
+}
+
+function queueStartupFolderProbeNotice(probe = {}) {
+  const userId = String(currentUser?.mid || currentUser?.id || '');
+  if (!userId || String(probe.userId || '') !== userId || !Array.isArray(probe.changes) || !probe.changes.length) return;
+  startupFolderProbeNotice = probe;
+  startupFolderProbeNoticeShown = false;
+  if (document.querySelector('#page-collections')?.classList.contains('active')) showStartupFolderProbeNotice();
+}
+
+function showStartupFolderProbeNotice() {
+  if (!startupFolderProbeNotice || startupFolderProbeNoticeShown) return;
+  const userId = String(currentUser?.mid || currentUser?.id || '');
+  if (String(startupFolderProbeNotice.userId || '') !== userId) {
+    startupFolderProbeNotice = null;
+    return;
+  }
+  const changes = startupFolderProbeNotice.changes || [];
+  const lines = changes.slice(0, 8).map((item) => {
+    const delta = Number(item.delta || 0);
+    return `${item.name}: ${item.previousCount} -> ${item.currentCount} (${delta > 0 ? '+' : ''}${delta})`;
+  });
+  if (changes.length > lines.length) lines.push(`另有 ${changes.length - lines.length} 个收藏夹数量发生变化`);
+  startupFolderProbeNoticeShown = true;
+  showToast('收藏夹视频数量有变化', `${lines.join('\n')}\n可选择收藏夹后手动执行“同步任务”。`, 'info', {
+    className: 'folder-count-notice',
+    dismissible: true,
+    duration: 12000
+  });
 }
 
 function renderTaskInventory() {
@@ -2999,7 +3058,7 @@ qrCodeLoginButton?.addEventListener('click', async () => {
       showToast(TEXT.toastInfo, '正在退出当前 B站账号并准备扫码登录...', 'info');
       await prepareBiliAccountSwitch();
     }
-    await ensureLoginPage(switchingAccount);
+    await ensureLoginPage(true);
     await showQrCodeLogin();
     showToast(TEXT.toastSuccess, 'B站扫码登录二维码已就绪', 'success');
     startLoginWatch();
@@ -3151,7 +3210,7 @@ async function handleRuntime(data = {}) {
     refreshCredentials(credentialSelect.value).catch(() => {});
     if (!initialLoginCheckDone) {
       initialLoginCheckDone = true;
-      setTimeout(() => synchronizeLogin(), 0);
+      setTimeout(() => synchronizeLogin({ startupProbe: true }), 0);
     }
   }
 }
