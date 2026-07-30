@@ -122,6 +122,13 @@ class DependencyManager {
       try { return await this.downloadNow(packageId, { signal: controller.signal }); }
       catch (error) {
         const installed = this.state().packages.find((item) => item.id === id)?.available;
+        if (isDependencyPause(error)) {
+          this.update(packageId, {
+            status: 'paused',
+            message: '下载已暂停，已保留部分下载缓存；点击“继续下载”可断点续传'
+          });
+          return { id, paused: true, state: this.state() };
+        }
         if (isDependencyCancellation(error)) {
           this.update(packageId, {
             status: installed ? 'available' : 'missing',
@@ -153,6 +160,34 @@ class DependencyManager {
     this.downloadControllers.get(id)?.abort(dependencyCancellationError('已切换为本地导入'));
     await pending;
     return { id, cancelled: true };
+  }
+
+  async pauseDownload(packageId) {
+    const id = String(packageId || '');
+    const pending = this.pendingPackages.get(id);
+    if (!pending) {
+      const item = this.state().packages.find((entry) => entry.id === id);
+      return { id, paused: item?.status === 'paused', state: this.state() };
+    }
+    this.update(id, { status: 'pausing', message: '正在暂停下载，已保留当前下载缓存' });
+    this.downloadControllers.get(id)?.abort(dependencyPauseError('已暂停依赖下载'));
+    await pending;
+    return { id, paused: true, state: this.state() };
+  }
+
+  async prepareLocalImport(packageId) {
+    const id = String(packageId || '');
+    const definition = this.definitions().find((item) => item.id === id && isAsrModelPackage(item.id));
+    if (!definition) throw localImportError(`不支持从本地导入该依赖包：${id}`, this.releaseUrl());
+    await this.cancelDownload(id);
+    this.clearPackageArtifacts(id);
+    const available = definition.probes.every((probe) => fs.existsSync(path.join(this.projectRoot, probe)));
+    this.update(id, {
+      status: available ? 'available' : 'missing',
+      progress: available ? 1 : 0,
+      message: available ? '现有模型保持可用，请选择本地模型包导入' : '自动下载已中止，临时缓存已清理，请选择本地模型包导入'
+    });
+    return this.state();
   }
 
   async importLocal(packageId, sourceFile) {
@@ -704,12 +739,23 @@ function dependencyCancellationError(message = '依赖下载已中止') {
   return error;
 }
 
+function dependencyPauseError(message = '依赖下载已暂停') {
+  const error = new Error(message);
+  error.code = 'DEPENDENCY_DOWNLOAD_PAUSED';
+  return error;
+}
+
 function isDependencyCancellation(error) {
   return error?.code === 'DEPENDENCY_DOWNLOAD_CANCELLED';
 }
 
+function isDependencyPause(error) {
+  return error?.code === 'DEPENDENCY_DOWNLOAD_PAUSED';
+}
+
 function throwIfDependencyCancelled(signal) {
   if (!signal?.aborted) return;
+  if (isDependencyPause(signal.reason)) throw signal.reason;
   if (isDependencyCancellation(signal.reason)) throw signal.reason;
   throw dependencyCancellationError(signal.reason?.message || '依赖下载已中止');
 }

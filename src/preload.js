@@ -75,6 +75,7 @@ contextBridge.exposeInMainWorld('orchestrator', {
   dependencyState: () => ipcRenderer.invoke('dependencies:state'),
   dependencyAcknowledge: (payload) => ipcRenderer.invoke('dependencies:acknowledge', payload),
   dependencyDownload: (packageId) => ipcRenderer.invoke('dependencies:download', packageId),
+  dependencyPause: (packageId) => ipcRenderer.invoke('dependencies:pause', packageId),
   dependencyImport: (packageId) => ipcRenderer.invoke('dependencies:import-local', packageId),
   updateState: () => ipcRenderer.invoke('updates:state'),
   checkUpdate: () => ipcRenderer.invoke('updates:check'),

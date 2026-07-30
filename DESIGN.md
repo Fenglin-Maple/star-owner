@@ -269,7 +269,7 @@ Accepted output requires:
 - comments section and processing record;
 - temporary media cleanup unless cache preservation is explicit.
 
-Before validation, deterministic normalization repairs frame filename placeholders against the real extracted frame inventory, rejects literal FFmpeg pattern files, canonicalizes decorated/numbered headings, and orders Summary, Mind Map, and Contents. A remaining validation failure returns the task to pending and cannot be reclassified as a missing video.
+Before validation, deterministic normalization repairs frame filename placeholders against the real extracted frame inventory, rejects literal FFmpeg pattern files, canonicalizes decorated/numbered headings, and orders Summary, Mind Map, and Contents. A remaining validation failure returns the task to pending and cannot be reclassified as a missing video. When a workflow explicitly enables `retainProcessCache`, final validation disables only the temporary-media cleanup assertion because the cleanup tool has already been instructed to preserve the merged video, downloaded subtitles and ASR timestamp files. The normal cleanup path remains strict. Tool-run progress distinguishes queued work, downloader progress and FFmpeg stages; a stage with no stdout is reported as active processing rather than being presented as a fixed 29% completion state.
 
 Finalization applies metadata naming with Windows path budgeting, move retries, copy fallback, and a recoverable journal.
 

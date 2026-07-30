@@ -559,6 +559,7 @@ class ToolRunner {
           stage,
           resourcePool: startedPool,
           resourceLane: lane,
+          downloadProgress: null,
           queuePosition: 0,
           queueLength: 0,
           queueReason: '',
@@ -620,11 +621,12 @@ class ToolRunner {
         rememberOutput(text);
         this.appendLog(state.runId, text);
         const progress = parseDownloadProgress(text);
-        if (progress) this.updateRun(state.runId, { downloadProgress: progress });
+        this.updateRun(state.runId, { ...(progress ? { downloadProgress: progress } : {}), lastOutputAt: new Date().toISOString() });
       });
       readUtf8(child.stderr, (text) => {
         rememberOutput(text);
         this.appendLog(state.runId, text);
+        this.updateRun(state.runId, { lastOutputAt: new Date().toISOString() });
       });
       child.on('error', (error) => finish(error));
       child.on('close', (code, signal) => {
@@ -1215,6 +1217,8 @@ class ToolRunner {
     if (action !== 'clean-cache') {
       args.push('--out', artifactDir);
       if (collection?.cookieFile && fs.existsSync(collection.cookieFile)) args.push('--cookies', collection.cookieFile);
+    } else if (options.preserveProcessCache) {
+      args.push('--preserve-process-cache');
     } else if (options.preserveVideo || task.keepVideoCache || task.cachedVideoId) {
       args.push('--preserve-video');
     }

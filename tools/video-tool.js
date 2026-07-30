@@ -405,9 +405,10 @@ function cleanCache(target, args = {}) {
   const removed = [];
   const preserved = [];
   const preserveVideo = Boolean(args['preserve-video']);
+  const preserveProcessCache = Boolean(args['preserve-process-cache']);
   for (const file of walk(root)) {
     if (MEDIA_CACHE_EXTENSIONS.has(path.extname(file).toLowerCase())) {
-      if (preserveVideo && path.dirname(file) === root && /^merged\.(mp4|mkv|webm)$/i.test(path.basename(file))) {
+      if ((preserveProcessCache && isProcessCacheFile(root, file)) || (preserveVideo && path.dirname(file) === root && /^merged\.(mp4|mkv|webm)$/i.test(path.basename(file)))) {
         preserved.push(file);
         continue;
       }
@@ -415,7 +416,12 @@ function cleanCache(target, args = {}) {
       removed.push(file);
     }
   }
-  console.log(JSON.stringify({ root, preserveVideo, preserved, removed }, null, 2));
+  console.log(JSON.stringify({ root, preserveVideo, preserveProcessCache, preserved, removed }, null, 2));
+}
+
+function isProcessCacheFile(root, file) {
+  const relative = path.relative(root, file).split(path.sep).join('/');
+  return /^(merged\.(mp4|mkv|webm)|subtitles\/|asr\/)/i.test(relative);
 }
 
 async function getVideoInfo(videoUrl, args) {

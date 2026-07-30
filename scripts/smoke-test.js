@@ -93,6 +93,30 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   await Promise.all(duplicateDownloads);
   if (duplicateDownloadCalls !== 1) throw new Error('duplicate dependency request downloaded the same package more than once');
   dependencyManager.downloadNow = originalDownloadNow;
+
+  const pauseTarget = path.join(dependencyManager.downloadRoot, 'Star-Owner-v9.9.9-model-small.zip.partial');
+  fs.writeFileSync(pauseTarget, 'partial');
+  const originalPauseDownloadNow = dependencyManager.downloadNow.bind(dependencyManager);
+  dependencyManager.downloadNow = async (_id, { signal } = {}) => new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+  const pausedDownload = dependencyManager.download('model-small');
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const pauseResult = await dependencyManager.pauseDownload('model-small');
+  const pausedOutcome = await pausedDownload;
+  if (!pausedOutcome.paused || !pauseResult.paused || dependencyManager.state().packages.find((item) => item.id === 'model-small')?.status !== 'paused' || !fs.existsSync(pauseTarget)) {
+    throw new Error('dependency pause did not preserve partial download state');
+  }
+  dependencyManager.downloadNow = originalPauseDownloadNow;
+  fs.rmSync(pauseTarget, { force: true });
+  const importCleanupTarget = path.join(dependencyManager.downloadRoot, 'Star-Owner-v9.9.9-model-small.zip.partial');
+  fs.writeFileSync(importCleanupTarget, 'partial import cache');
+  dependencyManager.update('model-small', { status: 'paused', progress: 0.3 });
+  await dependencyManager.prepareLocalImport('model-small');
+  if (fs.existsSync(importCleanupTarget) || dependencyManager.state().packages.find((item) => item.id === 'model-small')?.status !== 'missing') {
+    throw new Error('local import preparation did not clear the paused download cache');
+  }
   const originalFetch = global.fetch;
   const checksumValue = 'a'.repeat(64);
   let checksumAttempts = 0;

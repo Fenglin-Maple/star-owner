@@ -44,7 +44,7 @@ function validateSubmission(task, submission, options = {}) {
     errors.push(error.message);
   }
   validateAsrTimeline(artifactDir, errors);
-  if (options.requireMediaCleanup !== false) validateTemporaryMediaCleanup(task, artifactDir, errors);
+  if (options.requireMediaCleanup !== false) validateTemporaryMediaCleanup(task, artifactDir, errors, options);
 
   if (!errors.some((error) => error.startsWith('Markdown ')) && fs.existsSync(markdownFile)) {
     const markdown = fs.readFileSync(markdownFile, 'utf8');
@@ -220,8 +220,9 @@ function validateArtifactTree(artifactDir, errors) {
   }
 }
 
-function validateTemporaryMediaCleanup(task, artifactDir, errors) {
+function validateTemporaryMediaCleanup(task, artifactDir, errors, options = {}) {
   const allowed = new Set();
+  const preserveProcessCache = options.preserveProcessCache === true;
   if (task.cachedVideoId || task.keepVideoCache) {
     for (const candidate of [task.cachedVideoFile, path.join(artifactDir, 'merged.mp4'), path.join(artifactDir, 'merged.mkv'), path.join(artifactDir, 'merged.webm')]) {
       if (candidate) allowed.add(normalizePath(candidate));
@@ -231,6 +232,7 @@ function validateTemporaryMediaCleanup(task, artifactDir, errors) {
   try {
     for (const file of walkFiles(artifactDir)) {
       if (!TEMPORARY_MEDIA_EXTENSIONS.has(path.extname(file).toLowerCase())) continue;
+      if (preserveProcessCache && isProcessCachePath(artifactDir, file)) continue;
       if (!allowed.has(normalizePath(file))) leftovers.push(path.relative(artifactDir, file));
     }
   } catch (error) {
@@ -240,6 +242,11 @@ function validateTemporaryMediaCleanup(task, artifactDir, errors) {
   if (leftovers.length) {
     errors.push(`Temporary media cache must be cleaned before submission: ${leftovers.slice(0, 8).join(', ')}${leftovers.length > 8 ? ` (+${leftovers.length - 8} more)` : ''}`);
   }
+}
+
+function isProcessCachePath(root, file) {
+  const relative = path.relative(root, file).split(path.sep).join('/');
+  return /^(merged\.(mp4|mkv|webm)|subtitles\/|asr\/)/i.test(relative);
 }
 
 function* walkFiles(root, depth = 0, state = { entries: 0 }) {

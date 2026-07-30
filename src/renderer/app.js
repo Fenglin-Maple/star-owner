@@ -864,7 +864,7 @@ function renderBootstrap(state = {}) {
     bootstrapPanel.classList.add('ready');
     overview?.classList.add('startup-complete');
     startupLoader?.classList.add('complete');
-    apiBadge.textContent = runtime.apiUrl || 'API ready';
+    apiBadge.textContent = runtime.apiUrl || '接口已就绪';
     return;
   }
   if (phase !== 'ready') {
@@ -885,7 +885,7 @@ function renderBootstrap(state = {}) {
       ? '\u540e\u7aef\u5df2\u5c31\u7eea'
       : '\u6b63\u5728\u542f\u52a8\u672c\u5730\u670d\u52a1';
   bootstrapMessage.textContent = state.message || '\u6b63\u5728\u51c6\u5907...';
-  apiBadge.textContent = phase === 'ready' ? (runtime.apiUrl || 'API ready') : `${Math.round(progress * 100)}%`;
+  apiBadge.textContent = phase === 'ready' ? (runtime.apiUrl || '接口已就绪') : `${Math.round(progress * 100)}%`;
   if (phase === 'ready' && !bootstrapHideTimer) {
     const minimumVisible = Math.max(80, 180 - (Date.now() - bootstrapStartedAt));
     bootstrapHideTimer = setTimeout(() => {
@@ -3293,7 +3293,7 @@ async function handleRuntime(data = {}) {
     renderProfile(lastSnapshot);
   }
   renderBootstrap(data.bootstrap || runtime.bootstrap || {});
-  apiBadge.textContent = data.backendReady ? (data.apiUrl || 'API ready') : `${Math.round(Number(data.bootstrap?.progress || 0) * 100)}%`;
+  apiBadge.textContent = data.backendReady ? (data.apiUrl || '接口已就绪') : `${Math.round(Number(data.bootstrap?.progress || 0) * 100)}%`;
   apiDocs.textContent = secureAgentApiText(buildApiDocs(data.apiUrl || 'http://127.0.0.1:17391'));
   updatePromptTemplate();
   if (!data.backendReady) return;

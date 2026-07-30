@@ -96,6 +96,18 @@ function assert(condition, message) {
   let currentUser = null;
   const cookieFixture = path.join(root, 'login-cookies.txt');
   const manager = new InternalAgentManager({ store, toolRunner, ragAssistant: rag, bili: { exportCookies: async () => { fs.writeFileSync(cookieFixture, 'cookie'); return cookieFixture; } }, getCurrentUser: () => currentUser, emit: (event) => events.push(event) });
+  const retainedArtifact = path.join(root, 'retained-artifact');
+  fs.mkdirSync(path.join(retainedArtifact, 'asr'), { recursive: true });
+  fs.mkdirSync(path.join(retainedArtifact, 'subtitles'), { recursive: true });
+  fs.writeFileSync(path.join(retainedArtifact, 'merged.mp4'), 'retained video');
+  fs.writeFileSync(path.join(retainedArtifact, 'asr', 'transcript.srt'), '1\n00:00:01,000 --> 00:00:02,000\n保留字幕。\n');
+  fs.writeFileSync(path.join(retainedArtifact, 'asr', 'asr-transcript.txt'), '[00:00:01,000 --> 00:00:02,000] 保留字幕。\n');
+  fs.writeFileSync(path.join(retainedArtifact, 'asr', 'asr-result.json'), JSON.stringify({ segments: [{ start: 1, end: 2, text: '保留字幕。' }] }));
+  fs.writeFileSync(path.join(retainedArtifact, 'subtitles', 'part-1.srt'), '1\n00:00:01,000 --> 00:00:02,000\n站内字幕。\n');
+  fs.writeFileSync(path.join(retainedArtifact, 'info.json'), JSON.stringify({ title: '保留缓存测试' }));
+  const retainedTask = { id: 'retained-task', bvid: 'BVRETAIN001', allowedRoot: root, artifactDir: retainedArtifact, keepVideoCache: false };
+  const retainedValidation = require('../src/core/validation').validateSubmission(retainedTask, { artifactDir: retainedArtifact, markdownFile: path.join(retainedArtifact, 'summary.md'), metadataFile: path.join(retainedArtifact, 'info.json') }, { preserveProcessCache: true });
+  if (retainedValidation.errors.some((error) => error.includes('Temporary media cache'))) throw new Error('retained process cache was still rejected by relaxed validation');
   const toggleCollection = manager.createInternalCollection('任务开关测试');
   store.upsertTask({ id: `${toggleCollection.id}:disabled`, collectionId: toggleCollection.id, bvid: 'BVDISABLED01', title: '关闭任务', status: 'pending', enabled: false, favoriteAddedAt: '2026-07-15T10:00:00.000Z' });
   store.upsertTask({ id: `${toggleCollection.id}:enabled`, collectionId: toggleCollection.id, bvid: 'BVENABLED001', title: '开启任务', status: 'pending', enabled: true, favoriteAddedAt: '2026-07-14T10:00:00.000Z' });

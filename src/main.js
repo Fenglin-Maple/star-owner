@@ -176,9 +176,9 @@ function openBilibiliVideoWindow(value) {
 }
 
 async function bootstrap() {
-  emitBootstrap('Preparing workspace...', 0.14);
+  emitBootstrap('正在准备工作目录…', 0.14);
   initWorkspace();
-  emitBootstrap('Opening SQLite database...', 0.32);
+  emitBootstrap('正在打开本地数据…', 0.32);
   store = await Store.open();
   updateManager = new UpdateManager({
     projectRoot: path.resolve(__dirname, '..'),
@@ -205,9 +205,9 @@ async function bootstrap() {
     browseHidden,
     openExternal: (url) => openExternalUrl(url)
   });
-  emitBootstrap('Preparing Bilibili session...', 0.52);
+  emitBootstrap('正在准备 B站会话…', 0.52);
   bili = new BiliClient(biliSession);
-  emitBootstrap('Registering tool runner...', 0.66);
+  emitBootstrap('正在启动工具调度器…', 0.66);
   toolRunner = new ToolRunner({
     store,
     onEvent: publishEvent,
@@ -269,19 +269,19 @@ async function bootstrap() {
     message: '等待健康检查',
     dependencies: []
   }));
-  emitBootstrap('Checking tool interfaces...', 0.7);
+  emitBootstrap('正在检查工具接口…', 0.7);
   sendRuntime();
   let checkedTools = 0;
   await toolRunner.probeTools(registeredTools, (result) => {
     toolHealth = toolHealth.map((item) => item.toolId === result.toolId ? result : item);
     checkedTools += 1;
-    emitBootstrap(`Checking tools ${checkedTools}/${registeredTools.length}: ${result.toolName}`, 0.7 + (0.11 * checkedTools / Math.max(1, registeredTools.length)));
+    emitBootstrap(`正在检查工具 ${checkedTools}/${registeredTools.length}：${result.toolName}`, 0.7 + (0.11 * checkedTools / Math.max(1, registeredTools.length)));
     sendRuntime();
   });
-  emitBootstrap('Loading persistent GPU ASR service...', 0.84);
+  emitBootstrap('正在加载常驻 GPU ASR 服务…', 0.84);
   await toolRunner.initialize();
   videoCacheManager.initialize();
-  emitBootstrap('Starting resource pools and read-only knowledge API...', 0.92);
+  emitBootstrap('正在启动资源池和知识库接口…', 0.92);
   apiServer = new ApiServer({
     store,
     toolRunner,
@@ -290,7 +290,7 @@ async function bootstrap() {
   });
   const apiUrl = await apiServer.start();
   backendReady = true;
-  emitBootstrap('Ready.', 1, 'ready');
+  emitBootstrap('应用已准备就绪。', 1, 'ready');
   try {
     const shortcut = ensurePortableDesktopShortcut({
       projectRoot: path.resolve(__dirname, '..'),
@@ -933,10 +933,16 @@ ipcMain.handle('dependencies:download', async (_event, packageId) => {
   return dependencyManager.download(packageId);
 });
 
+ipcMain.handle('dependencies:pause', async (_event, packageId) => {
+  assertBackendReady();
+  return dependencyManager.pauseDownload(packageId);
+});
+
 ipcMain.handle('dependencies:import-local', async (_event, packageId) => {
   assertBackendReady();
   const definition = dependencyManager.state().packages.find((item) => item.id === String(packageId || '') && item.localImport);
   if (!definition) throw new Error('只允许从本地导入受支持的 ASR 模型包。');
+  await dependencyManager.prepareLocalImport(definition.id);
   const selected = await dialog.showOpenDialog(mainWindow, {
     title: `导入 ${definition.name}`,
     buttonLabel: '验证并导入',
@@ -1100,7 +1106,7 @@ async function browseHidden(value, options = {}) {
 }
 
 function assertBackendReady() {
-  if (!backendReady || !store || !bili || !apiServer) throw new Error('Backend is still starting.');
+  if (!backendReady || !store || !bili || !apiServer) throw new Error('应用正在启动，请等待加载完成后再操作。');
 }
 
 function emitBootstrap(message, progress, phase = 'loading') {

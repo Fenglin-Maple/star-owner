@@ -859,7 +859,12 @@ class InternalAgentManager {
     const markdownFile = path.join(task.artifactDir, 'summary-draft.md');
     fs.writeFileSync(markdownFile, `${generated.trim()}\n`, 'utf8');
     this.setProgress(session, task.keepVideoCache || task.cachedVideoId ? '清理过渡缓存并保留视频' : '清理临时音视频缓存', 0.88);
-    const cleanup = this.startTool(session, task, toolCollection, 'clean-cache', { timeoutMs: 30 * 60 * 1000, preserveVideo: Boolean(task.keepVideoCache || task.cachedVideoId || session.taskOptions?.retainProcessCache) });
+    const preserveProcessCache = shouldPreserveProcessCache(task, session);
+    const cleanup = this.startTool(session, task, toolCollection, 'clean-cache', {
+      timeoutMs: 30 * 60 * 1000,
+      preserveVideo: Boolean(task.cachedVideoId),
+      preserveProcessCache
+    });
     await this.waitForRun(session, task, cleanup.id, signal, 0.89, 0.94);
     this.setProgress(session, '校验并归档产物', 0.95);
     const finalized = this.submitTask(session, task, markdownFile);
@@ -893,9 +898,13 @@ class InternalAgentManager {
       if (signal.aborted) throw abortError();
       const run = this.store.getToolRun(runId);
       if (!run) throw new Error(`工具运行记录不存在：${runId}`);
-      const fraction = run.asrProgress ? Number(run.asrProgress.progress || 0) : (run.status === 'running' ? 0.45 : 0.12);
+      const fraction = run.asrProgress
+        ? Number(run.asrProgress.progress || 0)
+        : run.downloadProgress
+          ? Number(run.downloadProgress.progress || 0)
+          : stageProgressFraction(run);
       const progress = progressStart + (progressEnd - progressStart) * Math.max(0, Math.min(1, fraction));
-      const detail = run.status === 'queued' ? `排队 ${run.queuePosition || '-'} · ${run.stage || run.toolName}` : `${run.toolName} · ${run.stage || run.status}`;
+      const detail = describeToolRun(run);
       this.setProgress(session, detail, progress, false);
       if (TERMINAL_RUNS.has(run.status)) {
         if (run.status !== 'succeeded') {
@@ -1207,7 +1216,7 @@ class InternalAgentManager {
 
   submitTask(session, task, markdownFile) {
     const metadataFile = path.join(task.artifactDir, 'info.json');
-    const validation = validateSubmission(task, { artifactDir: task.artifactDir, markdownFile, metadataFile });
+    const validation = validateSubmission(task, { artifactDir: task.artifactDir, markdownFile, metadataFile }, { preserveProcessCache: shouldPreserveProcessCache(task, session) });
     const now = new Date().toISOString();
     this.store.recordSubmission(task.id, { createdAt: now, workerId: session.workerId, agentName: session.workerId, request: { artifactDir: task.artifactDir, markdownFile, metadataFile }, accepted: validation.ok, errors: validation.errors, internalAgent: true });
     if (!validation.ok) throw new Error(`提交校验失败：${validation.errors.join('；')}`);
@@ -1742,6 +1751,33 @@ function calculateFrameBudget(duration, options = {}) {
   const interval = Math.max(1, Math.min(600, Number(options.frameIntervalSeconds) || 25));
   const seconds = Math.max(0, Number(duration) || 0);
   return Math.max(minimum, seconds > 0 ? Math.ceil(seconds / interval) : minimum);
+}
+
+function shouldPreserveProcessCache(task = {}, session = {}) {
+  return Boolean(task.keepVideoCache || session.taskOptions?.retainProcessCache);
+}
+
+function stageProgressFraction(run = {}) {
+  if (run.status === 'queued') return 0.05;
+  if (run.status !== 'running') return 0.12;
+  if (run.stage === 'media-preparation' || run.stage === 'audio-preparation') return 0.35;
+  return 0.45;
+}
+
+function describeToolRun(run = {}) {
+  if (run.status === 'queued') return `排队 ${run.queuePosition || '-'} · ${run.stage || run.toolName}`;
+  if (run.downloadProgress) {
+    const progress = `${Math.round(Number(run.downloadProgress.percent || 0))}%`;
+    return `${run.toolName || run.toolId} · 下载 ${progress}`;
+  }
+  if (run.status === 'running' && ['media-preparation', 'audio-preparation'].includes(run.stage)) {
+    return `${run.toolName || run.toolId} · FFmpeg 处理中（等待工具输出）`;
+  }
+  if (run.status === 'running' && run.lastOutputAt) {
+    const quietSeconds = Math.max(0, Math.round((Date.now() - Date.parse(run.lastOutputAt)) / 1000));
+    if (quietSeconds >= 5) return `${run.toolName || run.toolId} · ${run.stage || '处理中'}（已运行 ${quietSeconds} 秒）`;
+  }
+  return `${run.toolName || run.toolId} · ${run.stage || run.status}`;
 }
 
 function clamp(value, min, max, fallback) {
