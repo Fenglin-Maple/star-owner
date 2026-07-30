@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.1.1`
+Version: `1.1.2`
 
 ## 1. Portable Release for Users
 
@@ -31,7 +31,7 @@ Star-Owner-v<dependency-version>-model-large-v3-turbo.zip
 Star-Owner-v<dependency-version>-model-large-v3-turbo.zip.sha256
 ```
 
-The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.1.1` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.1.2` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry.
 
 ### Updating and migrating an existing installation
 
@@ -204,7 +204,7 @@ The aggregate verifier also runs scheduler, RAG, task rollback, video cache, ima
 
 ### Automatic ASR model download is slow
 
-Open the dependency Release linked by a model name in Settings. For version `1.1.1`, the required published package is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; `Star-Owner-v1.0.0-model-small.zip` is the optional alternate. Keep the ZIP intact and click `从本地导入` on the matching row. The historical medium filename is only for older releases. The application stops an active automatic download for that model and removes its managed cache. A downloading model can be paused from the same row; pausing preserves the `.partial` file for a later ranged resume. Importing while downloading or paused first cancels the automatic transfer and removes its managed partial/install residue, but never removes the source ZIP selected by the user. A wrong version, wrong model, damaged file, modified archive or unexpected layout is rejected with the correct Release URL; an already healthy model remains installed.
+Open the dependency Release linked by a model name in Settings. For version `1.1.2`, the required published package is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; `Star-Owner-v1.0.0-model-small.zip` is the optional alternate. Keep the ZIP intact and click `从本地导入` on the matching row. The historical medium filename is only for older releases. The application stops an active automatic download for that model and removes its managed cache. A downloading model can be paused from the same row; pausing preserves the `.partial` file for a later ranged resume. Importing while downloading or paused first cancels the automatic transfer and removes its managed partial/install residue, but never removes the source ZIP selected by the user. A wrong version, wrong model, damaged file, modified archive or unexpected layout is rejected with the correct Release URL; an already healthy model remains installed.
 
 ### Windows reports a path-too-long risk
 
