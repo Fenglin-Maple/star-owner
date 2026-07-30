@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.0.6`
+Version: `1.0.7`
 
 ## 1. Portable Release for Users
 
@@ -33,7 +33,7 @@ Star-Owner-v<dependency-version>-model-large-v3-turbo.zip
 Star-Owner-v<dependency-version>-model-large-v3-turbo.zip.sha256
 ```
 
-The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.0.6` uses the unchanged `v1.0.0` runtime, small and medium assets; users do not need to redownload packages already installed and healthy. Turbo uses the same `v1.0.0` filename contract but is optional and is not uploaded by this source-only update.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.0.7` uses the unchanged published `v1.0.0` runtime, small, medium and optional Turbo assets; users do not need to redownload packages already installed and healthy.
 
 ## 2. Hardware and ASR
 
@@ -202,7 +202,7 @@ The aggregate verifier also runs scheduler, RAG, task rollback, video cache, ima
 
 ### Automatic ASR model download is slow
 
-Open the dependency Release linked by a model name in Settings. For version `1.0.6`, the required published packages remain `Star-Owner-v1.0.0-model-small.zip` and `Star-Owner-v1.0.0-model-medium.zip`; keep the ZIP intact and click `从本地导入` on the matching row. The optional Turbo filename is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`, but this source-only update does not upload it yet. The application stops an active automatic download for that model and removes its managed cache. A wrong version, wrong model, damaged file, modified archive or unexpected layout is rejected with the correct Release URL; an already healthy model remains installed.
+Open the dependency Release linked by a model name in Settings. For version `1.0.7`, the required published packages remain `Star-Owner-v1.0.0-model-small.zip` and `Star-Owner-v1.0.0-model-medium.zip`; keep the ZIP intact and click `从本地导入` on the matching row. The optional published Turbo filename is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`. The application stops an active automatic download for that model and removes its managed cache. A wrong version, wrong model, damaged file, modified archive or unexpected layout is rejected with the correct Release URL; an already healthy model remains installed.
 
 ### Windows reports a path-too-long risk
 

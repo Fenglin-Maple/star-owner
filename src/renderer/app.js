@@ -347,7 +347,8 @@ const THEMES = [
   ['bili', '\u54d4\u54e9\u54d4\u54e9\u7c89\u767d', '\u7c89\u8272\u9ad8\u4eae\u548c\u767d\u8272\u9762\u677f'],
   ['graphite', '\u77f3\u58a8', '\u4f4e\u5bf9\u6bd4\u9ed1\u7070\u914d\u8272'],
   ['midnight', '\u6df1\u84dd', '\u84dd\u9ed1\u79d1\u6280\u611f'],
-  ['mint', '\u9752\u8584\u8377', '\u6e05\u51b7\u9752\u7eff\u8272\u8c03']
+  ['mint', '\u9752\u8584\u8377', '\u6e05\u51b7\u9752\u7eff\u8272\u8c03'],
+  ['endfield', '\u7ec8\u672b\u5730 / Endfield', '\u6696\u767d\u5de5\u7a0b\u754c\u9762\u4e0e\u4fe1\u53f7\u9ec4\u64cd\u4f5c\u6807\u8bb0']
 ];
 
 function applyI18n() {
@@ -2291,7 +2292,7 @@ async function renderDocumentMermaid(root) {
     for (const block of blocks) block.parentElement.classList.add('mermaid-unavailable');
     return;
   }
-  const lightTheme = document.body.classList.contains('theme-day') || document.body.classList.contains('theme-bili') || document.body.classList.contains('theme-mint');
+  const lightTheme = document.body.classList.contains('theme-day') || document.body.classList.contains('theme-bili') || document.body.classList.contains('theme-mint') || document.body.classList.contains('theme-endfield');
   window.mermaid.initialize({
     startOnLoad: false,
     securityLevel: 'strict',

@@ -1,6 +1,6 @@
 # 星藏家 Design
 
-Version: `1.0.6`
+Version: `1.0.7`
 
 ## 1. Product Goal
 
@@ -284,7 +284,7 @@ The UI displays only reasoning text returned by the provider. Unsupported vision
 
 ## 16. UI Design
 
-The application uses a custom frameless title bar, seven themes, a compact left sidebar and non-default form controls. Settings navigation has three levels:
+The application uses a custom frameless title bar, eight themes, a compact left sidebar and non-default form controls. The Endfield theme is an original, moderate-density engineering treatment built from warm neutrals, restrained signal yellow and status green; it does not redistribute game artwork, logos or proprietary fonts. Settings navigation has three levels:
 
 ```text
 设置
@@ -307,7 +307,7 @@ Project-local runtime and models may be installed from GitHub Release assets. Do
 
 All three models support local ZIP import. The accepted asset name is generated only from `dependencyReleaseVersion`; the selected file must exactly match that name and the official Release SHA-256. Archive inspection rejects links, traversal, foreign runtime paths, the wrong model directory and missing probes before maintenance mode or target replacement. Import cancels and joins an in-flight automatic download for the same model, removes its `.partial`, archive, staging, backup and transaction residue, then copies the selected file into a managed temporary location. Existing healthy model files remain untouched until verified staging commits atomically, and remain available after validation failure. Package-name links and error dialogs point to the exact dependency Release.
 
-Version `1.0.6` keeps runtime, small and medium pinned to dependency baseline `1.0.0`. Turbo is an optional fourth dependency card and never enters `missingRequired`; its prepared asset contract is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`. This source update deliberately does not upload that asset. Packaging can build only this model with `npm run package:model:turbo`, while portable manifests distinguish required small/medium assets from optional Turbo.
+Version `1.0.7` keeps runtime and all ASR models pinned to dependency baseline `1.0.0`. Turbo is an optional fourth dependency card and never enters `missingRequired`; its published asset contract is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`. Packaging can build only this model with `npm run package:model:turbo`, while portable manifests distinguish required small/medium assets from optional Turbo.
 
 Media tool subprocesses never resolve `node` through the system `PATH`. Normal source tests use `process.execPath`; the desktop application launches its bundled Electron executable with `ELECTRON_RUN_AS_NODE=1`. Python processes receive `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`, and streamed stdout/stderr use incremental UTF-8 decoders so a multibyte Chinese character split across chunks is not replaced.
 

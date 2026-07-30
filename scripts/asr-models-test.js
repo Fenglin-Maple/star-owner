@@ -27,7 +27,7 @@ const store = {
 };
 
 try {
-  const manager = new DependencyManager({ store, projectRoot: root, version: '1.0.6', dependencyVersion: '1.0.0' });
+  const manager = new DependencyManager({ store, projectRoot: root, version: '1.0.7', dependencyVersion: '1.0.0' });
   const dependencyState = manager.state();
   const turboPackage = dependencyState.packages.find((item) => item.id === 'model-large-v3-turbo');
   assert(turboPackage && turboPackage.localImport && !turboPackage.required, 'Turbo optional dependency contract is missing');

@@ -21,11 +21,11 @@
 
 **Built with OpenAI Codex.**
 
-> `1.0.6` 版本边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
+> `1.0.7` 版本边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
 >
 > 当前稳定版只处理普通 BV 单 P 视频。多 P 视频会在元数据阶段被识别、清理本次缓存并关闭任务；`ep/ss/md`、课程、活动聚合、音频和直播等特殊页面会在输入阶段直接拒绝。这样可以避免把只处理第一 P 的结果误标为完整总结。完整多 P 支持将在独立 Git 分支完成并通过专项测试后再合并。
 
-`1.0.6` 新增可选的多语言 `large-v3-turbo` ASR。它在 NVIDIA GPU 上使用 `int8_float16`，保留和现有模型相同的自动语言检测、VAD、逐句时间戳、覆盖率诊断、常驻服务与单通道排队；CPU 通道使用 `int8`。模型配置、显存门槛、计算类型与依赖包统一由模型注册表管理，切换模型会同步重启正确的计算类型。`small` / `medium` 仍是首次启动必需依赖，Turbo 独立包是可选项，不会阻塞原有用户。本次只更新源码，不上传 Release；Turbo 包契约已准备为 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`。
+`1.0.7` 新增原创的“终末地 / Endfield”工程界面主题，以暖白、深色结构和信号黄操作标记统一桌面工作台，不分发游戏美术、标志或专有字体。版本同时保留可选的多语言 `large-v3-turbo` ASR：NVIDIA GPU 使用 `int8_float16`，CPU 使用 `int8`，并沿用自动语言检测、VAD、逐句时间戳、覆盖率诊断、常驻服务与单通道排队。`small` / `medium` 仍是首次启动必需依赖，Turbo 独立包已发布为 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`，按需安装且不会阻塞原有用户。
 
 ## 快速安装与第一次使用
 
@@ -303,7 +303,7 @@ Windows 10/11 x64 用户可从 [GitHub Releases](https://github.com/Fenglin-Mapl
 4. 首次启动若提示缺少 ASR 模型，可允许应用自动下载；也可在设置的“项目依赖包”中点击模型名称打开正确 Release，下载完整 ZIP 后直接“从本地导入”。默认推荐 `medium`，资源不足时可切换 `small`；可选 Turbo 独立包发布后可按需安装。
 5. 按启动页“第一次上手”依次完成模型配置、B站登录、收藏夹同步、任务检查和 Agent 工作流创建。
 
-运行时和模型 ZIP 是应用内依赖管理器使用的独立资产。设置页可以重新检查、下载或修复依赖，并可导入手动下载的 `small`、`medium`、`large-v3-turbo` ZIP。`1.0.6` 继续使用 `v1.0.0` 依赖基线，接受精确名称 `Star-Owner-v1.0.0-model-small.zip`、`Star-Owner-v1.0.0-model-medium.zip` 和 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`；其中 Turbo 资产契约已实现，但本次不上传 Release。依赖管理器核对 GitHub Release SHA-256、模型类型和目录结构，未经校验的包不会安装，错误导入不会损伤原有健康模型。
+运行时和模型 ZIP 是应用内依赖管理器使用的独立资产。设置页可以重新检查、下载或修复依赖，并可导入手动下载的 `small`、`medium`、`large-v3-turbo` ZIP。`1.0.7` 继续使用 `v1.0.0` 依赖基线，接受精确名称 `Star-Owner-v1.0.0-model-small.zip`、`Star-Owner-v1.0.0-model-medium.zip` 和 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`；三套模型资产及校验文件均已发布。依赖管理器核对 GitHub Release SHA-256、模型类型和目录结构，未经校验的包不会安装，错误导入不会损伤原有健康模型。
 
 源码运行：
 
