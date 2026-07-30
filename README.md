@@ -21,11 +21,11 @@
 
 **Built with OpenAI Codex.**
 
-> `1.0.7` 版本边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
+> `1.0.9` 版本边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
 >
 > 当前稳定版只处理普通 BV 单 P 视频。多 P 视频会在元数据阶段被识别、清理本次缓存并关闭任务；`ep/ss/md`、课程、活动聚合、音频和直播等特殊页面会在输入阶段直接拒绝。这样可以避免把只处理第一 P 的结果误标为完整总结。完整多 P 支持将在独立 Git 分支完成并通过专项测试后再合并。
 
-`1.0.7` 新增原创的“终末地 / Endfield”工程界面主题，以暖白、深色结构和信号黄操作标记统一桌面工作台，不分发游戏美术、标志或专有字体。版本同时保留可选的多语言 `large-v3-turbo` ASR：NVIDIA GPU 使用 `int8_float16`，CPU 使用 `int8`，并沿用自动语言检测、VAD、逐句时间戳、覆盖率诊断、常驻服务与单通道排队。`small` / `medium` 仍是首次启动必需依赖，Turbo 独立包已发布为 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`，按需安装且不会阻塞原有用户。
+`1.0.9` 延续“终末地 / Endfield”主题，并将 ASR 默认切换为多语言 `large-v3-turbo`：NVIDIA GPU 使用 `int8_float16`，CPU 使用 `int8`。CPU 与 CUDA 是互斥的独立运行模式，ASR 请求仍在选定通道中排队。当前版本只在应用中暴露 `large-v3-turbo` 和 `small`；旧版 `medium` 依赖包保留在历史 Release 中供旧应用使用，不会被新版本删除或展示。
 
 ## 快速安装与第一次使用
 
@@ -34,10 +34,10 @@
 1. 打开 [最新 GitHub Release](https://github.com/Fenglin-Maple/star-owner/releases/latest)，下载 `Star-Owner-v<version>-win-x64-core.zip`；建议同时下载同名 `.sha256` 校验文件。
 2. 将 ZIP 完整解压到当前用户可写且路径较短的目录，例如 `D:\Star-Owner`；不要在压缩包预览窗口内直接运行。
 3. 双击解压目录根部的 `Start-StarOwner.cmd`。便携包首次成功启动后会在当前用户桌面自动创建“星藏家”快捷方式，以后可直接使用桌面图标启动；同一安装目录不会反复创建。
-4. 核心包包含 Electron、Python、faster-whisper、FFmpeg、yt-dlp、CUDA/VC++ 运行依赖，但不包含 ASR 模型权重。全新安装首次启动会列出缺失的必需 `small` 和 `medium` 模型；可让应用自动下载，也可从 `v1.0.0` Release 手动下载对应 ZIP，然后在“设置 -> 应用设置 -> 项目依赖包”点击“从本地导入”。可选 Turbo 不影响首次启动，其独立包发布后也使用相同安装方式。ZIP 不需要自行解压；应用会核对版本、文件名、官方 SHA-256 和包结构。
+4. 核心包包含 Electron、Python、faster-whisper、FFmpeg、yt-dlp、CUDA/VC++ 运行依赖，但不包含 ASR 模型权重。全新安装首次启动会列出缺失的必需 `large-v3-turbo`；`small` 是可选模型。可让应用自动下载，也可从 `v1.0.0` Release 手动下载对应 ZIP，然后在“设置 -> 应用设置 -> 项目依赖包”点击“从本地导入”。ZIP 不需要自行解压；应用会核对版本、文件名、官方 SHA-256 和包结构。
 5. 在启动页按照“第一次上手”依次完成：`配置 AI 模型 -> 登录 B站 -> 同步收藏夹 -> 检查任务 -> 创建 Agent 视频总结工作流`。
 
-默认 ASR 模型仍为多语言 `medium`；显存紧张时可选 `small`，也可安装 `large-v3-turbo` 以较低显存运行更大的 Turbo 模型。建议为核心包、三个模型、缓存和视频产物预留至少 12 GB 可用空间。
+默认 ASR 模型为多语言 `large-v3-turbo`；资源更紧张时可切换 `small`。应用会在任务运行前后检查磁盘空间，默认至少保留 2 GB，并在大容量磁盘上使用封顶的比例阈值，空间不足时停止新增处理并给出迁移提示。建议为核心包、模型、缓存和视频产物预留至少 12 GB 可用空间。
 
 ## 核心能力
 
@@ -51,6 +51,7 @@
 - 同步收藏夹及 BV、标题、UP 主、时长、发布日期、收藏日期和收藏状态；同步结果按 SQLite 事务提交，失败或崩溃自动回滚。
 - 面对隐藏、私密或暂不可见条目，分别记录 B 站报告数、接口可见数与差值，保守合并本地状态，避免把暂时不可见的视频误判为已移出。
 - “任务总览”集中展示待处理、处理中、已完成、失败/打回和已关闭任务；支持搜索、日期、时长及状态筛选，并可按视频启用或关闭后续处理。
+- 任务总览支持“一键启用筛选结果”：当前收藏夹在普通/高级筛选后的可见任务会被整体启用，同收藏夹其余未完成任务自动关闭，已完成记录仍保留。
 
 ### 应用内 Agent 视频总结工作流
 
@@ -61,10 +62,10 @@
 
 ### 有时间轴依据的 Markdown 文档
 
-- 无论视频是否带有站内字幕，都会运行一次 faster-whisper ASR；默认使用多语言 `medium` 模型，生成逐句 SRT、时间轴文本和结构化起止时间。
+- 无论视频是否带有站内字幕，都会运行一次 faster-whisper ASR；默认使用多语言 `large-v3-turbo` 模型，生成逐句 SRT、时间轴文本和结构化起止时间。
 - Agent 对比站内字幕与 ASR 字幕的完整性、术语和时间轴，并可结合关键帧与多模态能力判断更可靠的内容依据。
-- 关键帧通过 FFmpeg 输出为真实图片文件，文档按“小结 -> 思维导图 -> 目录”组织，正文包含 Bilibili 时间轴链接、关键帧、字幕比较和热评前三分析。
-- 视频、图片、字幕、元数据和 Markdown 按统一目录与命名规则归档，任务完成后自动清理不需要保留的临时媒体缓存。
+- 关键帧通过 FFmpeg 输出为真实图片文件，工作流可设置最低关键帧数和按视频时长增加的间隔额度，文档按“小结 -> 思维导图 -> 目录”组织，正文包含 Bilibili 时间轴链接、关键帧、字幕比较和热评前三分析。
+- 视频、图片、字幕、元数据和 Markdown 按统一目录与命名规则归档，任务完成后自动清理不需要保留的临时媒体缓存；工作流可选择保留视频、字幕和 ASR 过程缓存。
 
 ### 文档库、RAG 与外部知识访问
 
@@ -75,7 +76,7 @@
 ### 视频缓存与本地运行保障
 
 - 下载队列与视频库支持合轨视频缓存、封面、横竖屏播放、条件筛选、文件缺失检测和确认删除；缓存视频收藏夹也可作为 AI 总结任务来源。
-- 自动检测 NVIDIA GPU、CTranslate2 CUDA、显存、项目内 Python 和 ASR 模型；可在 `small`、`medium`、`large-v3-turbo` 间切换，并提供默认关闭的 CPU ASR 回退通道。
+- 自动检测 NVIDIA GPU、CTranslate2 CUDA、显存、项目内 Python 和 ASR 模型；可在 `small` 与 `large-v3-turbo` 间切换，并提供默认关闭的独立 CPU ASR 模式。CPU 模式启用后不会同时运行 CUDA ASR。
 - 数据库、Cookie、模型配置、缓存、日志和最终产物默认保存在项目 `workspace/` 与用户注册的 Workspace 库中，便于迁移、备份和统一管理。
 
 ## 桌面导航
@@ -189,11 +190,11 @@ asr/asr-result.json
 - `api`：2 条通道，限制 Bilibili API 启动频率。
 - `media`：3 条通道，用于下载、FFmpeg、音频和关键帧。
 - `disk`：2 条通道，用于缓存清理。
-- `asr`：1 条 CUDA 常驻通道；`small` / `medium` 使用 `float16`，`large-v3-turbo` 使用低显存 `int8_float16`。可手动开启 CPU `int8` 辅助通道。
+- `asr`：1 条 CUDA 常驻通道或 1 条 CPU 常驻通道，二者互斥；`small` 使用 `float16`，`large-v3-turbo` 使用低显存 `int8_float16`，CPU 使用 `int8`。
 
-设置页显示真实 ASR 兼容性。`small` 建议至少 2048 MiB 总显存或 6144 MiB 系统内存；`medium` 建议至少 4096 MiB 总显存或 8192 MiB 系统内存；`large-v3-turbo` 建议至少 3072 MiB 总显存、启动时 2048 MiB 空闲显存或 8192 MiB 系统内存。CPU 通道仅在当前项目内置运行时支持的 Windows x64 环境开放，默认关闭。
+设置页显示真实 ASR 兼容性。`small` 建议至少 2048 MiB 总显存或 6144 MiB 系统内存；`large-v3-turbo` 建议至少 3072 MiB 总显存、启动时 2048 MiB 空闲显存或 8192 MiB 系统内存。独立 CPU 通道仅在当前项目内置运行时支持的 Windows x64 环境开放，默认关闭。
 
-本机 RTX 4070 Laptop 实测同一组 59 秒中文、159 秒英文竖屏和 80 秒日语/背景音乐 Bilibili 音轨：Turbo 峰值显存增量约 1348 MiB，`medium float16` 约 2564 MiB；两者都正确检测三种语言并生成有效 SRT。该结果用于确定 3GB 显卡门槛，不代表所有驱动、音轨和显卡都有完全相同的占用或准确率。
+本机 RTX 4070 Laptop 实测同一组 59 秒中文、159 秒英文竖屏和 80 秒日语/背景音乐 Bilibili 音轨：Turbo 峰值显存增量约 1348 MiB，并正确检测三种语言并生成有效 SRT。该结果用于确定 3GB 显卡门槛，不代表所有驱动、音轨和显卡都有完全相同的占用或准确率。
 
 ## 外部知识库 API
 
@@ -295,15 +296,19 @@ Windows 产物路径按传统 259 字符安全上限预算。标题包含 `\ / :
 
 ## 下载与部署
 
+1.0.9 支持在设置中检查 GitHub 最新稳定版并执行校验、暂存、替换和失败回滚，保留 `workspace/`、`runtime/` 与视频产物。旧版 v1.0.3 及更高版本可通过设置中的迁移入口导入完整 workspace；迁移前应停止 Agent、关闭旧应用，并把完整项目放在较短目录中。
+
+“B站之外”是预留的一级工具箱栏目，默认展示，可在设置中关闭；本版本只提供入口框架，不承诺其中的本地视频 ASR、TTS 或 PDF 工具已经实现。
+
 Windows 10/11 x64 用户可从 [GitHub Releases](https://github.com/Fenglin-Maple/star-owner/releases/latest) 下载便携包：
 
 1. 只需下载 `Star-Owner-v<version>-win-x64-core.zip`；同名 `.sha256` 文件用于校验下载完整性。
 2. 将 ZIP 完整解压到当前用户可写的目录，不要在压缩包预览窗口内直接运行。
 3. 双击解压目录根部的 `Start-StarOwner.cmd`。应用固定使用便携包内 Electron/Node、Python、FFmpeg、yt-dlp 和 SQLite，不读取全局 Node 来执行媒体工具。
-4. 首次启动若提示缺少 ASR 模型，可允许应用自动下载；也可在设置的“项目依赖包”中点击模型名称打开正确 Release，下载完整 ZIP 后直接“从本地导入”。默认推荐 `medium`，资源不足时可切换 `small`；可选 Turbo 独立包发布后可按需安装。
+4. 首次启动若提示缺少 ASR 模型，可允许应用自动下载；也可在设置的“项目依赖包”中点击模型名称打开正确 Release，下载完整 ZIP 后直接“从本地导入”。默认使用 `large-v3-turbo`，资源不足时可切换 `small`；如果没有 NVIDIA/CUDA，可在设置中改用独立 CPU ASR。
 5. 按启动页“第一次上手”依次完成模型配置、B站登录、收藏夹同步、任务检查和 Agent 工作流创建。
 
-运行时和模型 ZIP 是应用内依赖管理器使用的独立资产。设置页可以重新检查、下载或修复依赖，并可导入手动下载的 `small`、`medium`、`large-v3-turbo` ZIP。`1.0.7` 继续使用 `v1.0.0` 依赖基线，接受精确名称 `Star-Owner-v1.0.0-model-small.zip`、`Star-Owner-v1.0.0-model-medium.zip` 和 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`；三套模型资产及校验文件均已发布。依赖管理器核对 GitHub Release SHA-256、模型类型和目录结构，未经校验的包不会安装，错误导入不会损伤原有健康模型。
+运行时和模型 ZIP 是应用内依赖管理器使用的独立资产。设置页可以重新检查、下载或修复依赖，并可导入手动下载的 `small`、`large-v3-turbo` ZIP。`1.0.9` 继续使用 `v1.0.0` 依赖基线，接受精确名称 `Star-Owner-v1.0.0-model-small.zip` 和 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`；旧版 `medium` ZIP 仍保留在该 Release 供旧版本使用。依赖管理器核对 GitHub Release SHA-256、模型类型和目录结构，未经校验的包不会安装，错误导入不会损伤原有健康模型。
 
 源码运行：
 

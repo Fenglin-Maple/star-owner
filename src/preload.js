@@ -8,11 +8,14 @@ contextBridge.exposeInMainWorld('orchestrator', {
   syncCollection: (payload) => ipcRenderer.invoke('api:sync-collection', payload),
   snapshot: () => ipcRenderer.invoke('store:snapshot'),
   setTasksEnabled: (payload) => ipcRenderer.invoke('tasks:set-enabled', payload),
+  replaceCollectionEnabledTasks: (payload) => ipcRenderer.invoke('tasks:replace-collection-enabled', payload),
+  updateUiPreferences: (payload) => ipcRenderer.invoke('settings:ui-preferences', payload),
   updateFilenameMetadata: (value) => ipcRenderer.invoke('settings:filename-metadata', value),
   updateWorker: (payload) => ipcRenderer.invoke('workers:update', payload),
   exportMarkdown: (payload) => ipcRenderer.invoke('exports:markdown', payload),
   readDocument: (taskId) => ipcRenderer.invoke('documents:read', taskId),
   openDocument: (taskId) => ipcRenderer.invoke('documents:open', taskId),
+  openDocumentFolder: (taskId) => ipcRenderer.invoke('documents:open-folder', taskId),
   deleteDocument: (taskId) => ipcRenderer.invoke('documents:delete', taskId),
   listTools: () => ipcRenderer.invoke('tools:list'),
   updateTool: (payload) => ipcRenderer.invoke('tools:update', payload),
@@ -72,6 +75,12 @@ contextBridge.exposeInMainWorld('orchestrator', {
   dependencyAcknowledge: (payload) => ipcRenderer.invoke('dependencies:acknowledge', payload),
   dependencyDownload: (packageId) => ipcRenderer.invoke('dependencies:download', packageId),
   dependencyImport: (packageId) => ipcRenderer.invoke('dependencies:import-local', packageId),
+  updateState: () => ipcRenderer.invoke('updates:state'),
+  checkUpdate: () => ipcRenderer.invoke('updates:check'),
+  prepareUpdate: () => ipcRenderer.invoke('updates:prepare'),
+  applyUpdate: () => ipcRenderer.invoke('updates:apply'),
+  inspectMigration: () => ipcRenderer.invoke('updates:migration-inspect'),
+  applyMigration: (sourceRoot) => ipcRenderer.invoke('updates:migration-apply', sourceRoot),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximizeWindow: () => ipcRenderer.invoke('window:maximize-toggle'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
@@ -104,6 +113,11 @@ contextBridge.exposeInMainWorld('orchestrator', {
     const listener = (_event, data) => callback(data);
     ipcRenderer.on('dependency:event', listener);
     return () => ipcRenderer.removeListener('dependency:event', listener);
+  },
+  onUpdateEvent: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on('update:event', listener);
+    return () => ipcRenderer.removeListener('update:event', listener);
   },
   onVideoCacheEvent: (callback) => {
     const listener = (_event, data) => {

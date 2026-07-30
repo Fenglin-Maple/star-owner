@@ -1,6 +1,6 @@
-const DEFAULT_ASR_MODEL = 'medium';
+const DEFAULT_ASR_MODEL = 'large-v3-turbo';
 
-const ASR_MODELS = Object.freeze([
+const ASR_MODEL_DEFINITIONS = Object.freeze([
   Object.freeze({
     id: 'small',
     label: '小模型',
@@ -48,6 +48,9 @@ const ASR_MODELS = Object.freeze([
   })
 ]);
 
+const ASR_MODELS = Object.freeze(ASR_MODEL_DEFINITIONS
+  .filter((model) => model.id !== 'medium')
+  .map((model) => ({ ...model, required: model.id === DEFAULT_ASR_MODEL, isDefault: model.id === DEFAULT_ASR_MODEL })));
 const ASR_MODEL_BY_ID = new Map(ASR_MODELS.map((model) => [model.id, model]));
 const ASR_MODEL_BY_PACKAGE = new Map(ASR_MODELS.map((model) => [model.packageId, model]));
 

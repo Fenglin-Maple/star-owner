@@ -81,8 +81,8 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   const dependencyManager = new DependencyManager({ store, projectRoot: dependencyRoot, version: '9.9.9', retryBaseDelayMs: 0 });
   const missingDependencies = dependencyManager.state();
   const optionalTurbo = missingDependencies.packages.find((item) => item.id === 'model-large-v3-turbo');
-  if (missingDependencies.ready || !missingDependencies.needsPrompt || !missingDependencies.missingRequired.includes('runtime-base') || !missingDependencies.missingRequired.includes('model-small') || !missingDependencies.missingRequired.includes('model-medium')) throw new Error('dependency availability detection failed');
-  if (!optionalTurbo || optionalTurbo.required || !optionalTurbo.localImport || missingDependencies.missingRequired.includes(optionalTurbo.id)) throw new Error('optional Turbo dependency blocked required startup state');
+  if (missingDependencies.ready || !missingDependencies.needsPrompt || !missingDependencies.missingRequired.includes('runtime-base') || !missingDependencies.missingRequired.includes('model-large-v3-turbo') || missingDependencies.missingRequired.includes('model-small')) throw new Error('dependency availability detection failed');
+  if (!optionalTurbo || !optionalTurbo.required || !optionalTurbo.localImport || !missingDependencies.missingRequired.includes(optionalTurbo.id)) throw new Error('Turbo dependency did not remain a required startup model');
   dependencyManager.acknowledgePrompt(false);
   if (dependencyManager.state().needsPrompt) throw new Error('dependency first-run acknowledgement failed');
   const originalDownloadNow = dependencyManager.downloadNow.bind(dependencyManager);
@@ -146,10 +146,10 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   }
   global.fetch = async () => new Response(JSON.stringify({ message: 'API rate limit exceeded' }), { status: 403 });
   try {
-    const modelDefinition = dependencyManager.definitions().find((item) => item.id === 'model-medium');
+    const modelDefinition = dependencyManager.definitions().find((item) => item.id === 'model-large-v3-turbo');
     const directModel = await dependencyManager.resolveReleaseAsset(modelDefinition);
-    if (!directModel.directFallback || !directModel.asset.browser_download_url.endsWith('/releases/download/v9.9.9/Star-Owner-v9.9.9-model-medium.zip')) throw new Error('dependency resolver did not provide a current-release direct URL when GitHub API was unavailable');
-    if (!directModel.release.assets.some((item) => item.name === 'Star-Owner-v9.9.9-model-medium.zip.sha256')) throw new Error('direct dependency fallback omitted the checksum asset');
+    if (!directModel.directFallback || !directModel.asset.browser_download_url.endsWith('/releases/download/v9.9.9/Star-Owner-v9.9.9-model-large-v3-turbo.zip')) throw new Error('dependency resolver did not provide a current-release direct URL when GitHub API was unavailable');
+    if (!directModel.release.assets.some((item) => item.name === 'Star-Owner-v9.9.9-model-large-v3-turbo.zip.sha256')) throw new Error('direct dependency fallback omitted the checksum asset');
   } finally {
     global.fetch = originalFetch;
   }
@@ -157,15 +157,15 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   global.fetch = async (url) => String(url).includes('/tags/v9.9.8')
     ? new Response(JSON.stringify({ message: 'API rate limit exceeded' }), { status: 403 })
     : new Response(JSON.stringify({ id: 1000, tag_name: 'v10.0.0', assets: [
-      { name: 'Star-Owner-v10.0.0-model-medium.zip', browser_download_url: 'https://example.test/incompatible-model.zip', size: 123 },
+      { name: 'Star-Owner-v10.0.0-model-large-v3-turbo.zip', browser_download_url: 'https://example.test/incompatible-model.zip', size: 123 },
       { name: 'Star-Owner-v10.0.0-win-x64-core.zip', browser_download_url: 'https://example.test/incompatible-core.zip', size: 456 }
     ] }), { status: 200 });
   try {
     const pinnedState = pinnedDependencyManager.state();
-    const pinnedDefinition = pinnedDependencyManager.definitions().find((item) => item.id === 'model-medium');
+    const pinnedDefinition = pinnedDependencyManager.definitions().find((item) => item.id === 'model-large-v3-turbo');
     const pinnedModel = await pinnedDependencyManager.resolveReleaseAsset(pinnedDefinition);
-    if (pinnedState.dependencyReleaseVersion !== '9.9.8' || pinnedDefinition.assetName !== 'Star-Owner-v9.9.8-model-medium.zip') throw new Error('dependency release version was not pinned independently from the application version');
-    if (!pinnedModel.directFallback || !pinnedModel.asset.browser_download_url.endsWith('/releases/download/v9.9.8/Star-Owner-v9.9.8-model-medium.zip')) throw new Error('rate-limit fallback did not use the pinned dependency release');
+    if (pinnedState.dependencyReleaseVersion !== '9.9.8' || pinnedDefinition.assetName !== 'Star-Owner-v9.9.8-model-large-v3-turbo.zip') throw new Error('dependency release version was not pinned independently from the application version');
+    if (!pinnedModel.directFallback || !pinnedModel.asset.browser_download_url.endsWith('/releases/download/v9.9.8/Star-Owner-v9.9.8-model-large-v3-turbo.zip')) throw new Error('rate-limit fallback did not use the pinned dependency release');
   } finally {
     global.fetch = originalFetch;
   }
@@ -181,11 +181,11 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
     wrongVersionRejected = error.expectedAsset === smallDefinition.assetName && error.releaseUrl?.endsWith('/releases/tag/v9.9.9');
   }
   if (!wrongVersionRejected) throw new Error('local model import accepted a package from the wrong dependency release');
-  const incompleteMedium = path.join(dependencyRoot, 'runtime', 'models', 'medium');
-  fs.mkdirSync(incompleteMedium, { recursive: true });
-  fs.writeFileSync(path.join(incompleteMedium, 'model.bin'), 'incomplete automatic install');
-  dependencyManager.clearPackageArtifacts('model-medium');
-  if (fs.existsSync(incompleteMedium)) throw new Error('local import cleanup retained an unusable model directory');
+  const incompleteTurbo = path.join(dependencyRoot, 'runtime', 'models', 'large-v3-turbo');
+  fs.mkdirSync(incompleteTurbo, { recursive: true });
+  fs.writeFileSync(path.join(incompleteTurbo, 'model.bin'), 'incomplete automatic install');
+  dependencyManager.clearPackageArtifacts('model-large-v3-turbo');
+  if (fs.existsSync(incompleteTurbo)) throw new Error('local import cleanup retained an unusable model directory');
 
   const healthySmall = path.join(dependencyRoot, 'runtime', 'models', 'small');
   fs.mkdirSync(healthySmall, { recursive: true });
@@ -320,7 +320,7 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   store.upsertTask({ id: 'c2:BVENABLED', collectionId: 'c2', bvid: 'BVENABLED', title: 'Enabled', status: 'pending', enabled: true, favoriteAddedAt: '2025-01-01T00:00:00.000Z', cookieFile: path.join(WORKSPACE_ROOT, 'private-task-cookie.txt') });
   store.commit();
   const healthRunner = new ToolRunner({ store });
-  if (healthRunner.config.asrModel !== 'medium') throw new Error('medium ASR model must be the default');
+  if (healthRunner.config.asrModel !== 'large-v3-turbo') throw new Error('large-v3-turbo ASR model must be the default');
   const canonicalArgs = healthRunner.buildArgs({
     task: { bvid: 'BVTEST', url: 'bilibili://video/123' },
     action: 'info',

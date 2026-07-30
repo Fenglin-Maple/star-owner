@@ -35,6 +35,7 @@ const documentDeleteModal = document.querySelector('#documentDeleteModal');
 const documentDeleteMessage = document.querySelector('#documentDeleteMessage');
 const documentDeleteCancel = document.querySelector('#documentDeleteCancel');
 const documentDeleteAccept = document.querySelector('#documentDeleteAccept');
+const openDocumentFolder = document.querySelector('#openDocumentFolder');
 const apiDocs = document.querySelector('#apiDocs');
 const apiToolAnalytics = document.querySelector('#apiToolAnalytics');
 const settingsOutput = document.querySelector('#settingsOutput');
@@ -75,6 +76,7 @@ const taskDateFrom = document.querySelector('#taskDateFrom');
 const taskDateTo = document.querySelector('#taskDateTo');
 const durationMin = document.querySelector('#durationMin');
 const durationMax = document.querySelector('#durationMax');
+const enableFilteredTasksOnly = document.querySelector('#enableFilteredTasksOnly');
 const agentPromptTemplate = document.querySelector('#agentPromptTemplate');
 const readmeContent = document.querySelector('#readmeContent');
 const readmePath = document.querySelector('#readmePath');
@@ -88,6 +90,13 @@ const gpuMemoryValue = document.querySelector('#gpuMemoryValue');
 const gpuMemoryBar = document.querySelector('#gpuMemoryBar');
 const schedulerPoolGrid = document.querySelector('#schedulerPoolGrid');
 const asrHardwareStatus = document.querySelector('#asrHardwareStatus');
+const updateVersionLabel = document.querySelector('#updateVersionLabel');
+const updateStatus = document.querySelector('#updateStatus');
+const checkUpdateButton = document.querySelector('#checkUpdate');
+const prepareUpdateButton = document.querySelector('#prepareUpdate');
+const applyUpdateButton = document.querySelector('#applyUpdate');
+const inspectMigrationButton = document.querySelector('#inspectMigration');
+const outsideBilibiliToggle = document.querySelector('#outsideBilibiliToggle');
 
 let runtime = {};
 let folders = [];
@@ -234,6 +243,7 @@ const TEXT = {
   invertSelection: '\u53cd\u9009',
   enableSelected: '\u542f\u7528',
   disableSelected: '\u5173\u95ed',
+  enableFilteredOnly: '启用筛选结果并关闭其余任务',
   enabledTasks: '\u542f\u7528\u4efb\u52a1',
   claimedTasks: '\u5904\u7406\u4e2d',
   failedTasks: '\u5931\u8d25 / \u6253\u56de',
@@ -1317,6 +1327,22 @@ function renderSettingsSummary() {
   `).join('');
 }
 
+function renderUpdateState(state = runtime.update) {
+  const version = runtime.version || state?.currentVersion || '';
+  const versionNode = document.querySelector('#appVersion');
+  if (versionNode) versionNode.textContent = version ? `v${version}` : 'v-';
+  if (updateVersionLabel) updateVersionLabel.textContent = version ? `当前 v${version}` : 'v-';
+  if (!updateStatus || !state) return;
+  const progress = Number(state.progress || 0);
+  const bytes = state.totalBytes ? ` ${Math.round(progress * 100)}%` : '';
+  updateStatus.textContent = `${state.message || '尚未检查更新。'}${bytes}`;
+  const available = state.status === 'available';
+  const ready = state.status === 'ready' && state.prepared;
+  if (checkUpdateButton) checkUpdateButton.disabled = ['checking', 'downloading', 'verifying', 'applying'].includes(state.status);
+  if (prepareUpdateButton) prepareUpdateButton.disabled = !available || ['downloading', 'verifying', 'applying'].includes(state.status);
+  if (applyUpdateButton) applyUpdateButton.disabled = !ready;
+}
+
 function renderScheduler(state = runtime.scheduler) {
   if (!schedulerStatus || !cpuAsrToggle || !asrModelSelect || !schedulerPoolGrid) return;
   if (!state) {
@@ -1333,15 +1359,14 @@ function renderScheduler(state = runtime.scheduler) {
   const queued = Number(state.totals?.queued || 0);
   const running = Number(state.totals?.running || 0);
   schedulerStatus.textContent = `${running} \u8fd0\u884c / ${queued} \u6392\u961f`;
-  cpuAsrToggle.checked = Boolean(state.config?.cpuAsrEnabled);
+  cpuAsrToggle.checked = state.config?.asrExecutionMode === 'cpu' || Boolean(state.config?.cpuAsrEnabled);
   const hardware = state.hardware || {};
   cpuAsrToggle.disabled = schedulerUpdateInFlight || !runtime.backendReady || hardware.cpu?.supported === false;
   const modelDefinitions = Array.isArray(state.models) && state.models.length
     ? state.models
     : [
-        { id: 'medium', label: '中等模型', optionLabel: '中等模型（默认）', gpuComputeType: 'float16' },
-        { id: 'small', label: '小模型', optionLabel: '小模型（更快）', gpuComputeType: 'float16' },
-        { id: 'large-v3-turbo', label: '大模型 Turbo', optionLabel: '大模型 Turbo（低显存）', gpuComputeType: 'int8_float16' }
+        { id: 'large-v3-turbo', label: 'large-v3-turbo', optionLabel: 'large-v3-turbo（默认）', gpuComputeType: 'int8_float16' },
+        { id: 'small', label: 'small', optionLabel: 'small（更快）', gpuComputeType: 'float16' }
       ];
   const optionIds = [...asrModelSelect.options].map((option) => option.value);
   if (optionIds.join('|') !== modelDefinitions.map((model) => model.id).join('|')) {
@@ -1352,7 +1377,7 @@ function renderScheduler(state = runtime.scheduler) {
     const dependency = modelPackages.get(`model-${option.value}`);
     option.disabled = Boolean(dependency && !dependency.available);
   }
-  asrModelSelect.value = state.config?.asrModel || 'medium';
+  asrModelSelect.value = state.config?.asrModel || 'large-v3-turbo';
   const asrPool = state.pools?.asr;
   const asrBusy = Number(asrPool?.queued || 0) > 0 || (asrPool?.lanes || []).some((lane) => lane.busy || lane.checking);
   asrModelSelect.disabled = schedulerUpdateInFlight || !runtime.backendReady || asrBusy;
@@ -1368,7 +1393,7 @@ function renderScheduler(state = runtime.scheduler) {
     ? `\u5f53\u524d\u786c\u4ef6\u6216\u9879\u76ee\u8fd0\u884c\u65f6\u4e0d\u652f\u6301 ${modelLabel} CPU ASR\u3002`
     : state.config?.cpuAsrEnabled
     ? `\u5df2\u5f00\u542f\uff0c\u670d\u52a1 ${cpuState}${state.services?.cpu?.pid ? ` / PID ${state.services.cpu.pid}` : ''}`
-    : '\u9ed8\u8ba4\u5173\u95ed\uff0c\u4ec5\u5728\u624b\u52a8\u5f00\u542f\u540e\u52a0\u8f7d\u6a21\u578b\u3002';
+    : '\u9ed8\u8ba4\u4f7f\u7528 CUDA\uff0cCPU \u4e0e CUDA \u53ea\u80fd\u9009\u62e9\u4e00\u79cd\u3002';
 
   if (asrHardwareStatus) {
     const nvidia = hardware.nvidia || {};
@@ -1377,7 +1402,7 @@ function renderScheduler(state = runtime.scheduler) {
     const title = nvidia.supported
       ? `NVIDIA CUDA ASR \u53ef\u7528\u00b7${nvidia.name || 'NVIDIA GPU'}\u00b7${nvidia.totalMiB || 0} MiB`
       : hardware.cpu?.supported
-        ? `\u672a\u627e\u5230\u53ef\u7528 CUDA\uff0cCPU ASR \u53ef\u4f5c\u4e3a\u624b\u52a8\u56de\u9000`
+      ? `\u672a\u627e\u5230\u53ef\u7528 CUDA\uff0c\u53ef\u5728\u4e0a\u65b9\u5207\u6362\u4e3a\u72ec\u7acb CPU ASR`
         : '\u5f53\u524d\u73af\u5883\u4e0d\u652f\u6301\u672c\u5730 ASR';
     const detail = [
       hardware.recommendation,
@@ -1792,6 +1817,7 @@ function renderTaskRows(tasks) {
   const activeStatusLabel = taskStatusFilters?.querySelector(`[data-task-status="${taskStatusFilter}"] span`)?.textContent || '';
   document.querySelector('#taskFilterSummary').textContent = `\u663e\u793a ${tasks.length} / ${total}${taskStatusFilter === 'all' ? '' : ` \u00b7 ${activeStatusLabel}`}`;
   document.querySelector('#taskSelectionSummary').textContent = `\u5df2\u9009 ${taskSelection.size}`;
+  if (enableFilteredTasksOnly) enableFilteredTasksOnly.disabled = !taskCollectionSelect?.value || tasks.length === 0;
   if (!tasks.length) return taskList.appendChild(emptyRow(TEXT.noTasks, TEXT.noTasksHint));
   for (const task of tasks) {
     const favoriteAt = task.favoriteAddedAt || task.createdAt || '';
@@ -2180,7 +2206,7 @@ function renderDocumentList() {
     const favoriteStatus = collection?.biliDeleted || task.favoriteState === 'collection-deleted'
       ? ' / \u6536\u85cf\u72b6\u6001\uff1aB\u7ad9\u6536\u85cf\u5939\u5df2\u5220\u9664'
       : (task.removedFromFavorites || task.favoriteState === 'removed' ? ' / \u6536\u85cf\u72b6\u6001\uff1a\u5df2\u79fb\u51fa\u6536\u85cf\u5939' : '');
-    row.innerHTML = `${cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy" />` : '<span class="document-cover-placeholder"></span>'}<span class="document-row-copy"><strong>${escapeHtml(task.title || task.bvid)}</strong><small>${escapeHtml(task.bvid)} / ${escapeHtml(task.owner || TEXT.unknownUp)} / ${escapeHtml(formatSeconds(task.duration))}</small><em>\u6536\u85cf ${escapeHtml(formatDateTime(task.favoriteAddedAt))} / \u53d1\u5e03 ${escapeHtml(formatDateTime(task.publishedAt))}${favoriteStatus}</em></span>`;
+    row.innerHTML = `${cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy" />` : '<span class="document-cover-placeholder"></span>'}<span class="document-row-copy"><strong>${escapeHtml(task.title || task.bvid)}</strong><small>${escapeHtml(task.bvid)} / ${escapeHtml(task.owner || TEXT.unknownUp)} / ${escapeHtml(formatSeconds(task.duration))}</small><em>\u6536\u85cf ${escapeHtml(formatDateTime(task.favoriteAddedAt))} / \u53d1\u5e03 ${escapeHtml(formatDateTime(task.publishedAt))}${favoriteStatus}${task.documentExists === false ? ' / \u4ea7\u7269\u5df2\u88ab\u624b\u52a8\u5220\u9664' : ''}</em></span>`;
     row.addEventListener('click', () => selectDocument(task.id));
     row.addEventListener('contextmenu', (event) => {
       event.preventDefault();
@@ -2257,6 +2283,7 @@ async function selectDocument(taskId) {
   document.querySelector('#documentPreviewMeta').textContent = '\u6b63\u5728\u8bfb\u53d6 Markdown...';
   document.querySelector('#documentPreviewPath').textContent = task?.outputMarkdown || '';
   document.querySelector('#openDocumentFile').disabled = true;
+  if (openDocumentFolder) openDocumentFolder.disabled = true;
   documentPreview.innerHTML = '<div class="document-preview-loading"><span></span><strong>\u6b63\u5728\u6e32\u67d3\u6587\u6863</strong></div>';
   try {
     const result = await window.orchestrator.readDocument(taskId);
@@ -2269,6 +2296,7 @@ async function selectDocument(taskId) {
     document.querySelector('#documentPreviewMeta').textContent = `${result.task?.bvid || '-'} / ${result.task?.owner || TEXT.unknownUp} / ${formatSeconds(result.task?.duration)}`;
     document.querySelector('#documentPreviewPath').textContent = result.path || '';
     document.querySelector('#openDocumentFile').disabled = false;
+    if (openDocumentFolder) openDocumentFolder.disabled = !result.task?.artifactDir || result.task?.artifactExists === false;
   } catch (error) {
     if (request !== documentPreviewRequest) return;
     documentPreview.innerHTML = `<div class="document-preview-empty"><strong>\u6587\u6863\u8bfb\u53d6\u5931\u8d25</strong><span>${escapeHtml(error.message || String(error))}</span></div>`;
@@ -2282,6 +2310,7 @@ function clearDocumentPreview() {
   document.querySelector('#documentPreviewMeta').textContent = '';
   document.querySelector('#documentPreviewPath').textContent = '';
   document.querySelector('#openDocumentFile').disabled = true;
+  if (openDocumentFolder) openDocumentFolder.disabled = true;
   documentPreview.innerHTML = `<div class="document-preview-empty"><strong>${TEXT.selectDocument}</strong><span>${TEXT.selectDocumentHint}</span></div>`;
 }
 
@@ -2586,7 +2615,7 @@ cpuAsrToggle?.addEventListener('change', async (event) => {
   schedulerUpdateInFlight = true;
   renderScheduler(runtime.scheduler);
   try {
-    const state = await window.orchestrator.updateScheduler({ cpuAsrEnabled: enabled });
+    const state = await window.orchestrator.updateScheduler({ asrExecutionMode: enabled ? 'cpu' : 'cuda' });
     runtime.scheduler = state;
     renderScheduler(state);
     renderSettingsSummary();
@@ -2601,7 +2630,7 @@ cpuAsrToggle?.addEventListener('change', async (event) => {
 });
 asrModelSelect?.addEventListener('change', async (event) => {
   const requested = event.target.value;
-  const previous = runtime.scheduler?.config?.asrModel || 'medium';
+  const previous = runtime.scheduler?.config?.asrModel || 'large-v3-turbo';
   schedulerUpdateInFlight = true;
   renderScheduler(runtime.scheduler);
   try {
@@ -2622,6 +2651,35 @@ asrModelSelect?.addEventListener('change', async (event) => {
 document.querySelector('#winMin')?.addEventListener('click', () => window.orchestrator.minimizeWindow());
 document.querySelector('#winMax')?.addEventListener('click', () => window.orchestrator.toggleMaximizeWindow());
 document.querySelector('#winClose')?.addEventListener('click', () => window.orchestrator.closeWindow());
+checkUpdateButton?.addEventListener('click', async () => {
+  try { runtime.update = await window.orchestrator.checkUpdate(); renderUpdateState(runtime.update); }
+  catch (error) { showToast(TEXT.toastError, error.message || String(error), 'error'); }
+});
+prepareUpdateButton?.addEventListener('click', async () => {
+  try { runtime.update = await window.orchestrator.prepareUpdate(); renderUpdateState(runtime.update); }
+  catch (error) { showToast(TEXT.toastError, error.message || String(error), 'error'); }
+});
+applyUpdateButton?.addEventListener('click', async () => {
+  if (!window.confirm('应用将退出并安装已校验的新版本，workspace 和 runtime 会保留。继续吗？')) return;
+  try { await window.orchestrator.applyUpdate(); }
+  catch (error) { showToast(TEXT.toastError, error.message || String(error), 'error'); }
+});
+inspectMigrationButton?.addEventListener('click', async () => {
+  try {
+    const result = await window.orchestrator.inspectMigration();
+    if (result.canceled) return;
+    const migration = result.migration;
+    if (!window.confirm(`将从 ${migration.sourceRoot} 迁移 workspace（检测版本 ${migration.oldVersion}），应用会退出。继续吗？`)) return;
+    await window.orchestrator.applyMigration(migration.sourceRoot);
+  } catch (error) { showToast(TEXT.toastError, error.message || String(error), 'error'); }
+});
+outsideBilibiliToggle?.addEventListener('change', async (event) => {
+  try {
+    const preferences = await window.orchestrator.updateUiPreferences({ showOutsideBilibili: event.target.checked });
+    document.querySelector('.outside-bilibili-nav')?.toggleAttribute('hidden', preferences.showOutsideBilibili === false);
+    if (!preferences.showOutsideBilibili && document.querySelector('#page-outside-bilibili')?.classList.contains('active')) setPage('overview');
+  } catch (error) { event.target.checked = !event.target.checked; showToast(TEXT.toastError, error.message || String(error), 'error'); }
+});
 taskUserSelect?.addEventListener('change', () => {
   lastTaskCollectionId = '';
   renderTaskInventory();
@@ -2668,6 +2726,21 @@ document.querySelector('#invertVisibleTasks')?.addEventListener('click', () => {
 });
 document.querySelector('#enableSelectedTasks')?.addEventListener('click', () => updateTaskEnabled([...taskSelection], true).catch((error) => showToast(TEXT.toastError, error.message || String(error), 'error')));
 document.querySelector('#disableSelectedTasks')?.addEventListener('click', () => updateTaskEnabled([...taskSelection], false).catch((error) => showToast(TEXT.toastError, error.message || String(error), 'error')));
+enableFilteredTasksOnly?.addEventListener('click', async () => {
+  const collectionId = taskCollectionSelect?.value || '';
+  if (!collectionId || !visibleTasks.length) return;
+  enableFilteredTasksOnly.disabled = true;
+  try {
+    const result = await window.orchestrator.replaceCollectionEnabledTasks({ collectionId, taskIds: visibleTasks.map((task) => task.id) });
+    taskSelection.clear();
+    await refreshSnapshot();
+    showToast(TEXT.toastSuccess, `已启用 ${result.enabled} 个筛选任务，并关闭同收藏夹其余任务。`, 'success');
+  } catch (error) {
+    showToast(TEXT.toastError, error.message || String(error), 'error');
+  } finally {
+    renderTaskInventory();
+  }
+});
 const agentPerformanceSummary = document.querySelector('.agent-summary');
 const agentPerformancePanel = document.querySelector('#agentPerformanceDetails');
 function setAgentPerformanceOpen(open) {
@@ -3042,6 +3115,9 @@ async function handleRuntime(data = {}) {
   renderFilenameMetadataSettings();
   renderScheduler(runtime.scheduler);
   renderSettingsSummary();
+  renderUpdateState(runtime.update);
+  if (outsideBilibiliToggle && data.uiPreferences) outsideBilibiliToggle.checked = data.uiPreferences.showOutsideBilibili !== false;
+  document.querySelector('.outside-bilibili-nav')?.toggleAttribute('hidden', data.uiPreferences?.showOutsideBilibili === false);
   if (Array.isArray(data.toolHealth)) {
     toolHealth = data.toolHealth;
     renderToolHealth(toolHealth);
@@ -3081,6 +3157,17 @@ async function handleRuntime(data = {}) {
 }
 
 window.orchestrator.onRuntime(handleRuntime);
+window.orchestrator.onUpdateEvent((event) => {
+  if (event?.state) {
+    runtime.update = event.state;
+    renderUpdateState(event.state);
+  }
+});
+openDocumentFolder?.addEventListener('click', async () => {
+  if (!selectedDocumentId) return;
+  try { await window.orchestrator.openDocumentFolder(selectedDocumentId); }
+  catch (error) { showToast(TEXT.toastError, error.message || String(error), 'error'); }
+});
 window.orchestrator.onBootstrap((state) => {
   runtime.bootstrap = state;
   runtime.backendReady = state.phase === 'ready';

@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("none", "small", "medium", "large-v3-turbo", "all")]
+  [ValidateSet("none", "small", "large-v3-turbo", "all")]
   [string]$ModelBundle = "all",
   [switch]$SeparateModelAsset,
   [switch]$CoreOnly,
@@ -19,9 +19,9 @@ if ($CoreOnly -and $ModelOnly) { throw "CoreOnly and ModelOnly cannot be combine
 if ($ModelOnly -and (-not $SeparateModelAsset -or $ModelBundle -eq "none" -or $NoArchive)) {
   throw "ModelOnly requires SeparateModelAsset, an explicit model bundle, and archive output."
 }
-$allModels = @("small", "medium", "large-v3-turbo")
-$requiredModels = @("small", "medium")
-$optionalModels = @("large-v3-turbo")
+$allModels = @("small", "large-v3-turbo")
+$requiredModels = @("large-v3-turbo")
+$optionalModels = @("small")
 $splitModels = @()
 if ($SeparateModelAsset) {
   if ($ModelBundle -eq "all") { $splitModels = @($allModels) }

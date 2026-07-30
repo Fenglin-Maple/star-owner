@@ -15,7 +15,7 @@
       <header class="windowbar">
         <div class="window-left">
           <img class="app-mark" src="../../assets/star-note.png" alt="" />
-          <span class="app-title">星<b>藏家</b></span>
+          <span class="app-title">星<b>藏家</b><small id="appVersion">v-</small></span>
         </div>
         <div class="window-status">
           <span id="apiBadge">API...</span>
@@ -91,6 +91,10 @@
               </div>
             </div>
           </nav>
+          <button class="nav-item nav-root outside-bilibili-nav" data-page="outside-bilibili" title="B站之外">
+            <svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M5 5l14 14M19 5L5 19"/></svg>
+            <span>B站之外</span>
+          </button>
           <div class="nav-bottom">
             <div class="nav-group nav-settings-group" data-nav-group="settings">
               <button class="nav-group-toggle" type="button" aria-expanded="false" title="设置">
@@ -321,6 +325,7 @@
                   <span class="toolbar-divider"></span>
                   <button id="enableSelectedTasks" class="secondary-button compact-button" data-i18n="enableSelected"></button>
                   <button id="disableSelectedTasks" class="secondary-button compact-button danger-button" data-i18n="disableSelected"></button>
+                  <button id="enableFilteredTasksOnly" class="primary-button compact-button" data-i18n="enableFilteredOnly"></button>
                 </div>
               </div>
               <div class="task-primary-filters">
@@ -441,7 +446,7 @@
               <section class="section-block document-preview-panel">
                 <div class="document-preview-toolbar">
                   <div><strong id="documentPreviewTitle" data-i18n="selectDocument"></strong><span id="documentPreviewMeta"></span><code id="documentPreviewPath"></code></div>
-                  <button id="openDocumentFile" class="secondary-button compact-button" data-i18n="openFile" disabled></button>
+                  <div class="document-preview-actions"><button id="openDocumentFile" class="secondary-button compact-button" data-i18n="openFile" disabled></button><button id="openDocumentFolder" class="secondary-button compact-button" type="button" disabled>打开产物文件夹</button></div>
                 </div>
                 <article id="documentPreview" class="markdown-document document-preview"><div class="document-preview-empty"><strong data-i18n="selectDocument"></strong><span data-i18n="selectDocumentHint"></span></div></article>
               </section>
@@ -658,6 +663,22 @@
                 </div>
                 <div id="themeChoices" class="theme-grid"></div>
               </section>
+              <section class="section-block update-settings">
+                <div class="section-title">
+                  <div><h2>应用更新与迁移</h2><p>检查稳定版 Release；更新只替换程序文件，保留 workspace、runtime 与已生成产物。</p></div>
+                  <span id="updateVersionLabel" class="muted-count">v-</span>
+                </div>
+                <div id="updateStatus" class="update-status">尚未检查更新。</div>
+                <div class="button-row">
+                  <button id="checkUpdate" class="secondary-button" type="button">检查更新</button>
+                  <button id="prepareUpdate" class="primary-button" type="button" disabled>下载并准备更新</button>
+                  <button id="applyUpdate" class="primary-button" type="button" disabled>重启安装</button>
+                </div>
+                <div class="update-migration-row"><button id="inspectMigration" class="secondary-button" type="button">从 v1.0.3 迁移数据</button><span>选择旧版安装目录，确认后应用会退出并迁移 workspace。</span></div>
+              </section>
+              <section class="section-block outside-settings">
+                <div class="section-title"><div><h2>B站之外栏目</h2><p>预留本地视频、PDF、图片与音频工具箱入口，暂未开放具体工具。</p></div><label class="switch" title="显示或隐藏 B站之外栏目"><input id="outsideBilibiliToggle" type="checkbox" checked /><span></span></label></div>
+              </section>
               <section class="section-block filename-settings">
                 <div class="section-title"><div><h2 data-i18n="artifactNaming"></h2><p data-i18n="artifactNamingHint"></p></div></div>
                 <div id="filenameMetadataChoices" class="filename-metadata-grid">
@@ -694,8 +715,8 @@
                 </div>
                 <div class="scheduler-asr-row">
                   <div>
-                    <strong>CPU ASR 辅助通道</strong>
-                    <span id="cpuAsrHint">默认关闭，仅在手动开启后加载模型。</span>
+                    <strong>独立 CPU ASR</strong>
+                    <span id="cpuAsrHint">开启后只使用 CPU，不使用 NVIDIA/CUDA。</span>
                   </div>
                   <label class="switch" title="开启或关闭 CPU ASR 服务">
                     <input id="cpuAsrToggle" type="checkbox" />
@@ -709,9 +730,9 @@
                 <div class="scheduler-model-row">
                   <div>
                     <strong>faster-whisper 常驻模型</strong>
-                    <span id="asrModelHint">默认使用中等模型；Turbo 使用低显存计算，切换前需要等待 ASR 队列空闲。</span>
+                    <span id="asrModelHint">默认使用 large-v3-turbo；切换前需要等待 ASR 队列空闲。</span>
                   </div>
-                  <label><span>识别模型</span><select id="asrModelSelect"><option value="medium">中等模型（默认）</option><option value="small">小模型（更快）</option><option value="large-v3-turbo">大模型 Turbo（低显存）</option></select></label>
+                  <label><span>识别模型</span><select id="asrModelSelect"><option value="large-v3-turbo">large-v3-turbo（默认）</option><option value="small">small（更快）</option></select></label>
                 </div>
                 <div class="gpu-memory-row">
                   <div><span id="gpuMemoryLabel">GPU 显存</span><strong id="gpuMemoryValue">检测中</strong></div>
@@ -731,6 +752,11 @@
                 <div id="settingsOutput" class="runtime-summary"></div>
               </section>
             </div>
+          </section>
+
+          <section class="page outside-bilibili-page" id="page-outside-bilibili">
+            <div class="page-head"><h1>B站之外</h1><p>未来将在这里集中提供本地媒体、文档与音频工具。</p></div>
+            <section class="section-block outside-placeholder"><div class="outside-placeholder-icon"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M5 5l14 14M19 5L5 19"/></svg></div><div><h2>工具箱正在规划中</h2><p>当前版本先保留入口，不会改变已有 B 站视频总结、知识库和导出流程。</p></div></section>
           </section>
 
           <section class="page readme-layout" id="page-readme">
@@ -759,7 +785,9 @@
           <label><span>会话名称</span><input id="aiAgentTitle" placeholder="例如：AIcode 整理 Agent 1" /></label>
           <div class="ai-create-grid"><label><span>供应商</span><select id="aiAgentProvider"></select></label><label><span>模型</span><select id="aiAgentModel"></select></label></div>
           <label><span>任务收藏夹</span><select id="aiAgentCollection"></select></label>
-          <label><span>额外工作要求</span><textarea id="aiAgentRequirements" rows="5" placeholder="留空则使用视频总结标准模板与默认规则。"></textarea></label>
+          <label><span>额外工作要求</span><textarea id="aiAgentRequirements" rows="4" placeholder="留空则使用视频总结标准模板与默认规则。"></textarea></label>
+          <div class="ai-create-grid"><label><span>最少关键帧数</span><input id="aiAgentMinimumFrames" type="number" min="12" max="300" value="12" /></label><label><span>每多少秒增加 1 张</span><input id="aiAgentFrameInterval" type="number" min="1" max="600" value="25" /></label></div>
+          <label class="single-keep-cache"><input id="aiAgentRetainCache" class="app-checkbox" type="checkbox" /><span>保留处理过程中的缓存视频</span><small>完成后保留合轨视频、下载字幕和 ASR 文件，便于复盘。</small></label>
         </div>
         <footer><button id="aiCancelAgentCreate" class="secondary-button" type="button">取消</button><span></span><button id="aiCreateAgentOnly" class="secondary-button" type="button">仅创建</button><button id="aiCreateAgentStart" class="primary-button" type="button">创建并启动</button></footer>
       </section>

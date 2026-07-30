@@ -22,7 +22,7 @@ def main():
     parser = argparse.ArgumentParser(description="Persistent Xing Cang Jia faster-whisper service")
     parser.add_argument("--device", choices=["cuda", "cpu"], required=True)
     parser.add_argument("--compute-type", required=True)
-    parser.add_argument("--model", default="medium")
+    parser.add_argument("--model", default="large-v3-turbo")
     args = parser.parse_args()
 
     cli = load_cli_module()

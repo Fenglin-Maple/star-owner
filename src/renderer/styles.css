@@ -1997,3 +1997,11 @@ body.theme-endfield *::-webkit-scrollbar-thumb:hover { background: #191919; back
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+/* 1.0.9 update and reserved-toolbox surfaces */
+.app-title small { margin-left: 8px; font-size: 11px; font-weight: 600; opacity: .62; }
+.update-status { min-height: 24px; margin: 12px 0; color: var(--text-muted); white-space: pre-wrap; }
+.update-migration-row { display: flex; align-items: center; gap: 12px; margin-top: 10px; color: var(--text-muted); font-size: 12px; }
+.outside-placeholder { min-height: 180px; display: flex; align-items: center; gap: 18px; }
+.outside-placeholder-icon { width: 52px; height: 52px; display: grid; place-items: center; border: 1px solid var(--border-strong); color: var(--accent); }
+.outside-placeholder-icon svg { width: 28px; height: 28px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+.document-preview-actions { display: flex; gap: 8px; }

@@ -67,7 +67,7 @@ The service binds to `127.0.0.1`, accepts origin-less local process requests, re
 
 - Dependency archives are GitHub Release assets, not Git-tracked runtime files.
 - Archives may install only under `runtime/`; extraction rejects absolute paths and `..` traversal.
-- Required assets use `Star-Owner-v<dependency-version>-runtime-win-x64.zip`, `Star-Owner-v<dependency-version>-model-small.zip`, and `Star-Owner-v<dependency-version>-model-medium.zip`, with matching SHA-256 assets. Optional Turbo uses `Star-Owner-v<dependency-version>-model-large-v3-turbo.zip` and must never enter the first-launch required set.
+- Current required assets use `Star-Owner-v<dependency-version>-runtime-win-x64.zip` and `Star-Owner-v<dependency-version>-model-large-v3-turbo.zip`, with matching SHA-256 assets. `small` uses `Star-Owner-v<dependency-version>-model-small.zip` as an optional alternate. The historical medium asset remains in the v1.0.0 Release for older applications but is not exposed by the current registry.
 - Keep model IDs, compute types, package IDs and hardware thresholds centralized in `src/core/asr-models.js`; do not add model-specific ternaries back to ToolRunner or hardware detection.
 - `package.json.dependencyReleaseVersion` is the explicit compatibility contract shared by the dependency manager and portable manifest. A code-only Release keeps it pinned and uploads only the new core ZIP plus checksum.
 - Never change probes or layouts without updating dependency manager, packaging, deployment docs, and regression tests.

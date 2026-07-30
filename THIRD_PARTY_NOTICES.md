@@ -32,8 +32,8 @@ The npm dependency tree also contains MIT, ISC, BSD-2-Clause, BSD-3-Clause, Apac
 | imageio-ffmpeg / FFmpeg | 0.6.0 / 7.1 essentials build | BSD-2-Clause wrapper / GPL-3.0-or-later binary | Project-local FFmpeg provider, [imageio/imageio-ffmpeg](https://github.com/imageio/imageio-ffmpeg), [FFmpeg](https://ffmpeg.org/) |
 | yt-dlp | 2026.07.04 | Unlicense | Project-local media acquisition module, [yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp) |
 | `Systran/faster-whisper-small` | revision `536b0662742c02347bc0e980a01041f333bce120` | MIT | Built-in low-latency multilingual ASR model |
-| `Systran/faster-whisper-medium` | revision `08e178d48790749d25932bbc082711ddcfdfbc4f` | MIT | Default balanced multilingual ASR model |
-| `dropbox-dash/faster-whisper-large-v3-turbo` | revision `0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf` | MIT | Optional multilingual Turbo ASR model, exposed by faster-whisper as `large-v3-turbo` |
+| `Systran/faster-whisper-medium` | revision `08e178d48790749d25932bbc082711ddcfdfbc4f` | MIT | Historical model retained for older releases; not exposed by the current registry |
+| `dropbox-dash/faster-whisper-large-v3-turbo` | revision `0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf` | MIT | Default multilingual Turbo ASR model, exposed by faster-whisper as `large-v3-turbo` |
 
 Model files are data artifacts and are published as release payloads rather than committed to Git. Their repository/model-card terms must be retained in any redistributed model archive.
 

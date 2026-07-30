@@ -22,7 +22,7 @@ const { PROJECT_ROOT } = require('../src/core/workspace');
       console.log(`optional ASR ${model.id} skipped: model is not installed`);
       continue;
     }
-    await verifyModel(model.id, audio, root, model.id === 'medium' ? 2 : 1);
+    await verifyModel(model.id, audio, root, 1);
   }
 })().catch((error) => {
   console.error(error);

@@ -6,7 +6,7 @@ const { readUtf8, utf8ChildEnvironment } = require('./child-process-io');
 const { PROJECT_ROOT } = require('./workspace');
 
 class AsrService {
-  constructor({ id, device, computeType, model = 'medium', onEvent, onLog }) {
+  constructor({ id, device, computeType, model = 'large-v3-turbo', onEvent, onLog }) {
     this.id = id;
     this.device = device;
     this.computeType = computeType;

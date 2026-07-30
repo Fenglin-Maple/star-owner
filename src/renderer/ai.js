@@ -5,7 +5,7 @@
     newAgent: $('#aiNewAgent'), refreshAgents: $('#aiRefreshAgents'), agentList: $('#aiAgentSessionList'), agentDetail: $('#aiAgentDetail'),
     metricSessions: $('#aiMetricSessions'), metricRunning: $('#aiMetricRunning'), metricCompleted: $('#aiMetricCompleted'), metricFailed: $('#aiMetricFailed'),
     createModal: $('#aiAgentCreateModal'), closeCreate: $('#aiCloseAgentCreate'), cancelCreate: $('#aiCancelAgentCreate'), createOnly: $('#aiCreateAgentOnly'), createStart: $('#aiCreateAgentStart'),
-    agentTitle: $('#aiAgentTitle'), agentProvider: $('#aiAgentProvider'), agentModel: $('#aiAgentModel'), agentCollection: $('#aiAgentCollection'), agentRequirements: $('#aiAgentRequirements'),
+    agentTitle: $('#aiAgentTitle'), agentProvider: $('#aiAgentProvider'), agentModel: $('#aiAgentModel'), agentCollection: $('#aiAgentCollection'), agentRequirements: $('#aiAgentRequirements'), agentMinimumFrames: $('#aiAgentMinimumFrames'), agentFrameInterval: $('#aiAgentFrameInterval'), agentRetainCache: $('#aiAgentRetainCache'),
     collectionModal: $('#aiCollectionModal'), collectionName: $('#aiCollectionName'), closeCollection: $('#aiCloseCollection'), cancelCollection: $('#aiCancelCollection'), saveCollection: $('#aiSaveCollection'),
     singleVideo: $('#singleVideoInput'), singleCollection: $('#singleCollectionSelect'), singleCreateCollection: $('#singleCreateCollection'), singleOpenCollection: $('#singleOpenCollection'), singleProvider: $('#singleProviderSelect'), singleModel: $('#singleModelSelect'), singleFrames: $('#singleFrames'), singleComments: $('#singleComments'), singleRequirements: $('#singleRequirements'), singleKeepVideoCache: $('#singleKeepVideoCache'), singleStart: $('#singleStart'), singleSession: $('#singleSessionSelect'), singleDetail: $('#singleAgentDetail'),
     modelNew: $('#aiModelNewProvider'), modelProviderList: $('#aiModelProviderList'), modelProviderId: $('#aiModelProviderId'), modelProviderName: $('#aiModelProviderName'), modelProviderType: $('#aiModelProviderType'), modelProviderBaseUrl: $('#aiModelProviderBaseUrl'), modelProviderApiKey: $('#aiModelProviderApiKey'), modelProviderTemperature: $('#aiModelProviderTemperature'), modelProviderMaxTokens: $('#aiModelProviderMaxTokens'), modelProviderHeaders: $('#aiModelProviderHeaders'), modelDelete: $('#aiModelDeleteProvider'), modelSave: $('#aiModelSaveProvider'), modelFetch: $('#aiModelFetchModels'), modelCount: $('#aiModelRemoteCount'), modelRemote: $('#aiModelRemoteModels'),
@@ -276,6 +276,9 @@
       elements.createModal.hidden = false;
       elements.agentTitle.value = '';
       elements.agentRequirements.value = '';
+      elements.agentMinimumFrames.value = '12';
+      elements.agentFrameInterval.value = '25';
+      elements.agentRetainCache.checked = false;
       populateProviderSelect(elements.agentProvider, elements.agentModel, state.providers.find((item) => item.enabledModels?.length)?.id || '', '');
       elements.agentCollection.innerHTML = '<option value="">选择任务收藏夹</option>' + state.collections.map((item) => `<option value="${esc(item.id)}" ${item.collectionAvailable === false ? 'disabled' : ''}>${html(item.userName)} / ${html(item.name)} · ${item.collectionAvailable === false ? '任务不可用' : `待处理 ${item.pending}`}</option>`).join('');
     } catch (error) {
@@ -289,7 +292,7 @@
 
   async function createAgent(start) {
     try {
-      const session = await window.orchestrator.internalAgentCreateSession({ title: elements.agentTitle.value, providerId: elements.agentProvider.value, modelId: elements.agentModel.value, collectionId: elements.agentCollection.value, taskRequirements: elements.agentRequirements.value });
+      const session = await window.orchestrator.internalAgentCreateSession({ title: elements.agentTitle.value, providerId: elements.agentProvider.value, modelId: elements.agentModel.value, collectionId: elements.agentCollection.value, taskRequirements: elements.agentRequirements.value, taskOptions: { minimumFrames: Number(elements.agentMinimumFrames.value), frameIntervalSeconds: Number(elements.agentFrameInterval.value), retainProcessCache: Boolean(elements.agentRetainCache.checked) } });
       activeAgentId = session.id;
       persistActiveIds();
       closeCreateModal();

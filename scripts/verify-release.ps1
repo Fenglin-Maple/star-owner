@@ -38,7 +38,7 @@ $required = @(
   "runtime\vc-runtime\vcruntime140.dll",
   "runtime\vc-runtime\vcruntime140_1.dll",
   "runtime\models\small\model.bin",
-  "runtime\models\medium\model.bin"
+  "runtime\models\large-v3-turbo\model.bin"
 )
 $required | ForEach-Object { Require-Path $_ }
 $vcRuntimeHashes = @{
@@ -112,6 +112,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "ASR hardware capability test failed." }
   & npm run test:asr-models
   if ($LASTEXITCODE -ne 0) { throw "ASR model registry test failed." }
+  & npm run test:v1-0-9-controls
+  if ($LASTEXITCODE -ne 0) { throw "1.0.9 workflow, disk, update and task-filter control test failed." }
   & npm run test:runtime-node
   if ($LASTEXITCODE -ne 0) { throw "Bundled Electron Node runtime test failed." }
   & npm run test:image-clipboard

@@ -13,7 +13,7 @@ RUNTIME_ROOT = PROJECT_ROOT / "runtime"
 MODELS_ROOT = RUNTIME_ROOT / "models"
 HF_CACHE_ROOT = RUNTIME_ROOT / "cache" / "huggingface"
 VC_RUNTIME_ROOT = RUNTIME_ROOT / "vc-runtime"
-DEFAULT_MODEL = "medium"
+DEFAULT_MODEL = "large-v3-turbo"
 GPU_COMPUTE_TYPES = {
     "large-v3-turbo": "int8_float16",
     "turbo": "int8_float16",

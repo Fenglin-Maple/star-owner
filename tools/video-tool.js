@@ -232,7 +232,7 @@ async function runAsr(videoUrl, outDir, args) {
   const audioFile = await prepareAudio(videoUrl, outDir, args);
   const asrDir = path.join(outDir, 'asr');
   fs.mkdirSync(asrDir, { recursive: true });
-  run('faster-whisper', [audioFile, '--model', String(args.model || 'medium'), '--language', String(args.language || 'auto'), '--output_dir', asrDir, '--output_format', 'all']);
+  run('faster-whisper', [audioFile, '--model', String(args.model || 'large-v3-turbo'), '--language', String(args.language || 'auto'), '--output_dir', asrDir, '--output_format', 'all']);
   console.log(asrDir);
 }
 
@@ -354,7 +354,7 @@ function extractFrames(outDir, count) {
   fs.mkdirSync(framesDir, { recursive: true });
   let info = {};
   try { info = JSON.parse(fs.readFileSync(path.join(outDir, 'info.json'), 'utf8')); } catch {}
-  const wanted = Math.max(1, Math.min(60, Math.round(Number(count) || 12)));
+  const wanted = Math.max(1, Math.min(300, Math.round(Number(count) || 12)));
   const duration = Math.max(0, Number(info.duration || 0));
   const interval = duration > 0 ? Math.max(0.5, duration / (wanted + 1)) : 30;
   const executable = resolveCommand('ffmpeg');
@@ -383,7 +383,7 @@ function extractFrames(outDir, count) {
   return frames.map((_buffer, index) => `frames/frame-${String(index + 1).padStart(3, '0')}.jpg`);
 }
 
-function splitJpegStream(value, maximum = 60) {
+function splitJpegStream(value, maximum = 300) {
   const buffer = Buffer.from(value || []);
   const frames = [];
   let offset = 0;
@@ -695,7 +695,7 @@ function dependencyStatus(command) {
   if (command !== 'faster-whisper' || executable !== WHISPER_PYTHON || !fs.existsSync(WHISPER_CLI)) {
     return { command, available: true, source: executable };
   }
-  const probe = spawnSync(executable, [WHISPER_CLI, '--health', '--model', 'medium'], {
+  const probe = spawnSync(executable, [WHISPER_CLI, '--health', '--model', 'large-v3-turbo'], {
     encoding: 'utf8',
     env: utf8ChildEnvironment(),
     windowsHide: true,
@@ -711,7 +711,7 @@ function dependencyStatus(command) {
       model: payload.model || '',
       modelReady: Boolean(payload.modelReady),
       cudaDevices: Number(payload.cudaDevices || 0),
-      message: payload.ok ? 'faster-whisper 与默认 medium 模型可用' : (payload.error || 'medium 模型尚未就绪')
+      message: payload.ok ? 'faster-whisper 与默认 large-v3-turbo 模型可用' : (payload.error || 'large-v3-turbo 模型尚未就绪')
     };
   } catch (error) {
     return { command, available: false, source: executable, message: String(probe.stderr || '').trim() || error.message };

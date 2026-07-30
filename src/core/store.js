@@ -165,6 +165,35 @@ class Store {
     return changed;
   }
 
+  replaceCollectionEnabledTasks(collectionId, enabledTaskIds = []) {
+    const id = String(collectionId || '').trim();
+    if (!id) throw new Error('Collection ID is required.');
+    const collection = this.getCollectionById(id);
+    if (!collection) throw new Error('收藏夹不存在，无法更新任务范围。');
+    const tasks = this.listTasks({ collectionId: id });
+    const wanted = new Set([...new Set((enabledTaskIds || []).map(String))]);
+    const taskIds = new Set(tasks.map((task) => String(task.id)));
+    const foreign = [...wanted].filter((taskId) => !taskIds.has(taskId));
+    if (foreign.length) throw new Error('筛选任务属于其它收藏夹，已拒绝更新任务范围。');
+    const now = new Date().toISOString();
+    const changed = [];
+    this.transaction(() => {
+      for (const task of tasks) {
+        const shouldEnable = wanted.has(String(task.id)) && !task.unsupportedVideo;
+        if (Boolean(task.enabled !== false) === shouldEnable) continue;
+        this.set('tasks', task.id, { ...task, enabled: shouldEnable, updatedAt: now });
+        changed.push({ ...task, enabled: shouldEnable, updatedAt: now });
+      }
+    });
+    return {
+      collectionId: id,
+      total: tasks.length,
+      enabled: tasks.filter((task) => wanted.has(String(task.id)) && !task.unsupportedVideo).length,
+      disabled: tasks.length - tasks.filter((task) => wanted.has(String(task.id)) && !task.unsupportedVideo).length,
+      changed
+    };
+  }
+
   updateTool(id, patch) {
     const current = this.get('tools', id);
     if (!current) throw new Error(`Tool not found: ${id}`);
@@ -371,6 +400,30 @@ class Store {
 
   getFilenameMetadata() {
     return normalizeFilenameMetadata(this.get('settings', 'filenameMetadata') || {}, DEFAULT_FILENAME_METADATA);
+  }
+
+  getUiPreferences() {
+    const current = this.get('settings', 'uiPreferences') || {};
+    return {
+      id: 'uiPreferences',
+      showOutsideBilibili: current.showOutsideBilibili !== false,
+      updatedAt: current.updatedAt || ''
+    };
+  }
+
+  setUiPreferences(value = {}) {
+    const next = {
+      ...this.getUiPreferences(),
+      ...value,
+      id: 'uiPreferences',
+      showOutsideBilibili: value.showOutsideBilibili === undefined
+        ? this.getUiPreferences().showOutsideBilibili
+        : Boolean(value.showOutsideBilibili),
+      updatedAt: new Date().toISOString()
+    };
+    this.set('settings', next.id, next);
+    this.save();
+    return next;
   }
 
   setFilenameMetadata(value = {}) {

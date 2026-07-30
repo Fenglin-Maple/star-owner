@@ -139,7 +139,10 @@ class InternalAgentManager {
       taskRequirements: String(input.taskRequirements || '').trim(),
       taskOptions: {
         frames: clamp(input.taskOptions?.frames, 4, 30, 12),
-        commentLimit: clamp(input.taskOptions?.commentLimit, 0, 3, 3)
+        minimumFrames: clamp(input.taskOptions?.minimumFrames, 12, 300, 12),
+        frameIntervalSeconds: clamp(input.taskOptions?.frameIntervalSeconds, 1, 600, 25),
+        commentLimit: clamp(input.taskOptions?.commentLimit, 0, 3, 3),
+        retainProcessCache: Boolean(input.taskOptions?.retainProcessCache)
       },
       singleTaskId: String(input.singleTaskId || ''),
       currentTaskId: '',
@@ -315,7 +318,10 @@ class InternalAgentManager {
       taskRequirements: String(input.taskRequirements || '').trim(),
       taskOptions: {
         frames: clamp(input.taskOptions?.frames, 4, 30, 12),
-        commentLimit: clamp(input.taskOptions?.commentLimit, 0, 3, 3)
+        minimumFrames: clamp(input.taskOptions?.minimumFrames, 12, 300, 12),
+        frameIntervalSeconds: clamp(input.taskOptions?.frameIntervalSeconds, 1, 600, 25),
+        commentLimit: clamp(input.taskOptions?.commentLimit, 0, 3, 3),
+        retainProcessCache: Boolean(input.taskOptions?.retainProcessCache)
       },
       currentTaskId: '',
       currentRunId: '',
@@ -394,7 +400,7 @@ class InternalAgentManager {
     if (hardware?.checkedAt && !hardware.localAsrSupported) {
       throw new Error(`当前硬件环境无法运行本地 ASR：${hardware.issues?.join(' ') || hardware.recommendation || '请在设置中检查运行时、模型、显卡与内存。'}`);
     }
-    if (hardware?.checkedAt && !hardware.nvidia?.supported && hardware.cpu?.supported && !scheduler.config?.cpuAsrEnabled) {
+    if (hardware?.checkedAt && !hardware.nvidia?.supported && hardware.cpu?.supported && scheduler.config?.asrExecutionMode !== 'cpu') {
       throw new Error('未检测到可用 NVIDIA/CUDA ASR；本机可使用 CPU ASR，但该通道默认关闭。请先在“设置 → 资源调度”中手动开启 CPU ASR。');
     }
     if (session.status === 'waiting-login') {
@@ -840,7 +846,7 @@ class InternalAgentManager {
     this.setProgress(session, '准备视频素材', 0.09);
     const commentLimit = Number(session.taskOptions?.commentLimit ?? 3);
     const bundle = this.startTool(session, task, toolCollection, 'material-bundle', {
-      frames: session.taskOptions?.frames || 12,
+      frames: calculateFrameBudget(task.duration, session.taskOptions),
       comments: commentLimit > 0,
       skipComments: commentLimit <= 0,
       commentLimit: Math.max(0, commentLimit),
@@ -853,7 +859,7 @@ class InternalAgentManager {
     const markdownFile = path.join(task.artifactDir, 'summary-draft.md');
     fs.writeFileSync(markdownFile, `${generated.trim()}\n`, 'utf8');
     this.setProgress(session, task.keepVideoCache || task.cachedVideoId ? '清理过渡缓存并保留视频' : '清理临时音视频缓存', 0.88);
-    const cleanup = this.startTool(session, task, toolCollection, 'clean-cache', { timeoutMs: 30 * 60 * 1000, preserveVideo: Boolean(task.keepVideoCache || task.cachedVideoId) });
+    const cleanup = this.startTool(session, task, toolCollection, 'clean-cache', { timeoutMs: 30 * 60 * 1000, preserveVideo: Boolean(task.keepVideoCache || task.cachedVideoId || session.taskOptions?.retainProcessCache) });
     await this.waitForRun(session, task, cleanup.id, signal, 0.89, 0.94);
     this.setProgress(session, '校验并归档产物', 0.95);
     const finalized = this.submitTask(session, task, markdownFile);
@@ -1731,6 +1737,13 @@ function addUsage(current = {}, next = {}) {
   return { input: Number(current.input || 0) + input, output: Number(current.output || 0) + output, total: Number(current.total || 0) + total };
 }
 
+function calculateFrameBudget(duration, options = {}) {
+  const minimum = Math.max(12, Math.min(300, Number(options.minimumFrames) || 12));
+  const interval = Math.max(1, Math.min(600, Number(options.frameIntervalSeconds) || 25));
+  const seconds = Math.max(0, Number(duration) || 0);
+  return Math.max(minimum, seconds > 0 ? Math.ceil(seconds / interval) : minimum);
+}
+
 function clamp(value, min, max, fallback) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(min, Math.min(max, Math.round(number))) : fallback;
@@ -1760,4 +1773,4 @@ function abortError() {
   return error;
 }
 
-module.exports = { InternalAgentManager, INTERNAL_USER_ID, INTERNAL_USER_NAME, extractBvid, normalizeGeneratedMarkdown, planGenerationRequest, splitTextByTokenBudget };
+module.exports = { InternalAgentManager, INTERNAL_USER_ID, INTERNAL_USER_NAME, calculateFrameBudget, extractBvid, normalizeGeneratedMarkdown, planGenerationRequest, splitTextByTokenBudget };

@@ -1,6 +1,6 @@
 # 星藏家 Design
 
-Version: `1.0.7`
+Version: `1.0.9`
 
 ## 1. Product Goal
 
@@ -20,7 +20,7 @@ The system optimizes for:
 1. The desktop application is the only writer of SQLite, task state, Workspace indexes, artifacts, cookies, tool runs, and internal Worker records.
 2. Video-summary execution is application-internal. External Agents cannot register video Workers, claim tasks, execute media tools, heartbeat, submit, or abort.
 3. The public local HTTP API is read-only knowledge access across all completed Markdown documents.
-4. Task Overview switches affect internal Agent claim eligibility. A disabled unfinished task is skipped; an already completed document remains readable.
+4. Task Overview switches affect internal Agent claim eligibility. A disabled unfinished task is skipped; an already completed document remains readable. The filtered-only action atomically enables exactly the visible task IDs and disables every other unfinished task in the selected collection.
 5. Each internal queue Agent binds its own collection. No global active external collection exists.
 6. Single-video mode keeps one canonical output per internal collection/BV pair.
 7. Only deletion of a completed task that still belongs to an active Bilibili favorite restores that task to pending.
@@ -223,14 +223,14 @@ Internal tools are registered in SQLite but invoked only through `ToolRunner`. P
 - API: Bilibili metadata/subtitles/comments with start-rate limiting;
 - media: yt-dlp, FFmpeg, audio extraction and keyframes;
 - disk: cleanup;
-- ASR: one CUDA lane and optional CPU lane.
+- ASR: one selected CUDA lane or one selected CPU lane; the lanes are mutually exclusive.
 
 GPU ASR is a persistent faster-whisper service. CPU ASR is disabled by default and starts only after the user enables it.
 
 Hardware detection combines:
 
 - project-local Python and faster-whisper health process;
-- selected `small`, `medium`, or optional `large-v3-turbo` model files;
+- selected `small` or `large-v3-turbo` model files; the old `medium` asset remains only in the historical dependency Release for older applications;
 - CTranslate2 version and CUDA device count;
 - `nvidia-smi` adapter name, total/free/used memory;
 - Windows x64 CPU runtime support, system memory, CPU thread count.
@@ -240,18 +240,19 @@ Recommended thresholds:
 | Model | CUDA compute | GPU total | Startup free | CPU system memory |
 | --- | --- | ---: | ---: | ---: |
 | small | `float16` | 2048 MiB | 1536 MiB | 6144 MiB |
-| medium | `float16` | 4096 MiB | 3072 MiB | 8192 MiB |
 | large-v3-turbo | `int8_float16` | 3072 MiB | 2048 MiB | 8192 MiB |
 
-`src/core/asr-models.js` is the single registry for model IDs, labels, package IDs, compute types and memory gates. ToolRunner configures both model path and compute type before every persistent service start, so switching from Turbo back to another model cannot leave the process on stale quantization. All GPU ASR requests still share one lane; adding a larger model does not add concurrent GPU residency. CPU remains `int8` and opt-in.
+`src/core/asr-models.js` is the single registry for model IDs, labels, package IDs, compute types and memory gates. ToolRunner configures both model path and compute type before every persistent service start, so switching models cannot leave the process on stale quantization. A selected CUDA mode disables the CPU lane and a selected CPU mode disables the GPU lane; there is never simultaneous ASR model residency. All requests in the selected lane still share one queue.
 
-Turbo keeps the same multilingual auto-detection, VAD, word timestamps, sentence materialization, SRT, timeline text and diagnostics as the existing models. A real RTX 4070 Laptop comparison over Chinese, English vertical-video and Japanese/music Bilibili audio measured about 1348 MiB Turbo peak allocation above baseline versus 2564 MiB for medium. The 3072 MiB total / 2048 MiB startup-free policy includes headroom beyond that observed peak and remains a capability gate rather than a universal performance guarantee.
+Turbo keeps the same multilingual auto-detection, VAD, word timestamps, sentence materialization, SRT, timeline text and diagnostics as the existing models. A real RTX 4070 Laptop comparison over Chinese, English vertical-video and Japanese/music Bilibili audio measured about 1348 MiB Turbo peak allocation above baseline. The 3072 MiB total / 2048 MiB startup-free policy includes headroom beyond that observed peak and remains a capability gate rather than a universal performance guarantee.
 
 Unsupported GPU lanes are disabled. Unsupported CPU environments disable the CPU toggle and block workflow startup when no valid ASR path exists.
 
 Every video passes through the ASR precondition and language-detection workflow. Sources with audio produce sentence-level SRT, readable timeline text, structured segments, language/probability, coverage and silence diagnostics. A video-only source produces a successful empty diagnostic with `noAudioStream=true`; the Agent continues with station subtitles and keyframes instead of retrying an impossible extraction.
 
 Keyframe extraction writes FFmpeg MJPEG output through an image pipe and then persists validated numbered JPEG files. It never exposes the artifact directory to FFmpeg's image-sequence pattern parser, so percent signs or other title metadata in Bilibili, cached-video, and single-video paths cannot corrupt `frame-001.jpg` naming. Material discovery accepts only concrete numbered frame files and ignores legacy pattern placeholders.
+
+Each internal workflow stores a minimum frame count and an interval budget. The effective count is `max(minimumFrames, ceil(duration / frameIntervalSeconds))`, clamped to the supported range and with the final partial interval counted. The default is at least 12 frames and one additional budget slot per 25 seconds. A workflow may opt into `retainProcessCache`; cleanup then preserves the process video and subtitle/ASR cache while still recording disk usage and refusing new work when the protected free-space threshold is crossed.
 
 ## 13. Markdown Validation
 
@@ -305,9 +306,9 @@ The main window appears before heavy initialization. Bootstrap progress covers d
 
 Project-local runtime and models may be installed from GitHub Release assets. Downloads use bounded retry with backoff and HTTP Range continuation while retaining `.partial` data. Verification prefers the Release asset SHA-256 digest; direct-URL fallback obtains the matching `.sha256` before transferring the large archive. Complete archives survive transient checksum-network failures, but unverified content is never installed. Installation uses staging, backup, a transaction journal and startup rollback, then refreshes ASR and tool health without requiring an application restart. Archives may write only below `runtime/`.
 
-All three models support local ZIP import. The accepted asset name is generated only from `dependencyReleaseVersion`; the selected file must exactly match that name and the official Release SHA-256. Archive inspection rejects links, traversal, foreign runtime paths, the wrong model directory and missing probes before maintenance mode or target replacement. Import cancels and joins an in-flight automatic download for the same model, removes its `.partial`, archive, staging, backup and transaction residue, then copies the selected file into a managed temporary location. Existing healthy model files remain untouched until verified staging commits atomically, and remain available after validation failure. Package-name links and error dialogs point to the exact dependency Release.
+The two current models support local ZIP import. The accepted asset name is generated only from `dependencyReleaseVersion`; the selected file must exactly match that name and the official Release SHA-256. Archive inspection rejects links, traversal, foreign runtime paths, the wrong model directory and missing probes before maintenance mode or target replacement. Import cancels and joins an in-flight automatic download for the same model, removes its `.partial`, archive, staging, backup and transaction residue, then copies the selected file into a managed temporary location. Existing healthy model files remain untouched until verified staging commits atomically, and remain available after validation failure. Package-name links and error dialogs point to the exact dependency Release. The v1.0.0 medium asset remains untouched for older applications.
 
-Version `1.0.7` keeps runtime and all ASR models pinned to dependency baseline `1.0.0`. Turbo is an optional fourth dependency card and never enters `missingRequired`; its published asset contract is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`. Packaging can build only this model with `npm run package:model:turbo`, while portable manifests distinguish required small/medium assets from optional Turbo.
+Version `1.0.9` keeps runtime and ASR dependencies pinned to baseline `1.0.0`. The current dependency manager exposes `large-v3-turbo` as the required default and `small` as an optional alternate. The historical `medium` package remains untouched in the v1.0.0 Release for older applications and is not exposed by the 1.0.9 model registry. The published Turbo asset contract is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; packaging can build it with `npm run package:model:turbo`.
 
 Media tool subprocesses never resolve `node` through the system `PATH`. Normal source tests use `process.execPath`; the desktop application launches its bundled Electron executable with `ELECTRON_RUN_AS_NODE=1`. Python processes receive `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`, and streamed stdout/stderr use incremental UTF-8 decoders so a multibyte Chinese character split across chunks is not replaced.
 

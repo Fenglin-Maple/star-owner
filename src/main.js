@@ -23,6 +23,7 @@ const { RagAssistant } = require('./core/rag-assistant');
 const { Store } = require('./core/store');
 const { recoverPendingSubmissionFinalizations } = require('./core/submission-artifacts');
 const { ToolRunner } = require('./core/tool-runner');
+const { UpdateManager } = require('./core/update-manager');
 const { VideoCacheManager } = require('./core/video-cache-manager');
 const { assertSafeWindowsPath, ensureDir, evaluateWorkspacePathSafety, fitArtifactName, initWorkspace, safeName, timestampForFile, videoArtifactName, WORKSPACE_ROOT } = require('./core/workspace');
 
@@ -56,6 +57,7 @@ let internalAgentManager = null;
 let dependencyManager = null;
 let videoCacheManager = null;
 let collectionSyncService = null;
+let updateManager = null;
 let currentUser = null;
 let biliAccountGeneration = 0;
 let biliRefreshGeneration = -1;
@@ -176,6 +178,11 @@ async function bootstrap() {
   initWorkspace();
   emitBootstrap('Opening SQLite database...', 0.32);
   store = await Store.open();
+  updateManager = new UpdateManager({
+    projectRoot: path.resolve(__dirname, '..'),
+    version: PACKAGE_VERSION,
+    emit: (event) => mainWindow?.webContents.send('update:event', event)
+  });
   if (store.portableRelocation) {
     console.info(`[portable-workspace] relocated ${store.portableRelocation.updatedRecords} records from ${store.portableRelocation.oldRoot} to ${store.portableRelocation.newRoot}`);
   }
@@ -236,7 +243,7 @@ async function bootstrap() {
     acquireInstall: (packageId, onWait) => toolRunner.acquireMaintenance(`dependency package ${packageId}`, onWait),
     onInstalled: async (packageId) => {
       if (isAsrModelPackage(packageId) || packageId === 'runtime-base') {
-        try { await toolRunner.ensureGpuAsr(); } catch (error) { publishEvent({ type: 'asr-reload-required', error: error.message }); }
+        try { await toolRunner.ensureSelectedAsr(); } catch (error) { publishEvent({ type: 'asr-reload-required', error: error.message }); }
       }
       await refreshToolHealth();
       sendRuntime();
@@ -317,6 +324,7 @@ app.on('before-quit', () => {
 });
 
 ipcMain.handle('app:get-runtime', async () => ({
+  version: PACKAGE_VERSION,
   apiUrl: apiServer?.url(),
   workspaceRoot: store?.getDefaultWorkspace()?.root || WORKSPACE_ROOT,
   defaultWorkspace: store?.getDefaultWorkspace() || null,
@@ -328,7 +336,9 @@ ipcMain.handle('app:get-runtime', async () => ({
   videoCache: videoCacheManager?.state() || null,
   pathSafety,
   backendReady,
-  bootstrap: bootstrapState
+  bootstrap: bootstrapState,
+  update: updateManager?.state() || null,
+  uiPreferences: store?.getUiPreferences?.() || { showOutsideBilibili: true }
 }));
 
 ipcMain.handle('docs:read-readme', async () => {
@@ -367,8 +377,9 @@ ipcMain.handle('documents:read', async (_event, taskId) => {
   if (!task || task.status !== 'done' || !task.outputMarkdown) throw new Error('Completed Markdown document not found.');
   if (!fs.existsSync(task.outputMarkdown)) throw new Error(`Markdown file does not exist: ${task.outputMarkdown}`);
   const markdown = fs.readFileSync(task.outputMarkdown, 'utf8');
+  const taskView = { ...task, artifactExists: Boolean(task.artifactDir && fs.existsSync(task.artifactDir)), documentExists: true };
   return {
-    task,
+    task: taskView,
     collection: store.getCollectionById(task.collectionId) || null,
     path: task.outputMarkdown,
     markdown,
@@ -383,6 +394,16 @@ ipcMain.handle('documents:open', async (_event, taskId) => {
   const error = await shell.openPath(task.outputMarkdown);
   if (error) throw new Error(error);
   return { path: task.outputMarkdown };
+});
+
+ipcMain.handle('documents:open-folder', async (_event, taskId) => {
+  assertBackendReady();
+  const task = store.getTask(String(taskId || ''));
+  const target = task?.artifactDir || (task?.outputMarkdown ? path.dirname(task.outputMarkdown) : '');
+  if (!target || !fs.existsSync(target)) throw new Error('产物目录不存在。');
+  const error = await shell.openPath(target);
+  if (error) throw new Error(error);
+  return { path: target };
 });
 
 ipcMain.handle('documents:delete', async (_event, taskId) => {
@@ -480,7 +501,7 @@ ipcMain.handle('store:snapshot', async () => {
     videoCache: videoCacheManager?.state() || { collections: [], videos: [], jobs: [] },
     analytics: buildAnalytics(store),
     scheduler: toolRunner?.getState() || null,
-    settings: { filenameMetadata: store.getFilenameMetadata() },
+    settings: { filenameMetadata: store.getFilenameMetadata(), uiPreferences: store.getUiPreferences?.() || { showOutsideBilibili: true } },
     activities: store.listRecent('activities', 500),
     taskEvents: store.listRecent('taskEvents', 500)
   };
@@ -491,6 +512,13 @@ ipcMain.handle('tasks:set-enabled', async (_event, payload) => {
   const tasks = store.updateTasksEnabled(payload?.taskIds || [], Boolean(payload?.enabled));
   publishEvent({ type: 'tasks-enabled-changed', taskIds: tasks.map((task) => task.id), enabled: Boolean(payload?.enabled) });
   return { updated: tasks.length, taskIds: tasks.map((task) => task.id) };
+});
+
+ipcMain.handle('tasks:replace-collection-enabled', async (_event, payload = {}) => {
+  assertBackendReady();
+  const result = store.replaceCollectionEnabledTasks(payload.collectionId, payload.taskIds || []);
+  publishEvent({ type: 'tasks-collection-enabled-replaced', collectionId: result.collectionId, changed: result.changed.length });
+  return result;
 });
 
 ipcMain.handle('video-cache:state', async () => videoCacheManager?.state() || { collections: [], videos: [], jobs: [] });
@@ -536,6 +564,14 @@ ipcMain.handle('settings:filename-metadata', async (_event, value) => {
   publishEvent({ type: 'filename-metadata-changed', filenameMetadata });
   sendRuntime();
   return filenameMetadata;
+});
+
+ipcMain.handle('settings:ui-preferences', async (_event, value = {}) => {
+  assertBackendReady();
+  const preferences = store.setUiPreferences(value);
+  publishEvent({ type: 'ui-preferences-changed', preferences });
+  sendRuntime();
+  return preferences;
 });
 
 ipcMain.handle('workers:update', async (_event, payload) => {
@@ -916,6 +952,37 @@ ipcMain.handle('dependencies:import-local', async (_event, packageId) => {
   }
 });
 
+ipcMain.handle('updates:state', async () => updateManager?.state() || null);
+ipcMain.handle('updates:check', async () => {
+  assertBackendReady();
+  return updateManager.check();
+});
+ipcMain.handle('updates:prepare', async () => {
+  assertBackendReady();
+  return updateManager.prepare();
+});
+ipcMain.handle('updates:apply', async () => {
+  assertBackendReady();
+  const result = updateManager.launchPreparedUpdate();
+  setImmediate(() => app.quit());
+  return result;
+});
+ipcMain.handle('updates:migration-inspect', async () => {
+  assertBackendReady();
+  const selected = await dialog.showOpenDialog(mainWindow, {
+    title: '选择旧版星藏家目录（至少 v1.0.3）',
+    properties: ['openDirectory']
+  });
+  if (selected.canceled || !selected.filePaths?.[0]) return { canceled: true };
+  return { canceled: false, migration: updateManager.inspectMigrationSource(selected.filePaths[0]) };
+});
+ipcMain.handle('updates:migration-apply', async (_event, sourceRoot) => {
+  assertBackendReady();
+  const result = updateManager.launchMigration(sourceRoot);
+  setImmediate(() => app.quit());
+  return result;
+});
+
 ipcMain.handle('window:minimize', async () => mainWindow?.minimize());
 ipcMain.handle('window:maximize-toggle', async () => {
   if (!mainWindow) return false;
@@ -1035,6 +1102,7 @@ function sendBootstrap() {
 function sendRuntime() {
   if (!mainWindow || mainWindow.webContents.isLoading()) return;
   mainWindow.webContents.send('app:runtime', {
+    version: PACKAGE_VERSION,
     apiUrl: apiServer?.url(),
     workspaceRoot: store?.getDefaultWorkspace()?.root || WORKSPACE_ROOT,
     defaultWorkspace: store?.getDefaultWorkspace() || null,
@@ -1046,7 +1114,9 @@ function sendRuntime() {
     videoCache: videoCacheManager?.state() || null,
     pathSafety,
     backendReady,
-    bootstrap: bootstrapState
+    bootstrap: bootstrapState,
+    update: updateManager?.state() || null,
+    uiPreferences: store?.getUiPreferences?.() || { showOutsideBilibili: true }
   });
 }
 
@@ -1093,9 +1163,12 @@ function buildTaskSnapshot(activeStore) {
   for (const id of taskDisplayCoverCache.keys()) {
     if (!liveIds.has(id)) taskDisplayCoverCache.delete(id);
   }
-  return tasks.map((task) => task.status === 'done'
-    ? { ...task, displayCover: resolveTaskDisplayCover(task) }
-    : task);
+  return tasks.map((task) => {
+    if (task.status !== 'done') return task;
+    const artifactExists = Boolean(task.artifactDir && fs.existsSync(task.artifactDir));
+    const documentExists = Boolean(task.outputMarkdown && fs.existsSync(task.outputMarkdown));
+    return { ...task, artifactExists, documentExists, displayCover: resolveTaskDisplayCover(task) };
+  });
 }
 
 function publicCurrentUser(user) {

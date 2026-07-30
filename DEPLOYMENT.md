@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.0.7`
+Version: `1.0.9`
 
 ## 1. Portable Release for Users
 
@@ -13,7 +13,7 @@ On first launch:
 1. The main window opens immediately.
 2. SQLite and the default Workspace initialize.
 3. After the portable backend first becomes ready, the application creates a `星藏家.lnk` shortcut on the current user's Desktop. It records completion in SQLite and does not recreate a shortcut deleted by the user; moving the complete portable directory allows the new location to replace the old shortcut on its next successful launch.
-4. The application checks project-local runtime, faster-whisper, required small/medium packages, optional Turbo, FFmpeg, yt-dlp and VC++ runtime.
+4. The application checks project-local runtime, required large-v3-turbo package, optional small package, FFmpeg, yt-dlp and VC++ runtime.
 5. Missing required packages trigger an in-app download prompt.
 6. Downloads come from this repository's Release assets, show progress, retain `.partial` files, retry transient failures with backoff, and resume with HTTP Range requests.
 7. Verification prefers the SHA-256 digest in GitHub Release asset metadata. If the unauthenticated API is unavailable, the predictable direct URL fallback fetches the matching `.sha256` before downloading the large archive. A complete archive is retained across checksum-network failures and reused on retry; unverified content is never installed.
@@ -27,13 +27,17 @@ Star-Owner-v<dependency-version>-runtime-win-x64.zip
 Star-Owner-v<dependency-version>-runtime-win-x64.zip.sha256
 Star-Owner-v<dependency-version>-model-small.zip
 Star-Owner-v<dependency-version>-model-small.zip.sha256
-Star-Owner-v<dependency-version>-model-medium.zip
-Star-Owner-v<dependency-version>-model-medium.zip.sha256
 Star-Owner-v<dependency-version>-model-large-v3-turbo.zip
 Star-Owner-v<dependency-version>-model-large-v3-turbo.zip.sha256
 ```
 
-The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.0.7` uses the unchanged published `v1.0.0` runtime, small, medium and optional Turbo assets; users do not need to redownload packages already installed and healthy.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.0.9` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry.
+
+### Updating and migrating an existing installation
+
+For a portable installation, use `设置 -> 应用更新与迁移 -> 检查更新`. Only the GitHub `latest` stable Release is eligible. The application downloads the core archive with retry and Range continuation, verifies its SHA-256, inspects archive paths, stages it, and replaces only the application files. `workspace/`, `runtime/` and `.updates/` are retained; a failed transaction rolls back and records the result for the next launch.
+
+To move data from a v1.0.3 or newer installation, first stop all Agents and close the old application. Copy the complete old project directory to a short new location, start the new release, and use `设置 -> 应用更新与迁移 -> 从旧版目录迁移`. The application validates the source SQLite database and version, backs up the target workspace, migrates it atomically, and can restore the backup if the operation fails. Never copy only individual artifact folders or mix two live installations against the same workspace.
 
 ## 2. Hardware and ASR
 
@@ -44,7 +48,6 @@ Recommended local ASR capacity:
 | Model | CUDA compute | NVIDIA total | Free before load | CPU system memory |
 | --- | --- | ---: | ---: | ---: |
 | small | `float16` | 2048 MiB | 1536 MiB | 6144 MiB |
-| medium | `float16` | 4096 MiB | 3072 MiB | 8192 MiB |
 | large-v3-turbo | `int8_float16` | 3072 MiB | 2048 MiB | 8192 MiB |
 
 The application automatically checks:
@@ -57,7 +60,7 @@ The application automatically checks:
 
 The CUDA lane is disabled when these checks fail. CPU ASR is disabled by default and can be enabled only when the packaged CPU environment is supported. If neither path is valid, starting an internal video Agent is blocked with concrete diagnostic reasons.
 
-An 8GB laptop RTX 4070 is suitable for the default `medium` model with one persistent CUDA lane. Multiple video workflows may run concurrently, but ASR requests queue through the shared lane. Turbo uses the same lane and is never loaded beside another GPU ASR model. On that adapter, three real Bilibili samples measured about 1348 MiB Turbo peak allocation over baseline versus 2564 MiB for medium; lower-memory devices still need enough free memory for Windows display use and other applications.
+An 8GB laptop RTX 4070 is suitable for the default `large-v3-turbo` model with one persistent CUDA lane. Multiple video workflows may run concurrently, but ASR requests queue through the selected lane. CPU mode is an explicit alternative and is never loaded beside CUDA ASR. On that adapter, three real Bilibili samples measured about 1348 MiB Turbo peak allocation over baseline; lower-memory devices still need enough free memory for Windows display use and other applications.
 
 ## 3. Source Setup
 
@@ -89,7 +92,6 @@ runtime/python/
 runtime/faster-whisper/
 runtime/vc-runtime/
 runtime/models/small/
-runtime/models/medium/
 runtime/models/large-v3-turbo/
 ```
 
@@ -202,7 +204,7 @@ The aggregate verifier also runs scheduler, RAG, task rollback, video cache, ima
 
 ### Automatic ASR model download is slow
 
-Open the dependency Release linked by a model name in Settings. For version `1.0.7`, the required published packages remain `Star-Owner-v1.0.0-model-small.zip` and `Star-Owner-v1.0.0-model-medium.zip`; keep the ZIP intact and click `从本地导入` on the matching row. The optional published Turbo filename is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`. The application stops an active automatic download for that model and removes its managed cache. A wrong version, wrong model, damaged file, modified archive or unexpected layout is rejected with the correct Release URL; an already healthy model remains installed.
+Open the dependency Release linked by a model name in Settings. For version `1.0.9`, the required published package is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; `Star-Owner-v1.0.0-model-small.zip` is the optional alternate. Keep the ZIP intact and click `从本地导入` on the matching row. The historical medium filename is only for older releases. The application stops an active automatic download for that model and removes its managed cache. A wrong version, wrong model, damaged file, modified archive or unexpected layout is rejected with the correct Release URL; an already healthy model remains installed.
 
 ### Windows reports a path-too-long risk
 
@@ -214,14 +216,14 @@ Version `1.0.4` forces project Python tools to UTF-8 and uses streaming UTF-8 de
 
 ### Application starts but video Agent cannot run
 
-Open `设置 -> 应用设置 -> 资源调度`. Check the ASR compatibility card for project runtime, model, NVIDIA/CUDA, memory and CPU fallback details. Install missing packages, choose `small`, or install low-VRAM Turbo when the current GPU cannot support `medium`.
+Open `设置 -> 应用设置 -> 资源调度`. Check the ASR compatibility card for project runtime, model, NVIDIA/CUDA, memory and CPU details. Install the required Turbo package, choose `small`, or switch to the independent CPU ASR mode when CUDA is unavailable.
 
 ### NVIDIA is detected but CUDA ASR is unavailable
 
 Confirm the driver exposes the GPU through `nvidia-smi`, then run:
 
 ```powershell
-runtime\faster-whisper\Scripts\python.exe tools\faster-whisper-cli.py --model medium --health
+runtime\faster-whisper\Scripts\python.exe tools\faster-whisper-cli.py --model large-v3-turbo --health
 ```
 
 The JSON should report `modelReady: true` and at least one CUDA device. Repair dependencies in Settings if imports or DLL loading fail.
