@@ -592,6 +592,9 @@ function verifyRendererContracts() {
   const preload = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
   const rag = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'rag.js'), 'utf8');
+  const ai = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'ai.js'), 'utf8');
+  const cache = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'cache.js'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
   if (!index.includes('id="singleDuplicateModal"') || !index.includes('id="documentDeleteModal"') || !index.includes('id="documentContextMenu"')) {
     throw new Error('single-video/document lifecycle dialogs are missing from the renderer');
   }
@@ -607,6 +610,15 @@ function verifyRendererContracts() {
   if (!app.includes('function renderSyncSummary') || !app.includes('function taskStateGroup') || !app.includes("taskStatusFilter === 'all'")) {
     throw new Error('collection/task status summaries are not wired into renderer filtering');
   }
+  if (!app.includes('function applyOutsideBilibiliPreference') || !app.includes('applyOutsideBilibiliPreference(preferences, { animate: true })') || !styles.includes('.outside-bilibili-nav.is-hiding') || !styles.includes('.outside-bilibili-nav[hidden]')) {
+    throw new Error('the Bilibili-extras navigation preference is not applied or hidden reliably');
+  }
+  if (!app.includes('function renderSnapshotPage') || !app.includes('function schedulePageRender') || !app.includes('schedulePageRender(activePageName())') || !app.includes("const scope = document.querySelector('.page.active')") || !ai.includes('function renderActivePage') || !cache.includes("elements.downloadPage.classList.contains('active')") || !rag.includes("elements.page.classList.contains('active')")) {
+    throw new Error('large renderer surfaces must only rebuild while their page is visible');
+  }
+  if (!/body\.theme-endfield \.sidebar\s*{\s*background: #191919;/.test(styles) || !/body\.theme-endfield \.nav-item\.active,[\s\S]*?background: #f2f2f0;/.test(styles)) {
+    throw new Error('the Endfield sidebar must use a black shell and white selected navigation state');
+  }
   if (!index.includes('id="firstRunGuide"') || !index.includes('data-navigate-page="ai-models"') || !index.includes('data-navigate-page="internal-agents"')) {
     throw new Error('the startup first-run journey or its navigation targets are missing');
   }
@@ -616,7 +628,6 @@ function verifyRendererContracts() {
   if (!app.includes("new CustomEvent('star:page-changed'") || !fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'ai.js'), 'utf8').includes("window.addEventListener('star:page-changed'")) {
     throw new Error('page navigation does not refresh AI state consistently across sidebar and onboarding entry points');
   }
-  const ai = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'ai.js'), 'utf8');
   if (!index.includes('普通问答无需选择知识库') || !rag.includes('尚未创建会话') || !rag.includes('loadReadyStateForSessionCreation') || !rag.includes('star:model-config-changed') || !rag.includes('当前没有选择知识库，仍可直接提问') || !ai.includes('window.starFlushModelConfig = flushPendingModelSave')) {
     throw new Error('RAG session creation must refresh model configuration and keep knowledge selection optional');
   }

@@ -87,6 +87,7 @@
   }
 
   function renderAll() {
+    if (!elements.page.classList.contains('active')) return;
     renderSessions();
     renderInspector();
     queueMessageRender();
@@ -494,6 +495,7 @@
     if (streamRenderTimer) return;
     streamRenderTimer = setTimeout(async () => {
       streamRenderTimer = null;
+      if (!elements.page.classList.contains('active')) return;
       await messageRenderQueue;
       const streaming = activeStreaming();
       if (!streaming) return;
@@ -783,17 +785,18 @@
     if (event.type === 'approval-request') return showApproval(event.approval);
     const eventSessionId = String(event.sessionId || '');
     const active = !eventSessionId || eventSessionId === activeSessionId;
+    const visible = elements.page.classList.contains('active');
     if (event.type === 'message') {
       if (active && state.activeSession && !state.activeSession.messages.some((item) => item.id === event.message.id)) {
         state.activeSession.messages.push(event.message);
-        queueMessageRender();
+        if (visible) queueMessageRender();
       }
     } else if (event.type === 'assistant-start') {
       const previousId = streamingBySession.get(eventSessionId)?.id;
       if (active && previousId && previousId !== event.messageId) elements.messages.querySelector(`[data-message-id="${cssEscape(previousId)}"]`)?.remove();
       streamingBySession.set(eventSessionId, { id: event.messageId, sessionId: eventSessionId, role: 'assistant', content: '', reasoning: '', toolEvents: [], status: 'streaming', pending: false, createdAt: new Date().toISOString() });
-      renderSessions();
-      if (active) {
+      if (visible) renderSessions();
+      if (active && visible) {
         setGenerating(true, '模型正在思考');
         scheduleStreamRender();
       }
@@ -802,7 +805,7 @@
       if (!streaming) return;
       if (event.content) streaming.content += event.content;
       if (event.reasoning) streaming.reasoning += event.reasoning;
-      if (active) {
+      if (active && visible) {
         setGenerating(true, event.reasoning && !streaming.content ? '正在接收模型推理' : '正在流式输出');
         scheduleStreamRender();
       }
@@ -812,32 +815,34 @@
       const index = streaming.toolEvents.findIndex((item) => item.id === event.tool.id);
       if (index >= 0) streaming.toolEvents[index] = event.tool;
       else streaming.toolEvents.push(event.tool);
-      if (active) {
+      if (active && visible) {
         setGenerating(true, `正在调用 ${toolLabel(event.tool.name)}`);
         scheduleStreamRender();
       }
     } else if (event.type === 'context-compaction') {
       if (!active) return;
       if (event.phase === 'started') {
-        setGenerating(true, `上下文达到 ${event.contextPercent || '-'}%，正在自动压缩`);
+        if (visible) setGenerating(true, `上下文达到 ${event.contextPercent || '-'}%，正在自动压缩`);
       } else if (event.phase === 'completed') {
         if (event.detail && state.activeSession) state.activeSession = event.detail;
-        renderInspector();
-        setGenerating(true, '上下文已整理，模型正在继续回答');
-        notify('已自动压缩上下文', `触发阈值 ${event.thresholdPercent || 75}%，当前提问保留原文。`, 'info');
+        if (visible) {
+          renderInspector();
+          setGenerating(true, '上下文已整理，模型正在继续回答');
+          notify('已自动压缩上下文', `触发阈值 ${event.thresholdPercent || 75}%，当前提问保留原文。`, 'info');
+        }
       }
     } else if (event.type === 'assistant-complete') {
       streamingBySession.delete(eventSessionId);
-      if (active) setGenerating(false);
-      renderSessions();
+      if (active && visible) setGenerating(false);
+      if (visible) renderSessions();
       refresh(activeSessionId, { quiet: true });
     } else if (event.type === 'assistant-error') {
       streamingBySession.delete(eventSessionId);
-      if (active) {
+      if (active && visible) {
         setGenerating(false);
         notify('模型调用结束', event.error || '生成失败', event.message?.status === 'cancelled' ? 'info' : 'error');
       }
-      renderSessions();
+      if (visible) renderSessions();
       refresh(activeSessionId, { quiet: true });
     } else if (event.type === 'session-updated') {
       refresh(activeSessionId, { quiet: true });

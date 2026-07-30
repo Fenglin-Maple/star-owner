@@ -140,6 +140,12 @@ let taskStatusFilter = 'all';
 let snapshotPromise = null;
 let snapshotRefreshTimer = null;
 let snapshotRevision = 0;
+let snapshotDataRevision = 0;
+let pendingPageRender = null;
+let pageRenderFrame = null;
+let pageRenderTimer = null;
+const renderedPageRevisions = new Map();
+const locallyDirtyPages = new Set();
 let lastUiInteractionAt = 0;
 let transientActivity = null;
 let profileCloseTimer = null;
@@ -152,6 +158,8 @@ let schedulerUpdateInFlight = false;
 let bootstrapDismissed = false;
 let bootstrapHideTimer = null;
 let backendSnapshotLoaded = false;
+let outsideBilibiliAnimationTimer = null;
+let outsideBilibiliAnimationTarget = null;
 const SNAPSHOT_IGNORED_EVENTS = new Set([
   'asr-progress',
   'asr-service-log',
@@ -1178,15 +1186,108 @@ function setPage(name, sourceItem = null) {
   if (name === 'login') {
     openLoginWorkspace().catch((error) => showToast(TEXT.toastError, error.message || String(error), 'error'));
   }
-  if (name === 'tasks') renderTaskInventory();
-  if (name === 'documents') renderDocumentLibrary();
-  if (name === 'collections') {
-    if (profileFolders.length) populateFolderSelect(profileFolders);
-    updateSyncCollectionState();
-    showStartupFolderProbeNotice();
-  }
   if (name === 'readme') loadReadme().catch((error) => showToast(TEXT.toastError, error.message || String(error), 'error'));
   window.dispatchEvent(new CustomEvent('star:page-changed', { detail: { page: name } }));
+  schedulePageRender(name);
+}
+
+function activePageName() {
+  return document.querySelector('.page.active')?.id?.replace(/^page-/, '') || 'overview';
+}
+
+function renderSnapshotPage(name) {
+  const uiState = captureRefreshUiState();
+  if (name === 'overview') {
+    renderActivityLog(lastSnapshot.activities || []);
+    renderToolHealth(toolHealth);
+  } else if (name === 'collections') {
+    if (profileFolders.length) populateFolderSelect(profileFolders);
+    updateSyncCollectionState();
+    renderSelectedSyncSummary();
+    showStartupFolderProbeNotice();
+  } else if (name === 'tasks') renderTaskInventory();
+  else if (name === 'tools') renderTools(lastSnapshot.tools || []);
+  else if (name === 'agent-tool-status') {
+    renderRuns(lastSnapshot.toolRuns || []);
+    renderApiToolAnalytics(lastSnapshot.analytics?.tools || []);
+  } else if (name === 'workers') {
+    renderWorkers((lastSnapshot.analytics?.workers || []).filter((worker) => worker.tool === 'star-owner-internal'));
+  } else if (name === 'export') renderExportPage();
+  else if (name === 'documents') renderDocumentLibrary();
+  else if (name === 'settings') {
+    renderFilenameMetadataSettings();
+    renderWorkspaces(lastSnapshot.workspaces || []);
+    renderScheduler(runtime.scheduler);
+    renderSettingsSummary();
+    renderUpdateState(runtime.update);
+  }
+  renderedPageRevisions.set(name, snapshotDataRevision);
+  locallyDirtyPages.delete(name);
+  restoreRefreshUiState(uiState);
+}
+
+function flushScheduledPageRender() {
+  pageRenderTimer = null;
+  const job = pendingPageRender;
+  pendingPageRender = null;
+  if (!job) return;
+  const currentPage = activePageName();
+  if (currentPage !== job.name) {
+    schedulePageRender(currentPage, { force: true });
+    return;
+  }
+  const stale = renderedPageRevisions.get(job.name) !== snapshotDataRevision || locallyDirtyPages.has(job.name);
+  if (job.force || stale) renderSnapshotPage(job.name);
+}
+
+function schedulePageRender(name = activePageName(), { force = false } = {}) {
+  pendingPageRender = { name, force: force || pendingPageRender?.force === true };
+  if (pageRenderFrame || pageRenderTimer) return;
+  pageRenderFrame = requestAnimationFrame(() => {
+    pageRenderFrame = null;
+    // Let the new page paint before rebuilding a large task, document, or log list.
+    pageRenderTimer = setTimeout(flushScheduledPageRender, 0);
+  });
+}
+
+function applyOutsideBilibiliPreference(preferences = runtime.uiPreferences, { animate = false } = {}) {
+  const showOutsideBilibili = preferences?.showOutsideBilibili !== false;
+  if (outsideBilibiliToggle) outsideBilibiliToggle.checked = showOutsideBilibili;
+  const navItem = document.querySelector('.outside-bilibili-nav');
+  if (navItem) {
+    const animationAlreadyTargetsValue = !animate && outsideBilibiliAnimationTarget === showOutsideBilibili;
+    if (!animationAlreadyTargetsValue && outsideBilibiliAnimationTimer) clearTimeout(outsideBilibiliAnimationTimer);
+    if (!animationAlreadyTargetsValue) outsideBilibiliAnimationTarget = animate ? showOutsideBilibili : null;
+    if (animationAlreadyTargetsValue) {
+      // Keep the user-triggered transition alive when a matching snapshot arrives.
+    } else if (showOutsideBilibili) {
+      const wasHidden = navItem.hidden;
+      navItem.hidden = false;
+      navItem.classList.remove('is-hiding');
+      if (animate && wasHidden) {
+        navItem.classList.add('is-entering');
+        void navItem.offsetHeight;
+        navItem.classList.remove('is-entering');
+      } else {
+        navItem.classList.remove('is-entering');
+      }
+    } else if (animate && !navItem.hidden) {
+      navItem.classList.remove('is-entering');
+      navItem.classList.add('is-hiding');
+    } else {
+      navItem.hidden = true;
+      navItem.classList.remove('is-entering', 'is-hiding');
+    }
+    if (animate && !animationAlreadyTargetsValue) {
+      outsideBilibiliAnimationTimer = setTimeout(() => {
+        outsideBilibiliAnimationTimer = null;
+        outsideBilibiliAnimationTarget = null;
+        if (!showOutsideBilibili) navItem.hidden = true;
+        navItem.classList.remove('is-entering', 'is-hiding');
+      }, 240);
+    }
+  }
+  if (!showOutsideBilibili && document.querySelector('#page-outside-bilibili')?.classList.contains('active')) setPage('overview');
 }
 
 function setNavGroupOpen(target, open) {
@@ -1251,15 +1352,16 @@ function toggleSidebar() {
 
 function log(message) {
   transientActivity = { createdAt: new Date().toISOString(), type: String(message || '') };
-  renderActivityLog(lastSnapshot.activities || []);
+  locallyDirtyPages.add('overview');
+  if (activePageName() === 'overview') schedulePageRender('overview', { force: true });
 }
 
 async function refreshSnapshot() {
   if (snapshotPromise) return snapshotPromise;
   const revisionAtStart = snapshotRevision;
   snapshotPromise = window.orchestrator.snapshot().then((snap) => {
-    const uiState = captureRefreshUiState();
     lastSnapshot = snap;
+    snapshotDataRevision += 1;
     if (snap.scheduler) runtime.scheduler = snap.scheduler;
     transientActivity = null;
     document.querySelector('#metricCollections').textContent = snap.collections.length;
@@ -1267,22 +1369,11 @@ async function refreshSnapshot() {
     document.querySelector('#metricDone').textContent = snap.tasks.filter((task) => task.status === 'done').length;
     document.querySelector('#metricRuns').textContent = (snap.toolRuns || []).length;
     renderProfile(snap);
-    renderSelectedSyncSummary();
-    renderTaskInventory();
-    renderTools(snap.tools || []);
-    renderRuns(snap.toolRuns || []);
-    renderWorkers((snap.analytics?.workers || []).filter((worker) => worker.tool === 'star-owner-internal'));
-    renderExportPage();
     runtime.filenameMetadata = snap.settings?.filenameMetadata || runtime.filenameMetadata;
-    renderFilenameMetadataSettings();
-    renderDocumentLibrary();
-    renderApiToolAnalytics(snap.analytics?.tools || []);
-    renderWorkspaces(snap.workspaces || []);
-    renderScheduler(runtime.scheduler);
-    renderActivityLog(snap.activities || []);
-    renderSettingsSummary();
+    runtime.uiPreferences = snap.settings?.uiPreferences || runtime.uiPreferences;
+    applyOutsideBilibiliPreference(runtime.uiPreferences);
     updatePromptTemplate();
-    restoreRefreshUiState(uiState);
+    schedulePageRender(activePageName());
     return snap;
   }).finally(() => {
     snapshotPromise = null;
@@ -1303,18 +1394,24 @@ function invalidateSnapshot(delay = 0) {
 }
 
 function captureRefreshUiState() {
-  const expanded = new Set([...document.querySelectorAll('[data-state-key]')]
+  const scope = document.querySelector('.page.active');
+  if (!scope) return null;
+  const expanded = new Set([...scope.querySelectorAll('[data-state-key]')]
     .filter((node) => node.classList.contains('expanded') || (node.tagName === 'DETAILS' && node.open))
     .map((node) => node.dataset.stateKey));
-  const selector = '#taskList, #toolList, #runList, #workerList, #apiToolAnalytics, .page.active .side-sheet, .page.active .settings-side, .page.active .document-list, .page.active .document-preview';
-  const scroll = [...document.querySelectorAll(selector)].map((node, index) => ({ index, top: node.scrollTop, left: node.scrollLeft }));
-  return { expanded, scroll, selector };
+  const selector = '#taskList, #toolList, #runList, #workerList, #apiToolAnalytics, .side-sheet, .document-list, .document-preview';
+  const nodes = [...scope.querySelectorAll(selector)];
+  if (scope.id === 'page-settings') nodes.unshift(scope);
+  const scroll = nodes.map((node, index) => ({ index, top: node.scrollTop, left: node.scrollLeft }));
+  return { pageId: scope.id, expanded, scroll, selector };
 }
 
 function restoreRefreshUiState(state) {
   if (!state) return;
   const apply = () => {
-    for (const node of document.querySelectorAll('[data-state-key]')) {
+    const scope = document.querySelector(`#${state.pageId}.active`);
+    if (!scope) return;
+    for (const node of scope.querySelectorAll('[data-state-key]')) {
       if (!state.expanded.has(node.dataset.stateKey)) continue;
       if (node.tagName === 'DETAILS') node.open = true;
       else if (node.classList.contains('setting-row')) {
@@ -1327,7 +1424,8 @@ function restoreRefreshUiState(state) {
         }
       }
     }
-    const nodes = [...document.querySelectorAll(state.selector)];
+    const nodes = [...scope.querySelectorAll(state.selector)];
+    if (scope.id === 'page-settings') nodes.unshift(scope);
     for (const item of state.scroll) {
       if (!nodes[item.index]) continue;
       nodes[item.index].scrollTop = item.top;
@@ -2735,8 +2833,8 @@ inspectMigrationButton?.addEventListener('click', async () => {
 outsideBilibiliToggle?.addEventListener('change', async (event) => {
   try {
     const preferences = await window.orchestrator.updateUiPreferences({ showOutsideBilibili: event.target.checked });
-    document.querySelector('.outside-bilibili-nav')?.toggleAttribute('hidden', preferences.showOutsideBilibili === false);
-    if (!preferences.showOutsideBilibili && document.querySelector('#page-outside-bilibili')?.classList.contains('active')) setPage('overview');
+    runtime.uiPreferences = preferences;
+    applyOutsideBilibiliPreference(preferences, { animate: true });
   } catch (error) { event.target.checked = !event.target.checked; showToast(TEXT.toastError, error.message || String(error), 'error'); }
 });
 taskUserSelect?.addEventListener('change', () => {
@@ -3171,15 +3269,13 @@ document.querySelector('#refreshRuns')?.addEventListener('click', async () => {
 
 async function handleRuntime(data = {}) {
   runtime = { ...runtime, ...data };
-  renderFilenameMetadataSettings();
-  renderScheduler(runtime.scheduler);
-  renderSettingsSummary();
-  renderUpdateState(runtime.update);
-  if (outsideBilibiliToggle && data.uiPreferences) outsideBilibiliToggle.checked = data.uiPreferences.showOutsideBilibili !== false;
-  document.querySelector('.outside-bilibili-nav')?.toggleAttribute('hidden', data.uiPreferences?.showOutsideBilibili === false);
+  locallyDirtyPages.add('settings');
+  if (activePageName() === 'settings') schedulePageRender('settings', { force: true });
+  applyOutsideBilibiliPreference(runtime.uiPreferences);
   if (Array.isArray(data.toolHealth)) {
     toolHealth = data.toolHealth;
-    renderToolHealth(toolHealth);
+    locallyDirtyPages.add('overview');
+    if (activePageName() === 'overview') schedulePageRender('overview', { force: true });
   }
   if (Object.prototype.hasOwnProperty.call(data, 'currentUser')) {
     const previousMid = String(currentUser?.mid || currentUser?.id || '');
@@ -3219,7 +3315,8 @@ window.orchestrator.onRuntime(handleRuntime);
 window.orchestrator.onUpdateEvent((event) => {
   if (event?.state) {
     runtime.update = event.state;
-    renderUpdateState(event.state);
+    locallyDirtyPages.add('settings');
+    if (activePageName() === 'settings') schedulePageRender('settings', { force: true });
   }
 });
 openDocumentFolder?.addEventListener('click', async () => {

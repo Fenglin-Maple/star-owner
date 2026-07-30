@@ -75,11 +75,23 @@
 
   function renderAll() {
     state.providers = modelState.providers || state.providers || [];
-    renderAgentPage();
-    renderSinglePage();
-    renderModelPage();
-    renderDependencies();
+    renderActivePage();
     maybeShowDependencyPrompt();
+  }
+
+  function activeAiPage() {
+    if (elements.agentPage.classList.contains('active')) return 'internal-agents';
+    if (elements.singlePage.classList.contains('active')) return 'single-agent';
+    if (elements.modelPage.classList.contains('active')) return 'ai-models';
+    if ($('#page-settings')?.classList.contains('active')) return 'settings';
+    return '';
+  }
+
+  function renderActivePage(page = activeAiPage()) {
+    if (page === 'internal-agents') renderAgentPage();
+    else if (page === 'single-agent') renderSinglePage();
+    else if (page === 'ai-models') renderModelPage();
+    else if (page === 'settings') renderDependencies();
   }
 
   function renderAgentPage() {
@@ -626,13 +638,14 @@
     if (streamRenderTimer) return;
     streamRenderTimer = setTimeout(() => {
       streamRenderTimer = null;
+      const page = activeAiPage();
       if (streamStructuralRender) {
         streamStructuralRender = false;
-        renderAgentPage();
-        renderSinglePage();
+        if (page === 'internal-agents') renderAgentPage();
+        else if (page === 'single-agent') renderSinglePage();
       } else {
-        patchAgentPage();
-        patchSinglePage();
+        if (page === 'internal-agents') patchAgentPage();
+        else if (page === 'single-agent') patchSinglePage();
       }
     }, 90);
   }
@@ -819,8 +832,10 @@
     }
   });
   window.addEventListener('star:page-changed', (event) => {
-    if (event.detail?.page !== 'ai-models') flushPendingModelSave().catch((error) => notify('模型配置自动保存失败', error.message || String(error), 'error'));
-    if (['internal-agents', 'single-agent', 'ai-models'].includes(event.detail?.page)) refreshAll({ quiet: initialized });
+    const page = event.detail?.page;
+    if (page !== 'ai-models') flushPendingModelSave().catch((error) => notify('模型配置自动保存失败', error.message || String(error), 'error'));
+    if (['internal-agents', 'single-agent', 'ai-models'].includes(page)) refreshAll({ quiet: initialized });
+    else if (page === 'settings') renderDependencies();
   });
   elements.pathSafetyOpenProject.addEventListener('click', async () => {
     try { await window.orchestrator.openProjectPath(''); }
@@ -836,11 +851,15 @@
   window.orchestrator.onDependencyEvent((event) => {
     if (event.state) dependencyState = event.state;
     if (event.type === 'dependency-error') notify('依赖下载失败', event.error || '未知错误', 'error');
-    renderDependencies();
+    if (activeAiPage() === 'settings') renderDependencies();
   });
   window.orchestrator.onRuntime((runtime) => {
     if (runtime?.pathSafety) { pathSafetyState = runtime.pathSafety; maybeShowPathSafetyPrompt(); }
-    if (runtime?.dependencies) { dependencyState = runtime.dependencies; renderDependencies(); maybeShowDependencyPrompt(); }
+    if (runtime?.dependencies) {
+      dependencyState = runtime.dependencies;
+      if (activeAiPage() === 'settings') renderDependencies();
+      maybeShowDependencyPrompt();
+    }
   });
 
   function providerName(id) { return state.providers.find((item) => item.id === id)?.name || '未配置供应商'; }

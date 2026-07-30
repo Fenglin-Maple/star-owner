@@ -31,9 +31,12 @@
 
   function render(nextState) {
     if (nextState) state = nextState;
+    const showDownloads = elements.downloadPage.classList.contains('active');
+    const showLibrary = elements.libraryPage.classList.contains('active');
+    if (!showDownloads && !showLibrary) return;
     renderCollections();
-    renderQueue();
-    renderLibrary();
+    if (showDownloads) renderQueue();
+    if (showLibrary) renderLibrary();
   }
 
   function renderCollections() {
