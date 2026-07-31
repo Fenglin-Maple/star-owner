@@ -785,7 +785,7 @@
           <label><span>任务收藏夹</span><select id="aiAgentCollection"></select></label>
           <label><span>额外工作要求</span><textarea id="aiAgentRequirements" rows="4" placeholder="留空则使用视频总结标准模板与默认规则。"></textarea></label>
           <div class="ai-create-grid"><label><span>最少关键帧数</span><input id="aiAgentMinimumFrames" type="number" min="12" max="300" value="12" /></label><label><span>每多少秒增加 1 张</span><input id="aiAgentFrameInterval" type="number" min="1" max="600" value="25" /></label></div>
-          <label class="single-keep-cache"><input id="aiAgentRetainCache" class="app-checkbox" type="checkbox" /><span>保留处理过程中的缓存视频</span><small>完成后保留合轨视频、下载字幕和 ASR 文件，便于复盘。</small></label>
+          <label class="single-keep-cache"><input id="aiAgentRetainCache" class="app-checkbox" type="checkbox" /><span>保留处理过程中的缓存视频</span><small>此选项控制视频总结产物的输出目录中是否保留视频缓存。如果希望保留收藏夹总结过程中下载的视频，请勾选。无论是否勾选，应用内置缓存视频收藏夹中的原始视频（来自“下载视频”独立栏目）都不会被删除。</small></label>
         </div>
         <footer><button id="aiCancelAgentCreate" class="secondary-button" type="button">取消</button><span></span><button id="aiCreateAgentOnly" class="secondary-button" type="button">仅创建</button><button id="aiCreateAgentStart" class="primary-button" type="button">创建并启动</button></footer>
       </section>
