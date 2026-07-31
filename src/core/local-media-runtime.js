@@ -85,6 +85,45 @@ async function extractAudio(source, target, options = {}) {
   return target;
 }
 
+async function compressMedia(source, target, metadata, options = {}) {
+  if (metadata?.kind === 'audio' || metadata?.hasVideo === false) return compressAudio(source, target, metadata, options);
+  return compressVideo(source, target, metadata, options);
+}
+
+async function compressAudio(source, target, metadata, options = {}) {
+  const duration = Math.max(1, Number(metadata.duration || 0));
+  const budgetBlocks = Math.max(1, Math.ceil(duration / 600));
+  const budgetBytes = budgetBlocks * 50 * 1024 * 1024;
+  const budgetKbps = Math.max(32, Math.floor((budgetBytes * 8 * 0.9) / duration / 1000));
+  const sourceKbps = Math.max(32, Math.floor((Number(metadata.size || budgetBytes) * 8) / duration / 1000));
+  const audioKbps = Math.max(32, Math.min(256, sourceKbps, budgetKbps));
+  const output = assertSafeWindowsPath(path.resolve(target), '本地音频缓存路径');
+  ensureDir(path.dirname(output));
+  try {
+    await runFfmpeg([
+      '-y', '-hide_banner', '-loglevel', 'error', '-i', source,
+      '-map', '0:a:0', '-vn', '-c:a', 'aac', '-b:a', `${audioKbps}k`,
+      '-movflags', '+faststart', '-progress', 'pipe:1', '-nostats', output
+    ], {
+      signal: options.signal,
+      duration,
+      timeoutMs: options.timeoutMs,
+      onProgress: options.onProgress
+    });
+    if (!fs.existsSync(output) || fs.statSync(output).size <= 0) throw new Error('FFmpeg 未生成可用的压缩音频。');
+    const outputSize = fs.statSync(output).size;
+    if (outputSize > budgetBytes) {
+      const error = new Error(`压缩音频仍超过大小额度：${formatBytes(outputSize)} / ${formatBytes(budgetBytes)}。`);
+      error.code = 'LOCAL_AUDIO_BUDGET_EXCEEDED';
+      throw error;
+    }
+    return { file: output, size: outputSize, budgetBytes, audioKbps };
+  } catch (error) {
+    if (fs.existsSync(output)) fs.rmSync(output, { force: true });
+    throw error;
+  }
+}
+
 async function compressVideo(source, target, metadata, options = {}) {
   const duration = Math.max(1, Number(metadata.duration || 0));
   const budgetBlocks = Math.max(1, Math.ceil(duration / 600));
@@ -319,6 +358,8 @@ module.exports = {
   AUDIO_EXTENSIONS,
   SUBTITLE_FORMATS,
   VIDEO_EXTENSIONS,
+  compressAudio,
+  compressMedia,
   compressVideo,
   extractAudio,
   extractCover,

@@ -18,6 +18,7 @@ const { assertHiddenBrowserUrl, installHiddenBrowserRequestGuard } = require('./
 const { InternalAgentManager } = require('./core/internal-agent-manager');
 const { loadClipboardImage } = require('./core/image-clipboard');
 const { LocalToolboxManager } = require('./core/local-toolbox-manager');
+const { AUDIO_EXTENSIONS, VIDEO_EXTENSIONS } = require('./core/local-media-runtime');
 const { promoteMindMap, wrapMarkdownTables } = require('./core/markdown');
 const { isPrivateNetworkHost } = require('./core/network-policy');
 const { repairPortablePythonHome } = require('./core/portable-runtime');
@@ -39,6 +40,7 @@ const DEFAULT_WINDOW = { width: 1350, height: 836 };
 const README_FILE = path.join(__dirname, '..', 'README.md');
 const RENDERER_FILE = path.join(__dirname, 'renderer', 'index.html');
 const markdownRenderer = new MarkdownIt({ html: false, linkify: true, typographer: false });
+const LOCAL_MEDIA_EXTENSIONS = [...new Set([...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS])].map((extension) => extension.slice(1));
 
 try {
   repairPortablePythonHome(path.join(__dirname, '..'));
@@ -595,19 +597,23 @@ ipcMain.handle('settings:filename-metadata', async (_event, value) => {
 
 ipcMain.handle('local-tools:state', async () => localToolboxManager?.state() || { jobs: [], videoCollections: [], documentCollections: [] });
 
-ipcMain.handle('local-tools:subtitle-select-folder', async () => {
+ipcMain.handle('local-tools:subtitle-select-file', async () => {
   assertBackendReady();
-  const result = await dialog.showOpenDialog(mainWindow, { title: '选择包含视频或音频的文件夹', properties: ['openDirectory'] });
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '选择一个视频或音频文件',
+    properties: ['openFile'],
+    filters: [{ name: '视频或音频文件', extensions: LOCAL_MEDIA_EXTENSIONS }]
+  });
   if (result.canceled || !result.filePaths[0]) return { canceled: true };
-  return { canceled: false, selection: await localToolboxManager.inspectSubtitleDirectory(result.filePaths[0]) };
+  return { canceled: false, selection: await localToolboxManager.inspectSubtitleFile(result.filePaths[0]) };
 });
 
 ipcMain.handle('local-tools:video-select-files', async () => {
   assertBackendReady();
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: '选择一个或多个本地视频',
+    title: '选择一个或多个本地视频或音频',
     properties: ['openFile', 'multiSelections'],
-    filters: [{ name: '视频文件', extensions: ['mp4', 'mkv', 'webm', 'mov', 'avi', 'm4v', 'flv', 'wmv', 'ts', 'mts', 'm2ts'] }]
+    filters: [{ name: '视频或音频文件', extensions: LOCAL_MEDIA_EXTENSIONS }]
   });
   if (result.canceled || !result.filePaths.length) return { canceled: true };
   return { canceled: false, selection: await localToolboxManager.inspectVideoSelection(result.filePaths) };
@@ -615,7 +621,7 @@ ipcMain.handle('local-tools:video-select-files', async () => {
 
 ipcMain.handle('local-tools:video-select-folder', async () => {
   assertBackendReady();
-  const result = await dialog.showOpenDialog(mainWindow, { title: '选择包含本地视频的文件夹', properties: ['openDirectory'] });
+  const result = await dialog.showOpenDialog(mainWindow, { title: '选择包含本地视频或音频的文件夹', properties: ['openDirectory'] });
   if (result.canceled || !result.filePaths[0]) return { canceled: true };
   return { canceled: false, selection: await localToolboxManager.inspectVideoSelection(result.filePaths) };
 });

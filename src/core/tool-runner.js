@@ -387,6 +387,7 @@ class ToolRunner {
 
   async executeBundle(state, run, task, tool, collection) {
     const localImported = task.localImported === true || task.sourceType === 'local-video';
+    const localAudio = localImported && (task.sourceMediaKind === 'audio' || task.mediaKind === 'audio');
     const options = run.options || {};
     if (!localImported) await this.runScheduledStage(state, 'api', 'metadata-comments', async () => {
       if (!options.skipInfo) await this.runChild(state, this.buildArgs({ task, action: 'info', collection, artifactDir: run.artifactDir, options }), run.timeoutMs);
@@ -425,7 +426,7 @@ class ToolRunner {
       action: 'bundle',
       collection,
       artifactDir: run.artifactDir,
-      options: { ...options, asr: false, comments: false, skipInfo: true, skipSubtitles: true, skipComments: true, audio: true }
+      options: { ...options, asr: false, comments: false, skipInfo: true, skipSubtitles: true, skipComments: true, skipFrames: localAudio, audio: true }
     }));
     await this.runAsrStage(state, run);
     this.finalizeBundleManifest(run, state.warnings);
@@ -1310,6 +1311,7 @@ class ToolRunner {
       if (options.skipInfo) args.push('--skip-info');
       if (options.skipSubtitles) args.push('--skip-subtitles');
       if (options.skipComments) args.push('--skip-comments');
+      if (options.skipFrames) args.push('--skip-frames');
       args.push('--comment-limit', String(clampNumber(options.commentLimit, 1, 3, 3)));
     }
     if (action === 'merged' || action === 'audio') args.push('--height', String(clampNumber(options.height, 360, 2160, 720)));

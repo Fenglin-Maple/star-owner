@@ -73,7 +73,7 @@ contextBridge.exposeInMainWorld('orchestrator', {
   videoCacheDeleteVideos: (ids) => ipcRenderer.invoke('video-cache:delete-videos', ids),
   videoCacheDeleteCollection: (id) => ipcRenderer.invoke('video-cache:delete-collection', id),
   localToolboxState: () => ipcRenderer.invoke('local-tools:state'),
-  localSubtitleSelectFolder: () => ipcRenderer.invoke('local-tools:subtitle-select-folder'),
+  localSubtitleSelectFile: () => ipcRenderer.invoke('local-tools:subtitle-select-file'),
   localSubtitleStart: (payload) => ipcRenderer.invoke('local-tools:subtitle-start', payload),
   localVideoSelectFiles: () => ipcRenderer.invoke('local-tools:video-select-files'),
   localVideoSelectFolder: () => ipcRenderer.invoke('local-tools:video-select-folder'),

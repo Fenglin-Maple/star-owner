@@ -678,7 +678,7 @@
                 <div class="update-migration-row"><button id="inspectMigration" class="secondary-button" type="button">从 v1.0.3 迁移数据</button><span>选择旧版安装目录，确认后应用会退出并迁移 workspace。</span></div>
               </section>
               <section class="section-block outside-settings">
-                <div class="section-title"><div><h2>B站之外栏目</h2><p>提供本地字幕生成、本地视频导入和多模态文档知识库工具。</p></div><label class="switch" title="显示或隐藏 B站之外栏目"><input id="outsideBilibiliToggle" type="checkbox" checked /><span></span></label></div>
+                <div class="section-title"><div><h2>B站之外栏目</h2><p>提供本地字幕生成、本地视频/音频导入和多模态文档知识库工具。</p></div><label class="switch" title="显示或隐藏 B站之外栏目"><input id="outsideBilibiliToggle" type="checkbox" checked /><span></span></label></div>
               </section>
               <section class="section-block filename-settings">
                 <div class="section-title"><div><h2 data-i18n="artifactNaming"></h2><p data-i18n="artifactNamingHint"></p></div></div>
@@ -757,7 +757,7 @@
             <div class="page-head"><h1>B站之外</h1><p>本地媒体处理与多模态知识库工具。</p></div>
             <div class="outside-tool-stack">
               <section class="section-block outside-tool" data-local-tool="subtitles">
-                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 10h4M7 14h7M16 10h1"/></svg></div><div><h2>视频 / 音频字幕生成</h2><p>批量识别所选文件夹中的音视频，字幕写回原文件目录。</p></div><button id="localSubtitleChoose" class="primary-button" type="button">选择文件夹</button></div>
+                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 10h4M7 14h7M16 10h1"/></svg></div><div><h2>视频 / 音频字幕生成</h2><p>选择一个视频或音频文件，生成的字幕写回原文件所在目录。</p></div><button id="localSubtitleChoose" class="primary-button" type="button">选择视频或音频</button></div>
                 <div class="local-subtitle-options">
                   <span>输出格式</span>
                   <label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="srt" checked /><span>SRT</span></label>
@@ -766,14 +766,14 @@
                   <label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="txt" /><span>TXT</span></label>
                   <label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="json" /><span>JSON</span></label>
                 </div>
-                <div id="localSubtitleSelection" class="local-selection-summary">尚未选择文件夹</div>
+                <div id="localSubtitleSelection" class="local-selection-summary">尚未选择视频或音频文件</div>
                 <div class="outside-tool-actions"><button id="localSubtitleStart" class="primary-button" type="button" disabled>开始生成字幕</button></div>
                 <div id="localSubtitleJob" class="local-tool-job-slot"></div>
               </section>
 
               <section class="section-block outside-tool" data-local-tool="video-import">
-                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9 9l6 3-6 3zM4 19h16"/></svg></div><div><h2>本地视频导入内置缓存收藏夹</h2><p>压缩并规范化本地视频，导入后可由 Agent 视频总结工作流直接处理。</p></div></div>
-                <div class="outside-tool-actions"><button id="localVideoChooseFiles" class="primary-button" type="button">选择视频</button><button id="localVideoChooseFolder" class="secondary-button" type="button">选择视频文件夹</button></div>
+                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9 9l6 3-6 3zM4 19h16"/></svg></div><div><h2>本地视频 / 音频导入内置缓存收藏夹</h2><p>压缩并规范化本地视频或音频，导入后可由 Agent 视频总结工作流直接处理。</p></div></div>
+                <div class="outside-tool-actions"><button id="localVideoChooseFiles" class="primary-button" type="button">选择视频 / 音频</button><button id="localVideoChooseFolder" class="secondary-button" type="button">选择视频 / 音频文件夹</button></div>
                 <div id="localVideoJob" class="local-tool-job-slot"></div>
               </section>
 
@@ -912,7 +912,7 @@
     </div>
     <div id="localVideoImportModal" class="rag-modal" hidden>
       <section class="rag-modal-dialog local-import-dialog" role="dialog" aria-modal="true" aria-labelledby="localVideoImportTitle">
-        <header><div><h2 id="localVideoImportTitle">导入本地视频</h2><p id="localVideoImportSummary">正在检查视频</p></div><button id="localVideoImportClose" class="icon-action" type="button" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M5 5l14 14M19 5L5 19"/></svg></button></header>
+        <header><div><h2 id="localVideoImportTitle">导入本地视频 / 音频</h2><p id="localVideoImportSummary">正在检查视频或音频</p></div><button id="localVideoImportClose" class="icon-action" type="button" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M5 5l14 14M19 5L5 19"/></svg></button></header>
         <div class="local-import-body">
           <div class="local-collection-picker"><label><span>内置缓存视频收藏夹</span><select id="localVideoCollectionSelect"></select></label><label id="localVideoCollectionNameRow"><span>新收藏夹名称</span><input id="localVideoCollectionName" maxlength="80" /></label><div id="localVideoCollectionKind" class="collection-kind-note"></div></div>
           <div class="local-import-legend"><span class="is-new">新文件</span><span class="is-existing">存在同名文件</span></div>

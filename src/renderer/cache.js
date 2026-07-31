@@ -152,11 +152,12 @@
     const collection = state.collections.find((item) => item.id === video.collectionId);
     const orientation = video.orientation === 'portrait' || Number(video.height || 0) > Number(video.width || 0) ? 'portrait' : '';
     const localImported = video.localImported === true || video.sourceType === 'local-video';
+    const localMediaLabel = (video.sourceMediaKind || video.mediaKind) === 'audio' ? '本地音频' : '本地视频';
     const sourceUrl = `https://www.bilibili.com/video/${encodeURIComponent(video.bvid)}`;
     const sourceLabel = localImported
-      ? `<span class="collection-kind-badge" data-kind="video-cache">本地导入</span>`
+      ? `<span class="collection-kind-badge" data-kind="video-cache">${localMediaLabel}</span>`
       : `<a class="video-bvid-link" href="${attr(sourceUrl)}" data-video-source-link data-bvid="${attr(video.bvid)}" title="左键打开原视频，右键复制 BV 号">${html(video.bvid)}</a>`;
-    return `<div class="video-library-item ${video.id === activeVideoId ? 'active' : ''} ${video.fileExists ? '' : 'missing'}" data-cache-video="${attr(video.id)}" role="button" tabindex="0"><input class="app-checkbox" type="checkbox" ${selected.has(video.id) ? 'checked' : ''} aria-label="选择 ${attr(video.title || video.bvid)}" /><div class="video-library-thumb ${orientation}">${thumb}</div><div class="video-library-copy"><strong title="${attr(video.title || video.bvid)}">${html(video.title || video.bvid)}</strong><span>${sourceLabel} · ${html(video.owner || (localImported ? '本地视频' : '未知 UP'))} · ${duration(video.duration)}</span><small>${html(collection?.name || '')} · ${html(formatDate(video.downloadedAt))}${video.tags?.length ? ` · ${html(video.tags.slice(0, 4).join(' / '))}` : ''}</small></div><em class="video-file-state ${video.fileExists ? '' : 'missing'}">${video.fileExists ? '可播放' : '文件缺失'}</em></div>`;
+    return `<div class="video-library-item ${video.id === activeVideoId ? 'active' : ''} ${video.fileExists ? '' : 'missing'}" data-cache-video="${attr(video.id)}" role="button" tabindex="0"><input class="app-checkbox" type="checkbox" ${selected.has(video.id) ? 'checked' : ''} aria-label="选择 ${attr(video.title || video.bvid)}" /><div class="video-library-thumb ${orientation}">${thumb}</div><div class="video-library-copy"><strong title="${attr(video.title || video.bvid)}">${html(video.title || video.bvid)}</strong><span>${sourceLabel} · ${html(video.owner || (localImported ? localMediaLabel : '未知 UP'))} · ${duration(video.duration)}</span><small>${html(collection?.name || '')} · ${html(formatDate(video.downloadedAt))}${video.tags?.length ? ` · ${html(video.tags.slice(0, 4).join(' / '))}` : ''}</small></div><em class="video-file-state ${video.fileExists ? '' : 'missing'}">${video.fileExists ? '可播放' : '文件缺失'}</em></div>`;
   }
 
   function selectVideo(id) {
@@ -174,7 +175,8 @@
     elements.playerShell.hidden = false;
     elements.centerPlay.hidden = false;
     elements.playerTitle.textContent = video.title || video.bvid;
-    elements.playerMeta.textContent = `${video.localImported || video.sourceType === 'local-video' ? '本地导入' : video.bvid} · ${video.owner || '未知来源'} · ${duration(video.duration)} · ${formatDate(video.downloadedAt)}`;
+    const localMediaLabel = (video.sourceMediaKind || video.mediaKind) === 'audio' ? '本地音频' : '本地视频';
+    elements.playerMeta.textContent = `${video.localImported || video.sourceType === 'local-video' ? localMediaLabel : video.bvid} · ${video.owner || '未知来源'} · ${duration(video.duration)} · ${formatDate(video.downloadedAt)}`;
   }
 
   function clearPlayer() {

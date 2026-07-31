@@ -46,13 +46,13 @@
   async function chooseSubtitles() {
     setBusy(elements.subtitleChoose, true, '正在读取');
     try {
-      const result = await window.orchestrator.localSubtitleSelectFolder();
+      const result = await window.orchestrator.localSubtitleSelectFile();
       if (result.canceled) return;
       subtitleSelection = result.selection;
       elements.subtitleSelection.textContent = `${subtitleSelection.outputDirectory} · 可处理 ${subtitleSelection.files.length} 个文件${subtitleSelection.rejected.length ? ` · 忽略 ${subtitleSelection.rejected.length} 个不可读文件` : ''}`;
       elements.subtitleStart.disabled = false;
-    } catch (error) { notify('读取文件夹失败', error); }
-    finally { setBusy(elements.subtitleChoose, false, '选择文件夹'); }
+    } catch (error) { notify('读取媒体文件失败', error); }
+    finally { setBusy(elements.subtitleChoose, false, '选择视频或音频'); }
   }
 
   async function startSubtitles() {
@@ -77,7 +77,7 @@
       openImportModal('video');
       await loadVideoPreview();
     } catch (error) { notify('视频读取失败', error); }
-    finally { setBusy(button, false, mode === 'folder' ? '选择视频文件夹' : '选择视频'); }
+    finally { setBusy(button, false, mode === 'folder' ? '选择视频/音频文件夹' : '选择视频/音频'); }
   }
 
   async function chooseDocuments() {
@@ -142,7 +142,7 @@
       return;
     }
     videoPreview = await window.orchestrator.localVideoPreview({ selectionId: videoSelection.id, ...payload });
-    elements.videoSummary.textContent = `读取到 ${videoPreview.files.length} 个视频${videoPreview.rejected.length ? `，另有 ${videoPreview.rejected.length} 个文件不可读` : ''}`;
+    elements.videoSummary.textContent = `读取到 ${videoPreview.files.length} 个视频或音频${videoPreview.rejected.length ? `，另有 ${videoPreview.rejected.length} 个文件不可读` : ''}`;
     renderImportList('video', videoPreview.files);
     elements.videoStart.disabled = false;
   }
@@ -165,7 +165,7 @@
     const list = type === 'video' ? elements.videoList : elements.documentList;
     list.innerHTML = files.map((file) => {
       const detail = type === 'video'
-        ? `${formatDuration(file.duration)} · ${formatBytes(file.size)} · ${file.width || '-'}×${file.height || '-'}`
+        ? `${file.kind === 'audio' ? '音频' : '视频'} · ${formatDuration(file.duration)} · ${formatBytes(file.size)}${file.kind === 'audio' ? '' : ` · ${file.width || '-'}×${file.height || '-'}`}`
         : `${String(file.extension || '').slice(1).toUpperCase()} · ${formatBytes(file.size)}`;
       return `<div class="local-import-row ${file.existing ? 'is-existing' : 'is-new'}" data-local-source="${escAttr(file.id)}"><div><strong title="${escAttr(file.path)}">${esc(file.name)}</strong><small>${file.existing ? '收藏夹内已存在同名记录' : '收藏夹内不存在同名记录'} · ${detail}</small></div>${file.existing ? '<select class="local-conflict-choice" aria-label="同名文件处理方式"><option value="skip">跳过</option><option value="overwrite">覆盖</option></select>' : '<span class="collection-kind-badge">准备导入</span>'}</div>`;
     }).join('');
@@ -184,7 +184,7 @@
       mergeJob(job);
       closeImportModal('video');
       renderJobs();
-    } catch (error) { notify('视频导入任务创建失败', error); elements.videoStart.disabled = false; }
+    } catch (error) { notify('视频/音频导入任务创建失败', error); elements.videoStart.disabled = false; }
   }
 
   async function startDocumentImport() {

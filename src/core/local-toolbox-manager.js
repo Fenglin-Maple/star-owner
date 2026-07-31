@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { CACHE_USER_ID, CACHE_USER_NAME } = require('./video-cache-manager');
 const { importDocument, inspectDocument, stableDocumentId } = require('./local-document-importer');
-const { compressVideo, extractAudio, extractCover, inspectMedia, mediaKind, writeSubtitleFormats } = require('./local-media-runtime');
+const { compressMedia, extractAudio, extractCover, inspectMedia, mediaKind, writeSubtitleFormats } = require('./local-media-runtime');
 const { assertInside, collectionDirs, ensureDir, fitArtifactName, safeName } = require('./workspace');
 
 const ACTIVE_JOB_STATUSES = new Set(['queued', 'running']);
@@ -64,28 +64,29 @@ class LocalToolboxManager {
     };
   }
 
-  async inspectSubtitleDirectory(directory) {
-    const root = path.resolve(String(directory || ''));
-    const stat = fs.statSync(root);
-    if (!stat.isDirectory()) throw new Error('请选择包含视频或音频的文件夹。');
-    const candidates = walkSelectedFiles([root], (file) => Boolean(mediaKind(file)));
-    const { accepted, rejected } = await inspectFiles(candidates, async (file) => inspectMedia(file));
-    if (!accepted.length) throw new Error('所选文件夹中没有找到 FFmpeg 可以读取的视频或音频。');
+  async inspectSubtitleFile(filePath) {
+    const source = path.resolve(String(filePath || ''));
+    let file;
+    try {
+      file = await inspectMedia(source);
+    } catch (error) {
+      throw error;
+    }
     return this.rememberSelection({
       type: 'subtitles',
-      roots: [root],
-      outputDirectory: root,
-      defaultCollectionName: path.basename(root),
-      files: accepted,
-      rejected
+      roots: [source],
+      outputDirectory: path.dirname(source),
+      defaultCollectionName: path.basename(path.dirname(source)),
+      files: [file],
+      rejected: []
     });
   }
 
   async inspectVideoSelection(paths) {
     const roots = normalizePaths(paths);
-    const candidates = walkSelectedFiles(roots, (file) => mediaKind(file) === 'video');
+    const candidates = walkSelectedFiles(roots, (file) => Boolean(mediaKind(file)));
     const { accepted, rejected } = await inspectFiles(candidates, async (file) => inspectMedia(file));
-    if (!accepted.length) throw new Error('没有找到 FFmpeg 可以读取的视频文件。');
+    if (!accepted.length) throw new Error('没有找到 FFmpeg 可以读取的视频或音频文件。');
     const defaultCollectionName = defaultSelectionName(roots, accepted);
     return this.rememberSelection({ type: 'video-import', roots, defaultCollectionName, files: accepted, rejected });
   }
@@ -149,7 +150,7 @@ class LocalToolboxManager {
     const choices = normalizeChoices(input.choices);
     this.assertVideoConflictsIdle(selection.files, records, choices);
     const job = this.createJob('video-import', selection, {
-      title: `本地视频导入 · ${collection.name}`,
+      title: `本地视频/音频导入 · ${collection.name}`,
       collectionId: collection.id,
       collectionName: collection.name,
       choices,
@@ -256,15 +257,18 @@ class LocalToolboxManager {
         continue;
       }
       const workDir = ensureDir(path.join(this.jobWorkspace(jobId), file.id));
+      const mediaLabel = file.kind === 'audio' ? '音频' : '视频';
       try {
-        this.updateItem(jobId, file.id, { status: 'running', phase: '等待视频压缩资源', progress: 0.01 });
+        this.updateItem(jobId, file.id, { status: 'running', phase: `等待${mediaLabel}压缩资源`, progress: 0.01 });
         const compressed = path.join(workDir, 'merged.mp4');
-        await this.runScheduledMedia(jobId, file.id, signal, () => compressVideo(file.path, compressed, file, {
+        await this.runScheduledMedia(jobId, file.id, signal, () => compressMedia(file.path, compressed, file, {
           jobId: `${jobId}-${file.id}`,
           signal,
-          onProgress: (progress) => this.updateItemProgress(jobId, file.id, '压缩并规范化视频', Number(progress) * 0.9)
+          onProgress: (progress) => this.updateItemProgress(jobId, file.id, `压缩并规范化${mediaLabel}`, Number(progress) * 0.9)
         }));
-        const cover = await this.runScheduledMedia(jobId, `${file.id}:cover`, signal, () => extractCover(compressed, path.join(workDir, 'cover.jpg'), { signal, duration: file.duration }));
+        const cover = file.hasVideo
+          ? await this.runScheduledMedia(jobId, `${file.id}:cover`, signal, () => extractCover(compressed, path.join(workDir, 'cover.jpg'), { signal, duration: file.duration }))
+          : '';
         if (signal.aborted) throw cancelledError();
         this.updateItem(jobId, file.id, { phase: '写入内置缓存收藏夹', progress: 0.94 });
         const record = this.commitVideoImport({ jobId, file, workDir, cover, collection, existing });
@@ -284,7 +288,7 @@ class LocalToolboxManager {
     this.refreshCollectionCount(collection.id);
     const latest = this.store.get('localToolJobs', jobId);
     const failed = latest.items.filter((item) => item.status === 'failed').length;
-    return this.updateJob(latest, { status: failed === latest.items.length ? 'failed' : 'completed', phase: failed ? `导入结束，${failed} 个视频失败` : '本地视频导入完成', progress: 1, finishedAt: new Date().toISOString() });
+    return this.updateJob(latest, { status: failed === latest.items.length ? 'failed' : 'completed', phase: failed ? `导入结束，${failed} 个文件失败` : '本地视频/音频导入完成', progress: 1, finishedAt: new Date().toISOString() });
   }
 
   async runDocumentImport(jobId, selection, collection, choices, signal) {
@@ -351,12 +355,16 @@ class LocalToolboxManager {
       const info = {
         schemaVersion: 1,
         sourceType: 'local-video',
+        sourceMediaKind: file.kind,
         localImported: true,
         localVideoId: localId,
         bvid,
         title: file.title,
-        owner: { name: '本地视频', mid: '' },
+        owner: { name: file.kind === 'audio' ? '本地音频' : '本地视频', mid: '' },
         duration: file.duration,
+        mediaKind: file.kind,
+        hasVideo: Boolean(file.hasVideo),
+        hasAudio: Boolean(file.hasAudio),
         dimension: { width: file.width, height: file.height, rotate: 0 },
         pubdate: Math.floor(new Date(importedAt).getTime() / 1000),
         ctime: Math.floor(new Date(importedAt).getTime() / 1000),
@@ -365,7 +373,7 @@ class LocalToolboxManager {
         originalFileName: file.name,
         originalExtension: file.extension,
         sourceFingerprint: sourceFingerprint(file),
-        tags: ['本地导入'],
+        tags: ['本地导入', file.kind === 'audio' ? '音频' : '视频'],
         pages: [{ page: 1, part: file.title, duration: file.duration }],
         coverFile: coverFile ? path.basename(coverFile) : '',
         url: ''
@@ -379,9 +387,12 @@ class LocalToolboxManager {
         bvid,
         url: '',
         title: file.title,
-        owner: '本地视频',
+        owner: file.kind === 'audio' ? '本地音频' : '本地视频',
         duration: file.duration,
-        tags: ['本地导入'],
+        mediaKind: file.kind,
+        hasVideo: Boolean(file.hasVideo),
+        hasAudio: Boolean(file.hasAudio),
+        tags: ['本地导入', file.kind === 'audio' ? '音频' : '视频'],
         cover: '',
         coverFile,
         width: file.width,
@@ -395,6 +406,7 @@ class LocalToolboxManager {
         allowedRoot: collection.cacheRoot,
         status: 'ready',
         sourceType: 'local-video',
+        sourceMediaKind: file.kind,
         localImported: true,
         localVideoId: localId,
         originalFileName: file.name,
@@ -419,9 +431,12 @@ class LocalToolboxManager {
         bvid,
         sourceTitle: file.title,
         title: file.title,
-        owner: '本地视频',
+        owner: file.kind === 'audio' ? '本地音频' : '本地视频',
         duration: file.duration,
-        tags: ['本地导入'],
+        mediaKind: file.kind,
+        hasVideo: Boolean(file.hasVideo),
+        hasAudio: Boolean(file.hasAudio),
+        tags: ['本地导入', file.kind === 'audio' ? '音频' : '视频'],
         url: '',
         favoriteAddedAt: currentTask.favoriteAddedAt || importedAt,
         publishedAt: importedAt,
@@ -440,6 +455,7 @@ class LocalToolboxManager {
         reuseCachedMedia: true,
         localImported: true,
         sourceType: 'local-video',
+        sourceMediaKind: file.kind,
         localVideoId: localId,
         originalFileName: file.name,
         internal: true,

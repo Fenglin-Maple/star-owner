@@ -95,7 +95,7 @@ function printHelp() {
   node tools/video-tool.js merged <视频链接或BV号> --out <目录> [--cookies <cookie.txt>] [--height 720]
   node tools/video-tool.js audio <视频链接或BV号> --out <目录> [--cookies <cookie.txt>] [--height 720]
   node tools/video-tool.js asr <视频链接或BV号> --out <目录> [--cookies <cookie.txt>]
-  node tools/video-tool.js bundle <视频链接或BV号> --out <目录> [--cookies <cookie.txt>] [--frames 12] [--audio] [--asr] [--comments]
+  node tools/video-tool.js bundle <视频链接或BV号> --out <目录> [--cookies <cookie.txt>] [--frames 12] [--audio] [--asr] [--comments] [--skip-frames]
   node tools/video-tool.js clean-cache <视频工作目录>
 
 说明:
@@ -320,11 +320,15 @@ async function buildBundle(videoUrl, outDir, args) {
     }
   }
 
-  try {
-    extractFrames(outDir, Number(args.frames || 12));
-    manifest.outputs.frames = 'frames/';
-  } catch (error) {
-    manifest.warnings.push(`frames failed: ${error.message || String(error)}`);
+  if (!args['skip-frames']) {
+    try {
+      extractFrames(outDir, Number(args.frames || 12));
+      manifest.outputs.frames = 'frames/';
+    } catch (error) {
+      manifest.warnings.push(`frames failed: ${error.message || String(error)}`);
+    }
+  } else {
+    manifest.outputs.frames = '';
   }
 
   if (args.asr) {

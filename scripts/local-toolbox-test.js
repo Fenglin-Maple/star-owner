@@ -29,8 +29,11 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
     fs.mkdirSync(mediaRoot, { recursive: true });
     const sourceVideo = path.join(mediaRoot, '竖屏测试.mp4');
     await createTestVideo(sourceVideo);
+    const sourceAudio = path.join(mediaRoot, 'audio-test.m4a');
+    await createTestAudio(sourceAudio);
 
-    const subtitleSelection = await manager.inspectSubtitleDirectory(mediaRoot);
+    const subtitleSelection = await manager.inspectSubtitleFile(sourceVideo);
+    assert.equal(subtitleSelection.files.length, 1, 'subtitle tool must accept exactly one selected media file');
     const subtitleJob = manager.startSubtitleJob(subtitleSelection.id, ['srt', 'vtt', 'lrc', 'txt', 'json']);
     const subtitleResult = await waitForJob(manager, store, subtitleJob.id);
     assert.equal(subtitleResult.status, 'completed');
@@ -40,6 +43,13 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
     }
     assert(runner.pools.includes('media') && runner.pools.includes('asr'), 'subtitle generation bypassed the shared media or ASR resource pool');
 
+    const audioSubtitleSelection = await manager.inspectSubtitleFile(sourceAudio);
+    assert.equal(audioSubtitleSelection.files.length, 1, 'subtitle tool must accept one audio file');
+    const audioSubtitleJob = manager.startSubtitleJob(audioSubtitleSelection.id, ['srt']);
+    const audioSubtitleResult = await waitForJob(manager, store, audioSubtitleJob.id);
+    assert.equal(audioSubtitleResult.status, 'completed');
+    assert(fs.existsSync(path.join(mediaRoot, 'audio-test.asr.srt')), 'audio subtitle output was not written beside the source file');
+
     const videoSelection = await manager.inspectVideoSelection([sourceVideo]);
     const videoPreview = manager.previewVideoImport(videoSelection.id, { collectionName: '本地导入测试' });
     assert.equal(videoPreview.files.length, 1);
@@ -47,13 +57,28 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
     const videoResult = await waitForJob(manager, store, videoJob.id, 30000);
     assert.equal(videoResult.status, 'completed');
     const collection = store.getCollectionById(videoJob.collectionId);
-    const record = store.listVideoCaches({ collectionId: collection.id })[0];
+    const record = store.listVideoCaches({ collectionId: collection.id }).find((item) => item.sourceMediaKind === 'video');
     const task = store.getTask(record.taskId);
     assert(record.localImported && record.sourceType === 'local-video' && record.orientation === 'portrait', 'local video metadata was not persisted');
     assert(task.status === 'pending' && task.reuseCachedMedia && task.cachedVideoFile === record.videoFile, 'local video was not exposed as an Agent task');
     assert(fs.existsSync(sourceVideo), 'source video was moved or deleted');
     assert(fs.statSync(record.videoFile).size <= 50 * 1024 * 1024, 'short imported video exceeded the 50 MiB budget');
     assert.equal(JSON.parse(fs.readFileSync(record.metadataFile, 'utf8')).sourceType, 'local-video');
+
+    const audioSelection = await manager.inspectVideoSelection([sourceAudio]);
+    assert.equal(audioSelection.files.length, 1);
+    assert.equal(audioSelection.files[0].kind, 'audio');
+    const audioJob = manager.startVideoImport(audioSelection.id, { collectionId: collection.id, choices: {} });
+    const audioResult = await waitForJob(manager, store, audioJob.id, 30000);
+    assert.equal(audioResult.status, 'completed');
+    const audioRecord = store.listVideoCaches({ collectionId: collection.id }).find((item) => item.sourceMediaKind === 'audio');
+    assert(audioRecord?.localImported && audioRecord.mediaKind === 'audio' && audioRecord.hasVideo === false && audioRecord.hasAudio === true, 'local audio metadata was not persisted');
+    assert(fs.existsSync(audioRecord.videoFile), 'compressed local audio cache was not created');
+    assert(fs.statSync(audioRecord.videoFile).size <= 50 * 1024 * 1024, 'short imported audio exceeded the 50 MiB budget');
+    const audioProbe = await runFfmpeg(['-hide_banner', '-i', audioRecord.videoFile], { acceptedExitCodes: [0, 1] });
+    assert(/Audio:/i.test(audioProbe.stderr) && !/Video:/i.test(audioProbe.stderr), 'local audio cache unexpectedly contains a video stream');
+    const audioTask = store.getTask(audioRecord.taskId);
+    assert(audioTask?.status === 'pending' && audioTask.reuseCachedMedia, 'local audio was not exposed as an Agent task');
 
     store.upsertTask({ ...task, status: 'claimed', workId: 'work-active', claimedBy: 'agent-active' });
     const skippedJob = manager.startVideoImport(videoSelection.id, { collectionId: collection.id, choices: { [videoSelection.files[0].id]: 'skip' } });
@@ -72,7 +97,8 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
     assert.equal(rollbackResult.status, 'failed');
     assert(fs.readFileSync(record.metadataFile).equals(oldInfo) && fs.statSync(record.videoFile).size === oldVideoSize, 'failed overwrite did not restore the previous cache files');
 
-    await verifyLocalAgentSkipsBilibili(task, record, collection);
+    await verifyLocalAgentSkipsBilibili(task, record, collection, false);
+    await verifyLocalAgentSkipsBilibili(audioTask, audioRecord, collection, true);
 
     const documentRoot = path.join(root, 'documents');
     const documentFiles = await createDocumentFixtures(documentRoot);
@@ -237,6 +263,14 @@ async function createTestVideo(target) {
   ], { timeoutMs: 120000 });
 }
 
+async function createTestAudio(target) {
+  await runFfmpeg([
+    '-y', '-hide_banner', '-loglevel', 'error',
+    '-f', 'lavfi', '-i', 'sine=frequency=660:duration=2',
+    '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', target
+  ], { timeoutMs: 120000 });
+}
+
 async function createDocumentFixtures(root) {
   fs.mkdirSync(root, { recursive: true });
   const image = path.join(root, 'image.png');
@@ -297,12 +331,16 @@ function makePdf(text) {
   return Buffer.from(output, 'binary');
 }
 
-async function verifyLocalAgentSkipsBilibili(task, record, collection) {
+async function verifyLocalAgentSkipsBilibili(task, record, collection, expectedSkipFrames) {
   const runner = Object.create(ToolRunner.prototype);
   let apiStages = 0;
   let mediaStages = 0;
   let asrStages = 0;
-  runner.buildArgs = () => [];
+  let bundleOptions = null;
+  runner.buildArgs = (payload) => {
+    if (payload.action === 'bundle') bundleOptions = payload.options;
+    return [];
+  };
   runner.appendLog = () => {};
   runner.runScheduledStage = async () => { apiStages += 1; };
   runner.runCommandStage = async (_state, pool) => { assert.equal(pool, 'media'); mediaStages += 1; };
@@ -312,6 +350,7 @@ async function verifyLocalAgentSkipsBilibili(task, record, collection) {
   assert.equal(apiStages, 0, 'local imported video attempted a Bilibili API stage');
   assert.equal(mediaStages, 1);
   assert.equal(asrStages, 1);
+  assert.equal(Boolean(bundleOptions?.skipFrames), expectedSkipFrames, 'local media frame policy was not selected by media type');
 }
 
 async function waitForJob(manager, store, id, timeoutMs = 10000) {

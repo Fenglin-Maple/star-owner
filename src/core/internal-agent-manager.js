@@ -1500,10 +1500,15 @@ function subtitleTime(seconds) {
 
 function buildGenerationPrompt({ session, task, collection, materials, template }) {
   const localImported = task.localImported === true || task.sourceType === 'local-video';
-  const timelineRequirement = localImported
+  const localAudio = localImported && (task.sourceMediaKind === 'audio' || task.mediaKind === 'audio');
+  const timelineRequirement = localAudio
+    ? '3. 这是本地音频，没有可用画面和关键帧。不得生成或猜测 Bilibili 链接；章节标题使用 ASR SRT 的真实时间点标注，例如“## 章节标题（00:03:25）”，不得根据文字顺序猜测时间位置。'
+    : localImported
     ? '3. 这是本地导入视频，不得生成或猜测 Bilibili 链接。章节标题使用 ASR SRT 的真实时间点标注，例如“## 章节标题（00:03:25）”；不得根据文字顺序猜测时间位置。'
     : `3. 章节标题加入 Bilibili 时间轴链接：https://www.bilibili.com/video/${task.bvid}?t=<秒数>。优先依据 ASR/站内 SRT 的起止时间换算秒数，不得根据文字顺序猜测时间位置。`;
-  const subtitleRequirement = localImported
+  const subtitleRequirement = localAudio
+    ? '4. 这是本地音频，没有站内字幕、站内评论或关键帧；必须检查本次 ASR 结果，不得把缺少 B 站数据描述为工具故障。时间轴字幕中的“HH:MM:SS,mmm --> HH:MM:SS,mmm”是真实分段时间。'
+    : localImported
     ? '4. 本地导入视频没有站内字幕和站内评论；必须检查本次 ASR 结果，不得把缺少 B站数据描述为工具故障。时间轴字幕中的“HH:MM:SS,mmm --> HH:MM:SS,mmm”是真实分段时间。'
     : '4. 必须比较站内字幕与本次 ASR；无论有无站内字幕，都必须检查本次 ASR 结果。若 asr-result.json 标记 noAudioStream=true，说明源视频没有音轨，应如实说明并改用站内字幕、关键帧与多模态画面理解，不得把它当作工具失败。时间轴字幕中的“HH:MM:SS,mmm --> HH:MM:SS,mmm”是可直接使用的真实分段时间。';
   const transcriptContext = materials.evidencePack
