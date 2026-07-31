@@ -140,7 +140,7 @@ class LocalToolboxManager {
       outputDirectories: [selection.outputDirectory]
     });
     this.runBackground(job.id, (signal) => this.runSubtitleJob(job.id, selection, selectedFormats, signal));
-    return job;
+    return publicJob(job);
   }
 
   startVideoImport(selectionId, input = {}) {
@@ -157,7 +157,7 @@ class LocalToolboxManager {
       outputDirectories: [collection.cacheRoot]
     });
     this.runBackground(job.id, (signal) => this.runVideoImport(job.id, selection, collection, choices, signal));
-    return job;
+    return publicJob(job);
   }
 
   startDocumentImport(selectionId, input = {}) {
@@ -172,7 +172,7 @@ class LocalToolboxManager {
       outputDirectories: [collection.collectionRoot]
     });
     this.runBackground(job.id, (signal) => this.runDocumentImport(job.id, selection, collection, choices, signal));
-    return job;
+    return publicJob(job);
   }
 
   cancel(jobId) {
@@ -883,7 +883,23 @@ function publicJob(job) {
     ...job,
     totalItems: (job.items || []).length,
     itemCounts,
-    items: (job.items || []).filter((item) => item.status === 'failed').slice(0, 8)
+    items: (job.items || []).map(publicJobItem)
+  };
+}
+
+function publicJobItem(item = {}) {
+  return {
+    id: item.id || '',
+    name: item.name || '',
+    status: item.status || 'queued',
+    phase: item.phase || '',
+    progress: Math.max(0, Math.min(1, Number(item.progress || 0))),
+    error: item.error || '',
+    duration: Number(item.duration || 0),
+    size: Number(item.size || 0),
+    completedAt: item.completedAt || '',
+    output: item.output || '',
+    cacheId: item.cacheId || ''
   };
 }
 

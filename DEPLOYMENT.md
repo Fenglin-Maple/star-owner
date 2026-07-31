@@ -190,15 +190,17 @@ npm run smoke
 npm run test:knowledge-api
 npm run test:hardware
 npm run test:runtime-node
+npm run test:runtime-isolation
 npm run test:internal-agent
 npm run test:document-lifecycle
 npm run test:collection-sync
 npm run test:security
 npm run test:asr-models
 npm run test:asr-service
+npm run test:local-toolbox
 ```
 
-The aggregate verifier also runs scheduler, RAG, task rollback, video cache, image clipboard, persistence, Bilibili client, ASR timestamp format, analytics, JavaScript/Python syntax and `npm audit --audit-level=high`.
+The aggregate verifier also runs scheduler, RAG, task rollback, video cache, image clipboard, persistence, Bilibili client, ASR timestamp format, local toolbox media/document import, runtime isolation, analytics, JavaScript/Python syntax and `npm audit --audit-level=high`.
 
 ## 8. Troubleshooting
 

@@ -567,6 +567,7 @@ class ToolRunner {
           resourcePool: startedPool,
           resourceLane: lane,
           downloadProgress: null,
+          mediaProgress: null,
           queuePosition: 0,
           queueLength: 0,
           queueReason: '',
@@ -702,7 +703,12 @@ class ToolRunner {
         rememberOutput(text);
         this.appendLog(state.runId, text);
         const progress = parseDownloadProgress(text);
-        this.updateRun(state.runId, { ...(progress ? { downloadProgress: progress } : {}), lastOutputAt: new Date().toISOString() });
+        const mediaProgress = parseMediaProgress(text);
+        this.updateRun(state.runId, {
+          ...(progress ? { downloadProgress: progress } : {}),
+          ...(mediaProgress ? { mediaProgress } : {}),
+          lastOutputAt: new Date().toISOString()
+        });
       });
       readUtf8(child.stderr, (text) => {
         rememberOutput(text);
@@ -1397,6 +1403,14 @@ function parseDownloadProgress(value) {
     eta: String(match[5] || '').trim(),
     updatedAt: new Date().toISOString()
   };
+}
+
+function parseMediaProgress(value) {
+  const matches = [...String(value || '').matchAll(/media-progress:\s*([0-9.]+)%\|([^\r\n]*)/g)];
+  if (!matches.length) return null;
+  const match = matches.at(-1);
+  const percent = Math.max(0, Math.min(100, Number(match[1]) || 0));
+  return { progress: percent / 100, percent, phase: String(match[2] || '').trim(), updatedAt: new Date().toISOString() };
 }
 
 function initialPoolForAction(action) {

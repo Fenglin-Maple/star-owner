@@ -3271,6 +3271,7 @@ document.querySelector('#refreshRuns')?.addEventListener('click', async () => {
 
 async function handleRuntime(data = {}) {
   runtime = { ...runtime, ...data };
+  renderUpdateState(runtime.update);
   locallyDirtyPages.add('settings');
   if (activePageName() === 'settings') schedulePageRender('settings', { force: true });
   applyOutsideBilibiliPreference(runtime.uiPreferences);

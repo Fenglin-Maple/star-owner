@@ -214,7 +214,7 @@
     return state.jobs.filter((item) => item.type === type).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))[0] || null;
   }
 
-  function renderJobSlot(root, job) {
+  function renderJobSlotLegacy(root, job) {
     if (!job) { root.innerHTML = ''; return; }
     const active = ['queued', 'running'].includes(job.status);
     const completed = Number(job.itemCounts?.completed ?? job.items.filter((item) => item.status === 'completed').length);
@@ -223,6 +223,27 @@
     const failedItems = job.items.filter((item) => item.status === 'failed');
     const progress = Math.max(0, Math.min(100, Math.round(Number(job.progress || 0) * 100)));
     root.innerHTML = `<div class="local-job"><div class="local-job-head"><div><strong>${esc(job.title)}</strong><span>${esc(job.phase || statusLabel(job.status))}</span></div><div class="local-job-actions">${active ? `<button class="secondary-button compact-button" type="button" data-local-cancel="${escAttr(job.id)}">停止</button>` : ''}${job.outputDirectories?.length ? `<button class="secondary-button compact-button" type="button" data-local-open="${escAttr(job.id)}">打开目录</button>` : ''}</div></div><div class="local-progress"><span style="width:${progress}%"></span></div><div class="local-job-summary"><span>${progress}% · 完成 ${completed}${skipped ? ` · 跳过 ${skipped}` : ''}${failed ? ` · 失败 ${failed}` : ''}</span><span>${statusLabel(job.status)}</span></div>${job.error || failed ? `<div class="local-job-errors">${job.error ? `<div>${esc(job.error)}</div>` : ''}${failedItems.slice(0, 5).map((item) => `<div>${esc(item.name)}：${esc(item.error || '处理失败')}</div>`).join('')}</div>` : ''}</div>`;
+  }
+
+  function renderJobSlot(root, job) {
+    if (!job) { root.innerHTML = ''; return; }
+    const active = ['queued', 'running'].includes(job.status);
+    const items = Array.isArray(job.items) ? job.items : [];
+    const completed = Number(job.itemCounts?.completed ?? items.filter((item) => item.status === 'completed').length);
+    const skipped = Number(job.itemCounts?.skipped ?? items.filter((item) => item.status === 'skipped').length);
+    const failed = Number(job.itemCounts?.failed ?? items.filter((item) => item.status === 'failed').length);
+    const failedItems = items.filter((item) => item.status === 'failed');
+    const progress = Math.max(0, Math.min(100, Math.round(Number(job.progress || 0) * 100)));
+    const previousList = root.querySelector('[data-local-item-list]');
+    const previousScrollTop = previousList?.scrollTop || 0;
+    const itemRows = items.map((item) => {
+      const itemProgress = Math.max(0, Math.min(100, Math.round(Number(item.progress || 0) * 100)));
+      const statusClass = String(item.status || 'queued').replace(/[^a-z-]/gi, '');
+      return `<div class="local-job-item is-${statusClass}" title="${escAttr(item.phase || statusLabel(item.status))}"><div class="local-job-item-head"><strong>${esc(item.name || '-')}</strong><span>${itemProgress}% · ${esc(statusLabel(item.status))}</span></div><div class="local-item-progress"><span style="width:${itemProgress}%"></span></div>${item.error ? `<small>${esc(item.error)}</small>` : ''}</div>`;
+    }).join('');
+    root.innerHTML = `<div class="local-job"><div class="local-job-head"><div><strong>${esc(job.title)}</strong><span>${esc(job.phase || statusLabel(job.status))}</span></div><div class="local-job-actions">${active ? `<button class="secondary-button compact-button" type="button" data-local-cancel="${escAttr(job.id)}">停止</button>` : ''}${job.outputDirectories?.length ? `<button class="secondary-button compact-button" type="button" data-local-open="${escAttr(job.id)}">打开目录</button>` : ''}</div></div><div class="local-progress" aria-label="总进度"><span style="width:${progress}%"></span></div><div class="local-job-summary"><span>${progress}% · 完成 ${completed}${skipped ? ` · 跳过 ${skipped}` : ''}${failed ? ` · 失败 ${failed}` : ''}</span><span>${statusLabel(job.status)}</span></div><div class="local-job-items" data-local-item-list aria-label="每个视频进度">${itemRows}</div>${job.error || failed ? `<div class="local-job-errors">${job.error ? `<div>${esc(job.error)}</div>` : ''}${failedItems.slice(0, 5).map((item) => `<div>${esc(item.name)}：${esc(item.error || '处理失败')}</div>`).join('')}</div>` : ''}</div>`;
+    const nextList = root.querySelector('[data-local-item-list]');
+    if (nextList) nextList.scrollTop = previousScrollTop;
   }
 
   async function handleJobAction(event) {

@@ -111,6 +111,8 @@
 - `npm run test:media-edge`：无音轨视频识别、百分号路径下三种任务来源抽帧、空 ASR 诊断、继续处理和工具失败句柄清理；
 - `npm run test:persistence`：数据库原子恢复与便携项目整体移动后的路径重定位；
 - `npm run test:runtime-node`：无全局 PATH 时使用项目内 Electron Node 执行工具；
+- `npm run test:runtime-isolation`：验证 Node、Python、FFmpeg、yt-dlp 及 CMD 子进程只使用项目受控运行环境；
+- `npm run test:local-toolbox`：字幕生成、视频/音频压缩导入、多模态文档导入、冲突跳过、回滚、RAG 索引和媒体边界；
 - `npm run test:collection-sync`：事务回滚、部分可见快照、缺席任务保留和错误墓碑恢复；
 - `npm run smoke`：端到端只读 API 和核心应用契约。
 

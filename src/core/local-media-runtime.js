@@ -6,6 +6,7 @@ const { assertSafeWindowsPath, ensureDir, safeName } = require('./workspace');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const IMAGEIO_BINARIES = path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'Lib', 'site-packages', 'imageio_ffmpeg', 'binaries');
+const LOCAL_IMPORT_MB_PER_BLOCK = 30;
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4v', '.flv', '.wmv', '.ts', '.mts', '.m2ts']);
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wma']);
 const SUBTITLE_FORMATS = new Set(['srt', 'vtt', 'lrc', 'txt', 'json']);
@@ -93,7 +94,7 @@ async function compressMedia(source, target, metadata, options = {}) {
 async function compressAudio(source, target, metadata, options = {}) {
   const duration = Math.max(1, Number(metadata.duration || 0));
   const budgetBlocks = Math.max(1, Math.ceil(duration / 600));
-  const budgetBytes = budgetBlocks * 50 * 1024 * 1024;
+  const budgetBytes = budgetBlocks * LOCAL_IMPORT_MB_PER_BLOCK * 1024 * 1024;
   const budgetKbps = Math.max(32, Math.floor((budgetBytes * 8 * 0.9) / duration / 1000));
   const sourceKbps = Math.max(32, Math.floor((Number(metadata.size || budgetBytes) * 8) / duration / 1000));
   const audioKbps = Math.max(32, Math.min(256, sourceKbps, budgetKbps));
@@ -124,10 +125,10 @@ async function compressAudio(source, target, metadata, options = {}) {
   }
 }
 
-async function compressVideo(source, target, metadata, options = {}) {
+async function compressVideoLegacy(source, target, metadata, options = {}) {
   const duration = Math.max(1, Number(metadata.duration || 0));
   const budgetBlocks = Math.max(1, Math.ceil(duration / 600));
-  const budgetBytes = budgetBlocks * 50 * 1024 * 1024;
+  const budgetBytes = budgetBlocks * LOCAL_IMPORT_MB_PER_BLOCK * 1024 * 1024;
   const hasAudio = metadata.hasAudio !== false;
   const audioKbps = hasAudio ? 64 : 0;
   const budgetKbps = Math.floor((budgetBytes * 8 * 0.9) / duration / 1000);
@@ -182,6 +183,66 @@ async function compressVideo(source, target, metadata, options = {}) {
       const candidate = `${passLog}${suffix}`;
       if (fs.existsSync(candidate)) fs.rmSync(candidate, { force: true });
     }
+  }
+}
+
+async function compressVideo(source, target, metadata, options = {}) {
+  const duration = Math.max(1, Number(metadata.duration || 0));
+  const budgetBlocks = Math.max(1, Math.ceil(duration / 600));
+  const budgetBytes = budgetBlocks * LOCAL_IMPORT_MB_PER_BLOCK * 1024 * 1024;
+  const hasAudio = metadata.hasAudio !== false;
+  const audioKbps = hasAudio ? 64 : 0;
+  const budgetKbps = Math.max(160, Math.floor((budgetBytes * 8 * 0.86) / duration / 1000));
+  const sourceKbps = Math.max(160, Math.floor((Number(metadata.size || budgetBytes) * 8) / duration / 1000));
+  const initialVideoKbps = Math.max(96, Math.min(sourceKbps - audioKbps, budgetKbps - audioKbps));
+  const output = assertSafeWindowsPath(path.resolve(target), 'local video cache path');
+  ensureDir(path.dirname(output));
+
+  const encode = async (videoKbps, progressStart, progressEnd) => {
+    const maxRateKbps = Math.max(videoKbps, Math.floor(videoKbps * 1.05));
+    const bufferKbps = Math.max(192, videoKbps * 2);
+    const audioArgs = hasAudio
+      ? ['-map', '0:a:0?', '-c:a', 'aac', '-b:a', `${audioKbps}k`, '-ac', '2']
+      : ['-an'];
+    await runFfmpeg([
+      '-y', '-hide_banner', '-loglevel', 'error', '-i', source,
+      '-map', '0:v:0', '-vf', "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+      '-c:v', 'libx264', '-preset', 'veryfast', '-b:v', `${videoKbps}k`,
+      '-maxrate', `${maxRateKbps}k`, '-bufsize', `${bufferKbps}k`, '-pix_fmt', 'yuv420p',
+      ...audioArgs, '-shortest', '-movflags', '+faststart',
+      '-progress', 'pipe:1', '-nostats', output
+    ], {
+      signal: options.signal,
+      duration,
+      timeoutMs: options.timeoutMs,
+      onProgress: (value) => options.onProgress?.(progressStart + Number(value || 0) * (progressEnd - progressStart))
+    });
+  };
+
+  try {
+    await encode(initialVideoKbps, 0, 0.82);
+    if (!fs.existsSync(output) || fs.statSync(output).size <= 0) throw new Error('FFmpeg did not create a usable compressed video.');
+    let outputSize = fs.statSync(output).size;
+    let videoKbps = initialVideoKbps;
+    let retries = 0;
+    if (outputSize > budgetBytes) {
+      retries = 1;
+      videoKbps = Math.max(64, Math.floor(initialVideoKbps * (budgetBytes / outputSize) * 0.88));
+      fs.rmSync(output, { force: true });
+      await encode(videoKbps, 0.82, 1);
+      if (!fs.existsSync(output) || fs.statSync(output).size <= 0) throw new Error('FFmpeg did not create a usable compressed video after retry.');
+      outputSize = fs.statSync(output).size;
+    }
+    if (outputSize > budgetBytes) {
+      const error = new Error(`Compressed video exceeds the ${LOCAL_IMPORT_MB_PER_BLOCK} MiB per 10-minute budget: ${formatBytes(outputSize)} / ${formatBytes(budgetBytes)}.`);
+      error.code = 'LOCAL_VIDEO_BUDGET_EXCEEDED';
+      throw error;
+    }
+    options.onProgress?.(1);
+    return { file: output, size: outputSize, budgetBytes, videoKbps, audioKbps, retries };
+  } catch (error) {
+    if (fs.existsSync(output)) fs.rmSync(output, { force: true });
+    throw error;
   }
 }
 

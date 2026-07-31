@@ -4,6 +4,8 @@ const path = require('path');
 const JSZip = require('jszip');
 const { LocalToolboxManager } = require('../src/core/local-toolbox-manager');
 const { runFfmpeg } = require('../src/core/local-media-runtime');
+const { extractFrames } = require('../tools/video-tool');
+const { inspectDocument } = require('../src/core/local-document-importer');
 const { RagAssistant } = require('../src/core/rag-assistant');
 const { Store } = require('../src/core/store');
 const { ToolRunner } = require('../src/core/tool-runner');
@@ -31,6 +33,14 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
     await createTestVideo(sourceVideo);
     const sourceAudio = path.join(mediaRoot, 'audio-test.m4a');
     await createTestAudio(sourceAudio);
+
+    const frameFixture = path.join(root, 'frame-fixture');
+    fs.mkdirSync(frameFixture, { recursive: true });
+    fs.copyFileSync(sourceVideo, path.join(frameFixture, 'merged.mp4'));
+    fs.writeFileSync(path.join(frameFixture, 'info.json'), JSON.stringify({ duration: 2 }), 'utf8');
+    const frameOutputs = await extractFrames(frameFixture, 4);
+    assert.equal(frameOutputs.length, 4, 'FFmpeg frame extraction did not produce the requested frame count');
+    assert(frameOutputs.every((item) => fs.existsSync(path.join(frameFixture, item))), 'FFmpeg frame extraction returned missing files');
 
     const subtitleSelection = await manager.inspectSubtitleFile(sourceVideo);
     assert.equal(subtitleSelection.files.length, 1, 'subtitle tool must accept exactly one selected media file');
@@ -62,7 +72,7 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
     assert(record.localImported && record.sourceType === 'local-video' && record.orientation === 'portrait', 'local video metadata was not persisted');
     assert(task.status === 'pending' && task.reuseCachedMedia && task.cachedVideoFile === record.videoFile, 'local video was not exposed as an Agent task');
     assert(fs.existsSync(sourceVideo), 'source video was moved or deleted');
-    assert(fs.statSync(record.videoFile).size <= 50 * 1024 * 1024, 'short imported video exceeded the 50 MiB budget');
+    assert(fs.statSync(record.videoFile).size <= 30 * 1024 * 1024, 'short imported video exceeded the 30 MiB budget');
     assert.equal(JSON.parse(fs.readFileSync(record.metadataFile, 'utf8')).sourceType, 'local-video');
 
     const audioSelection = await manager.inspectVideoSelection([sourceAudio]);
@@ -74,7 +84,7 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
     const audioRecord = store.listVideoCaches({ collectionId: collection.id }).find((item) => item.sourceMediaKind === 'audio');
     assert(audioRecord?.localImported && audioRecord.mediaKind === 'audio' && audioRecord.hasVideo === false && audioRecord.hasAudio === true, 'local audio metadata was not persisted');
     assert(fs.existsSync(audioRecord.videoFile), 'compressed local audio cache was not created');
-    assert(fs.statSync(audioRecord.videoFile).size <= 50 * 1024 * 1024, 'short imported audio exceeded the 50 MiB budget');
+    assert(fs.statSync(audioRecord.videoFile).size <= 30 * 1024 * 1024, 'short imported audio exceeded the 30 MiB budget');
     const audioProbe = await runFfmpeg(['-hide_banner', '-i', audioRecord.videoFile], { acceptedExitCodes: [0, 1] });
     assert(/Audio:/i.test(audioProbe.stderr) && !/Video:/i.test(audioProbe.stderr), 'local audio cache unexpectedly contains a video stream');
     const audioTask = store.getTask(audioRecord.taskId);
@@ -102,6 +112,12 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
 
     const documentRoot = path.join(root, 'documents');
     const documentFiles = await createDocumentFixtures(documentRoot);
+    const oversizedPdf = path.join(documentRoot, 'oversized.pdf');
+    const oversizedExcel = path.join(documentRoot, 'oversized.xlsx');
+    createSparseFile(oversizedPdf, 257 * 1024 * 1024);
+    createSparseFile(oversizedExcel, 257 * 1024 * 1024);
+    assert.throws(() => inspectDocument(oversizedPdf), /256 MiB/);
+    assert.throws(() => inspectDocument(oversizedExcel), /256 MiB/);
     const documentSelection = manager.inspectDocumentSelection(documentFiles);
     const documentJob = manager.startDocumentImport(documentSelection.id, { collectionName: '本地资料库', choices: {} });
     const documentResult = await waitForJob(manager, store, documentJob.id, 30000);
@@ -269,6 +285,12 @@ async function createTestAudio(target) {
     '-f', 'lavfi', '-i', 'sine=frequency=660:duration=2',
     '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', target
   ], { timeoutMs: 120000 });
+}
+
+function createSparseFile(target, size) {
+  const descriptor = fs.openSync(target, 'w');
+  try { fs.ftruncateSync(descriptor, size); }
+  finally { fs.closeSync(descriptor); }
 }
 
 async function createDocumentFixtures(root) {

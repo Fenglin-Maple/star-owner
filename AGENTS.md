@@ -93,6 +93,8 @@ npm run test:bili-client
 npm run test:asr-format
 npm run test:analytics
 npm run test:asr-service
+npm run test:local-toolbox
+npm run test:runtime-isolation
 npm audit --audit-level=high
 ```
 

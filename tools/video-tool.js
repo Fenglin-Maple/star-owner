@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { projectRuntimeEnvironment } = require('../src/core/child-process-io');
 const { repairPortablePythonHome } = require('../src/core/portable-runtime');
 
@@ -246,7 +246,17 @@ async function prepareAudio(videoUrl, outDir, args) {
   const audioDir = path.join(outDir, 'audio');
   fs.mkdirSync(audioDir, { recursive: true });
   const audioFile = path.join(audioDir, 'audio.wav');
-  run('ffmpeg', ['-y', '-i', merged, '-vn', '-ac', '1', '-ar', '16000', audioFile], { capture: true });
+  const info = readJsonFile(path.join(outDir, 'info.json'));
+  emitMediaProgress(0, 'audio');
+  await runFfmpegAsync([
+    '-y', '-hide_banner', '-loglevel', 'error', '-i', merged,
+    '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le',
+    '-progress', 'pipe:1', '-nostats', audioFile
+  ], {
+    duration: Number(info.duration || 0),
+    onProgress: (progress) => emitMediaProgress(progress, 'audio')
+  });
+  if (!fs.existsSync(audioFile) || fs.statSync(audioFile).size <= 44) throw new Error('FFmpeg did not generate usable ASR audio.');
   console.log(audioFile);
   return audioFile;
 }
@@ -322,7 +332,7 @@ async function buildBundle(videoUrl, outDir, args) {
 
   if (!args['skip-frames']) {
     try {
-      extractFrames(outDir, Number(args.frames || 12));
+      await extractFrames(outDir, Number(args.frames || 12));
       manifest.outputs.frames = 'frames/';
     } catch (error) {
       manifest.warnings.push(`frames failed: ${error.message || String(error)}`);
@@ -349,7 +359,124 @@ async function buildBundle(videoUrl, outDir, args) {
   console.log(file);
 }
 
-function extractFrames(outDir, count) {
+async function extractFrames(outDir, count) {
+  requireCommand('ffmpeg');
+  const merged = findFirst(outDir, /^merged\.(mp4|mkv|webm)$/i);
+  if (!merged) throw new Error('Merged video is missing; cannot extract frames.');
+  const framesDir = path.join(outDir, 'frames');
+  fs.rmSync(framesDir, { recursive: true, force: true });
+  fs.mkdirSync(framesDir, { recursive: true });
+  const info = readJsonFile(path.join(outDir, 'info.json'));
+  const wanted = Math.max(1, Math.min(300, Math.round(Number(count) || 12)));
+  const duration = Math.max(0, Number(info.duration || 0));
+  const interval = duration > 0 ? Math.max(0.5, duration / (wanted + 1)) : 30;
+  const scale = "scale='min(1280,iw)':'min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2";
+  emitMediaProgress(0, 'frames');
+  try {
+    // Fast input seeking is much cheaper for normal frame budgets. Long videos
+    // with a large frame budget use one sequential decode to avoid process churn.
+    if (duration > 0 && wanted <= 32) await extractFramesBySeek(merged, framesDir, wanted, duration, scale);
+    else await extractFramesSequential(merged, framesDir, wanted, interval, scale, duration);
+  } catch (error) {
+    if (!(duration > 0 && wanted <= 32)) throw error;
+    fs.rmSync(framesDir, { recursive: true, force: true });
+    fs.mkdirSync(framesDir, { recursive: true });
+    await extractFramesSequential(merged, framesDir, wanted, interval, scale, duration);
+  }
+  const files = listExtractedFrames(framesDir);
+  if (!files.length) throw new Error('FFmpeg finished without producing usable JPEG frames.');
+  return files.map((file) => `frames/${path.basename(file)}`);
+}
+
+async function extractFramesBySeek(source, framesDir, wanted, duration, scale) {
+  for (let index = 0; index < wanted; index += 1) {
+    const position = duration * (index + 1) / (wanted + 1);
+    const output = path.join(framesDir, `frame-${String(index + 1).padStart(3, '0')}.jpg`);
+    await runFfmpegAsync([
+      '-y', '-hide_banner', '-loglevel', 'error', '-ss', position.toFixed(3), '-i', source,
+      '-map', '0:v:0', '-frames:v', '1', '-an', '-vf', scale, '-q:v', '3',
+      '-progress', 'pipe:1', '-nostats', output
+    ]);
+    if (!fs.existsSync(output) || fs.statSync(output).size <= 0) throw new Error(`FFmpeg did not generate frame ${index + 1}.`);
+    emitMediaProgress((index + 1) / wanted, 'frames');
+  }
+}
+
+async function extractFramesSequential(source, framesDir, wanted, interval, scale, duration) {
+  await runFfmpegAsync([
+    '-y', '-hide_banner', '-loglevel', 'error', '-i', source,
+    '-vf', `fps=1/${interval.toFixed(3)},${scale}`,
+    '-frames:v', String(wanted), '-an', '-q:v', '3',
+    '-progress', 'pipe:1', '-nostats', path.join(framesDir, 'frame-%03d.jpg')
+  ], {
+    duration,
+    onProgress: (progress) => emitMediaProgress(progress, 'frames')
+  });
+}
+
+function listExtractedFrames(directory) {
+  return fs.readdirSync(directory)
+    .filter((name) => /^frame-\d{3,}\.jpe?g$/i.test(name))
+    .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
+    .map((name) => path.join(directory, name));
+}
+
+function emitMediaProgress(progress, phase) {
+  const percent = Math.max(0, Math.min(100, Math.round(Number(progress || 0) * 100)));
+  process.stdout.write(`media-progress:${percent}%|${phase}\n`);
+}
+
+function runFfmpegAsync(args, options = {}) {
+  const executable = resolveCommand('ffmpeg');
+  if (!executable) throw new Error('Bundled FFmpeg is unavailable; repair the runtime-base dependency.');
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let stdout = '';
+    let stderr = '';
+    const child = spawn(executable, args, {
+      cwd: PROJECT_ROOT,
+      env: projectRuntimeEnvironment(),
+      windowsHide: true,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      error ? reject(error) : resolve(value);
+    };
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      const text = String(chunk);
+      stdout = `${stdout}${text}`.slice(-64000);
+      const duration = Number(options.duration || 0);
+      const match = text.match(/out_time_(?:ms|us)=(\d+)/g)?.at(-1)?.match(/=(\d+)/);
+      if (duration > 0 && match) options.onProgress?.(Math.min(1, Number(match[1]) / 1000000 / duration));
+      if (/progress=end/.test(text)) options.onProgress?.(1);
+    });
+    child.stderr.on('data', (chunk) => { stderr = `${stderr}${String(chunk)}`.slice(-128000); });
+    child.once('error', (error) => finish(error));
+    child.once('close', (code, signal) => {
+      const normalizedCode = signedWindowsExitCode(code);
+      if (signal || normalizedCode !== 0) {
+        const detail = processFailureDetail(stderr, stdout);
+        const error = new Error(`FFmpeg failed with exit code ${normalizedCode}${signal ? ` (${signal})` : ''}${detail ? `\n${detail}` : ''}`);
+        error.exitCode = normalizedCode;
+        error.stderr = stderr;
+        if (isNoAudioStreamError(error)) error.code = 'NO_AUDIO_STREAM';
+        return finish(error);
+      }
+      finish(null, { code: normalizedCode, signal: signal || '', stdout, stderr });
+    });
+  });
+}
+
+function readJsonFile(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; }
+}
+
+function extractFramesLegacy(outDir, count) {
   requireCommand('ffmpeg');
   const merged = findFirst(outDir, /^merged\.(mp4|mkv|webm)$/i);
   if (!merged) throw new Error('未找到合轨视频，无法抽帧。');

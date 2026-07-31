@@ -1779,6 +1779,11 @@ function stageProgressFraction(run = {}) {
 
 function describeToolRun(run = {}) {
   if (run.status === 'queued') return `排队 ${run.queuePosition || '-'} · ${run.stage || run.toolName}`;
+  if (run.mediaProgress) {
+    const progress = `${Math.round(Number(run.mediaProgress.percent || 0))}%`;
+    const phase = run.mediaProgress.phase === 'frames' ? '关键帧' : run.mediaProgress.phase === 'audio' ? '音频' : '媒体';
+    return `${run.toolName || run.toolId} · FFmpeg ${phase} ${progress}`;
+  }
   if (run.downloadProgress) {
     const progress = `${Math.round(Number(run.downloadProgress.percent || 0))}%`;
     return `${run.toolName || run.toolId} · 下载 ${progress}`;

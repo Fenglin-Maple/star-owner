@@ -56,7 +56,7 @@ const { MIN_ARTIFACT_NAME_LENGTH, PROJECT_ROOT, PathSafetyError, evaluateWorkspa
     fs.mkdirSync(sourceDir, { recursive: true });
     fs.copyFileSync(merged, path.join(sourceDir, 'merged.mp4'));
     fs.copyFileSync(path.join(root, 'info.json'), path.join(sourceDir, 'info.json'));
-    const extracted = extractFrames(sourceDir, 2);
+    const extracted = await extractFrames(sourceDir, 2);
     assert(extracted.length >= 1 && extracted.every((item) => /^frames\/frame-\d{3}\.jpg$/.test(item)), `${sourceName} did not receive concrete numbered frames.`);
     assert(!fs.existsSync(path.join(sourceDir, 'frames', 'frame-%03d.jpg')), `${sourceName} retained a literal FFmpeg frame placeholder.`);
     for (const item of extracted) {

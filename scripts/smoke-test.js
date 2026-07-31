@@ -646,6 +646,11 @@ function verifyRendererContracts() {
   if (!index.includes('id="firstRunGuide"') || !index.includes('data-navigate-page="ai-models"') || !index.includes('data-navigate-page="internal-agents"')) {
     throw new Error('the startup first-run journey or its navigation targets are missing');
   }
+  const runtimeHandlerStart = app.indexOf('async function handleRuntime');
+  const runtimeHandler = runtimeHandlerStart >= 0 ? app.slice(runtimeHandlerStart, runtimeHandlerStart + 1400) : '';
+  if (!runtimeHandler.includes('renderUpdateState(runtime.update)')) {
+    throw new Error('the application version label is not refreshed when backend runtime state arrives');
+  }
   if (!app.includes('/api/health') || !app.includes('favorite-desc') || !app.includes('lineCount 单次支持 1～1000 行')) {
     throw new Error('the external knowledge Agent prompt is missing health, sorting, or exact-content guidance');
   }

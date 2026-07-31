@@ -332,7 +332,7 @@ The stable workflow accepts ordinary Bilibili BV videos with exactly one page. M
 
 ## 20. Verification
 
-`npm run verify:release` checks package/lock versions, machine-specific paths, JavaScript/Python syntax, all integration tests, both ASR models and npm audit. `test:runtime-node` deliberately removes the global `PATH` and verifies that the bundled Electron Node mode still executes the video tool.
+`npm run verify:release` checks package/lock versions, machine-specific paths, JavaScript/Python syntax, all integration tests including local media/document tools and runtime isolation, both ASR models and npm audit. `test:runtime-node` deliberately removes the global `PATH` and verifies that the bundled Electron Node mode still executes the video tool; `test:runtime-isolation` checks controlled PATH/environment handling and project-owned child-process boundaries.
 
 Protocol and lifecycle gates include:
 

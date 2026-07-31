@@ -26,6 +26,19 @@
 .local-progress > span { display: block; width: 0; height: 100%; background: var(--accent); transition: width .2s ease; }
 .local-job-summary { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 11px; }
 .local-job-errors { max-height: 90px; overflow-y: auto; color: var(--red); font-size: 11px; line-height: 1.45; }
+.local-job-items { display: grid; gap: 6px; max-height: 240px; overflow-y: auto; overscroll-behavior: contain; padding: 2px 4px 2px 0; }
+.local-job-item { display: grid; gap: 4px; padding: 7px 8px; border: 1px solid var(--line); background: color-mix(in srgb, var(--row) 82%, transparent); }
+.local-job-item.is-running { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); }
+.local-job-item.is-completed, .local-job-item.is-skipped { border-color: color-mix(in srgb, var(--green) 45%, var(--line)); }
+.local-job-item.is-failed, .local-job-item.is-cancelled, .local-job-item.is-interrupted { border-color: color-mix(in srgb, var(--red) 55%, var(--line)); }
+.local-job-item-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.local-job-item-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
+.local-job-item-head span { flex: 0 0 auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.local-item-progress { height: 4px; overflow: hidden; background: color-mix(in srgb, var(--line) 74%, transparent); }
+.local-item-progress > span { display: block; width: 0; height: 100%; background: var(--accent); transition: width .2s ease; }
+.local-job-item.is-completed .local-item-progress > span, .local-job-item.is-skipped .local-item-progress > span { background: var(--green); }
+.local-job-item.is-failed .local-item-progress > span, .local-job-item.is-cancelled .local-item-progress > span, .local-job-item.is-interrupted .local-item-progress > span { background: var(--red); }
+.local-job-item small { color: var(--red); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
 .local-import-dialog { width: min(920px, calc(100vw - 40px)); max-height: min(780px, calc(100vh - 40px)); }
 .local-import-body { min-height: 0; overflow-y: auto; display: grid; gap: 12px; padding: 14px 18px 18px; }
 .local-collection-picker { display: grid; grid-template-columns: minmax(210px, .8fr) minmax(240px, 1fr) auto; gap: 10px; align-items: end; }
