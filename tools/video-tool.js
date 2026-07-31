@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { utf8ChildEnvironment } = require('../src/core/child-process-io');
+const { projectRuntimeEnvironment } = require('../src/core/child-process-io');
 const { repairPortablePythonHome } = require('../src/core/portable-runtime');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -17,7 +17,7 @@ const IMAGEIO_BINARIES = path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'L
 const LOCAL_BINARIES = {
   ffmpeg: findFirst(IMAGEIO_BINARIES, process.platform === 'win32' ? /^ffmpeg-.*\.exe$/i : /^ffmpeg-/i),
   'yt-dlp': WHISPER_PYTHON,
-  'faster-whisper': process.env.FASTER_WHISPER_BIN || WHISPER_PYTHON
+  'faster-whisper': WHISPER_PYTHON
 };
 
 const MEDIA_CACHE_EXTENSIONS = new Set(['.mp4', '.mkv', '.webm', '.m4a', '.mp3', '.wav', '.aac', '.flac', '.part', '.ytdl']);
@@ -100,8 +100,8 @@ function printHelp() {
 
 说明:
   info/comments 可直接调用 Bilibili Web API。
-  merged 需要本机可执行 yt-dlp 和 ffmpeg。
-  asr 需要本机可执行 faster-whisper，并会优先复用 merged.mp4。
+  merged 使用应用内置 yt-dlp 和 FFmpeg。
+  asr 使用应用内置 faster-whisper，并会优先复用 merged.mp4。
 `);
 }
 
@@ -689,7 +689,7 @@ function dependencyStatus(command) {
   const executable = resolveCommand(command);
   if (!executable) return { command, available: false, source: '' };
   if (command === 'yt-dlp' && executable === WHISPER_PYTHON) {
-    const probe = spawnSync(executable, ['-m', 'yt_dlp', '--version'], { encoding: 'utf8', env: utf8ChildEnvironment(), windowsHide: true, timeout: 15000 });
+    const probe = spawnSync(executable, ['-m', 'yt_dlp', '--version'], { encoding: 'utf8', env: projectRuntimeEnvironment(), windowsHide: true, timeout: 15000 });
     return {
       command,
       available: probe.status === 0,
@@ -703,7 +703,7 @@ function dependencyStatus(command) {
   }
   const probe = spawnSync(executable, [WHISPER_CLI, '--health', '--model', 'large-v3-turbo'], {
     encoding: 'utf8',
-    env: utf8ChildEnvironment(),
+    env: projectRuntimeEnvironment(),
     windowsHide: true,
     timeout: 15000
   });
@@ -738,8 +738,8 @@ function run(command, args, options = {}) {
   if (command === 'yt-dlp' && executable === WHISPER_PYTHON) finalArgs = ['-m', 'yt_dlp', ...args];
   const capture = Boolean(options.capture);
   const result = spawnSync(executable, finalArgs, capture
-    ? { encoding: 'utf8', env: utf8ChildEnvironment(), maxBuffer: 16 * 1024 * 1024, shell: false, windowsHide: true }
-    : { stdio: 'inherit', env: utf8ChildEnvironment(), shell: false, windowsHide: true });
+    ? { encoding: 'utf8', env: projectRuntimeEnvironment(), maxBuffer: 16 * 1024 * 1024, shell: false, windowsHide: true }
+    : { stdio: 'inherit', env: projectRuntimeEnvironment(), shell: false, windowsHide: true });
   if (capture) {
     if (result.stdout) process.stdout.write(result.stdout);
     if (result.stderr) process.stderr.write(result.stderr);

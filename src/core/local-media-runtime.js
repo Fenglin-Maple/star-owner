@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { utf8ChildEnvironment } = require('./child-process-io');
+const { projectRuntimeEnvironment } = require('./child-process-io');
 const { assertSafeWindowsPath, ensureDir, safeName } = require('./workspace');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
@@ -243,7 +243,7 @@ function runFfmpeg(args, options = {}) {
     const child = spawn(executable, args, {
       cwd: PROJECT_ROOT,
       windowsHide: true,
-      env: utf8ChildEnvironment(),
+      env: projectRuntimeEnvironment(),
       stdio: ['ignore', 'pipe', 'pipe']
     });
     const finish = (error, value) => {

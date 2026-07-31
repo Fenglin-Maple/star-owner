@@ -6,7 +6,7 @@ const { Readable, Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const { recoverAtomicFile, writeFileRecoverable } = require('./atomic-file');
 const { ASR_MODELS, getAsrModelByPackage, isAsrModelPackage } = require('./asr-models');
-const { readUtf8, utf8ChildEnvironment } = require('./child-process-io');
+const { readUtf8, resolveSystemExecutable, utf8ChildEnvironment } = require('./child-process-io');
 const { ensureDir } = require('./workspace');
 
 const REPOSITORY = 'Fenglin-Maple/star-owner';
@@ -486,8 +486,10 @@ class DependencyManager {
   }
 
   async inspectArchive(archive, definition, fallback = false) {
-    const listing = await run('tar.exe', ['-tf', archive], this.projectRoot);
-    const verboseListing = await run('tar.exe', ['-tvf', archive], this.projectRoot);
+    const tar = resolveSystemExecutable('tar.exe');
+    if (!tar) throw new Error('Windows 系统缺少 tar.exe，无法检查依赖包。');
+    const listing = await run(tar, ['-tf', archive], this.projectRoot);
+    const verboseListing = await run(tar, ['-tvf', archive], this.projectRoot);
     if (verboseListing.split(/\r?\n/).some((line) => /^[lh]/i.test(line.trim()))) {
       throw new Error('依赖包包含符号链接或硬链接，已拒绝解压。');
     }
@@ -504,6 +506,8 @@ class DependencyManager {
 
   async extractArchive(archive, definition, fallback = false, inspection = null) {
     const { entries } = inspection || await this.inspectArchive(archive, definition, fallback);
+    const tar = resolveSystemExecutable('tar.exe');
+    if (!tar) throw new Error('Windows 系统缺少 tar.exe，无法解压依赖包。');
     const stagingRoot = path.join(this.projectRoot, 'runtime', `.install-staging-${definition.id}-${crypto.randomBytes(4).toString('hex')}`);
     ensureDir(stagingRoot);
     try {
@@ -518,9 +522,9 @@ class DependencyManager {
         const args = ['-xf', archive, '-C', stagingRoot];
         if (strip) args.push('--strip-components', String(strip));
         args.push(`${prefix}runtime/python`, `${prefix}runtime/faster-whisper`);
-        await run('tar.exe', args, this.projectRoot);
+        await run(tar, args, this.projectRoot);
       } else {
-        await run('tar.exe', ['-xf', archive, '-C', stagingRoot], this.projectRoot);
+        await run(tar, ['-xf', archive, '-C', stagingRoot], this.projectRoot);
       }
       this.installStagedRuntime(stagingRoot, definition);
     } finally {

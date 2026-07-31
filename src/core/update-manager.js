@@ -5,6 +5,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
+const { resolveSystemExecutable } = require('./child-process-io');
 const { ensureDir } = require('./workspace');
 
 const REPOSITORY = 'Fenglin-Maple/star-owner';
@@ -162,7 +163,9 @@ class UpdateManager {
       '-StagedRoot', stagedRoot, '-SourceWorkspace', sourceWorkspace,
       '-TargetVersion', targetVersion, '-Relaunch'
     ];
-    const child = spawn('powershell.exe', args, { detached: true, windowsHide: true, stdio: 'ignore' });
+    const powershell = resolveSystemExecutable('powershell.exe');
+    if (!powershell) throw new Error('Windows 系统缺少 PowerShell，无法执行更新或迁移。');
+    const child = spawn(powershell, args, { detached: true, windowsHide: true, stdio: 'ignore' });
     child.unref();
     this.publish({ status: 'applying', progress: 1, message: mode === 'update' ? '应用即将退出并安装更新，Workspace 与依赖会保留。' : '应用即将退出并迁移旧版本数据，完成后会自动重启。' });
     return { scheduled: true, mode, targetVersion };
@@ -243,8 +246,10 @@ function resolveCoreRelease(release) {
 }
 
 async function inspectArchive(archive, cwd) {
-  const listing = await runCommand('tar.exe', ['-tf', archive], cwd);
-  const verbose = await runCommand('tar.exe', ['-tvf', archive], cwd);
+  const tar = resolveSystemExecutable('tar.exe');
+  if (!tar) throw new Error('Windows 系统缺少 tar.exe，无法检查更新包。');
+  const listing = await runCommand(tar, ['-tf', archive], cwd);
+  const verbose = await runCommand(tar, ['-tvf', archive], cwd);
   if (verbose.split(/\r?\n/).some((line) => /^[lh]/i.test(line.trim()))) throw new Error('更新包包含符号链接或硬链接，已拒绝安装。');
   const entries = listing.split(/\r?\n/).map((item) => item.replaceAll('\\', '/').replace(/\/$/, '')).filter(Boolean);
   return validateArchiveEntries(entries);

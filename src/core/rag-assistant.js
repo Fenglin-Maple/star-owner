@@ -7,7 +7,7 @@ const { pathToFileURL } = require('url');
 const MarkdownIt = require('markdown-it');
 const pdf = require('pdf-parse');
 const mammoth = require('mammoth');
-const { utf8ChildEnvironment } = require('./child-process-io');
+const { projectRuntimeEnvironment, resolveSystemExecutable } = require('./child-process-io');
 const { collectionKindInfo, favoriteStatus } = require('./collection-state');
 const { isPrivateNetworkHost, parseHttpUrl } = require('./network-policy');
 const { assertSafeWindowsPath, ensureDir: ensureWorkspaceDir } = require('./workspace');
@@ -793,6 +793,8 @@ class RagAssistant {
     if (signal?.aborted) throw abortError();
     const workingDirectory = cwd ? await this.authorizePath(session, cwd, 'use command working directory') : session.sandboxDir;
     if (session.permissionMode !== 'full') await this.approve(session, { action: 'run CMD command', target: String(command), detail: `Working directory: ${workingDirectory}` });
+    const commandShell = resolveSystemExecutable('cmd.exe');
+    if (!commandShell) throw new Error('Windows 系统缺少 cmd.exe，无法执行命令。');
     return new Promise((resolve, reject) => {
       let aborted = false;
       let timedOut = false;
@@ -807,7 +809,7 @@ class RagAssistant {
         callback();
       };
       const utf8Command = `chcp 65001>nul & ${String(command)}`;
-      const child = execFile('cmd.exe', ['/d', '/s', '/c', utf8Command], { cwd: workingDirectory, encoding: 'utf8', env: utf8ChildEnvironment(), windowsHide: true, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
+      const child = execFile(commandShell, ['/d', '/s', '/c', utf8Command], { cwd: workingDirectory, encoding: 'utf8', env: projectRuntimeEnvironment(), windowsHide: true, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
         if (aborted) return finish(() => reject(abortError()));
         if (timedOut) return finish(() => reject(new Error('Command timed out after 120 seconds.')));
         if (error) return finish(() => reject(new Error(`${error.message}\n${stderr || stdout}`.trim())));
@@ -1685,8 +1687,11 @@ function readUtf8Prefix(file, maximumCharacters) {
 function killProcessTree(child) {
   if (!child || child.killed) return;
   if (process.platform === 'win32' && child.pid) {
-    const result = spawnSync('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
-    if (result.status === 0) return;
+    const taskkill = resolveSystemExecutable('taskkill.exe');
+    if (taskkill) {
+      const result = spawnSync(taskkill, ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
+      if (result.status === 0) return;
+    }
   }
   try { child.kill('SIGTERM'); } catch {}
 }

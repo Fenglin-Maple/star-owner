@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const { spawn } = require('child_process');
-const { readUtf8, utf8ChildEnvironment } = require('./child-process-io');
+const { projectRuntimeEnvironment, readUtf8 } = require('./child-process-io');
 const { PROJECT_ROOT } = require('./workspace');
 
 class AsrService {
@@ -228,18 +228,13 @@ function findRuntimePython(projectRoot = PROJECT_ROOT) {
 
 function serviceEnvironment(projectRoot = PROJECT_ROOT) {
   const venv = path.join(projectRoot, 'runtime', 'faster-whisper');
-  const vcRuntime = path.join(projectRoot, 'runtime', 'vc-runtime');
   const sitePackages = process.platform === 'win32'
     ? path.join(venv, 'Lib', 'site-packages')
     : path.join(venv, 'lib', 'python3', 'site-packages');
-  const executablePaths = [vcRuntime, path.join(venv, process.platform === 'win32' ? 'Scripts' : 'bin')]
-    .filter((item) => item && fs.existsSync(item));
-  if (process.env.PATH) executablePaths.push(process.env.PATH);
   return {
-    ...utf8ChildEnvironment(),
+    ...projectRuntimeEnvironment(process.env, projectRoot),
     VIRTUAL_ENV: venv,
-    PYTHONPATH: [sitePackages, process.env.PYTHONPATH || ''].filter(Boolean).join(path.delimiter),
-    PATH: executablePaths.join(path.delimiter)
+    PYTHONPATH: sitePackages
   };
 }
 

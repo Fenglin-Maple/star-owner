@@ -4,7 +4,7 @@ const { execFile, spawn, spawnSync } = require('child_process');
 const { promisify } = require('util');
 const { AsrService } = require('./asr-service');
 const { DEFAULT_ASR_MODEL, asrComputeType, getAsrModel, normalizeAsrModel, publicAsrModels } = require('./asr-models');
-const { nodeChildProcessSpec, readUtf8, utf8ChildEnvironment } = require('./child-process-io');
+const { nodeChildProcessSpec, readUtf8, resolveSystemExecutable } = require('./child-process-io');
 const { detectAsrHardware } = require('./hardware-capabilities');
 const { isVideoUnavailableMessage, unsupportedVideoError, videoUnavailableError } = require('./media-errors');
 const { ResourceScheduler } = require('./resource-scheduler');
@@ -1613,8 +1613,11 @@ function delay(ms) {
 function killProcessTree(child) {
   if (!child || child.killed) return;
   if (process.platform === 'win32' && child.pid) {
-    const result = spawnSync('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
-    if (result.status === 0) return;
+    const taskkill = resolveSystemExecutable('taskkill.exe');
+    if (taskkill) {
+      const result = spawnSync(taskkill, ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
+      if (result.status === 0) return;
+    }
   }
   try { child.kill('SIGTERM'); } catch {}
 }
