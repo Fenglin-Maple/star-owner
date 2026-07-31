@@ -71,10 +71,18 @@ function favoriteStatus(task = {}, collection = {}) {
   return { code: 'local', label: '本地内置收藏夹', at: '' };
 }
 
+function collectionKindInfo(collection = {}) {
+  if (collection.collectionKind === 'video-cache') return { code: 'video-cache', label: '内置缓存视频' };
+  if (collection.collectionKind === 'multimodal-document') return { code: 'multimodal-document', label: '多模态文档' };
+  if (collection.internal === true) return { code: 'default', label: '默认' };
+  return { code: 'bilibili', label: 'B站收藏夹' };
+}
+
 module.exports = {
   DELETED_COLLECTION_SUFFIX,
   REMOVED_FAVORITE_SUFFIX,
   collectionBlockReason,
+  collectionKindInfo,
   collectionSourceName,
   collectionStorageName,
   collectionSyncReady,

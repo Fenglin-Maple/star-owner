@@ -291,8 +291,8 @@
         const label = document.createElement('label');
         label.className = 'rag-knowledge-option';
         label.dataset.knowledgeUser = user;
-        label.dataset.knowledgeSearch = `${user} ${collection.name}`.toLocaleLowerCase();
-        label.innerHTML = `<input type="checkbox" value="${escapeAttr(collection.id)}" ${selected.has(collection.id) ? 'checked' : ''} ${!session || streaming ? 'disabled' : ''}><span>${escapeHtml(collection.name)}</span><small>${collection.documentCount} 篇</small>`;
+        label.dataset.knowledgeSearch = `${user} ${collection.name} ${collection.kindInfo?.label || ''}`.toLocaleLowerCase();
+        label.innerHTML = `<input type="checkbox" value="${escapeAttr(collection.id)}" ${selected.has(collection.id) ? 'checked' : ''} ${!session || streaming ? 'disabled' : ''}><span>${escapeHtml(collection.name)}</span>${collection.kindInfo?.label ? `<em class="collection-kind-badge" data-kind="${escapeAttr(collection.kindInfo.code)}">${escapeHtml(collection.kindInfo.label)}</em>` : ''}<small>${collection.documentCount} 篇</small>`;
         label.querySelector('input').addEventListener('change', () => updateKnowledgeSelection(menu));
         menu.appendChild(label);
       }
@@ -783,6 +783,10 @@
   function handleEvent(event) {
     if (!event) return;
     if (event.type === 'approval-request') return showApproval(event.approval);
+    if (event.type === 'knowledge-catalog-changed') {
+      refresh(activeSessionId, { quiet: true });
+      return;
+    }
     const eventSessionId = String(event.sessionId || '');
     const active = !eventSessionId || eventSessionId === activeSessionId;
     const visible = elements.page.classList.contains('active');

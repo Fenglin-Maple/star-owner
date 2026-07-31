@@ -15,17 +15,17 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-1d2939" alt="GPL-3.0-or-later 许可证"></a>
 </p>
 
-星藏家是一个面向 Bilibili 收藏夹的本地视频知识整理桌面应用。它负责收藏夹同步、视频缓存、ASR、关键帧、字幕比较、AI 视频总结、Markdown 文档库、RAG 对话和知识库导出。
+星藏家是一个面向 Bilibili 收藏夹的本地视频知识整理桌面应用。它负责收藏夹同步、视频缓存、ASR、关键帧、字幕比较、AI 视频总结、Markdown 文档库、RAG 对话、知识库导出，以及“B站之外”中的本地媒体和多模态文档工具。
 
 项目主页与源码：[Fenglin-Maple/star-owner](https://github.com/Fenglin-Maple/star-owner)
 
 **Built with OpenAI Codex.**
 
-> `1.1.3` 版本边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
+> `1.2.0` 版本边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
 >
 > 当前稳定版只处理普通 BV 单 P 视频。多 P 视频会在元数据阶段被识别、清理本次缓存并关闭任务；`ep/ss/md`、课程、活动聚合、音频和直播等特殊页面会在输入阶段直接拒绝。这样可以避免把只处理第一 P 的结果误标为完整总结。完整多 P 支持将在独立 Git 分支完成并通过专项测试后再合并。
 
-`1.1.3` 默认使用多语言 `large-v3-turbo` ASR：NVIDIA GPU 使用 `int8_float16`，CPU 使用 `int8`。CPU 与 CUDA 是互斥的独立运行模式，ASR 请求仍在选定通道中排队。当前版本只在应用中暴露 `large-v3-turbo` 和 `small`；旧版 `medium` 依赖包保留在历史 Release 中供旧应用使用，不会被新版本删除或展示。本版本还将大列表和后台流式事件改为仅重绘当前可见栏目，减少切换栏目时的渲染阻塞；“终末地 / Endfield”使用黑色侧栏和白色选中态，“B站之外”入口的显示/隐藏带有过渡动画。
+`1.2.0` 默认使用多语言 `large-v3-turbo` ASR：NVIDIA GPU 使用 `int8_float16`，CPU 使用 `int8`。CPU 与 CUDA 是互斥的独立运行模式，ASR 请求仍在选定通道中排队。当前版本只在应用中暴露 `large-v3-turbo` 和 `small`；旧版 `medium` 依赖包保留在历史 Release 中供旧应用使用，不会被新版本删除或展示。本版本的本地工具复用应用媒体和 ASR 资源池，大批任务只向界面发送计数和失败摘要，避免进度更新拖慢主界面；“终末地 / Endfield”使用黑色侧栏和白色选中态，“B站之外”入口的显示/隐藏带有过渡动画。
 
 ## 快速安装与第一次使用
 
@@ -79,6 +79,13 @@
 - 下载队列与视频库支持合轨视频缓存、封面、横竖屏播放、条件筛选、文件缺失检测和确认删除；缓存视频收藏夹也可作为 AI 总结任务来源。
 - 自动检测 NVIDIA GPU、CTranslate2 CUDA、显存、项目内 Python 和 ASR 模型；可在 `small` 与 `large-v3-turbo` 间切换，并提供默认关闭的独立 CPU ASR 模式。CPU 模式启用后不会同时运行 CUDA ASR。
 - 数据库、Cookie、模型配置、缓存、日志和最终产物默认保存在项目 `workspace/` 与用户注册的 Workspace 库中，便于迁移、备份和统一管理。
+
+### “B站之外”本地工具箱
+
+- “视频 / 音频字幕生成”支持选择文件夹内可读取的音视频，复用统一媒体与 ASR 队列，按需生成 `SRT`、`VTT`、`LRC`、`TXT` 和 `JSON`，字幕写回各原文件目录。
+- “本地视频导入内置缓存收藏夹”支持单个或多个视频、视频文件夹；只接受项目内置 FFmpeg 可解码的视频，导入前显示同名冲突，支持逐项跳过或覆盖。视频会按每 10 分钟 50 MiB 的预算压缩，竖屏比例保留，源文件不移动；导入记录带有本地来源、导入/投稿/收藏时间和可派发 Agent 任务。
+- “本地文档知识库导入”支持图片、PDF、DOCX、PPTX、XLSX/XLSM、Markdown 和常见文本。原件、Markdown 索引与图片资源都会保存到“多模态文档”收藏夹，RAG 可以读取原始 Markdown 和可识别的本地图片；PDF 文本解析在独立的项目 Node 子进程中执行，并有超时与内存边界。
+- 本地工具中断或应用关闭时，已完成条目保留，当前及未开始条目回退并清理过渡文件。现代 Office 使用受限 ZIP/XML 解析；旧式二进制 `.doc`、`.ppt`、`.xls` 不在当前支持范围，避免依赖系统 Office 或全局运行时。
 
 ## 桌面导航
 
@@ -183,6 +190,9 @@ asr/asr-result.json
 | `bili-subtitles` | 提取各分 P 站内字幕并检查覆盖率 |
 | `comments-top3` | 获取热评前三条 |
 | `clean-cache` | 删除临时音视频，保护已登记缓存源 |
+| `local-subtitles` | 生成本地视频/音频的 SRT、VTT、LRC、TXT 或 JSON 字幕 |
+| `local-video-import` | 压缩本地视频并导入内置缓存视频收藏夹 |
+| `local-document-import` | 导入本地多模态文档、原件和图片资源 |
 
 这些工具只由应用内工作流调用。外部进程不能通过 HTTP 执行工具。工具模块页面可查看用途、提示词、内部命令、输出和开源项目来源，也可以禁用某个模块。
 
@@ -299,7 +309,7 @@ Windows 产物路径按传统 259 字符安全上限预算。标题包含 `\ / :
 
 自 1.0.9 起，应用支持在设置中检查 GitHub 最新稳定版并执行校验、暂存、替换和失败回滚，保留 `workspace/`、`runtime/` 与视频产物。旧版 v1.0.3 及更高版本可通过设置中的迁移入口导入完整 workspace；迁移前应停止 Agent、关闭旧应用，并把完整项目放在较短目录中。
 
-“B站之外”是预留的一级工具箱栏目，默认展示，可在设置中关闭；本版本只提供入口框架，不承诺其中的本地视频 ASR、TTS 或 PDF 工具已经实现。
+“B站之外”是可在设置中关闭的一级工具箱栏目。1.2.0 已提供本地视频/音频字幕、本地视频压缩导入内置缓存收藏夹、本地多模态文档知识库导入；TTS、本地 PDF 总结等其它工具仍为后续规划，不会显示为已实现功能。
 
 Windows 10/11 x64 用户可从 [GitHub Releases](https://github.com/Fenglin-Maple/star-owner/releases/latest) 下载便携包：
 
@@ -309,7 +319,7 @@ Windows 10/11 x64 用户可从 [GitHub Releases](https://github.com/Fenglin-Mapl
 4. 首次启动若提示缺少 ASR 模型，可允许应用自动下载；也可在设置的“项目依赖包”中点击模型名称打开正确 Release，下载完整 ZIP 后直接“从本地导入”。下载中的按钮会变成“暂停”，暂停会保留 `.partial` 断点缓存，之后可继续下载；下载中或暂停时点击“从本地导入”会先中止自动下载并清理受管缓存。默认使用 `large-v3-turbo`，资源不足时可切换 `small`；如果没有 NVIDIA/CUDA，可在设置中改用独立 CPU ASR。
 5. 按启动页“第一次上手”依次完成模型配置、B站登录、收藏夹同步、任务检查和 Agent 工作流创建。
 
-运行时和模型 ZIP 是应用内依赖管理器使用的独立资产。设置页可以重新检查、下载或修复依赖，并可导入手动下载的 `small`、`large-v3-turbo` ZIP。`1.1.3` 继续使用 `v1.0.0` 依赖基线，接受精确名称 `Star-Owner-v1.0.0-model-small.zip` 和 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`；旧版 `medium` ZIP 仍保留在该 Release 供旧版本使用。依赖管理器核对 GitHub Release SHA-256、模型类型和目录结构，未经校验的包不会安装，错误导入不会损伤原有健康模型。
+运行时和模型 ZIP 是应用内依赖管理器使用的独立资产。设置页可以重新检查、下载或修复依赖，并可导入手动下载的 `small`、`large-v3-turbo` ZIP。`1.2.0` 继续使用 `v1.0.0` 依赖基线，接受精确名称 `Star-Owner-v1.0.0-model-small.zip` 和 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`；旧版 `medium` ZIP 仍保留在该 Release 供旧版本使用。依赖管理器核对 GitHub Release SHA-256、模型类型和目录结构，未经校验的包不会安装，错误导入不会损伤原有健康模型。
 
 源码运行：
 

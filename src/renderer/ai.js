@@ -292,7 +292,7 @@
       elements.agentFrameInterval.value = '25';
       elements.agentRetainCache.checked = false;
       populateProviderSelect(elements.agentProvider, elements.agentModel, state.providers.find((item) => item.enabledModels?.length)?.id || '', '');
-      elements.agentCollection.innerHTML = '<option value="">选择任务收藏夹</option>' + state.collections.map((item) => `<option value="${esc(item.id)}" ${item.collectionAvailable === false ? 'disabled' : ''}>${html(item.userName)} / ${html(item.name)} · ${item.collectionAvailable === false ? '任务不可用' : `待处理 ${item.pending}`}</option>`).join('');
+      elements.agentCollection.innerHTML = '<option value="">选择任务收藏夹</option>' + state.collections.map((item) => `<option value="${esc(item.id)}" ${item.collectionAvailable === false ? 'disabled' : ''}>${html(item.userName)} / ${html(item.name)} · ${html(item.kindInfo?.label || 'B站收藏夹')} · ${item.collectionAvailable === false ? '任务不可用' : `待处理 ${item.pending}`}</option>`).join('');
     } catch (error) {
       notify('无法读取 Agent 配置', error.message || String(error), 'error');
     } finally {

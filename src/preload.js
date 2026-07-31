@@ -72,6 +72,18 @@ contextBridge.exposeInMainWorld('orchestrator', {
   videoCacheOpen: (id) => ipcRenderer.invoke('video-cache:open', id),
   videoCacheDeleteVideos: (ids) => ipcRenderer.invoke('video-cache:delete-videos', ids),
   videoCacheDeleteCollection: (id) => ipcRenderer.invoke('video-cache:delete-collection', id),
+  localToolboxState: () => ipcRenderer.invoke('local-tools:state'),
+  localSubtitleSelectFolder: () => ipcRenderer.invoke('local-tools:subtitle-select-folder'),
+  localSubtitleStart: (payload) => ipcRenderer.invoke('local-tools:subtitle-start', payload),
+  localVideoSelectFiles: () => ipcRenderer.invoke('local-tools:video-select-files'),
+  localVideoSelectFolder: () => ipcRenderer.invoke('local-tools:video-select-folder'),
+  localVideoPreview: (payload) => ipcRenderer.invoke('local-tools:video-preview', payload),
+  localVideoStart: (payload) => ipcRenderer.invoke('local-tools:video-start', payload),
+  localDocumentSelectFiles: () => ipcRenderer.invoke('local-tools:document-select-files'),
+  localDocumentPreview: (payload) => ipcRenderer.invoke('local-tools:document-preview', payload),
+  localDocumentStart: (payload) => ipcRenderer.invoke('local-tools:document-start', payload),
+  localToolCancel: (jobId) => ipcRenderer.invoke('local-tools:cancel', jobId),
+  localToolOpenOutput: (jobId) => ipcRenderer.invoke('local-tools:open-output', jobId),
   dependencyState: () => ipcRenderer.invoke('dependencies:state'),
   dependencyAcknowledge: (payload) => ipcRenderer.invoke('dependencies:acknowledge', payload),
   dependencyDownload: (packageId) => ipcRenderer.invoke('dependencies:download', packageId),
@@ -124,6 +136,13 @@ contextBridge.exposeInMainWorld('orchestrator', {
   onVideoCacheEvent: (callback) => {
     const listener = (_event, data) => {
       if (String(data?.type || '').startsWith('video-cache-')) callback(data);
+    };
+    ipcRenderer.on('app:event', listener);
+    return () => ipcRenderer.removeListener('app:event', listener);
+  },
+  onLocalToolboxEvent: (callback) => {
+    const listener = (_event, data) => {
+      if (String(data?.type || '').startsWith('local-toolbox-') || data?.type === 'local-knowledge-catalog-changed') callback(data);
     };
     ipcRenderer.on('app:event', listener);
     return () => ipcRenderer.removeListener('app:event', listener);

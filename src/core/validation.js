@@ -57,7 +57,9 @@ function validateSubmission(task, submission, options = {}) {
     }
     const timelineLinks = [...markdown.matchAll(/https?:\/\/(?:www\.)?bilibili\.com\/video\/[^\s)]+[?&]t=\d+(?:\.\d+)?/ig)].map((match) => match[0]);
     const expectedBvid = String(task.bvid || '').toLowerCase();
-    if (!timelineLinks.length || (expectedBvid && !timelineLinks.some((link) => link.toLowerCase().includes(`/video/${expectedBvid}`)))) {
+    if (task.localImported === true || task.sourceType === 'local-video') {
+      if (!/\b\d{2}:\d{2}:\d{2}(?:,|\.)\d{3}\b|\b\d{2}:\d{2}:\d{2}\b/.test(markdown)) errors.push('本地视频 Markdown 必须包含至少一个真实 ASR 时间点。');
+    } else if (!timelineLinks.length || (expectedBvid && !timelineLinks.some((link) => link.toLowerCase().includes(`/video/${expectedBvid}`)))) {
       errors.push('Markdown must include at least one timeline link for the current Bilibili video with a real ?t=<seconds> value.');
     }
     const summaryIndex = markdown.search(/^##\s+小结\s*$/m);
@@ -122,7 +124,9 @@ function validateImageSignature(file, errors) {
           ? buffer.length >= 12 && buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'WEBP'
           : extension === '.avif'
             ? buffer.length >= 12 && buffer.subarray(4, 8).toString('ascii') === 'ftyp' && buffer.subarray(8, 12).toString('ascii').includes('avif')
-            : false;
+            : extension === '.bmp'
+              ? buffer.length >= 2 && buffer.subarray(0, 2).toString('ascii') === 'BM'
+              : false;
   if (!valid) errors.push(`Referenced image content does not match a supported raster image format: ${file}`);
 }
 

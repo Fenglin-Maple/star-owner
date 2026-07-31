@@ -7,6 +7,7 @@ const MarkdownIt = require('markdown-it');
 const { buildAnalytics } = require('./core/analytics');
 const { ApiServer } = require('./core/api-server');
 const { BiliClient, assertBilibiliImageUrl, isBilibiliCookieDomain, normalizeBilibiliAssetUrl } = require('./core/bili');
+const { collectionKindInfo } = require('./core/collection-state');
 const { CollectionSyncService } = require('./core/collection-sync-service');
 const { DependencyManager } = require('./core/dependency-manager');
 const { isAsrModelPackage } = require('./core/asr-models');
@@ -16,6 +17,7 @@ const { ensurePortableDesktopShortcut } = require('./core/desktop-shortcut');
 const { assertHiddenBrowserUrl, installHiddenBrowserRequestGuard } = require('./core/hidden-browser-policy');
 const { InternalAgentManager } = require('./core/internal-agent-manager');
 const { loadClipboardImage } = require('./core/image-clipboard');
+const { LocalToolboxManager } = require('./core/local-toolbox-manager');
 const { promoteMindMap, wrapMarkdownTables } = require('./core/markdown');
 const { isPrivateNetworkHost } = require('./core/network-policy');
 const { repairPortablePythonHome } = require('./core/portable-runtime');
@@ -57,6 +59,7 @@ let ragAssistant = null;
 let internalAgentManager = null;
 let dependencyManager = null;
 let videoCacheManager = null;
+let localToolboxManager = null;
 let collectionSyncService = null;
 let startupFolderProbe = null;
 let updateManager = null;
@@ -68,7 +71,7 @@ let backendReady = false;
 let toolHealth = [];
 let pathSafety = null;
 let bootstrapStarted = false;
-const VOLATILE_ACTIVITY_TYPES = new Set(['collection-sync-progress', 'asr-progress', 'asr-service-log', 'video-cache-job-updated', 'video-cache-queue-updated']);
+const VOLATILE_ACTIVITY_TYPES = new Set(['collection-sync-progress', 'asr-progress', 'asr-service-log', 'video-cache-job-updated', 'video-cache-queue-updated', 'local-toolbox-job-created', 'local-toolbox-job-updated', 'local-toolbox-queue-updated']);
 const pendingRagApprovals = new Map();
 const taskDisplayCoverCache = new Map();
 let bootstrapState = {
@@ -241,6 +244,12 @@ async function bootstrap() {
     getCurrentUser: () => currentUser,
     emit: publishEvent
   });
+  localToolboxManager = new LocalToolboxManager({
+    store,
+    toolRunner,
+    videoCacheManager,
+    emit: publishLocalToolboxEvent
+  });
   dependencyManager = new DependencyManager({
     store,
     projectRoot: path.resolve(__dirname, '..'),
@@ -281,6 +290,7 @@ async function bootstrap() {
   emitBootstrap('正在加载常驻 GPU ASR 服务…', 0.84);
   await toolRunner.initialize();
   videoCacheManager.initialize();
+  localToolboxManager.initialize();
   emitBootstrap('正在启动资源池和知识库接口…', 0.92);
   apiServer = new ApiServer({
     store,
@@ -322,6 +332,7 @@ app.on('before-quit', () => {
   ragAssistant?.shutdown();
   internalAgentManager?.shutdown();
   videoCacheManager?.shutdown();
+  localToolboxManager?.shutdown();
   toolRunner?.shutdown();
   for (const pending of pendingRagApprovals.values()) {
     clearTimeout(pending.timer);
@@ -341,6 +352,7 @@ ipcMain.handle('app:get-runtime', async () => ({
   filenameMetadata: store?.getFilenameMetadata() || null,
   dependencies: dependencyManager?.state() || null,
   videoCache: videoCacheManager?.state() || null,
+  localToolbox: localToolboxManager?.state() || null,
   pathSafety,
   backendReady,
   bootstrap: bootstrapState,
@@ -502,7 +514,7 @@ function refreshBilibiliUser() {
 }
 
 ipcMain.handle('store:snapshot', async () => {
-  if (!store) return { users: [], collections: [], tasks: [], tools: [], toolRuns: [], workspaces: [], videoCache: { collections: [], videos: [], jobs: [] }, analytics: { collections: {}, tools: [] }, activities: [] };
+  if (!store) return { users: [], collections: [], tasks: [], tools: [], toolRuns: [], workspaces: [], videoCache: { collections: [], videos: [], jobs: [] }, localToolbox: { jobs: [], videoCollections: [], documentCollections: [] }, analytics: { collections: {}, tools: [] }, activities: [] };
   return {
     users: store.list('users'),
     collections: store.listCollections().map(rendererCollection),
@@ -513,6 +525,7 @@ ipcMain.handle('store:snapshot', async () => {
     workers: store.listWorkers(),
     internalAgentSessions: internalAgentManager?.state().sessions || [],
     videoCache: videoCacheManager?.state() || { collections: [], videos: [], jobs: [] },
+    localToolbox: localToolboxManager?.state() || { jobs: [], videoCollections: [], documentCollections: [] },
     analytics: buildAnalytics(store),
     scheduler: toolRunner?.getState() || null,
     settings: { filenameMetadata: store.getFilenameMetadata(), uiPreferences: store.getUiPreferences?.() || { showOutsideBilibili: true } },
@@ -578,6 +591,82 @@ ipcMain.handle('settings:filename-metadata', async (_event, value) => {
   publishEvent({ type: 'filename-metadata-changed', filenameMetadata });
   sendRuntime();
   return filenameMetadata;
+});
+
+ipcMain.handle('local-tools:state', async () => localToolboxManager?.state() || { jobs: [], videoCollections: [], documentCollections: [] });
+
+ipcMain.handle('local-tools:subtitle-select-folder', async () => {
+  assertBackendReady();
+  const result = await dialog.showOpenDialog(mainWindow, { title: '选择包含视频或音频的文件夹', properties: ['openDirectory'] });
+  if (result.canceled || !result.filePaths[0]) return { canceled: true };
+  return { canceled: false, selection: await localToolboxManager.inspectSubtitleDirectory(result.filePaths[0]) };
+});
+
+ipcMain.handle('local-tools:video-select-files', async () => {
+  assertBackendReady();
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '选择一个或多个本地视频',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: '视频文件', extensions: ['mp4', 'mkv', 'webm', 'mov', 'avi', 'm4v', 'flv', 'wmv', 'ts', 'mts', 'm2ts'] }]
+  });
+  if (result.canceled || !result.filePaths.length) return { canceled: true };
+  return { canceled: false, selection: await localToolboxManager.inspectVideoSelection(result.filePaths) };
+});
+
+ipcMain.handle('local-tools:video-select-folder', async () => {
+  assertBackendReady();
+  const result = await dialog.showOpenDialog(mainWindow, { title: '选择包含本地视频的文件夹', properties: ['openDirectory'] });
+  if (result.canceled || !result.filePaths[0]) return { canceled: true };
+  return { canceled: false, selection: await localToolboxManager.inspectVideoSelection(result.filePaths) };
+});
+
+ipcMain.handle('local-tools:video-preview', async (_event, payload = {}) => {
+  assertBackendReady();
+  return localToolboxManager.previewVideoImport(payload.selectionId, payload);
+});
+
+ipcMain.handle('local-tools:video-start', async (_event, payload = {}) => {
+  assertBackendReady();
+  return localToolboxManager.startVideoImport(payload.selectionId, payload);
+});
+
+ipcMain.handle('local-tools:document-select-files', async () => {
+  assertBackendReady();
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '选择要导入知识库的本地文档',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: '多模态文档', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'pdf', 'docx', 'pptx', 'xlsx', 'xlsm', 'md', 'markdown', 'txt', 'csv', 'tsv', 'json', 'jsonl', 'xml', 'yaml', 'yml', 'log', 'ini', 'toml', 'html', 'htm'] }]
+  });
+  if (result.canceled || !result.filePaths.length) return { canceled: true };
+  return { canceled: false, selection: localToolboxManager.inspectDocumentSelection(result.filePaths) };
+});
+
+ipcMain.handle('local-tools:document-preview', async (_event, payload = {}) => {
+  assertBackendReady();
+  return localToolboxManager.previewDocumentImport(payload.selectionId, payload);
+});
+
+ipcMain.handle('local-tools:document-start', async (_event, payload = {}) => {
+  assertBackendReady();
+  return localToolboxManager.startDocumentImport(payload.selectionId, payload);
+});
+
+ipcMain.handle('local-tools:subtitle-start', async (_event, payload = {}) => {
+  assertBackendReady();
+  return localToolboxManager.startSubtitleJob(payload.selectionId, payload.formats || []);
+});
+
+ipcMain.handle('local-tools:cancel', async (_event, jobId) => {
+  assertBackendReady();
+  return localToolboxManager.cancel(jobId);
+});
+
+ipcMain.handle('local-tools:open-output', async (_event, jobId) => {
+  assertBackendReady();
+  const directory = localToolboxManager.outputDirectory(jobId);
+  const error = await shell.openPath(directory);
+  if (error) throw new Error(error);
+  return { directory };
 });
 
 ipcMain.handle('settings:ui-preferences', async (_event, value = {}) => {
@@ -1132,6 +1221,7 @@ function sendRuntime() {
     filenameMetadata: store?.getFilenameMetadata() || null,
     dependencies: dependencyManager?.state() || null,
     videoCache: videoCacheManager?.state() || null,
+    localToolbox: localToolboxManager?.state() || null,
     pathSafety,
     backendReady,
     bootstrap: bootstrapState,
@@ -1171,7 +1261,7 @@ async function refreshToolHealth() {
 function publishEvent(event) {
   const record = { createdAt: new Date().toISOString(), ...event };
   if (store && !VOLATILE_ACTIVITY_TYPES.has(event.type)) {
-    const { cacheState, ...activity } = record;
+    const { cacheState, localToolbox, ...activity } = record;
     store.recordActivity(activity);
   }
   mainWindow?.webContents.send('app:event', record);
@@ -1191,6 +1281,11 @@ function buildTaskSnapshot(activeStore) {
   });
 }
 
+function publishLocalToolboxEvent(event) {
+  publishEvent(event);
+  if (event.type === 'local-knowledge-catalog-changed') mainWindow?.webContents.send('rag:event', { type: 'knowledge-catalog-changed', collectionId: event.collectionId || '' });
+}
+
 function publicCurrentUser(user) {
   if (!user) return null;
   const { cookieFile, ...safe } = user;
@@ -1200,7 +1295,7 @@ function publicCurrentUser(user) {
 function rendererCollection(collection) {
   if (!collection) return null;
   const { cookieFile, ...safe } = collection;
-  return safe;
+  return { ...safe, kindInfo: collectionKindInfo(collection) };
 }
 
 function rendererTask(task) {

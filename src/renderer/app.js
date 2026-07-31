@@ -166,7 +166,9 @@ const SNAPSHOT_IGNORED_EVENTS = new Set([
   'desktop-shortcut-created',
   'desktop-shortcut-failed',
   'video-cache-job-updated',
-  'video-cache-queue-updated'
+  'video-cache-queue-updated',
+  'local-toolbox-job-updated',
+  'local-toolbox-queue-updated'
 ]);
 
 const TEXT = {
@@ -2292,7 +2294,7 @@ function syncDocumentSelectors() {
   const userId = documentUserSelect.value;
   const available = collections.filter((collection) => String(collection.userId || collection.userName) === userId);
   const previousCollection = documentCollectionSelect.value;
-  documentCollectionSelect.innerHTML = `<option value="">${TEXT.allCollections}</option>${available.map((collection) => `<option value="${escapeHtml(collection.id)}">${escapeHtml(collection.name)} (${documents.filter((item) => item.collection.id === collection.id).length} \u7bc7)</option>`).join('')}`;
+  documentCollectionSelect.innerHTML = `<option value="">${TEXT.allCollections}</option>${available.map((collection) => `<option value="${escapeHtml(collection.id)}">${escapeHtml(collection.name)} · ${escapeHtml(collection.kindInfo?.label || 'B站收藏夹')} (${documents.filter((item) => item.collection.id === collection.id).length} \u7bc7)</option>`).join('')}`;
   if (available.some((collection) => collection.id === previousCollection)) documentCollectionSelect.value = previousCollection;
 }
 
@@ -2559,7 +2561,7 @@ function syncExportSelectors() {
   const userId = userSelect.value;
   const previousCollection = collectionSelect.value;
   const available = collections.filter((collection) => String(collection.userId || collection.userName) === userId);
-  collectionSelect.innerHTML = `<option value="">\u5168\u90e8\u6536\u85cf\u5939</option>${available.map((collection) => `<option value="${escapeHtml(collection.id)}">${escapeHtml(collection.name)} (${(lastSnapshot.tasks || []).filter((task) => task.collectionId === collection.id && task.status === 'done' && task.outputMarkdown && task.knowledgeActive !== false).length} \u7bc7)</option>`).join('')}`;
+  collectionSelect.innerHTML = `<option value="">\u5168\u90e8\u6536\u85cf\u5939</option>${available.map((collection) => `<option value="${escapeHtml(collection.id)}">${escapeHtml(collection.name)} · ${escapeHtml(collection.kindInfo?.label || 'B站收藏夹')} (${(lastSnapshot.tasks || []).filter((task) => task.collectionId === collection.id && task.status === 'done' && task.outputMarkdown && task.knowledgeActive !== false).length} \u7bc7)</option>`).join('')}`;
   if (available.some((collection) => collection.id === previousCollection)) collectionSelect.value = previousCollection;
 }
 

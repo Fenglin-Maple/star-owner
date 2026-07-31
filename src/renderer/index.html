@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="./rag.css" />
     <link rel="stylesheet" href="./ai.css" />
     <link rel="stylesheet" href="./cache.css" />
+    <link rel="stylesheet" href="./outside.css" />
   </head>
   <body class="theme-night">
     <div class="window">
@@ -677,7 +678,7 @@
                 <div class="update-migration-row"><button id="inspectMigration" class="secondary-button" type="button">从 v1.0.3 迁移数据</button><span>选择旧版安装目录，确认后应用会退出并迁移 workspace。</span></div>
               </section>
               <section class="section-block outside-settings">
-                <div class="section-title"><div><h2>B站之外栏目</h2><p>预留本地视频、PDF、图片与音频工具箱入口，暂未开放具体工具。</p></div><label class="switch" title="显示或隐藏 B站之外栏目"><input id="outsideBilibiliToggle" type="checkbox" checked /><span></span></label></div>
+                <div class="section-title"><div><h2>B站之外栏目</h2><p>提供本地字幕生成、本地视频导入和多模态文档知识库工具。</p></div><label class="switch" title="显示或隐藏 B站之外栏目"><input id="outsideBilibiliToggle" type="checkbox" checked /><span></span></label></div>
               </section>
               <section class="section-block filename-settings">
                 <div class="section-title"><div><h2 data-i18n="artifactNaming"></h2><p data-i18n="artifactNamingHint"></p></div></div>
@@ -753,8 +754,34 @@
           </section>
 
           <section class="page outside-bilibili-page" id="page-outside-bilibili">
-            <div class="page-head"><h1>B站之外</h1><p>未来将在这里集中提供本地媒体、文档与音频工具。</p></div>
-            <section class="section-block outside-placeholder"><div class="outside-placeholder-icon"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M5 5l14 14M19 5L5 19"/></svg></div><div><h2>工具箱正在规划中</h2><p>当前版本先保留入口，不会改变已有 B 站视频总结、知识库和导出流程。</p></div></section>
+            <div class="page-head"><h1>B站之外</h1><p>本地媒体处理与多模态知识库工具。</p></div>
+            <div class="outside-tool-stack">
+              <section class="section-block outside-tool" data-local-tool="subtitles">
+                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 10h4M7 14h7M16 10h1"/></svg></div><div><h2>视频 / 音频字幕生成</h2><p>批量识别所选文件夹中的音视频，字幕写回原文件目录。</p></div><button id="localSubtitleChoose" class="primary-button" type="button">选择文件夹</button></div>
+                <div class="local-subtitle-options">
+                  <span>输出格式</span>
+                  <label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="srt" checked /><span>SRT</span></label>
+                  <label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="vtt" checked /><span>VTT</span></label>
+                  <label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="lrc" /><span>LRC</span></label>
+                  <label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="txt" /><span>TXT</span></label>
+                  <label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="json" /><span>JSON</span></label>
+                </div>
+                <div id="localSubtitleSelection" class="local-selection-summary">尚未选择文件夹</div>
+                <div class="outside-tool-actions"><button id="localSubtitleStart" class="primary-button" type="button" disabled>开始生成字幕</button></div>
+                <div id="localSubtitleJob" class="local-tool-job-slot"></div>
+              </section>
+
+              <section class="section-block outside-tool" data-local-tool="video-import">
+                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9 9l6 3-6 3zM4 19h16"/></svg></div><div><h2>本地视频导入内置缓存收藏夹</h2><p>压缩并规范化本地视频，导入后可由 Agent 视频总结工作流直接处理。</p></div></div>
+                <div class="outside-tool-actions"><button id="localVideoChooseFiles" class="primary-button" type="button">选择视频</button><button id="localVideoChooseFolder" class="secondary-button" type="button">选择视频文件夹</button></div>
+                <div id="localVideoJob" class="local-tool-job-slot"></div>
+              </section>
+
+              <section class="section-block outside-tool" data-local-tool="document-import">
+                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M9 12h6M9 16h6"/></svg></div><div><h2>本地文档知识库导入</h2><p>导入图片、PDF、DOCX、PPTX、XLSX、Markdown 与常见文本文件。</p></div><button id="localDocumentChoose" class="primary-button" type="button">选择文档</button></div>
+                <div id="localDocumentJob" class="local-tool-job-slot"></div>
+              </section>
+            </div>
           </section>
 
           <section class="page readme-layout" id="page-readme">
@@ -883,6 +910,28 @@
       <button id="ragContextEdit" type="button"><svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16zM13 7l4 4"/></svg><span>编辑会话</span></button>
       <button id="ragContextDelete" class="danger" type="button"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14"/></svg><span>删除会话</span></button>
     </div>
+    <div id="localVideoImportModal" class="rag-modal" hidden>
+      <section class="rag-modal-dialog local-import-dialog" role="dialog" aria-modal="true" aria-labelledby="localVideoImportTitle">
+        <header><div><h2 id="localVideoImportTitle">导入本地视频</h2><p id="localVideoImportSummary">正在检查视频</p></div><button id="localVideoImportClose" class="icon-action" type="button" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M5 5l14 14M19 5L5 19"/></svg></button></header>
+        <div class="local-import-body">
+          <div class="local-collection-picker"><label><span>内置缓存视频收藏夹</span><select id="localVideoCollectionSelect"></select></label><label id="localVideoCollectionNameRow"><span>新收藏夹名称</span><input id="localVideoCollectionName" maxlength="80" /></label><div id="localVideoCollectionKind" class="collection-kind-note"></div></div>
+          <div class="local-import-legend"><span class="is-new">新文件</span><span class="is-existing">存在同名文件</span></div>
+          <div id="localVideoImportList" class="local-import-list"></div>
+        </div>
+        <footer><button id="localVideoImportCancel" class="secondary-button" type="button">取消</button><span></span><span></span><button id="localVideoImportStart" class="primary-button" type="button">开始压缩并导入</button></footer>
+      </section>
+    </div>
+    <div id="localDocumentImportModal" class="rag-modal" hidden>
+      <section class="rag-modal-dialog local-import-dialog" role="dialog" aria-modal="true" aria-labelledby="localDocumentImportTitle">
+        <header><div><h2 id="localDocumentImportTitle">导入本地多模态文档</h2><p id="localDocumentImportSummary">正在检查文档</p></div><button id="localDocumentImportClose" class="icon-action" type="button" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M5 5l14 14M19 5L5 19"/></svg></button></header>
+        <div class="local-import-body">
+          <div class="local-collection-picker"><label><span>内置多模态格式收藏夹</span><select id="localDocumentCollectionSelect"></select></label><label id="localDocumentCollectionNameRow"><span>新收藏夹名称</span><input id="localDocumentCollectionName" maxlength="80" /></label><div class="collection-kind-note"><span class="collection-kind-badge" data-kind="multimodal-document">多模态文档</span></div></div>
+          <div class="local-import-legend"><span class="is-new">新文件</span><span class="is-existing">存在同名同格式文件</span></div>
+          <div id="localDocumentImportList" class="local-import-list"></div>
+        </div>
+        <footer><button id="localDocumentImportCancel" class="secondary-button" type="button">取消</button><span></span><span></span><button id="localDocumentImportStart" class="primary-button" type="button">开始导入知识库</button></footer>
+      </section>
+    </div>
     <div id="ragProviderModal" class="rag-modal" hidden>
       <section class="rag-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="ragProviderModalTitle">
         <header><div><h2 id="ragProviderModalTitle">模型供应商</h2><p>OpenAI 与 NewAPI 兼容接口</p></div><button id="ragCloseProviders" class="icon-action" type="button" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M5 5l14 14M19 5L5 19"/></svg></button></header>
@@ -928,5 +977,6 @@
     <script src="./rag.js"></script>
     <script src="./ai.js"></script>
     <script src="./cache.js"></script>
+    <script src="./outside.js"></script>
   </body>
 </html>

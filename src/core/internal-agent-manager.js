@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { applySubmissionFinalization, stageSubmissionFinalization } = require('./submission-artifacts');
-const { collectionBlockReason, collectionStorageName } = require('./collection-state');
+const { collectionBlockReason, collectionKindInfo, collectionStorageName } = require('./collection-state');
 const { promoteMindMap } = require('./markdown');
 const { isLoginRequiredMessage, isVideoUnavailableMessage, loginRequiredError } = require('./media-errors');
 const { abortTaskAttempt, cleanupAttemptFiles, createWorkId } = require('./task-attempt');
@@ -57,6 +57,7 @@ class InternalAgentManager {
           name: collection.name,
           userName: collection.userName,
           internal: collection.userId === INTERNAL_USER_ID || collection.internal === true,
+          kindInfo: collectionKindInfo(collection),
           collectionAvailable: !unavailableReason,
           collectionUnavailableReason: unavailableReason,
           ...this.collectionProgress(collection.id)
@@ -79,7 +80,7 @@ class InternalAgentManager {
 
   listInternalCollections() {
     return this.store.listCollections().filter((collection) => (collection.userId === INTERNAL_USER_ID || collection.internal === true)
-      && !['video-cache', 'document-archive'].includes(collection.collectionKind));
+      && !['video-cache', 'document-archive', 'multimodal-document'].includes(collection.collectionKind));
   }
 
   createInternalCollection(name) {
@@ -174,7 +175,7 @@ class InternalAgentManager {
     if (!bvid) throw new Error('请输入有效的 BV 号或 Bilibili 视频链接。');
     const collection = this.store.getCollectionById(String(input.collectionId || ''));
     if (!collection || !(collection.userId === INTERNAL_USER_ID || collection.internal === true)) throw new Error('请选择内置用户下的内置收藏夹。');
-    if (['video-cache', 'document-archive'].includes(collection.collectionKind)) throw new Error('请选择普通内置收藏夹，不能把单视频任务写入缓存库或文档归档库。');
+    if (['video-cache', 'document-archive', 'multimodal-document'].includes(collection.collectionKind)) throw new Error('请选择普通内置收藏夹，不能把单视频任务写入缓存库或文档归档库。');
     this.reclaimExpired(collection.id);
     const sessions = this.listSessions().filter((session) => session.mode === 'single');
     const candidates = this.store.listTasks({ collectionId: collection.id })
@@ -1457,7 +1458,7 @@ function collectMaterials(artifactDir) {
 }
 
 function agentCollectionBlockReason(collection) {
-  if (collection?.collectionKind === 'document-archive') return '该收藏夹仅保留已完成文档，不能继续派发视频总结任务。';
+  if (['document-archive', 'multimodal-document'].includes(collection?.collectionKind)) return '该收藏夹仅保留知识库文档，不能派发视频总结任务。';
   return collectionBlockReason(collection);
 }
 
@@ -1498,6 +1499,13 @@ function subtitleTime(seconds) {
 }
 
 function buildGenerationPrompt({ session, task, collection, materials, template }) {
+  const localImported = task.localImported === true || task.sourceType === 'local-video';
+  const timelineRequirement = localImported
+    ? '3. 这是本地导入视频，不得生成或猜测 Bilibili 链接。章节标题使用 ASR SRT 的真实时间点标注，例如“## 章节标题（00:03:25）”；不得根据文字顺序猜测时间位置。'
+    : `3. 章节标题加入 Bilibili 时间轴链接：https://www.bilibili.com/video/${task.bvid}?t=<秒数>。优先依据 ASR/站内 SRT 的起止时间换算秒数，不得根据文字顺序猜测时间位置。`;
+  const subtitleRequirement = localImported
+    ? '4. 本地导入视频没有站内字幕和站内评论；必须检查本次 ASR 结果，不得把缺少 B站数据描述为工具故障。时间轴字幕中的“HH:MM:SS,mmm --> HH:MM:SS,mmm”是真实分段时间。'
+    : '4. 必须比较站内字幕与本次 ASR；无论有无站内字幕，都必须检查本次 ASR 结果。若 asr-result.json 标记 noAudioStream=true，说明源视频没有音轨，应如实说明并改用站内字幕、关键帧与多模态画面理解，不得把它当作工具失败。时间轴字幕中的“HH:MM:SS,mmm --> HH:MM:SS,mmm”是可直接使用的真实分段时间。';
   const transcriptContext = materials.evidencePack
     ? `极端长视频语义证据包（由相同供应商/模型的独立上下文整理 Agent 分块读取全部原始素材后生成）：\n${materials.evidencePack}\n\n注意：证据包用于替代本次请求中的超长原始字幕，但原始文件仍保存在任务目录。必须覆盖证据包中的全部时间段、事实、步骤、参数、限制、冲突和不确定性。`
     : `站内字幕：\n${materials.station || '未提供可用站内字幕'}\n\nASR 识别语言与覆盖诊断：\n${JSON.stringify(materials.asrMetadata || {}, null, 2)}\n\nASR 字幕：\n${materials.asr || 'ASR 输出为空，请在文档中如实说明'}`;
@@ -1506,8 +1514,8 @@ function buildGenerationPrompt({ session, task, collection, materials, template 
 强制要求：
 1. 开头章节严格为“小结 -> 思维导图 -> 目录”，思维导图使用有效 Mermaid mindmap。
 2. 正文完整覆盖视频的新闻、技术、经验、步骤、参数、限制和时效性，不能只做简短摘要。
-3. 章节标题加入 Bilibili 时间轴链接：https://www.bilibili.com/video/${task.bvid}?t=<秒数>。优先依据 ASR/站内 SRT 的起止时间换算秒数，不得根据文字顺序猜测时间位置。
-4. 必须比较站内字幕与本次 ASR；无论有无站内字幕，都必须检查本次 ASR 结果。若 asr-result.json 标记 noAudioStream=true，说明源视频没有音轨，应如实说明并改用站内字幕、关键帧与多模态画面理解，不得把它当作工具失败。时间轴字幕中的“HH:MM:SS,mmm --> HH:MM:SS,mmm”是可直接使用的真实分段时间。
+${timelineRequirement}
+${subtitleRequirement}
 5. 从给出的关键帧中选择适合正文的图片，使用相对路径 frames/xxx.jpg，并解释图片价值。
 6. 评论分析只处理可获取的热评前三条。
 7. 处理记录写明 Worker ID、模型、工具、字幕选择、关键帧依据和缓存清理。

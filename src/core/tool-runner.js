@@ -386,11 +386,10 @@ class ToolRunner {
   }
 
   async executeBundle(state, run, task, tool, collection) {
-    await this.runScheduledStage(state, 'api', 'metadata-comments', async () => {
-      const options = run.options || {};
-      if (!options.skipInfo) {
-        await this.runChild(state, this.buildArgs({ task, action: 'info', collection, artifactDir: run.artifactDir, options }), run.timeoutMs);
-      }
+    const localImported = task.localImported === true || task.sourceType === 'local-video';
+    const options = run.options || {};
+    if (!localImported) await this.runScheduledStage(state, 'api', 'metadata-comments', async () => {
+      if (!options.skipInfo) await this.runChild(state, this.buildArgs({ task, action: 'info', collection, artifactDir: run.artifactDir, options }), run.timeoutMs);
       if (!fs.existsSync(path.join(run.artifactDir, 'info.json'))) {
         throw new Error('Required video metadata is missing after the material bundle metadata stage.');
       }
@@ -413,13 +412,20 @@ class ToolRunner {
         }
       }
     });
+    else {
+      if (!fs.existsSync(path.join(run.artifactDir, 'info.json'))) throw new Error('本地导入视频缺少 info.json，无法开始总结。');
+      if (![path.join(run.artifactDir, 'merged.mp4'), path.join(run.artifactDir, 'merged.mkv'), path.join(run.artifactDir, 'merged.webm')].some((file) => fs.existsSync(file))) {
+        throw new Error('本地导入视频缓存不存在，请重新导入该视频。');
+      }
+      this.appendLog(run.id, `[${new Date().toISOString()}] local imported media: skip Bilibili metadata, subtitle and comment requests\n`);
+    }
 
     await this.runCommandStage(state, 'media', 'media-preparation', this.buildArgs({
       task,
       action: 'bundle',
       collection,
       artifactDir: run.artifactDir,
-      options: { ...(run.options || {}), asr: false, comments: false, skipInfo: true, skipSubtitles: true, skipComments: true, audio: true }
+      options: { ...options, asr: false, comments: false, skipInfo: true, skipSubtitles: true, skipComments: true, audio: true }
     }));
     await this.runAsrStage(state, run);
     this.finalizeBundleManifest(run, state.warnings);
@@ -574,6 +580,80 @@ class ToolRunner {
     } finally {
       if (state.schedulerJobId === schedulerJobId) state.schedulerJobId = '';
     }
+  }
+
+  scheduleUtilityStage({ id, pool, workerId = 'local-toolbox', execute, cancel, onQueued, onStart }) {
+    if (!this.initialized) throw new Error('资源调度器仍在启动，请稍后重试。');
+    if (this.shuttingDown) throw new Error('应用正在关闭，不能开始新的本地工具任务。');
+    if (this.maintenance) {
+      const error = new Error(`应用正在维护 ${this.maintenance.reason}，请等待依赖安装结束后重试。`);
+      error.code = 'TOOL_MAINTENANCE_ACTIVE';
+      throw error;
+    }
+    const poolName = String(pool || '');
+    const jobId = String(id || '').trim();
+    if (!jobId) throw new Error('本地工具调度任务缺少 ID。');
+    if (!['api', 'media', 'disk', 'asr'].includes(poolName)) throw new Error(`未知资源池：${poolName}`);
+    return this.scheduler.enqueue(poolName, {
+      id: jobId,
+      workerId,
+      execute,
+      cancel,
+      onQueued,
+      onStart
+    });
+  }
+
+  transcribePreparedAudio({ id, audioFile, outputDir, workerId = 'local-toolbox', language = 'auto', signal, onQueued, onStart, onProgress }) {
+    const requestId = String(id || '').trim();
+    if (!requestId) throw new Error('本地 ASR 请求缺少 ID。');
+    ensureDir(outputDir);
+    let activeService = null;
+    const handle = this.scheduleUtilityStage({
+      id: `${requestId}:asr`,
+      pool: 'asr',
+      workerId,
+      onQueued,
+      onStart,
+      cancel: () => activeService?.cancel(requestId),
+      execute: async (lane) => {
+        if (signal?.aborted) throw utilityCancelledError();
+        const service = lane.id === 'cpu' ? this.cpuAsr : this.gpuAsr;
+        activeService = service;
+        const abort = () => service.cancel(requestId);
+        signal?.addEventListener?.('abort', abort, { once: true });
+        try {
+          assertDiskSpace(PROJECT_ROOT);
+          return await service.request({
+            id: requestId,
+            action: 'transcribe',
+            audio: audioFile,
+            outputDir,
+            language,
+            beamSize: 5,
+            conditionOnPreviousText: true
+          }, { onProgress });
+        } catch (error) {
+          if (signal?.aborted) throw utilityCancelledError();
+          if (!isAsrInfrastructureFailure(error, service)) {
+            error.code ||= 'ASR_TRANSCRIPTION_FAILED';
+            error.failureKind ||= 'task';
+            throw error;
+          }
+          throw asrInfrastructureError(error, service);
+        } finally {
+          signal?.removeEventListener?.('abort', abort);
+          activeService = null;
+        }
+      }
+    });
+    return {
+      ...handle,
+      cancel: () => {
+        activeService?.cancel(requestId);
+        return this.scheduler.cancel(`${requestId}:asr`);
+      }
+    };
   }
 
   runChild(state, args, timeoutMs = DEFAULT_TIMEOUT_MS) {
@@ -1492,6 +1572,12 @@ function optionalAsrMaxNewTokens(value) {
 function cancelledError(runId) {
   const error = new Error(`Tool run cancelled: ${runId}`);
   error.code = 'RUN_CANCELLED';
+  return error;
+}
+
+function utilityCancelledError() {
+  const error = new Error('本地工具任务已取消。');
+  error.code = 'LOCAL_TOOL_CANCELLED';
   return error;
 }
 

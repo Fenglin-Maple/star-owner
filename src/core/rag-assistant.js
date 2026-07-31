@@ -8,7 +8,7 @@ const MarkdownIt = require('markdown-it');
 const pdf = require('pdf-parse');
 const mammoth = require('mammoth');
 const { utf8ChildEnvironment } = require('./child-process-io');
-const { favoriteStatus } = require('./collection-state');
+const { collectionKindInfo, favoriteStatus } = require('./collection-state');
 const { isPrivateNetworkHost, parseHttpUrl } = require('./network-policy');
 const { assertSafeWindowsPath, ensureDir: ensureWorkspaceDir } = require('./workspace');
 
@@ -20,7 +20,7 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 
 const MIME_TYPES = {
-  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif',
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp',
   '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.ogg': 'audio/ogg', '.flac': 'audio/flac',
   '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime', '.pdf': 'application/pdf',
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.md': 'text/markdown'
@@ -324,6 +324,7 @@ class RagAssistant {
         name: collection.name,
         userId: collection.userId || user?.id || '',
         userName: collection.userName || user?.name || '未知用户',
+        kindInfo: collectionKindInfo(collection),
         documentCount: documents.length,
         updatedAt: documents.map((task) => task.completedAt || task.updatedAt || '').sort().at(-1) || collection.updatedAt || ''
       };
@@ -1257,6 +1258,7 @@ function matchesImageSignature(buffer, mimeType) {
   if (mimeType === 'image/jpeg') return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer.at(-2) === 0xff && buffer.at(-1) === 0xd9;
   if (mimeType === 'image/gif') return ['GIF87a', 'GIF89a'].includes(buffer.subarray(0, 6).toString('ascii'));
   if (mimeType === 'image/webp') return buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'WEBP';
+  if (mimeType === 'image/bmp') return buffer.subarray(0, 2).toString('ascii') === 'BM';
   return false;
 }
 
