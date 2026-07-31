@@ -9,6 +9,8 @@
 .outside-tool-head > button { grid-column: 1 / -1; width: 100%; }
 .outside-tool-actions { display: flex; justify-content: stretch; gap: 7px; flex-wrap: wrap; }
 .outside-tool-actions > button { flex: 1 1 132px; min-width: 0; }
+[data-local-tool="video-import"] .outside-tool-actions { flex-direction: column; }
+[data-local-tool="video-import"] .outside-tool-actions > button { flex: 0 0 auto; width: 100%; }
 .local-subtitle-options { display: flex; align-items: center; gap: 7px 10px; flex-wrap: wrap; min-height: 36px; padding: 8px 10px; border: 1px solid var(--line); background: var(--row); }
 .local-subtitle-options > span { color: var(--muted); font-size: 12px; font-weight: 650; }
 .local-subtitle-options label { display: inline-flex; align-items: center; gap: 6px; color: var(--text); font-size: 13px; }
