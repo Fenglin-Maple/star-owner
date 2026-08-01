@@ -111,17 +111,17 @@ Saved account passwords require Electron `safeStorage`. Netscape cookie files re
 
 When the application starts with an authenticated account, `StartupFolderProbe` requests the folder directory exactly once for that account and process. It compares only stable `mediaId` and the last successful remote reported count, returns the folder inventory to the Renderer, and queues a one-time 12-second notice for the Collection Sync page when counts differ. This read-only probe never calls `listVideos`, writes collection/task state, reconciles deletion or rename, stops Agents, or marks a collection as syncing. The user must still start the maintenance transaction below explicitly.
 
-Synchronization is a desktop-owned maintenance transaction:
+Synchronization is a desktop-owned maintenance transaction. Each explicit sync keeps one persisted batch snapshot for the authenticated Bilibili user, so folder-directory reconciliation and the selected folder's video inventory are committed as one logical operation. The snapshot contains only that user's Bilibili collections and related task/video/tombstone/Agent records; unrelated local operations are not replaced during recovery.
 
 1. Resolve the immutable Bilibili collection ID and current local snapshot.
-2. Persist a `collectionSyncTransactions` recovery record.
+2. Persist a batch `collectionSyncTransactions` recovery record plus per-collection guards.
 3. Mark the collection `syncing` and `syncReady=false`.
 4. Stop every internal queue Agent bound to the collection.
 5. Abort current attempts, cancel tools, remove attempt files, and invalidate work IDs.
 6. Fetch every remote page before changing inventory and retain reported count, visible count, and visibility gap.
 7. Reconcile additions, completed archives, explicit unavailable tombstones, rename state, and counts in one SQLite transaction. Missing-item removal is allowed only for a zero-gap snapshot.
-8. Remove the recovery record only after commit.
-9. On interruption or startup recovery, restore the previous snapshot and log the rollback.
+8. Remove per-collection and batch recovery records only after the complete operation commits.
+9. On interruption or startup recovery, restore the previous batch snapshot and log the rollback. Workflows stopped for synchronization remain stopped and require an explicit user restart.
 
 Reconciliation policy:
 

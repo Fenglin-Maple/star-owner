@@ -144,6 +144,59 @@ function video(bvid, title, favoriteAddedAt) {
   assert(renamed.collection.id === '100:7' && renamed.collection.name === 'AIcode Renamed' && renamed.collection.storageName === 'AIcode' && renamed.collection.collectionRoot === first.collection.collectionRoot, 'renamed folder created a duplicate or moved its storage identity');
 
   const beforeFailure = store.getCollectionById('100:7');
+  const secondCollectionBefore = {
+    ...beforeFailure,
+    id: '100:9',
+    mediaId: '9',
+    name: 'Second folder',
+    sourceName: 'Second folder',
+    storageName: 'Second folder',
+    collectionRoot: path.join(workspace.root, '测试用户', 'Second folder'),
+    videosDir: path.join(workspace.root, '测试用户', 'Second folder', 'videos'),
+    exportDir: path.join(workspace.root, '测试用户', 'Second folder', 'exports'),
+    syncState: 'ready',
+    syncReady: true,
+    remoteVideoCount: 1,
+    videoCount: 1
+  };
+  const secondTaskBefore = {
+    id: '100:9:BVSECOND1234',
+    collectionId: '100:9',
+    bvid: 'BVSECOND1234',
+    title: 'Second folder video',
+    sourceTitle: 'Second folder video',
+    enabled: true,
+    status: 'pending',
+    favoriteState: 'active',
+    createdAt: new Date().toISOString()
+  };
+  store.set('collections', secondCollectionBefore.id, secondCollectionBefore);
+  store.set('tasks', secondTaskBefore.id, secondTaskBefore);
+  store.set('videos', secondTaskBefore.id, { key: secondTaskBefore.id, collectionId: '100:9', bvid: secondTaskBefore.bvid, title: secondTaskBefore.title, favoriteState: 'active' });
+  store.commit();
+  const originalListVideos = bili.listVideos;
+  folders = [
+    { id: '7', name: 'AIcode Before Failure', mediaCount: 1, updatedAt: '2026-07-06T02:00:00.000Z' },
+    { id: '9', name: 'Second folder renamed', mediaCount: 1, updatedAt: '2026-07-06T02:00:00.000Z' }
+  ];
+  bili.listVideos = async (folderId) => {
+    if (String(folderId) === '7') throw new Error('simulated target collection fetch failure');
+    return { videos: [video('BVSECOND1234', 'Second folder video', '2026-07-06T00:00:00.000Z')], reportedTotal: 1, visibleCount: 1, visibilityGap: 0, completedPages: true };
+  };
+  let batchFailed = false;
+  try { await service.sync({ collectionName: '7' }); } catch { batchFailed = true; }
+  bili.listVideos = originalListVideos;
+  const secondCollectionAfterBatchFailure = store.getCollectionById('100:9');
+  assert(batchFailed, 'multi-collection synchronization failure did not surface to the caller');
+  assert(secondCollectionAfterBatchFailure.name === secondCollectionBefore.name && secondCollectionAfterBatchFailure.syncState === secondCollectionBefore.syncState && secondCollectionAfterBatchFailure.syncReady === secondCollectionBefore.syncReady, 'a later target fetch failure left an earlier folder-list rename partially committed');
+  assert(store.getTask(secondTaskBefore.id)?.title === secondTaskBefore.title && store.getTask(secondTaskBefore.id)?.status === secondTaskBefore.status, 'batch rollback changed an unrelated collection task');
+  assert(store.list('collectionSyncTransactions').length === 0, 'batch rollback left a collection synchronization journal behind');
+  store.delete('collections', secondCollectionBefore.id);
+  store.delete('tasks', secondTaskBefore.id);
+  store.delete('videos', secondTaskBefore.id);
+  store.commit();
+
+  folders = [{ ...folders[0], id: '7', name: 'AIcode Renamed', mediaCount: 1, updatedAt: '2026-07-05T01:00:00.000Z' }];
   videoError = new Error('simulated interrupted page fetch');
   let failed = false;
   try { await service.sync({ collectionName: '7' }); } catch { failed = true; }
@@ -194,6 +247,19 @@ function video(bvid, title, favoriteAddedAt) {
   assert(store.getCollectionById('100:7').name === deletedCollection.name && !store.get('collectionSyncTransactions', interruptedId), 'startup recovery did not restore an interrupted sync snapshot');
   assert(recoveryEvents.some((event) => event.type === 'collection-sync-rolled-back'), 'startup rollback was not logged');
   assert(!fs.existsSync(orphanDir) && store.get('removedFavoriteTasks', '100:7:BVORPHAN')?.cleanupPending === false, 'startup recovery did not finish persisted removed-task cache cleanup');
+
+  const batchRecoveryBefore = store.getCollectionById('100:7');
+  const batchRecoveryTaskBefore = store.getTask(completedTaskId);
+  const batchRecoveryId = service.beginBatchSync({ mid: '100', name: '测试用户' });
+  store.set('collections', '100:7', { ...batchRecoveryBefore, name: 'BATCH PARTIAL STATE', syncState: 'syncing', syncReady: false });
+  store.delete('tasks', completedTaskId);
+  store.commit();
+  const batchRecoveryEvents = [];
+  new CollectionSyncService({ store, bili, getCurrentUser: () => null, onEvent: (event) => batchRecoveryEvents.push(event) });
+  assert(!store.get('collectionSyncTransactions', batchRecoveryId), 'startup batch recovery left its journal behind');
+  assert(store.getCollectionById('100:7').name === batchRecoveryBefore.name && store.getCollectionById('100:7').syncState === batchRecoveryBefore.syncState, 'startup batch recovery did not restore the collection state');
+  assert(store.getTask(completedTaskId)?.status === batchRecoveryTaskBefore.status, 'startup batch recovery did not restore the task inventory');
+  assert(batchRecoveryEvents.some((event) => event.type === 'collection-sync-rolled-back' && event.batchTransactionId === batchRecoveryId), 'startup batch rollback was not logged');
 
   store.db.close();
   fs.rmSync(root, { recursive: true, force: true });

@@ -45,17 +45,18 @@ class CollectionSyncService {
     if (!workspace) throw new Error('No default workspace is configured.');
     let local = this.findLocalCollection(currentUser, identifier);
     let transactionId = '';
+    const batchTransactionId = this.beginBatchSync(currentUser);
     let syncId = `sync-${currentUser.mid}-${local?.mediaId || identifier}-${Date.now()}`;
     try {
       if (local) {
-        transactionId = this.beginSync(local.id, local, local);
+        transactionId = this.beginSync(local.id, local, local, batchTransactionId);
         await this.stopCollectionWork(local, '用户开始同步该收藏夹，已中止相关 Agent 视频总结工作流。', 'collection-sync');
       }
 
       this.progress(syncId, local?.name || identifier, { stage: 'resolving', loaded: 0, total: null, progress: 0.02 });
       const folders = await this.bili.listFolders(currentUser.mid);
       this.assertCurrentUser(currentUser);
-      await this.reconcileFolders(folders, currentUser, { excludeCollectionIds: local ? [local.id] : [] });
+      await this.reconcileFolders(folders, currentUser, { excludeCollectionIds: local ? [local.id] : [], batchTransactionId });
       const wanted = resolveRemoteFolder(folders, identifier, local?.mediaId);
       if (!wanted) {
         if (!local) throw new Error(`Collection not found: ${identifier}`);
@@ -82,7 +83,8 @@ class CollectionSyncService {
       const dirs = collectionDirs(workspace.root, currentUser.name, storageName);
       const provisional = this.buildCollection({ currentUser, wanted, workspace, dirs, label, current: local, syncState: 'syncing', syncReady: false });
       if (!transactionId) {
-        transactionId = this.beginSync(collectionId, local, provisional);
+        this.attachBatchCollection(batchTransactionId, collectionId);
+        transactionId = this.beginSync(collectionId, local, provisional, batchTransactionId);
         if (local) await this.stopCollectionWork(local, '用户开始同步该收藏夹，已中止相关 Agent 视频总结工作流。', 'collection-sync');
       }
 
@@ -107,6 +109,7 @@ class CollectionSyncService {
       const result = this.applySnapshot({ currentUser, wanted, snapshot, workspace, dirs, cookieFile, label, transactionId });
       transactionId = '';
       this.writeExportSafe(result.collection, videos, snapshot);
+      this.completeBatchSync(batchTransactionId);
       this.progress(syncId, result.collection.name, { stage: 'done', loaded: snapshot.visibleCount, total: snapshot.reportedTotal, progress: 1, visibilityGap: snapshot.visibilityGap });
       this.onEvent({
         type: snapshot.visibilityGap > 0 ? 'collection-synced-partial-visibility' : 'collection-synced',
@@ -117,60 +120,69 @@ class CollectionSyncService {
       return result;
     } catch (error) {
       if (transactionId) this.rollbackSync(transactionId, error.message || String(error));
+      this.rollbackBatchSync(batchTransactionId, error.message || String(error));
       this.progress(syncId, local?.name || identifier, { stage: 'error', loaded: 0, total: null, progress: 1 });
       throw error;
     }
   }
 
   async reconcileFolders(folders, currentUser, options = {}) {
+    const ownsBatch = !options.batchTransactionId;
+    const batchTransactionId = options.batchTransactionId || this.beginBatchSync(currentUser);
     const excluded = new Set((options.excludeCollectionIds || []).map(String));
     const remote = new Map((folders || []).map((folder) => [String(folder.id), folder]));
     const summary = { deleted: 0, renamed: 0, restored: 0 };
-    for (const collection of this.localCollections(currentUser)) {
-      if (excluded.has(collection.id)) continue;
-      if (collection.syncState === 'syncing') continue;
-      const folder = remote.get(String(collection.mediaId || ''));
-      if (!folder) {
-        if (!collection.biliDeleted) {
-          await this.markCollectionDeleted(collection, '读取 B站收藏夹列表时未找到该收藏夹。', 'folder-list');
-          summary.deleted += 1;
+    try {
+      for (const collection of this.localCollections(currentUser)) {
+        if (excluded.has(collection.id)) continue;
+        if (collection.syncState === 'syncing') continue;
+        const folder = remote.get(String(collection.mediaId || ''));
+        if (!folder) {
+          if (!collection.biliDeleted) {
+            await this.markCollectionDeleted(collection, '读取 B站收藏夹列表时未找到该收藏夹。', 'folder-list');
+            summary.deleted += 1;
+          }
+          continue;
         }
-        continue;
+        const renamed = collectionSourceName(collection) !== folder.name;
+        if (!renamed && !collection.biliDeleted) continue;
+        const transactionId = this.beginSync(collection.id, collection, collection, batchTransactionId);
+        try {
+          await this.stopCollectionWork(collection, collection.biliDeleted
+            ? 'B站收藏夹重新出现，需要先完成任务同步再重启 Agent 工作流。'
+            : 'B站收藏夹名称已变更，需要先完成任务同步再重启 Agent 工作流。', 'folder-list');
+          const latest = this.store.getCollectionById(collection.id) || collection;
+          const next = {
+            ...latest,
+            name: folder.name,
+            sourceName: folder.name,
+            storageName: collectionStorageName(collection),
+            biliDeleted: false,
+            biliDeletedAt: '',
+            syncState: 'needs-sync',
+            syncReady: false,
+            remoteVideoCount: Number(folder.mediaCount || 0),
+            remoteUpdatedAt: folder.updatedAt || '',
+            updatedAt: new Date().toISOString()
+          };
+          this.store.transaction(() => {
+            this.store.set('collections', next.id, next);
+            this.store.delete('collectionSyncTransactions', transactionId);
+          });
+          if (collection.biliDeleted) summary.restored += 1;
+          if (renamed) summary.renamed += 1;
+          this.onEvent({ type: collection.biliDeleted ? 'collection-restored-needs-sync' : 'collection-renamed-needs-sync', collectionId: next.id, collectionName: next.name });
+        } catch (error) {
+          this.rollbackSync(transactionId, error.message || String(error));
+          throw error;
+        }
       }
-      const renamed = collectionSourceName(collection) !== folder.name;
-      if (!renamed && !collection.biliDeleted) continue;
-      const transactionId = this.beginSync(collection.id, collection, collection);
-      try {
-        await this.stopCollectionWork(collection, collection.biliDeleted
-          ? 'B站收藏夹重新出现，需要先完成任务同步再重启 Agent 工作流。'
-          : 'B站收藏夹名称已变更，需要先完成任务同步再重启 Agent 工作流。', 'folder-list');
-        const latest = this.store.getCollectionById(collection.id) || collection;
-        const next = {
-          ...latest,
-          name: folder.name,
-          sourceName: folder.name,
-          storageName: collectionStorageName(collection),
-          biliDeleted: false,
-          biliDeletedAt: '',
-          syncState: 'needs-sync',
-          syncReady: false,
-          remoteVideoCount: Number(folder.mediaCount || 0),
-          remoteUpdatedAt: folder.updatedAt || '',
-          updatedAt: new Date().toISOString()
-        };
-        this.store.transaction(() => {
-          this.store.set('collections', next.id, next);
-          this.store.delete('collectionSyncTransactions', transactionId);
-        });
-        if (collection.biliDeleted) summary.restored += 1;
-        if (renamed) summary.renamed += 1;
-        this.onEvent({ type: collection.biliDeleted ? 'collection-restored-needs-sync' : 'collection-renamed-needs-sync', collectionId: next.id, collectionName: next.name });
-      } catch (error) {
-        this.rollbackSync(transactionId, error.message || String(error));
-        throw error;
-      }
+      if (ownsBatch) this.completeBatchSync(batchTransactionId);
+      return summary;
+    } catch (error) {
+      if (ownsBatch) this.rollbackBatchSync(batchTransactionId, error.message || String(error));
+      throw error;
     }
-    return summary;
   }
 
   assertCurrentUser(expected) {
@@ -464,7 +476,7 @@ class CollectionSyncService {
     return { stoppedSessions: stoppedSessions.length, abortedAttempts };
   }
 
-  beginSync(collectionId, collectionBefore, provisional) {
+  beginSync(collectionId, collectionBefore, provisional, batchTransactionId = '') {
     const transactionId = `collection-sync:${collectionId}`;
     const now = new Date().toISOString();
     const syncing = {
@@ -480,6 +492,7 @@ class CollectionSyncService {
         id: transactionId,
         collectionId,
         collectionBefore: collectionBefore || null,
+        batchTransactionId: String(batchTransactionId || ''),
         startedAt: now
       });
       this.store.set('collections', collectionId, syncing);
@@ -499,9 +512,99 @@ class CollectionSyncService {
     return true;
   }
 
+  beginBatchSync(currentUser) {
+    const collections = this.localCollections(currentUser);
+    const collectionIds = collections.map((collection) => String(collection.id));
+    const workerIds = this.store.list('internalAgentSessions')
+      .filter((session) => collectionIds.includes(String(session.collectionId || '')))
+      .map((session) => String(session.workerId || ''))
+      .filter(Boolean);
+    const scopes = ['collections', 'tasks', 'videos', 'removedFavoriteTasks', 'unavailableTasks', 'attemptCleanupQueue', 'internalAgentSessions', 'workers', 'videoCaches', 'videoCacheJobs', 'collectionSyncTransactions'];
+    const snapshot = {};
+    for (const scope of scopes) snapshot[scope] = this.store.list(scope).filter((record) => this.relatedToCollections(scope, record, new Set(collectionIds), new Set(workerIds)));
+    const id = `collection-sync-batch:${currentUser.mid}:${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+    this.store.transaction(() => {
+      this.store.set('collectionSyncTransactions', id, {
+        id,
+        kind: 'batch',
+        userId: String(currentUser.mid),
+        collectionIds,
+        ownedCollectionIds: [...collectionIds],
+        workerIds: [...new Set(workerIds)],
+        snapshot,
+        startedAt: new Date().toISOString()
+      });
+    });
+    return id;
+  }
+
+  attachBatchCollection(batchTransactionId, collectionId) {
+    const transaction = this.store.get('collectionSyncTransactions', batchTransactionId);
+    if (!transaction?.kind || transaction.kind !== 'batch') return;
+    const id = String(collectionId || '');
+    if (!id || transaction.ownedCollectionIds.includes(id)) return;
+    this.store.transaction(() => {
+      this.store.set('collectionSyncTransactions', batchTransactionId, {
+        ...transaction,
+        ownedCollectionIds: [...transaction.ownedCollectionIds, id]
+      });
+    });
+  }
+
+  completeBatchSync(batchTransactionId) {
+    if (!batchTransactionId) return;
+    const transaction = this.store.get('collectionSyncTransactions', batchTransactionId);
+    if (!transaction?.kind || transaction.kind !== 'batch') return;
+    this.store.transaction(() => this.store.delete('collectionSyncTransactions', batchTransactionId));
+  }
+
+  rollbackBatchSync(batchTransactionId, reason) {
+    if (!batchTransactionId) return false;
+    const transaction = this.store.get('collectionSyncTransactions', batchTransactionId);
+    if (!transaction?.kind || transaction.kind !== 'batch') return false;
+    const collectionIds = new Set([...(transaction.collectionIds || []), ...(transaction.ownedCollectionIds || [])].map(String));
+    const workerIds = new Set((transaction.workerIds || []).map(String));
+    const snapshot = transaction.snapshot || {};
+    this.store.transaction(() => {
+      for (const scope of Object.keys(snapshot)) {
+        const before = snapshot[scope] || [];
+        for (const current of this.store.list(scope)) {
+          if (this.relatedToCollections(scope, current, collectionIds, workerIds) || (scope === 'collectionSyncTransactions' && current.id === batchTransactionId)) {
+            this.store.delete(scope, current.id);
+          }
+        }
+        for (const record of before) this.store.set(scope, record.id, record);
+      }
+      this.store.delete('collectionSyncTransactions', batchTransactionId);
+    });
+    this.onEvent({
+      type: 'collection-sync-rolled-back',
+      batchTransactionId,
+      collectionIds: [...collectionIds],
+      reason: String(reason || '同步中断'),
+      message: '收藏夹同步已整体回滚到上一次完整状态。'
+    });
+    return true;
+  }
+
+  relatedToCollections(scope, record, collectionIds, workerIds) {
+    if (!record) return false;
+    if (scope === 'collections') return collectionIds.has(String(record.id || ''));
+    if (scope === 'workers') return workerIds.has(String(record.id || ''));
+    if (scope === 'internalAgentSessions') return collectionIds.has(String(record.collectionId || ''));
+    if (scope === 'collectionSyncTransactions') return collectionIds.has(String(record.collectionId || ''));
+    return collectionIds.has(String(record.collectionId || ''));
+  }
+
   recoverInterruptedSyncs() {
     const interrupted = this.store.list('collectionSyncTransactions');
-    for (const transaction of interrupted) this.rollbackSync(transaction.id, '应用上次在收藏夹同步期间退出或崩溃');
+    for (const transaction of interrupted.filter((item) => item.kind === 'batch')) {
+      this.rollbackBatchSync(transaction.id, '应用上次在收藏夹同步期间退出或崩溃');
+    }
+    const remaining = this.store.list('collectionSyncTransactions');
+    for (const transaction of remaining.filter((item) => item.kind !== 'batch' && !item.batchTransactionId)) {
+      this.rollbackSync(transaction.id, '应用上次在收藏夹同步期间退出或崩溃');
+    }
   }
 
   recoverTombstoneCleanups() {
