@@ -17,7 +17,8 @@ class ResourceScheduler {
       retryTimer: null,
       dispatching: false,
       waitReason: '',
-      durations: []
+      durations: [],
+      rejectWhenNoEnabledLanes: options.rejectWhenNoEnabledLanes === true
     });
   }
 
@@ -93,6 +94,17 @@ class ResourceScheduler {
     pool.dispatching = true;
     const fatalGates = [];
     try {
+      if (pool.queue.length && pool.rejectWhenNoEnabledLanes && !pool.lanes.some((lane) => lane.enabled)) {
+        this.rejectQueued(pool, {
+          fatal: true,
+          reason: 'RESOURCE_DISABLED',
+          code: 'RESOURCE_DISABLED',
+          failureKind: 'infrastructure',
+          message: `资源池“${pool.name}”当前没有可用的处理通道。请启用对应资源或检查运行环境后重试。`,
+          possibleCauses: ['所有资源通道均被关闭', '运行环境检查未通过', '对应服务尚未启动']
+        });
+        return;
+      }
       for (const lane of pool.lanes) {
         if (!pool.queue.length) break;
         if (!lane.enabled || lane.busy || lane.checking) continue;

@@ -10,6 +10,7 @@ const ACTIVE_JOB_STATUSES = new Set(['queued', 'running']);
 const MAX_SELECTIONS = 20;
 const MAX_SELECTED_FILES = 2000;
 const MULTIMODAL_COLLECTION_KIND = 'multimodal-document';
+const IMPORT_MANIFEST_NAME = '.star-owner-import.json';
 
 class LocalToolboxManager {
   constructor({ store, toolRunner, videoCacheManager, emit }) {
@@ -19,11 +20,13 @@ class LocalToolboxManager {
     this.emit = emit || (() => {});
     this.selections = new Map();
     this.running = new Map();
+    this.cancelRequested = new Set();
     this.stopped = false;
   }
 
   initialize() {
     this.stopped = false;
+    this.recoverImportTransactions();
     const now = new Date().toISOString();
     for (const job of this.store.list('localToolJobs')) {
       if (!ACTIVE_JOB_STATUSES.has(job.status)) continue;
@@ -45,6 +48,7 @@ class LocalToolboxManager {
   shutdown() {
     this.stopped = true;
     for (const [jobId, active] of this.running.entries()) {
+      this.cancelRequested.add(jobId);
       active.controller.abort();
       active.handle?.cancel?.();
       const job = this.store.get('localToolJobs', jobId);
@@ -153,6 +157,8 @@ class LocalToolboxManager {
       title: `本地视频/音频导入 · ${collection.name}`,
       collectionId: collection.id,
       collectionName: collection.name,
+      workspaceId: collection.workspaceId,
+      workspaceRoot: collection.workspaceRoot,
       choices,
       outputDirectories: [collection.cacheRoot]
     });
@@ -168,6 +174,8 @@ class LocalToolboxManager {
       title: `多模态文档导入 · ${collection.name}`,
       collectionId: collection.id,
       collectionName: collection.name,
+      workspaceId: collection.workspaceId,
+      workspaceRoot: collection.workspaceRoot,
       choices,
       outputDirectories: [collection.collectionRoot]
     });
@@ -180,6 +188,7 @@ class LocalToolboxManager {
     const job = this.store.get('localToolJobs', id);
     if (!job) throw new Error('本地工具任务不存在。');
     if (!ACTIVE_JOB_STATUSES.has(job.status)) return job;
+    this.cancelRequested.add(id);
     const active = this.running.get(id);
     active?.controller.abort();
     active?.handle?.cancel?.();
@@ -197,7 +206,7 @@ class LocalToolboxManager {
     const tempRoot = this.jobWorkspace(jobId);
     let handled = 0;
     for (let index = 0; index < selection.files.length; index += 1) {
-      if (signal.aborted) throw cancelledError();
+      this.assertNotCancelled(jobId, signal);
       const file = selection.files[index];
       const item = this.jobItem(jobId, file.id);
       const workDir = ensureDir(path.join(tempRoot, file.id));
@@ -224,13 +233,13 @@ class LocalToolboxManager {
         this.setActiveHandle(jobId, asr);
         try { await asr.promise; }
         finally { this.setActiveHandle(jobId, null); }
-        if (signal.aborted) throw cancelledError();
+        this.assertNotCancelled(jobId, signal);
         const outputs = writeSubtitleFormats(path.join(asrDir, 'asr-result.json'), path.dirname(file.path), file.name, formats);
         handled += 1;
         this.updateItem(jobId, file.id, { status: 'completed', phase: '字幕已写入原目录', progress: 1, outputs, completedAt: new Date().toISOString() });
         this.updateBatchProgress(jobId, handled, selection.files.length, `已处理 ${handled}/${selection.files.length}`);
       } catch (error) {
-        if (signal.aborted) throw cancelledError();
+        this.assertNotCancelled(jobId, signal);
         handled += 1;
         this.updateItem(jobId, file.id, { status: 'failed', phase: '生成失败', error: error.message || String(error), progress: 1 });
         this.updateBatchProgress(jobId, handled, selection.files.length, `已处理 ${handled}/${selection.files.length}`);
@@ -238,6 +247,7 @@ class LocalToolboxManager {
         fs.rmSync(workDir, { recursive: true, force: true });
       }
     }
+    this.assertNotCancelled(jobId, signal);
     const latest = this.store.get('localToolJobs', jobId);
     const failed = latest.items.filter((item) => item.status === 'failed').length;
     return this.updateJob(latest, { status: failed === latest.items.length ? 'failed' : 'completed', phase: failed ? `完成，${failed} 个文件失败` : '全部字幕已生成', progress: 1, finishedAt: new Date().toISOString() });
@@ -247,7 +257,7 @@ class LocalToolboxManager {
     const records = () => this.store.listVideoCaches({ collectionId: collection.id });
     let handled = 0;
     for (const file of selection.files) {
-      if (signal.aborted) throw cancelledError();
+      this.assertNotCancelled(jobId, signal);
       const existing = findVideoCollision(records(), file);
       const action = existing ? (choices[file.id] || 'skip') : 'import';
       if (existing && action !== 'overwrite') {
@@ -269,15 +279,16 @@ class LocalToolboxManager {
         const cover = file.hasVideo
           ? await this.runScheduledMedia(jobId, `${file.id}:cover`, signal, () => extractCover(compressed, path.join(workDir, 'cover.jpg'), { signal, duration: file.duration }))
           : '';
-        if (signal.aborted) throw cancelledError();
+        this.assertNotCancelled(jobId, signal);
         this.updateItem(jobId, file.id, { phase: '写入内置缓存收藏夹', progress: 0.94 });
         const record = this.commitVideoImport({ jobId, file, workDir, cover, collection, existing });
+        this.assertNotCancelled(jobId, signal);
         this.emit({ type: 'video-cache-local-imported', cacheId: record.id, collectionId: collection.id, localToolbox: this.state() });
         handled += 1;
         this.updateItem(jobId, file.id, { status: 'completed', phase: '已导入内置缓存收藏夹', progress: 1, output: record.videoFile, cacheId: record.id, completedAt: new Date().toISOString() });
         this.updateBatchProgress(jobId, handled, selection.files.length, `已导入 ${handled}/${selection.files.length}`);
       } catch (error) {
-        if (signal.aborted) throw cancelledError();
+        this.assertNotCancelled(jobId, signal);
         handled += 1;
         this.updateItem(jobId, file.id, { status: 'failed', phase: '导入失败', error: error.message || String(error), progress: 1 });
         this.updateBatchProgress(jobId, handled, selection.files.length, `已处理 ${handled}/${selection.files.length}`);
@@ -285,6 +296,7 @@ class LocalToolboxManager {
         fs.rmSync(workDir, { recursive: true, force: true });
       }
     }
+    this.assertNotCancelled(jobId, signal);
     this.refreshCollectionCount(collection.id);
     const latest = this.store.get('localToolJobs', jobId);
     const failed = latest.items.filter((item) => item.status === 'failed').length;
@@ -294,7 +306,7 @@ class LocalToolboxManager {
   async runDocumentImport(jobId, selection, collection, choices, signal) {
     let handled = 0;
     for (const file of selection.files) {
-      if (signal.aborted) throw cancelledError();
+      this.assertNotCancelled(jobId, signal);
       const existing = findDocumentCollision(this.store.listTasks({ collectionId: collection.id }), file);
       const action = existing ? (choices[file.id] || 'skip') : 'import';
       if (existing && action !== 'overwrite') {
@@ -308,14 +320,15 @@ class LocalToolboxManager {
         this.updateItem(jobId, file.id, { status: 'running', phase: '解析文档并复制资源', progress: 0.15 });
         const importedAt = new Date().toISOString();
         const result = await importDocument(file.path, workDir, { importedAt });
-        if (signal.aborted) throw cancelledError();
+        this.assertNotCancelled(jobId, signal);
         this.updateItem(jobId, file.id, { phase: '建立知识库索引', progress: 0.82 });
         const task = this.commitDocumentImport({ jobId, file, workDir, result, collection, existing, importedAt });
+        this.assertNotCancelled(jobId, signal);
         handled += 1;
         this.updateItem(jobId, file.id, { status: 'completed', phase: '已加入多模态知识库', progress: 1, taskId: task.id, output: task.outputMarkdown, warnings: result.warnings, completedAt: importedAt });
         this.updateBatchProgress(jobId, handled, selection.files.length, `已导入 ${handled}/${selection.files.length}`);
       } catch (error) {
-        if (signal.aborted) throw cancelledError();
+        this.assertNotCancelled(jobId, signal);
         handled += 1;
         this.updateItem(jobId, file.id, { status: 'failed', phase: '导入失败', error: error.message || String(error), progress: 1 });
         this.updateBatchProgress(jobId, handled, selection.files.length, `已处理 ${handled}/${selection.files.length}`);
@@ -323,6 +336,7 @@ class LocalToolboxManager {
         fs.rmSync(workDir, { recursive: true, force: true });
       }
     }
+    this.assertNotCancelled(jobId, signal);
     this.refreshCollectionCount(collection.id);
     const latest = this.store.get('localToolJobs', jobId);
     const failed = latest.items.filter((item) => item.status === 'failed').length;
@@ -332,6 +346,7 @@ class LocalToolboxManager {
   }
 
   commitVideoImport({ jobId, file, workDir, cover, collection, existing }) {
+    this.assertNotCancelled(jobId);
     const latestExisting = findVideoCollision(this.store.listVideoCaches({ collectionId: collection.id }), file);
     if (!existing && latestExisting) throw new Error('同名视频在等待期间已被其它导入任务写入，请重新选择“覆盖”或“跳过”。');
     if (existing && !latestExisting) throw new Error('准备覆盖的视频记录已经变化，请重新选择文件后再试。');
@@ -347,8 +362,8 @@ class LocalToolboxManager {
       ? path.basename(existing.artifactDir)
       : fitArtifactName(collection.cacheRoot, `本地-${safeName(file.title, localId, 72)}-${localId.slice(-8)}`);
     const targetDir = existing?.artifactDir || path.join(collection.cacheRoot, targetName);
-    ensureDir(targetDir);
-    const replacements = [];
+    const backupDir = `${targetDir}.backup-${safeName(jobId, 'job', 32)}`;
+    ensureDir(path.dirname(targetDir));
     try {
       const videoFile = path.join(targetDir, 'merged.mp4');
       const coverFile = fs.existsSync(path.join(workDir, 'cover.jpg')) ? path.join(targetDir, 'cover.jpg') : '';
@@ -416,14 +431,10 @@ class LocalToolboxManager {
       };
       fs.writeFileSync(path.join(workDir, 'info.json'), `${JSON.stringify(info, null, 2)}\n`, 'utf8');
       fs.writeFileSync(path.join(workDir, 'cache-record.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8');
-      for (const name of ['merged.mp4', 'cover.jpg', 'info.json', 'cache-record.json']) {
-        const source = path.join(workDir, name);
-        const target = path.join(targetDir, name);
-        const backup = fs.existsSync(target) ? path.join(workDir, `${name}.previous`) : '';
-        if (backup) fs.renameSync(target, backup);
-        if (fs.existsSync(source)) fs.renameSync(source, target);
-        replacements.push({ target, backup });
-      }
+      if (fs.existsSync(backupDir)) fs.rmSync(backupDir, { recursive: true, force: true });
+      if (fs.existsSync(targetDir)) fs.renameSync(targetDir, backupDir);
+      fs.renameSync(workDir, targetDir);
+      fs.writeFileSync(path.join(targetDir, IMPORT_MANIFEST_NAME), `${JSON.stringify({ kind: 'video-cache', jobId, targetDir, backupDir }, null, 2)}\n`, 'utf8');
       const task = {
         ...currentTask,
         id: taskId,
@@ -462,28 +473,24 @@ class LocalToolboxManager {
         createdAt: currentTask.createdAt || importedAt,
         updatedAt: importedAt
       };
+      this.assertNotCancelled(jobId);
       this.store.transaction(() => {
         this.store.set('videoCaches', record.id, record);
         this.store.set('tasks', task.id, task);
         this.store.set('collections', collection.id, { ...collection, videoCount: this.store.listVideoCaches({ collectionId: collection.id }).filter((item) => item.id !== record.id).length + 1, updatedAt: importedAt });
       });
-      for (const item of replacements) if (item.backup && fs.existsSync(item.backup)) {
-        try { fs.rmSync(item.backup, { force: true }); } catch {}
-      }
+      fs.rmSync(path.join(targetDir, IMPORT_MANIFEST_NAME), { force: true });
+      if (fs.existsSync(backupDir)) fs.rmSync(backupDir, { recursive: true, force: true });
       return record;
     } catch (error) {
-      for (const item of replacements.reverse()) {
-        if (fs.existsSync(item.target)) fs.rmSync(item.target, { force: true });
-        if (item.backup && fs.existsSync(item.backup)) fs.renameSync(item.backup, item.target);
-      }
-      try {
-        if (!existing && fs.existsSync(targetDir) && fs.readdirSync(targetDir).length === 0) fs.rmdirSync(targetDir);
-      } catch {}
+      if (fs.existsSync(targetDir)) fs.rmSync(targetDir, { recursive: true, force: true });
+      if (fs.existsSync(backupDir)) fs.renameSync(backupDir, targetDir);
       throw error;
     }
   }
 
   commitDocumentImport({ jobId, file, workDir, result, collection, existing, importedAt }) {
+    this.assertNotCancelled(jobId);
     const latestExisting = findDocumentCollision(this.store.listTasks({ collectionId: collection.id }), file);
     if (!existing && latestExisting) throw new Error('同名同格式文档在等待期间已被其它导入任务写入，请重新选择“覆盖”或“跳过”。');
     if (existing && !latestExisting) throw new Error('准备覆盖的文档记录已经变化，请重新选择文件后再试。');
@@ -498,6 +505,7 @@ class LocalToolboxManager {
       if (fs.existsSync(backupDir)) fs.rmSync(backupDir, { recursive: true, force: true });
       if (fs.existsSync(targetDir)) fs.renameSync(targetDir, backupDir);
       fs.renameSync(workDir, targetDir);
+      fs.writeFileSync(path.join(targetDir, IMPORT_MANIFEST_NAME), `${JSON.stringify({ kind: 'multimodal-document', jobId, targetDir, backupDir }, null, 2)}\n`, 'utf8');
       const task = {
         ...(existing || {}),
         id: stableId,
@@ -529,14 +537,14 @@ class LocalToolboxManager {
         createdAt: existing?.createdAt || importedAt,
         updatedAt: importedAt
       };
+      this.assertNotCancelled(jobId);
       this.store.transaction(() => {
         this.store.set('tasks', task.id, task);
         const count = this.store.listTasks({ collectionId: collection.id }).filter((item) => item.id !== task.id && item.sourceType === 'local-document').length + 1;
         this.store.set('collections', collection.id, { ...collection, documentCount: count, videoCount: count, updatedAt: importedAt });
       });
-      if (fs.existsSync(backupDir)) {
-        try { fs.rmSync(backupDir, { recursive: true, force: true }); } catch {}
-      }
+      fs.rmSync(path.join(targetDir, IMPORT_MANIFEST_NAME), { force: true });
+      if (fs.existsSync(backupDir)) fs.rmSync(backupDir, { recursive: true, force: true });
       return task;
     } catch (error) {
       if (fs.existsSync(targetDir)) fs.rmSync(targetDir, { recursive: true, force: true });
@@ -568,7 +576,7 @@ class LocalToolboxManager {
     Promise.resolve().then(() => operation(controller.signal)).catch((error) => {
       const latest = this.store.get('localToolJobs', jobId);
       if (!latest) return;
-      const cancelled = controller.signal.aborted || error.code === 'LOCAL_TOOL_CANCELLED' || error.code === 'SCHEDULER_CANCELLED';
+      const cancelled = this.cancelRequested.has(jobId) || controller.signal.aborted || error.code === 'LOCAL_TOOL_CANCELLED' || error.code === 'SCHEDULER_CANCELLED';
       this.updateJob(latest, {
         status: cancelled ? (latest.status === 'interrupted' ? 'interrupted' : 'cancelled') : 'failed',
         phase: cancelled ? '任务已停止，当前未完成条目已清理' : '任务失败',
@@ -579,6 +587,7 @@ class LocalToolboxManager {
     }).finally(() => {
       this.cleanupJobWorkspace(this.store.get('localToolJobs', jobId));
       this.running.delete(jobId);
+      this.cancelRequested.delete(jobId);
       this.emitState('local-toolbox-queue-updated', { jobId });
     });
   }
@@ -586,6 +595,9 @@ class LocalToolboxManager {
   createJob(type, selection, extra = {}) {
     const now = new Date().toISOString();
     const id = `local-tool-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
+    const workspace = extra.workspaceRoot
+      ? { id: extra.workspaceId || '', root: path.resolve(extra.workspaceRoot) }
+      : this.requireWorkspace();
     const job = {
       id,
       type,
@@ -596,6 +608,8 @@ class LocalToolboxManager {
       error: '',
       collectionId: extra.collectionId || '',
       collectionName: extra.collectionName || '',
+      workspaceId: extra.workspaceId || workspace.id,
+      workspaceRoot: workspace.root,
       formats: extra.formats || [],
       choices: extra.choices || {},
       outputDirectories: extra.outputDirectories || [],
@@ -655,6 +669,14 @@ class LocalToolboxManager {
   setActiveHandle(jobId, handle) {
     const active = this.running.get(jobId);
     if (active) active.handle = handle;
+  }
+
+  isCancellationRequested(jobId, signal) {
+    return this.cancelRequested.has(String(jobId || '')) || Boolean(signal?.aborted) || this.stopped;
+  }
+
+  assertNotCancelled(jobId, signal) {
+    if (this.isCancellationRequested(jobId, signal)) throw cancelledError();
   }
 
   rememberSelection(selection) {
@@ -742,21 +764,64 @@ class LocalToolboxManager {
     this.store.upsertCollection({ ...collection, videoCount: count, documentCount: collection.collectionKind === MULTIMODAL_COLLECTION_KIND ? count : collection.documentCount, updatedAt: new Date().toISOString() });
   }
 
-  jobWorkspace(jobId) {
+  requireWorkspace() {
     const workspace = this.store.getDefaultWorkspace();
     if (!workspace) throw new Error('默认 Workspace 不存在。');
-    return ensureDir(path.join(workspace.root, '.star-note', 'local-tools', safeName(jobId, 'local-tool', 80)));
+    return workspace;
+  }
+
+  jobWorkspace(jobId) {
+    const job = this.store.get('localToolJobs', String(jobId || ''));
+    const workspaceRoot = job?.workspaceRoot || this.requireWorkspace().root;
+    return ensureDir(path.join(path.resolve(workspaceRoot), '.star-note', 'local-tools', safeName(jobId, 'local-tool', 80)));
   }
 
   cleanupJobWorkspace(job) {
     if (!job?.id) return;
     try {
-      const workspace = this.store.getDefaultWorkspace();
-      if (!workspace) return;
-      const parent = path.join(workspace.root, '.star-note', 'local-tools');
+      const workspaceRoot = job.workspaceRoot || this.store.getDefaultWorkspace()?.root;
+      if (!workspaceRoot) return;
+      const parent = path.join(path.resolve(workspaceRoot), '.star-note', 'local-tools');
       const target = assertInside(parent, path.join(parent, safeName(job.id, 'local-tool', 80)));
       if (target !== path.resolve(parent) && fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true });
     } catch {}
+  }
+
+  recoverImportTransactions() {
+    for (const collection of this.store.listCollections()) {
+      const roots = [...new Set([collection.cacheRoot, collection.collectionRoot]
+        .filter(Boolean)
+        .map((value) => path.resolve(value)))];
+      for (const root of roots) {
+        if (!fs.existsSync(root)) continue;
+        let entries;
+        try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { continue; }
+        for (const entry of entries) {
+          if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+          const targetDir = path.join(root, entry.name);
+          const manifestPath = path.join(targetDir, IMPORT_MANIFEST_NAME);
+          if (!fs.existsSync(manifestPath)) continue;
+          try {
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            const target = assertInside(root, path.resolve(manifest.targetDir || targetDir));
+            if (target !== path.resolve(targetDir)) continue;
+            const backup = manifest.backupDir ? assertInside(root, path.resolve(manifest.backupDir)) : '';
+            const committed = collection.collectionKind === 'video-cache'
+              ? this.store.listVideoCaches({ collectionId: collection.id }).some((record) => samePath(record.artifactDir, target))
+              : this.store.listTasks({ collectionId: collection.id }).some((task) => samePath(task.artifactDir, target));
+            if (committed) {
+              fs.rmSync(manifestPath, { force: true });
+              if (backup && fs.existsSync(backup)) fs.rmSync(backup, { recursive: true, force: true });
+            } else {
+              fs.rmSync(target, { recursive: true, force: true });
+              if (backup && fs.existsSync(backup)) fs.renameSync(backup, target);
+            }
+          } catch {
+            // Leave an unreadable marker for manual recovery rather than deleting unknown data.
+          }
+        }
+      }
+    }
   }
 
   emitState(type, detail = {}) {
@@ -801,6 +866,13 @@ function walkSelectedFiles(paths, predicate) {
 
 function normalizePaths(values) {
   return [...new Set((values || []).map((item) => path.resolve(String(item || ''))).filter(Boolean))];
+}
+
+function samePath(left, right) {
+  if (!left || !right) return false;
+  const a = path.resolve(String(left));
+  const b = path.resolve(String(right));
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
 function defaultSelectionName(roots, files) {

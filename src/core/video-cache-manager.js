@@ -288,6 +288,7 @@ class VideoCacheManager {
     const taskId = `cache-task:${collection.id}:${job.bvid}`;
     let task = this.store.getTask(taskId) || {};
     const acceptedDocument = captureAcceptedDocument(task);
+    let cacheCommitted = false;
     task = {
       ...task,
       id: taskId,
@@ -366,9 +367,15 @@ class VideoCacheManager {
       fs.writeFileSync(path.join(baseDir, 'cache-record.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8');
       this.refreshCollectionCounts();
       this.store.commit();
+      cacheCommitted = true;
       this.updateJob(job, { status: 'completed', phase: '缓存可用', progress: 1, cacheId: record.id, currentRunId: '', completedAt: downloadedAt });
       this.emitState('video-cache-download-completed', { jobId: job.id, cacheId: record.id, collectionId: collection.id, bvid: job.bvid });
     } catch (error) {
+      if (!cacheCommitted && !acceptedDocument) {
+        try {
+          this.safeRemoveTaskArtifact({ ...task, artifactDir: baseDir, allowedRoot: job.outputRoot }, collection);
+        } catch {}
+      }
       if (acceptedDocument) {
         restoreAcceptedDocument(task, acceptedDocument);
         this.store.upsertTask(task);

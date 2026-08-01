@@ -1883,6 +1883,10 @@ function renderTaskInventory() {
   }
   renderTaskStatusFilters(collectionTasks);
   visibleTasks = filterTasks(collectionTasks);
+  const visibleTaskIds = new Set(visibleTasks.map((task) => task.id));
+  for (const taskId of taskSelection) {
+    if (!visibleTaskIds.has(taskId)) taskSelection.delete(taskId);
+  }
   renderActiveCollection(collection);
   renderTaskAnalytics(collection, collectionTasks);
   renderTaskRows(visibleTasks);

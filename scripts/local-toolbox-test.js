@@ -75,6 +75,24 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
     assert(fs.statSync(record.videoFile).size <= 30 * 1024 * 1024, 'short imported video exceeded the 30 MiB budget');
     assert.equal(JSON.parse(fs.readFileSync(record.metadataFile, 'utf8')).sourceType, 'local-video');
 
+    const importMarker = path.join(record.artifactDir, '.star-owner-import.json');
+    fs.writeFileSync(importMarker, JSON.stringify({ kind: 'video-cache', targetDir: record.artifactDir, backupDir: path.join(collection.cacheRoot, 'committed-backup') }), 'utf8');
+    fs.mkdirSync(path.join(collection.cacheRoot, 'committed-backup'), { recursive: true });
+    const committedRecovery = new LocalToolboxManager({ store, toolRunner: runner, videoCacheManager: videoCache });
+    committedRecovery.initialize();
+    assert(!fs.existsSync(importMarker) && !fs.existsSync(path.join(collection.cacheRoot, 'committed-backup')), 'startup recovery removed a committed local import or kept its backup');
+
+    const orphanTarget = path.join(collection.cacheRoot, 'orphan-import');
+    const orphanBackup = path.join(collection.cacheRoot, 'orphan-import.backup-test');
+    fs.mkdirSync(orphanTarget, { recursive: true });
+    fs.writeFileSync(path.join(orphanTarget, 'partial.txt'), 'partial');
+    fs.mkdirSync(orphanBackup, { recursive: true });
+    fs.writeFileSync(path.join(orphanBackup, 'restored.txt'), 'restored');
+    fs.writeFileSync(path.join(orphanTarget, '.star-owner-import.json'), JSON.stringify({ kind: 'video-cache', targetDir: orphanTarget, backupDir: orphanBackup }), 'utf8');
+    const orphanRecovery = new LocalToolboxManager({ store, toolRunner: runner, videoCacheManager: videoCache });
+    orphanRecovery.initialize();
+    assert(fs.existsSync(path.join(orphanTarget, 'restored.txt')) && !fs.existsSync(orphanBackup), 'startup recovery did not restore an uncommitted local import');
+
     const audioSelection = await manager.inspectVideoSelection([sourceAudio]);
     assert.equal(audioSelection.files.length, 1);
     assert.equal(audioSelection.files[0].kind, 'audio');

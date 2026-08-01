@@ -191,6 +191,7 @@ class ToolRunner {
       lanes: createLanes('disk', this.config.diskConcurrency, 'Disk cleanup')
     });
     this.scheduler.registerPool('asr', {
+      rejectWhenNoEnabledLanes: true,
       lanes: [
         { id: 'gpu', label: 'CUDA faster-whisper', type: 'gpu', enabled: this.config.asrExecutionMode === 'cuda', gate: () => this.gpuGate() },
         { id: 'cpu', label: 'CPU faster-whisper', type: 'cpu', enabled: this.config.asrExecutionMode === 'cpu', gate: () => this.cpuGate() }

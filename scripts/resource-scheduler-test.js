@@ -7,6 +7,7 @@ const { ToolRunner, asrInfrastructureError } = require('../src/core/tool-runner'
   await testDisabledLaneAndCapacityWait();
   await testLaneDisabledDuringGateCheck();
   await testQueuedCancellation();
+  await testNoEnabledLaneRejectsQueue();
   await testFatalGateRejectsQueue();
   await testBusyHealthyLanePreventsFatalQueueRejection();
   await testToolMaintenanceWindow();
@@ -110,6 +111,14 @@ async function testQueuedCancellation() {
   assert.strictEqual(scheduler.cancel('cancel-me'), true);
   await assert.rejects(queued.promise, (error) => error.code === 'SCHEDULER_CANCELLED');
   await blocker.promise;
+}
+
+async function testNoEnabledLaneRejectsQueue() {
+  const scheduler = new ResourceScheduler();
+  scheduler.registerPool('asr', { rejectWhenNoEnabledLanes: true, lanes: [{ id: 'gpu', enabled: false }, { id: 'cpu', enabled: false }] });
+  const handle = scheduler.enqueue('asr', { id: 'no-enabled-lane', workerId: 'worker-a', execute: async () => {} });
+  await assert.rejects(handle.promise, (error) => error.code === 'RESOURCE_DISABLED' && error.failureKind === 'infrastructure');
+  assert.strictEqual(scheduler.snapshot().pools.asr.queued, 0, 'disabled ASR lanes left work queued indefinitely');
 }
 
 async function testFatalGateRejectsQueue() {
