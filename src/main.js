@@ -7,6 +7,7 @@ const MarkdownIt = require('markdown-it');
 const { buildAnalytics } = require('./core/analytics');
 const { ApiServer } = require('./core/api-server');
 const { BiliClient, assertBilibiliImageUrl, isBilibiliCookieDomain, normalizeBilibiliAssetUrl } = require('./core/bili');
+const { LEGACY_BILI_SESSION, migrateLegacyBiliPartition, projectBiliPartition } = require('./core/bili-session');
 const { collectionKindInfo } = require('./core/collection-state');
 const { CollectionSyncService } = require('./core/collection-sync-service');
 const { DependencyManager } = require('./core/dependency-manager');
@@ -31,7 +32,7 @@ const { UpdateManager } = require('./core/update-manager');
 const { VideoCacheManager } = require('./core/video-cache-manager');
 const { assertSafeWindowsPath, ensureDir, evaluateWorkspacePathSafety, fitArtifactName, initWorkspace, safeName, timestampForFile, videoArtifactName, WORKSPACE_ROOT } = require('./core/workspace');
 
-const BILI_SESSION = 'persist:bili-orchestrator';
+const BILI_SESSION = projectBiliPartition(path.resolve(__dirname, '..'));
 const PRODUCT_NAME = '星藏家';
 const PACKAGE_METADATA = require('../package.json');
 const PACKAGE_VERSION = PACKAGE_METADATA.version;
@@ -185,6 +186,10 @@ async function bootstrap() {
   initWorkspace();
   emitBootstrap('正在打开本地数据…', 0.32);
   store = await Store.open();
+  const biliPartitionMigration = await migrateLegacyBiliPartition({ sessionModule: session, targetPartition: BILI_SESSION, store, legacyPartition: LEGACY_BILI_SESSION });
+  if (biliPartitionMigration.copied || biliPartitionMigration.errors) {
+    console.info(`[bili-session] migrated ${biliPartitionMigration.copied} legacy cookies${biliPartitionMigration.errors ? `, ${biliPartitionMigration.errors} failed` : ''}`);
+  }
   updateManager = new UpdateManager({
     projectRoot: path.resolve(__dirname, '..'),
     version: PACKAGE_VERSION,
@@ -439,6 +444,8 @@ ipcMain.handle('bili:check-login', async () => {
   assertBackendReady();
   return publicCurrentUser(await refreshBilibiliUser());
 });
+
+ipcMain.handle('bili:partition', () => BILI_SESSION);
 
 ipcMain.handle('bili:prepare-account-switch', async () => {
   assertBackendReady();

@@ -119,6 +119,10 @@ function assert(condition, message) {
   manager.abortAttempt(toggleClaim.id, toggleSession.workerId, 'test cleanup', 'test');
   manager.deleteSession(toggleSession.id);
   const collection = manager.listInternalCollections().find((item) => item.id !== toggleCollection.id);
+  const persistedCollectionRoot = collection.collectionRoot;
+  const movedDefaultWorkspace = store.addWorkspace({ name: 'New default workspace', root: path.join(root, 'workspace-new') });
+  store.setDefaultWorkspace(movedDefaultWorkspace.id);
+  assert(manager.collectionOutputDirectory(collection.id) === persistedCollectionRoot, 'Agent output directory was recomputed from the current default workspace instead of the collection snapshot');
   const tasksBeforeInvalidModel = store.listTasks().length;
   let invalidSingleModelRejected = false;
   try { await manager.createSingleTask({ video: 'BVINVALID001', collectionId: collection.id, providerId: 'provider-test', modelId: 'missing-model' }); }
@@ -140,7 +144,7 @@ function assert(condition, message) {
   assert(!finished.externalOutput && finished.lastOutput && fs.existsSync(finished.lastOutput), 'single task did not use its canonical internal artifact as the only output');
   const task = store.getTask(finished.singleTaskId);
   assert(task.status === 'done' && fs.existsSync(task.outputMarkdown), 'accepted internal document is missing');
-  assert(task.outputMarkdown.includes('内置用户') || task.artifactDir.includes('内置用户'), 'internal collection artifact path is incorrect');
+  assert(task.artifactDir.startsWith(persistedCollectionRoot) && (task.outputMarkdown.includes('内置用户') || task.artifactDir.includes('内置用户')), 'internal collection artifact path did not use the persisted collection root');
   assert(manager.collectionOutputDirectory(collection.id) === collection.collectionRoot, 'single-task collection output directory is incorrect');
   assert(manager.sessionOutputDirectory(finished.id) === task.artifactDir, 'completed session did not resolve its artifact directory');
   const duplicateInspection = await manager.inspectSingleTask({ video: task.bvid, collectionId: collection.id });
@@ -181,7 +185,7 @@ function assert(condition, message) {
   const switchedWorkspace = store.addWorkspace({ name: 'Agent switched workspace', root: path.join(root, 'workspace-switched') });
   store.setDefaultWorkspace(switchedWorkspace.id);
   const switchedOutput = manager.collectionOutputDirectory(collection.id);
-  assert(switchedOutput.startsWith(path.resolve(switchedWorkspace.root)), 'internal collection output did not follow the newly selected default workspace');
+  assert(switchedOutput === persistedCollectionRoot, 'internal collection output changed when the default workspace changed');
   store.setDefaultWorkspace(workspace.id);
   assert(store.getWorker(finished.workerId)?.tool === 'star-owner-internal', 'internal worker identity was not registered');
   assert(finished.contextCycle === 1 && finished.contextPercent > 0 && finished.contextCompactions === 0, 'ordinary single task unexpectedly used context fallback');

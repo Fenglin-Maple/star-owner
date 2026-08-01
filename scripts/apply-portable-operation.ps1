@@ -5,6 +5,7 @@ param(
   [string]$StagedRoot = '',
   [string]$SourceWorkspace = '',
   [string]$TargetVersion = '',
+  [string]$OperationId = '',
   [switch]$Relaunch
 )
 
@@ -12,7 +13,9 @@ $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath($ProjectRoot)
 $updates = Join-Path $root '.updates'
 $resultFile = Join-Path $updates 'operation-result.json'
-$operationId = "operation-$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))"
+$journalFile = Join-Path $updates 'operation-journal.json'
+$requestFile = Join-Path $updates 'operation-request.json'
+$operationId = if ($OperationId) { $OperationId } else { "operation-$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))" }
 $backup = Join-Path $updates "operation-backup-$operationId"
 
 function Assert-UnderRoot([string]$Path, [string]$Label) {
@@ -36,6 +39,26 @@ function Write-Result([string]$Status, [string]$Message, [hashtable]$Extra = @{}
   }
   foreach ($entry in $Extra.GetEnumerator()) { $payload[$entry.Key] = $entry.Value }
   $payload | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $resultFile -Encoding UTF8
+  if ($Status -in @('succeeded', 'rolled-back')) {
+    Remove-Item -LiteralPath $journalFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $requestFile -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Write-Journal([string]$Status, [string]$Message = '') {
+  New-Item -ItemType Directory -Force -Path $updates | Out-Null
+  [ordered]@{
+    operationId = $operationId
+    mode = $Mode
+    status = $Status
+    message = $Message
+    projectRoot = $root
+    stagedRoot = $StagedRoot
+    sourceWorkspace = $SourceWorkspace
+    targetVersion = $TargetVersion
+    backup = $backup
+    updatedAt = [DateTime]::UtcNow.ToString('o')
+  } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $journalFile -Encoding UTF8
 }
 
 function Wait-ForApplicationExit {
@@ -69,8 +92,8 @@ function Restore-Path([string]$Relative) {
 function Apply-CoreUpdate {
   $stage = Assert-UnderRoot $StagedRoot 'Staged package'
   if (-not (Test-Path -LiteralPath (Join-Path $stage 'package.json'))) { throw 'Staged package.json is missing.' }
-  $coreDirectories = @('assets', 'src', 'scripts', 'tools', 'node_modules')
-  $coreFiles = @('package.json', 'package-lock.json', 'Start-StarOwner.cmd', 'portable-manifest.json', 'README.md', 'DESIGN.md', 'DEPLOYMENT.md', 'LICENSE', 'NOTICE')
+  $coreDirectories = @('assets', 'src', 'templates', 'scripts', 'tools', 'packaging', 'node_modules')
+  $coreFiles = @('package.json', 'package-lock.json', 'Start-StarOwner.cmd', 'portable-manifest.json', 'README.md', 'DESIGN.md', 'DEPLOYMENT.md', 'AGENTS.md', 'CODE_REVIEW.md', 'THIRD_PARTY_NOTICES.md', 'SECURITY.md', 'runtime-requirements.txt', 'LICENSE')
   foreach ($item in ($coreDirectories + $coreFiles)) { Backup-Path $item }
   foreach ($item in $coreDirectories) {
     $target = Join-Path $root $item
@@ -104,8 +127,10 @@ function Apply-WorkspaceMigration {
 
 try {
   Assert-UnderRoot $root 'Project root' | Out-Null
+  Write-Journal 'waiting-for-exit' '等待应用退出。'
   Wait-ForApplicationExit
   New-Item -ItemType Directory -Force -Path $backup | Out-Null
+  Write-Journal 'applying' '正在替换应用文件或迁移 Workspace。'
   if ($Mode -eq 'update') { Apply-CoreUpdate } else { Apply-WorkspaceMigration }
   $successMessage = if ($Mode -eq 'update') { "Updated to v$TargetVersion." } else { 'Workspace migrated successfully.' }
   Write-Result 'succeeded' $successMessage @{ backup = $backup }
@@ -114,9 +139,10 @@ try {
     if (Test-Path -LiteralPath $launcher) { Start-Process -FilePath $launcher -WorkingDirectory $root -WindowStyle Hidden }
   }
 } catch {
+  Write-Journal 'rolling-back' $_.Exception.Message
   try {
     if ($Mode -eq 'update') {
-      foreach ($item in @('assets', 'src', 'scripts', 'tools', 'node_modules', 'package.json', 'package-lock.json', 'Start-StarOwner.cmd', 'portable-manifest.json', 'README.md', 'DESIGN.md', 'DEPLOYMENT.md', 'LICENSE', 'NOTICE')) { Restore-Path $item }
+      foreach ($item in @('assets', 'src', 'templates', 'scripts', 'tools', 'packaging', 'node_modules', 'package.json', 'package-lock.json', 'Start-StarOwner.cmd', 'portable-manifest.json', 'README.md', 'DESIGN.md', 'DEPLOYMENT.md', 'AGENTS.md', 'CODE_REVIEW.md', 'THIRD_PARTY_NOTICES.md', 'SECURITY.md', 'runtime-requirements.txt', 'LICENSE')) { Restore-Path $item }
     } else { Restore-Path 'workspace' }
     Write-Result 'rolled-back' $_.Exception.Message @{ backup = $backup }
   } catch {

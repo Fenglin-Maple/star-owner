@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('orchestrator', {
   getRuntime: () => ipcRenderer.invoke('app:get-runtime'),
+  getBiliPartition: () => ipcRenderer.invoke('bili:partition'),
   checkLogin: () => ipcRenderer.invoke('bili:check-login'),
   prepareAccountSwitch: () => ipcRenderer.invoke('bili:prepare-account-switch'),
   listFolders: () => ipcRenderer.invoke('bili:list-folders'),

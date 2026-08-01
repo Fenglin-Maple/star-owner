@@ -631,6 +631,9 @@ function verifyRendererContracts() {
   if (!index.includes('id="qrCodeLogin"') || !app.includes('function showQrCodeLogin') || !app.includes('function installBiliVideoLinkBridge')) {
     throw new Error('Bilibili QR-code login or video-window bridge is missing from the renderer');
   }
+  if (index.includes('partition="persist:bili-orchestrator"') || !preload.includes('getBiliPartition') || !app.includes('function initializeBiliView')) {
+    throw new Error('Bilibili login webview still uses the legacy shared partition');
+  }
   if (!app.includes('function renderSyncSummary') || !app.includes('function taskStateGroup') || !app.includes("taskStatusFilter === 'all'")) {
     throw new Error('collection/task status summaries are not wired into renderer filtering');
   }

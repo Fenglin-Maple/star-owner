@@ -35,9 +35,9 @@ The application version and dependency version are independent. `package.json.de
 
 ### Updating and migrating an existing installation
 
-For a portable installation, use `设置 -> 应用更新与迁移 -> 检查更新`. Only the GitHub `latest` stable Release is eligible. The application downloads the core archive with retry and Range continuation, verifies its SHA-256, inspects archive paths, stages it, and replaces only the application files. `workspace/`, `runtime/` and `.updates/` are retained; a failed transaction rolls back and records the result for the next launch.
+For a portable installation, use `设置 -> 应用更新与迁移 -> 检查更新`. Only the GitHub `latest` stable Release is eligible. The application downloads the core archive with retry and Range continuation, verifies its SHA-256, inspects archive paths, stages it, and uses the staged package's helper to replace the complete application file set, including `templates`. `workspace/`, `runtime/` and `.updates/` are retained; a failed transaction rolls back and records the result for the next launch. An `operation-journal.json` left by an interrupted helper is surfaced on the next startup instead of being silently ignored.
 
-To move data from a v1.0.3 or newer installation, first stop all Agents and close the old application. Copy the complete old project directory to a short new location, start the new release, and use `设置 -> 应用更新与迁移 -> 从旧版目录迁移`. The application validates the source SQLite database and version, backs up the target workspace, migrates it atomically, and can restore the backup if the operation fails. Never copy only individual artifact folders or mix two live installations against the same workspace.
+To move data from a v1.0.3 or newer installation, first stop all Agents and close the old application. Copy the complete old project directory to a short new location, start the new release, and use `设置 -> 应用更新与迁移 -> 从旧版目录迁移`. The application validates the source SQLite database and version, backs up the target workspace, migrates it atomically, and can restore the backup if the operation fails. Never copy only individual artifact folders or mix two live installations against the same workspace. Each project copy now gets an independent Bilibili login partition; a blank copy does not inherit another copy's cookies.
 
 ## 2. Hardware and ASR
 

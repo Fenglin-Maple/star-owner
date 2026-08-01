@@ -171,6 +171,19 @@ const SNAPSHOT_IGNORED_EVENTS = new Set([
   'local-toolbox-queue-updated'
 ]);
 
+async function initializeBiliView() {
+  if (!biliView || biliView.getAttribute('partition')) return;
+  const partition = await window.orchestrator.getBiliPartition();
+  if (!partition) throw new Error('B站项目会话隔离标识为空。');
+  biliView.setAttribute('partition', partition);
+  biliView.setAttribute('src', 'https://www.bilibili.com');
+}
+
+const biliViewReady = initializeBiliView().catch((error) => {
+  loginOutput.textContent = error.message || String(error);
+  return false;
+});
+
 const TEXT = {
   navOverview: '\u542f\u52a8\u9875',
   navLogin: 'B\u7ad9\u767b\u5f55',
@@ -625,6 +638,17 @@ async function showQrCodeLogin() {
 
 function ensureLoginPage(forceReload = false) {
   return new Promise((resolve, reject) => {
+    biliViewReady.then((ready) => {
+      if (ready === false) {
+        reject(new Error('B站登录页会话初始化失败，请重启应用后重试。'));
+        return;
+      }
+      ensureLoginPageAfterReady(forceReload, resolve, reject);
+    }).catch(reject);
+  });
+}
+
+function ensureLoginPageAfterReady(forceReload, resolve, reject) {
     const target = 'https://passport.bilibili.com/login';
     const src = biliView.getURL?.() || '';
     const alreadyOnLoginPage = src.includes('passport.bilibili.com/login');
@@ -650,7 +674,6 @@ function ensureLoginPage(forceReload = false) {
     } catch (error) {
       finish(error);
     }
-  });
 }
 
 function setLoginEndpointReady(ready, detail = '') {

@@ -215,8 +215,7 @@ class InternalAgentManager {
     if (inspection.recoverable) {
       return this.reuseSingleTask(inspection.recoverable.taskId, input, provider, modelId);
     }
-    const workspace = this.requireWorkspace();
-    const dirs = collectionDirs(workspace.root, INTERNAL_USER_NAME, collectionStorageName(collection));
+    const dirs = this.collectionDirectories(collection);
     const now = new Date().toISOString();
     const taskId = `${collection.id}:${bvid}:single-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
     this.store.upsertTask({
@@ -363,8 +362,7 @@ class InternalAgentManager {
     if (!collection || !(collection.userId === INTERNAL_USER_ID || collection.internal === true) || collection.collectionKind === 'video-cache') {
       throw new Error('请选择内置用户下的内置收藏夹。');
     }
-    const workspace = this.requireWorkspace();
-    return collectionDirs(workspace.root, INTERNAL_USER_NAME, collectionStorageName(collection)).root;
+    return this.collectionDirectories(collection).root;
   }
 
   sessionOutputDirectory(sessionId) {
@@ -794,9 +792,10 @@ class InternalAgentManager {
       return item.status === 'pending' || item.status === 'failed' || (item.status === 'rejected' && !item.workId && !item.claimedBy);
     });
     if (!task) return null;
-    const workspace = this.requireWorkspace();
-    const dirs = collectionDirs(workspace.root, collection.userName, collectionStorageName(collection));
-    const canReuse = task.artifactDir && (task.cachedVideoId ? fs.existsSync(task.artifactDir) : task.workspaceId === workspace.id);
+    const dirs = this.collectionDirectories(collection);
+    const canReuse = task.artifactDir && (task.cachedVideoId
+      ? fs.existsSync(task.artifactDir)
+      : task.workspaceId === dirs.workspace.id && path.resolve(task.workspaceRoot || dirs.workspace.root) === dirs.workspace.root);
     const artifactDir = canReuse ? task.artifactDir : videoArtifactDir(dirs.videos, task, collection, this.store.getFilenameMetadata());
     ensureDir(artifactDir);
     const now = new Date();
@@ -807,8 +806,8 @@ class InternalAgentManager {
       claimedAt: now.toISOString(),
       leaseExpiresAt: new Date(now.getTime() + LEASE_MS).toISOString(),
       attempts: Number(task.attempts || 0) + 1,
-      workspaceId: workspace.id,
-      workspaceRoot: workspace.root,
+      workspaceId: dirs.workspace.id,
+      workspaceRoot: dirs.workspace.root,
       allowedRoot: task.cachedVideoId ? task.allowedRoot : dirs.root,
       artifactDir,
       validatorErrors: [],
@@ -821,7 +820,7 @@ class InternalAgentManager {
     });
     this.store.upsertTask(task);
     this.store.commit();
-    this.store.recordTaskEvent(task.id, 'claimed', { collectionId: collection.id, workerId: session.workerId, agentName: session.workerId, attempt: task.attempts, workId: task.workId, workspaceId: workspace.id, internalAgent: true });
+    this.store.recordTaskEvent(task.id, 'claimed', { collectionId: collection.id, workerId: session.workerId, agentName: session.workerId, attempt: task.attempts, workId: task.workId, workspaceId: dirs.workspace.id, internalAgent: true });
     session.currentTaskId = task.id;
     session.status = 'running';
     session.phase = '已领取任务';
@@ -1369,6 +1368,26 @@ class InternalAgentManager {
     const workspace = this.store.getDefaultWorkspace();
     if (!workspace) throw new Error('请先在设置中指定默认 Workspace。');
     return workspace;
+  }
+
+  collectionDirectories(collection) {
+    const fallbackWorkspace = this.requireWorkspace();
+    const storedWorkspace = collection?.workspaceId ? this.store.get('workspaces', collection.workspaceId) : null;
+    const workspace = storedWorkspace || fallbackWorkspace;
+    const workspaceRoot = path.resolve(String(collection?.workspaceRoot || workspace.root || fallbackWorkspace.root));
+    const fallback = collectionDirs(workspaceRoot, collection?.userName || INTERNAL_USER_NAME, collectionStorageName(collection));
+    const root = assertInside(workspaceRoot, collection?.collectionRoot || fallback.root);
+    const videos = assertInside(root, collection?.videosDir || root);
+    const exports = assertInside(workspaceRoot, collection?.exportDir || fallback.exports);
+    ensureDir(root);
+    ensureDir(videos);
+    ensureDir(exports);
+    return {
+      workspace: { id: String(collection?.workspaceId || workspace.id || fallbackWorkspace.id), root: workspaceRoot },
+      root,
+      videos,
+      exports
+    };
   }
 
   ensureInternalUser() {

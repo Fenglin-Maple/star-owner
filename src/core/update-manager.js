@@ -99,7 +99,7 @@ class UpdateManager {
     const partial = `${archive}.partial`;
     this.publish({ status: 'downloading', progress: 0.03, downloadedBytes: fs.existsSync(partial) ? fs.statSync(partial).size : 0, totalBytes: Number(release.asset.size || 0), message: `正在下载 ${release.asset.name}` });
     if (!fs.existsSync(archive) || await sha256(archive) !== release.checksum) {
-      await this.downloadFile(release.asset.url, partial, release.asset.name, Number(release.asset.size || 0));
+      await this.downloadFile(release.asset.url, partial, release.asset.name, Number(release.asset.size || 0), release.checksum);
       if (fs.existsSync(archive)) fs.rmSync(archive, { force: true });
       fs.renameSync(partial, archive);
       this.publish({ status: 'verifying', progress: 0.9, message: '正在校验核心包 SHA-256' });
@@ -109,11 +109,13 @@ class UpdateManager {
       fs.rmSync(archive, { force: true });
       throw new Error(`核心包 SHA-256 不匹配，已拒绝安装：${actual}`);
     }
-    const inspection = await inspectArchive(archive, this.projectRoot);
+    const tar = resolveSystemExecutable('tar.exe');
+    if (!tar) throw new Error('Windows 系统缺少 tar.exe，无法检查更新包。');
+    const inspection = await inspectArchive(archive, this.projectRoot, tar);
     const stagingRoot = path.join(this.updateRoot, `staging-v${release.version}`);
     fs.rmSync(stagingRoot, { recursive: true, force: true });
     ensureDir(stagingRoot);
-    await runCommand('tar.exe', ['-xf', archive, '-C', stagingRoot], this.projectRoot);
+    await runCommand(tar, ['-xf', archive, '-C', stagingRoot], this.projectRoot);
     const packageRoot = locatePackageRoot(stagingRoot, inspection.prefix);
     validateStagedPackage(packageRoot, release.version);
     this.prepared = { archive, stagingRoot, packageRoot, release };
@@ -153,15 +155,30 @@ class UpdateManager {
 
   launchOperation({ mode, stagedRoot = '', sourceWorkspace = '', targetVersion = '' }) {
     if (this.platform !== 'win32') throw new Error('便携自动更新和迁移目前只支持 Windows。');
-    const helperSource = path.join(this.projectRoot, 'scripts', 'apply-portable-operation.ps1');
+    const helperSource = mode === 'update' && stagedRoot
+      ? path.join(path.resolve(stagedRoot), 'scripts', 'apply-portable-operation.ps1')
+      : path.join(this.projectRoot, 'scripts', 'apply-portable-operation.ps1');
     if (!fs.existsSync(helperSource)) throw new Error('更新事务脚本缺失，无法安全更新。');
+    if (mode === 'update' && !isInside(this.updateRoot, helperSource)) throw new Error('更新事务脚本不在受管暂存目录中。');
+    const operationId = `operation-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+    const requestFile = path.join(this.updateRoot, 'operation-request.json');
+    fs.writeFileSync(requestFile, `${JSON.stringify({
+      operationId,
+      mode,
+      projectRoot: this.projectRoot,
+      stagedRoot: stagedRoot ? path.resolve(stagedRoot) : '',
+      sourceWorkspace: sourceWorkspace ? path.resolve(sourceWorkspace) : '',
+      targetVersion,
+      helperSource,
+      requestedAt: new Date().toISOString()
+    }, null, 2)}\n`, 'utf8');
     const helper = path.join(os.tmpdir(), `star-owner-operation-${process.pid}-${Date.now()}.ps1`);
     fs.copyFileSync(helperSource, helper);
     const args = [
       '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', helper,
       '-Mode', mode, '-ProjectRoot', this.projectRoot, '-ProcessId', String(process.pid),
       '-StagedRoot', stagedRoot, '-SourceWorkspace', sourceWorkspace,
-      '-TargetVersion', targetVersion, '-Relaunch'
+      '-TargetVersion', targetVersion, '-OperationId', operationId, '-Relaunch'
     ];
     const powershell = resolveSystemExecutable('powershell.exe');
     if (!powershell) throw new Error('Windows 系统缺少 PowerShell，无法执行更新或迁移。');
@@ -191,15 +208,33 @@ class UpdateManager {
     return checksum;
   }
 
-  async downloadFile(url, target, label, expectedTotal = 0) {
+  async downloadFile(url, target, label, expectedTotal = 0, expectedChecksum = '') {
+    expectedChecksum = String(expectedChecksum || '').toLowerCase();
     let existing = fs.existsSync(target) ? fs.statSync(target).size : 0;
     const headers = { Accept: 'application/octet-stream', 'User-Agent': 'star-owner-updater' };
     if (existing) headers.Range = `bytes=${existing}-`;
-    const response = await this.fetchImpl(url, { headers, redirect: 'follow', signal: AbortSignal.timeout(6 * 60 * 60 * 1000) });
+    const request = (requestHeaders) => this.fetchImpl(url, { headers: requestHeaders, redirect: 'follow', signal: AbortSignal.timeout(6 * 60 * 60 * 1000) });
+    let response = await request(headers);
+    if (response.status === 416 && existing) {
+      const partialIsComplete = Boolean((expectedTotal && existing === Number(expectedTotal)) || (!expectedTotal && expectedChecksum))
+        && Boolean(expectedChecksum)
+        && await sha256(target) === expectedChecksum;
+      if (partialIsComplete) return;
+      fs.rmSync(target, { force: true });
+      existing = 0;
+      response = await request({ Accept: 'application/octet-stream', 'User-Agent': 'star-owner-updater' });
+    }
     if (!response.ok || !response.body) throw new Error(`更新包下载失败（${response.status}）。`);
-    const range = parseContentRange(response.headers.get('content-range'));
-    const resumed = existing > 0 && response.status === 206 && range?.start === existing;
+    let range = parseContentRange(response.headers.get('content-range'));
+    let resumed = existing > 0 && response.status === 206 && range?.start === existing;
     if (existing && !resumed) {
+      if (response.status === 206) {
+        fs.rmSync(target, { force: true });
+        existing = 0;
+        response = await request({ Accept: 'application/octet-stream', 'User-Agent': 'star-owner-updater' });
+        if (!response.ok || !response.body) throw new Error(`更新包下载失败（${response.status}）。`);
+        range = parseContentRange(response.headers.get('content-range'));
+      }
       existing = 0;
       fs.rmSync(target, { force: true });
     }
@@ -219,8 +254,24 @@ class UpdateManager {
 
   restoreOperationResult() {
     const file = path.join(this.updateRoot, 'operation-result.json');
+    const journal = readJsonIfPresent(path.join(this.updateRoot, 'operation-journal.json'));
+    const request = readJsonIfPresent(path.join(this.updateRoot, 'operation-request.json'));
     const result = readJsonIfPresent(file);
-    if (result) this.stateData.lastOperation = result;
+    if (journal) {
+      this.stateData.lastOperation = {
+        ...journal,
+        status: 'incomplete',
+        message: '检测到上次更新/迁移没有写入完成结果，请检查备份后重新执行。'
+      };
+    } else if (request && (!result || String(result.operationId || '') !== String(request.operationId || ''))) {
+      this.stateData.lastOperation = {
+        ...request,
+        status: 'scheduled',
+        message: '上次更新/迁移已安排，但尚未收到 helper 的完成结果。'
+      };
+    } else if (result) {
+      this.stateData.lastOperation = result;
+    }
   }
 }
 
@@ -245,8 +296,7 @@ function resolveCoreRelease(release) {
   };
 }
 
-async function inspectArchive(archive, cwd) {
-  const tar = resolveSystemExecutable('tar.exe');
+async function inspectArchive(archive, cwd, tar = resolveSystemExecutable('tar.exe')) {
   if (!tar) throw new Error('Windows 系统缺少 tar.exe，无法检查更新包。');
   const listing = await runCommand(tar, ['-tf', archive], cwd);
   const verbose = await runCommand(tar, ['-tvf', archive], cwd);

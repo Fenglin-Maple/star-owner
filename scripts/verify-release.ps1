@@ -128,6 +128,10 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "SQLite persistence test failed." }
   & npm run test:collection-sync
   if ($LASTEXITCODE -ne 0) { throw "Collection sync test failed." }
+  & npm run test:bili-session
+  if ($LASTEXITCODE -ne 0) { throw "Bilibili session partition test failed." }
+  & npm run test:update-migration
+  if ($LASTEXITCODE -ne 0) { throw "Update and migration test failed." }
   & npm run test:bili-client
   if ($LASTEXITCODE -ne 0) { throw "Bilibili client test failed." }
   & npm run test:asr-format
