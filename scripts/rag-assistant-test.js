@@ -3,7 +3,7 @@ const http = require('http');
 const path = require('path');
 const MarkdownIt = require('markdown-it');
 const { Store } = require('../src/core/store');
-const { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, MAX_RAG_TOOL_ROUNDS, RAG_AUTO_COMPACT_TRIGGER, RagAssistant, normalizeModel, splitTextByTokenBudget } = require('../src/core/rag-assistant');
+const { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, MAX_RAG_TOOL_ROUNDS, RAG_AUTO_COMPACT_TRIGGER, RagAssistant, normalizeModel, splitTextByTokenBudget, readUtf8LineRange, estimateAttachmentTokens } = require('../src/core/rag-assistant');
 const { wrapMarkdownTables } = require('../src/core/markdown');
 
 function assert(condition, message) {
@@ -59,6 +59,15 @@ async function startFakeProvider() {
     if (userText.includes('PROVIDER_FAILURE')) {
       response.writeHead(503, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ error: { message: 'temporary upstream outage' } }));
+      return;
+    }
+    if (userText.includes('THINK_TAG_TEST')) {
+      sse(response, [
+        { choices: [{ delta: { content: '正文前<thi' } }] },
+        { choices: [{ delta: { content: 'nk>隐藏推理' } }] },
+        { choices: [{ delta: { content: '</thi' } }] },
+        { choices: [{ delta: { content: 'nk>正文后' } }] }
+      ]);
       return;
     }
     if (userText.includes('JSON_FALLBACK')) {
@@ -160,6 +169,19 @@ async function startFakeProvider() {
     assert(tableHtml.includes('<div class="rag-table-wrap"><table>') && tableHtml.includes('<th>名称</th>') && tableHtml.includes('</table></div>'), 'RAG Markdown table wrapper was not rendered');
     const splitFixture = `${'第一段完整上下文。'.repeat(500)}\n${'second complete context line. '.repeat(500)}`;
     assert(splitTextByTokenBudget(splitFixture, 700).join('') === splitFixture, 'RAG context chunking dropped or reordered source text');
+    assert(estimateAttachmentTokens([{ mimeType: 'image/png', size: 15 * 1024 * 1024 }], { supportsVision: true }) > 5000000, 'RAG image context estimation did not account for the actual base64 payload');
+    const lineRangeFixture = path.join(root, 'line-range.md');
+    fs.writeFileSync(lineRangeFixture, `第一行\n第二行-中间分页\n${'长文本'.repeat(30000)}`, 'utf8');
+    const firstLinePage = readUtf8LineRange(lineRangeFixture, 1, 1, 0, 1000);
+    assert(firstLinePage.selected === '第一行\n' && firstLinePage.next?.line === 2 && firstLinePage.next?.column === 0, 'line-range reader did not preserve line/page boundaries');
+    const longLinePage = readUtf8LineRange(lineRangeFixture, 3, 1, 0, 50000);
+    assert(longLinePage.selected.length === 50000 && longLinePage.next?.line === 3 && longLinePage.next?.column === 50000, 'line-range reader did not paginate a long UTF-8 line by character column');
+    const resumedLongLinePage = readUtf8LineRange(lineRangeFixture, 3, 1, longLinePage.next.column, 50000);
+    assert(resumedLongLinePage.selected.length > 0 && resumedLongLinePage.selected === '长文本'.repeat(30000).slice(50000), 'line-range reader could not resume a long UTF-8 line');
+    const noTrailingNewlineFixture = path.join(root, 'no-trailing-newline.md');
+    fs.writeFileSync(noTrailingNewlineFixture, '有换行\n末行无换行', 'utf8');
+    const finalLinePage = readUtf8LineRange(noTrailingNewlineFixture, 1, 10, 0, 1000);
+    assert(finalLinePage.selected === '有换行\n末行无换行' && finalLinePage.next === null && finalLinePage.totalLines === 2, 'line-range reader mishandled the final line without a trailing newline');
     store.delete('ragProviders', 'legacy-provider');
     store.commit();
 
@@ -167,7 +189,10 @@ async function startFakeProvider() {
     const remoteModels = await assistant.fetchModels(provider.id);
     assert(remoteModels.length === 2, 'remote model list was not fetched');
     assert(assistant.rawProvider(provider.id).resolvedBaseUrl === fake.url, 'NewAPI /v1 endpoint was not discovered');
-    assistant.updateProviderModels(provider.id, [{ id: 'fake-agent', contextWindow: 4096, maxOutputTokens: 2048, supportsTools: true, supportsReasoning: true, supportsVision: true, supportsCompression: true, supportsSubagents: true }]);
+    assistant.updateProviderModels(provider.id, [
+      { id: 'fake-agent', contextWindow: 4096, maxOutputTokens: 2048, supportsTools: true, supportsReasoning: true, supportsVision: true, supportsCompression: true, supportsSubagents: true },
+      { id: 'fake-tools', contextWindow: 32768, maxOutputTokens: 2048, supportsTools: true, supportsReasoning: true, supportsVision: true, supportsCompression: true, supportsSubagents: true }
+    ]);
     const session = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', knowledgeCollectionIds: ['rag-collection'] });
     assert(assistant.state('rag-session-that-no-longer-exists').activeSession?.id === session.id, 'stale RAG session id did not fall back to the first available session');
 
@@ -233,6 +258,10 @@ async function startFakeProvider() {
     const clipboardMessage = assistant.sessionDetail(session.id).messages.find((message) => message.role === 'user' && message.content === 'JSON_FALLBACK');
     assert(clipboardMessage.attachments[0]?.previewUrl.startsWith('file:'), 'sent clipboard image did not retain a conversation preview');
 
+    const thinkTagSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: 'Inline reasoning tag test' });
+    const thinkTagReply = await assistant.send(thinkTagSession.id, { content: 'THINK_TAG_TEST' });
+    assert(thinkTagReply.content === '正文前正文后' && thinkTagReply.reasoning === '隐藏推理' && !/<\/?think>/i.test(thinkTagReply.content), 'inline think tags were not separated from the final answer');
+
     const disposableSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: 'Attachment cleanup test' });
     const disposableSessionImage = await assistant.importBuffer(disposableSession.id, {
       buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
@@ -292,11 +321,11 @@ async function startFakeProvider() {
     assert(usageAfterAuto >= usageBeforeAuto + 2, 'automatic compression model calls were not included in usage accounting');
     assert(events.some((item) => item.type === 'context-compaction' && item.phase === 'completed' && item.automatic), 'automatic compression UI event was not emitted');
 
-    const toolRoundSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: 'Tool round accounting test' });
-    const usageBeforeToolRounds = assistant.state(toolRoundSession.id).modelUsage.find((item) => item.providerId === provider.id && item.modelId === 'fake-agent')?.requests || 0;
+    const toolRoundSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-tools', title: 'Tool round accounting test' });
+    const usageBeforeToolRounds = assistant.state(toolRoundSession.id).modelUsage.find((item) => item.providerId === provider.id && item.modelId === 'fake-tools')?.requests || 0;
     const manyToolRounds = await assistant.send(toolRoundSession.id, { content: 'TOOL_ROUND_LIMIT：连续检索后给出答案。' });
     assert(manyToolRounds.toolEvents.length === 24 && manyToolRounds.content.includes('24 轮'), 'RAG assistant did not allow 24 complete knowledge-tool rounds plus a final answer');
-    const usageAfterToolRounds = assistant.state(toolRoundSession.id).modelUsage.find((item) => item.providerId === provider.id && item.modelId === 'fake-agent')?.requests || 0;
+    const usageAfterToolRounds = assistant.state(toolRoundSession.id).modelUsage.find((item) => item.providerId === provider.id && item.modelId === 'fake-tools')?.requests || 0;
     assert(usageAfterToolRounds === usageBeforeToolRounds + 1, 'multi-round answer usage should be recorded as one conversation turn');
 
     const providerFailureSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: 'Provider failure classification' });
@@ -330,7 +359,7 @@ async function startFakeProvider() {
 
     const state = assistant.state(session.id);
     assert(state.knowledgeCatalog[0]?.documentCount === 2, 'knowledge catalog classification failed');
-    assert(state.modelUsage[0]?.requests >= 8, 'per-model request count did not include extended RAG and compression calls');
+    assert(state.modelUsage.reduce((sum, item) => sum + Number(item.requests || 0), 0) >= 8, 'per-model request count did not include extended RAG and compression calls');
     assert(events.some((item) => item.type === 'assistant-delta') && events.some((item) => item.type === 'tool'), 'stream events were not emitted');
     const shutdownController = new AbortController();
     assistant.controllers.set('shutdown-fixture', shutdownController);

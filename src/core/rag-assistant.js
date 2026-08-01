@@ -3,6 +3,7 @@ const path = require('path');
 const crypto = require('crypto');
 const dns = require('dns');
 const { execFile, spawnSync } = require('child_process');
+const { StringDecoder } = require('string_decoder');
 const { pathToFileURL } = require('url');
 const MarkdownIt = require('markdown-it');
 const pdf = require('pdf-parse');
@@ -38,6 +39,11 @@ const PROVIDER_REQUEST_TIMEOUT_MS = 60 * 60 * 1000;
 const MAX_ATTACHMENT_BYTES = 250 * 1024 * 1024;
 const MAX_EXTRACTABLE_DOCUMENT_BYTES = 64 * 1024 * 1024;
 const MAX_DOCUMENT_CACHE_ENTRIES = 128;
+const MAX_INDEX_DOCUMENT_CHARACTERS = 4 * 1024 * 1024;
+const MAX_RAG_SEARCH_DOCUMENTS = 2000;
+const MAX_RAG_SEARCH_CHUNKS = 12000;
+const MAX_RAG_SEARCH_RESULT_CHARACTERS = 50000;
+const RAG_SEARCH_TIME_BUDGET_MS = 5000;
 const knowledgeMarkdownParser = new MarkdownIt({ html: false, linkify: false, typographer: false });
 
 class RagAssistant {
@@ -508,6 +514,7 @@ class RagAssistant {
     let toolCallsUsed = 0;
     const toolContextLimit = toolContextCharacterLimit(model);
     while (toolRounds <= MAX_RAG_TOOL_ROUNDS) {
+      assertApiContextBudget(apiMessages, model, this.outputTokenLimit(provider, model));
       const availableTools = toolCallsUsed < MAX_RAG_TOOL_CALLS ? tools : [];
       const result = await this.streamCompletion(provider, {
         model: session.modelId,
@@ -580,7 +587,7 @@ class RagAssistant {
     let used = 0;
     for (let index = messages.length - 1; index >= 0 && recent.length < 500; index -= 1) {
       const message = messages[index];
-      const tokens = estimateTokens(message.content || '') + 8;
+      const tokens = estimateMessageTokens(message, model, this.store) + 8;
       if (recent.length >= 4 && used + tokens > historyBudget) break;
       recent.unshift(message);
       used += tokens;
@@ -659,9 +666,11 @@ class RagAssistant {
 
   async maybeAutoCompact(session, currentMessageId, attachments, signal) {
     const model = this.sessionModel(session);
-    const attachmentTokens = estimateAttachmentTokens(attachments, model);
-    const plan = this.contextPlan(session, model, attachmentTokens);
+    const plan = this.contextPlan(session, model);
     if (!plan.shouldCompact) return { compacted: false, plan };
+    if (!model.supportsCompression) {
+      throw new Error(`当前会话上下文已达到自动压缩阈值（${plan.contextPercent}%），但所选模型未启用上下文压缩。请手动切换支持压缩的模型，或新建会话。`);
+    }
     const stored = this.store.list('ragMessages').filter((item) => item.sessionId === session.id && item.id !== currentMessageId && ['user', 'assistant'].includes(item.role) && item.status === 'complete');
     const candidates = this.activeHistoryMessages(session, stored);
     if (!candidates.length && !session.compressedSummary) return { compacted: false, plan };
@@ -842,20 +851,47 @@ class RagAssistant {
     const tasks = this.store.listTasks().filter((task) => selected.has(task.collectionId) && knowledgeEligible(task));
     const collections = new Map(this.store.listCollections().map((item) => [item.id, item]));
     const scored = [];
-    for (const task of tasks) {
-      const chunks = this.documentChunks(task.outputMarkdown);
+    const startedAt = Date.now();
+    let inspectedDocuments = 0;
+    let skippedDocuments = 0;
+    let inspectedChunks = 0;
+    let truncatedByBudget = false;
+    for (const task of tasks.slice(0, MAX_RAG_SEARCH_DOCUMENTS)) {
+      if (Date.now() - startedAt >= RAG_SEARCH_TIME_BUDGET_MS || inspectedChunks >= MAX_RAG_SEARCH_CHUNKS) {
+        truncatedByBudget = true;
+        break;
+      }
+      inspectedDocuments += 1;
+      let chunks;
+      try {
+        chunks = this.documentChunks(task.outputMarkdown);
+      } catch {
+        skippedDocuments += 1;
+        continue;
+      }
       for (const chunk of chunks) {
+        inspectedChunks += 1;
+        if (Date.now() - startedAt >= RAG_SEARCH_TIME_BUDGET_MS || inspectedChunks > MAX_RAG_SEARCH_CHUNKS) {
+          truncatedByBudget = true;
+          break;
+        }
         const collection = collections.get(task.collectionId);
         const membership = knowledgeFavoriteMetadata(task, collection);
         const haystack = `${task.title || ''}\n${task.owner || ''}\n${task.publishedAt || ''}\n${task.favoriteAddedAt || ''}\n${membership}\n${chunk}`.toLowerCase();
         const score = terms.reduce((sum, term) => sum + countOccurrences(haystack, term), 0) + (terms.some((term) => String(task.title || '').toLowerCase().includes(term)) ? 6 : 0);
         if (score > 0 || !terms.length) scored.push({ score, task, chunk, collection });
       }
+      if (truncatedByBudget) break;
     }
     const wanted = Math.max(1, Math.min(20, Number(limit) || 8));
     const results = scored.sort((a, b) => b.score - a.score).slice(0, wanted);
-    if (!results.length) return `No matching passages found across ${tasks.length} selected documents.`;
-    return results.map((item, index) => `[#${index + 1}] Document ID: ${item.task.id}\nUser: ${item.collection?.userName || '-'} | Collection: ${item.collection?.name || '-'} | Title: ${item.task.title || item.task.bvid}\nBVID: ${item.task.bvid || '-'} | UP: ${item.task.owner || '-'}\nPublished at: ${item.task.publishedAt || '-'}\nFavorited at: ${item.task.favoriteAddedAt || '-'}\n${knowledgeFavoriteMetadata(item.task, item.collection)}\n${item.chunk}`).join('\n\n---\n\n');
+    const notice = [
+      skippedDocuments ? `Skipped ${skippedDocuments} unavailable or unreadable document(s).` : '',
+      truncatedByBudget || tasks.length > inspectedDocuments ? `Search budget reached; inspected ${inspectedDocuments}/${tasks.length} document(s) and ${inspectedChunks} chunk(s).` : ''
+    ].filter(Boolean).join('\n');
+    if (!results.length) return `${notice}${notice ? '\n' : ''}No matching passages found across ${tasks.length} selected documents.`;
+    const resultText = results.map((item, index) => `[#${index + 1}] Document ID: ${item.task.id}\nUser: ${item.collection?.userName || '-'} | Collection: ${item.collection?.name || '-'} | Title: ${item.task.title || item.task.bvid}\nBVID: ${item.task.bvid || '-'} | UP: ${item.task.owner || '-'}\nPublished at: ${item.task.publishedAt || '-'}\nFavorited at: ${item.task.favoriteAddedAt || '-'}\n${knowledgeFavoriteMetadata(item.task, item.collection)}\n${item.chunk}`).join('\n\n---\n\n');
+    return truncate(`${notice}${notice ? '\n\n' : ''}${resultText}`, MAX_RAG_SEARCH_RESULT_CHARACTERS);
   }
 
   listKnowledgeDocuments(session, query = '', offset = 0, limit = 50) {
@@ -880,31 +916,11 @@ class RagAssistant {
   readKnowledgeDocument(session, documentId, startLine = 1, lineCount = 300, startColumn = 0, maximumCharactersInput = MAX_KNOWLEDGE_READ_CHARACTERS) {
     const task = this.requireKnowledgeDocument(session, documentId);
     const collection = this.store.getCollectionById(task.collectionId);
-    const source = fs.readFileSync(task.outputMarkdown, 'utf8');
-    const lines = source.match(/[^\n]*\n|[^\n]+$/g) || [];
     const start = Math.max(1, Number(startLine) || 1);
     const column = Math.max(0, Number(startColumn) || 0);
     const wanted = Math.max(1, Math.min(2000, Number(lineCount) || 300));
     const maximumCharacters = Math.max(2000, Math.min(MAX_KNOWLEDGE_READ_CHARACTERS, Number(maximumCharactersInput) || MAX_KNOWLEDGE_READ_CHARACTERS));
-    let selected = '';
-    let lineIndex = start - 1;
-    let currentColumn = column;
-    const lastLineExclusive = Math.min(lines.length, start - 1 + wanted);
-    while (lineIndex < lastLineExclusive && selected.length < maximumCharacters) {
-      const line = lines[lineIndex] || '';
-      const remaining = line.slice(currentColumn);
-      const capacity = maximumCharacters - selected.length;
-      if (remaining.length > capacity) {
-        selected += remaining.slice(0, capacity);
-        currentColumn += capacity;
-        break;
-      }
-      selected += remaining;
-      lineIndex += 1;
-      currentColumn = 0;
-    }
-    const next = lineIndex < lines.length ? { line: lineIndex + 1, column: currentColumn } : null;
-    const endLine = Math.min(lines.length, Math.max(start, lineIndex + (currentColumn ? 1 : 0)));
+    const range = readUtf8LineRange(task.outputMarkdown, start, wanted, column, maximumCharacters);
     return [
       `Document ID: ${task.id}`,
       `Title: ${task.title || task.bvid}`,
@@ -913,10 +929,10 @@ class RagAssistant {
       `Published at: ${task.publishedAt || '-'}`,
       `Favorited at: ${task.favoriteAddedAt || '-'}`,
       knowledgeFavoriteMetadata(task, collection),
-      `Exact original Markdown range starts at line ${start}, column ${column}; returned through line ${endLine} of ${lines.length}.`,
-      next ? `next_start_line: ${next.line}\nnext_start_column: ${next.column}` : 'End of document.',
+      `Exact original Markdown range starts at line ${start}, column ${column}; returned through line ${range.endLine}${range.totalLinesKnown ? ` of ${range.totalLines}` : ''}.`,
+      range.next ? `next_start_line: ${range.next.line}\nnext_start_column: ${range.next.column}` : 'End of document.',
       '\n--- RAW MARKDOWN START ---\n',
-      selected,
+      range.selected,
       '\n--- RAW MARKDOWN END ---'
     ].join('\n');
   }
@@ -1002,7 +1018,7 @@ class RagAssistant {
       this.documentCache.set(file, cached);
       return cached.chunks;
     }
-    const text = fs.readFileSync(file, 'utf8').replace(/^---\r?\n[\s\S]*?\r?\n---\s*/, '');
+    const text = readUtf8Prefix(file, MAX_INDEX_DOCUMENT_CHARACTERS).replace(/^---\r?\n[\s\S]*?\r?\n---\s*/, '');
     const chunks = [];
     const sections = text.split(/(?=^#{1,3}\s+)/m);
     for (const section of sections) {
@@ -1130,13 +1146,12 @@ class RagAssistant {
     if (contentType.includes('application/json')) {
       const payload = parseJson(await response.text(), 'Model provider returned invalid JSON data.');
       const message = payload.choices?.[0]?.message || payload.choices?.[0]?.delta || {};
-      const content = normalizeContent(message.content);
-      const reasoning = normalizeContent(message.reasoning_content ?? message.reasoning ?? message.thinking);
-      if (content) onDelta({ content });
-      if (reasoning) onDelta({ reasoning });
+      const normalized = normalizeResponseMessage(message);
+      if (normalized.content) onDelta?.({ content: normalized.content });
+      if (normalized.reasoning) onDelta?.({ reasoning: normalized.reasoning });
       return {
-        content,
-        reasoning,
+        content: normalized.content,
+        reasoning: normalized.reasoning,
         usage: normalizeUsage(payload.usage || {}),
         toolCalls: normalizeToolCalls(message.tool_calls || [])
       };
@@ -1149,6 +1164,7 @@ class RagAssistant {
     let reasoning = '';
     let usage = null;
     const toolCalls = new Map();
+    const inlineReasoning = new InlineReasoningStreamParser();
     const consumeEvent = (event) => {
       for (const line of event.split(/\r?\n/)) {
         if (!line.startsWith('data:')) continue;
@@ -1160,8 +1176,12 @@ class RagAssistant {
           const delta = choice.delta || choice.message || {};
           const text = normalizeContent(delta.content);
           const thought = normalizeContent(delta.reasoning_content ?? delta.reasoning ?? delta.thinking);
-          if (text) { content += text; onDelta({ content: text }); }
-          if (thought) { reasoning += thought; onDelta({ reasoning: thought }); }
+          if (text) {
+            const parsed = inlineReasoning.push(text);
+            if (parsed.content) { content += parsed.content; onDelta?.({ content: parsed.content }); }
+            if (parsed.reasoning) { reasoning += parsed.reasoning; onDelta?.({ reasoning: parsed.reasoning }); }
+          }
+          if (thought) { reasoning += thought; onDelta?.({ reasoning: thought }); }
           for (const item of delta.tool_calls || []) {
             const matchingIndex = item.id
               ? [...toolCalls.entries()].find(([, call]) => call.id === item.id)?.[0]
@@ -1186,6 +1206,9 @@ class RagAssistant {
     }
     buffer += decoder.decode();
     if (buffer.trim()) consumeEvent(buffer);
+    const inlineTail = inlineReasoning.finish();
+    if (inlineTail.content) { content += inlineTail.content; onDelta?.({ content: inlineTail.content }); }
+    if (inlineTail.reasoning) { reasoning += inlineTail.reasoning; onDelta?.({ reasoning: inlineTail.reasoning }); }
     return { content, reasoning, usage, toolCalls: [...toolCalls.values()] };
   }
 
@@ -1196,7 +1219,8 @@ class RagAssistant {
       if (!response.ok) throw providerHttpError(response.status, text);
       const payload = parseJson(text, 'Model provider returned non-JSON data.');
       const message = payload.choices?.[0]?.message || {};
-      return { content: normalizeContent(message.content), reasoning: normalizeContent(message.reasoning_content ?? message.reasoning ?? message.thinking), usage: normalizeUsage(payload.usage || {}) };
+      const normalized = normalizeResponseMessage(message);
+      return { content: normalized.content, reasoning: normalized.reasoning, usage: normalizeUsage(payload.usage || {}) };
     } catch (error) {
       throw normalizeProviderError(error, signal);
     }
@@ -1422,6 +1446,20 @@ function estimateUsage(messages, output) {
   return { input, output: out, total: input + out };
 }
 
+function assertApiContextBudget(messages, model, outputTokens) {
+  const contextWindow = positiveInteger(model.contextWindow, null, DEFAULT_CONTEXT_WINDOW);
+  const inputTokens = estimateTokens(JSON.stringify(messages || []));
+  const outputReserve = Math.min(positiveInteger(outputTokens, null, DEFAULT_MAX_OUTPUT_TOKENS), Math.floor(contextWindow * 0.5));
+  const protocolReserve = Math.min(16000, Math.max(128, Math.floor(contextWindow * 0.05)));
+  if (inputTokens + outputReserve + protocolReserve > contextWindow) {
+    const percent = Math.round((inputTokens / Math.max(1, contextWindow)) * 1000) / 10;
+    const error = new Error(`当前请求上下文约 ${percent}%（${inputTokens}/${contextWindow} tokens），加上输出预留后超过模型上限。请先压缩会话、减少附件或切换更大上下文模型。`);
+    error.code = 'MODEL_CONTEXT_LIMIT';
+    error.failureKind = 'context';
+    throw error;
+  }
+}
+
 function estimateTokens(value) {
   return Math.max(0, Math.ceil(String(value || '').length / 3.5));
 }
@@ -1441,6 +1479,79 @@ function normalizeContent(value) {
     const url = part?.image_url?.url || part?.image_url || part?.url;
     return url ? `\n![model output](${url})\n` : '';
   }).join('');
+}
+
+function normalizeResponseMessage(message = {}) {
+  const content = splitInlineReasoning(normalizeContent(message.content));
+  const explicit = splitInlineReasoning(normalizeContent(message.reasoning_content ?? message.reasoning ?? message.thinking));
+  return {
+    content: content.content,
+    reasoning: [explicit.reasoning, explicit.content, content.reasoning].filter(Boolean).join('')
+  };
+}
+
+function splitInlineReasoning(value) {
+  const parser = new InlineReasoningStreamParser();
+  const first = parser.push(value);
+  const last = parser.finish();
+  return {
+    content: `${first.content}${last.content}`,
+    reasoning: `${first.reasoning}${last.reasoning}`
+  };
+}
+
+class InlineReasoningStreamParser {
+  constructor() {
+    this.mode = 'content';
+    this.pending = '';
+  }
+
+  push(value) {
+    this.pending += String(value || '');
+    const output = { content: '', reasoning: '' };
+    const open = /<\s*(?:think|thinking|analysis)\s*>/i;
+    const close = /<\s*\/\s*(?:think|thinking|analysis)\s*>/i;
+    while (this.pending) {
+      const expression = this.mode === 'content' ? open : close;
+      const match = expression.exec(this.pending);
+      if (!match) {
+        const hold = trailingTagPrefixLength(this.pending, this.mode === 'content' ? ['<think>', '<thinking>', '<analysis>'] : ['</think>', '</thinking>', '</analysis>']);
+        const stable = hold ? this.pending.slice(0, -hold) : this.pending;
+        if (this.mode === 'content') output.content += stable;
+        else output.reasoning += stable;
+        this.pending = hold ? this.pending.slice(-hold) : '';
+        break;
+      }
+      const before = this.pending.slice(0, match.index);
+      if (this.mode === 'content') output.content += before;
+      else output.reasoning += before;
+      this.pending = this.pending.slice(match.index + match[0].length);
+      this.mode = this.mode === 'content' ? 'reasoning' : 'content';
+    }
+    return output;
+  }
+
+  finish() {
+    const output = this.push('');
+    if (this.pending) {
+      if (this.mode === 'content') output.content += this.pending;
+      else output.reasoning += this.pending;
+      this.pending = '';
+    }
+    return output;
+  }
+}
+
+function trailingTagPrefixLength(value, tags) {
+  const lower = String(value || '').toLowerCase();
+  let longest = 0;
+  for (const tag of tags) {
+    const candidate = String(tag).toLowerCase();
+    for (let length = 1; length < candidate.length; length += 1) {
+      if (lower.endsWith(candidate.slice(0, length))) longest = Math.max(longest, length);
+    }
+  }
+  return longest;
 }
 
 function tool(name, description, properties, required = []) {
@@ -1589,10 +1700,25 @@ function abortError() {
 function estimateAttachmentTokens(attachments, model) {
   return (attachments || []).reduce((sum, attachment) => {
     if (attachment.extractedText) return sum + estimateTokens(attachment.extractedText.slice(0, 30000));
-    if (model.supportsVision && String(attachment.mimeType || '').startsWith('image/')) return sum + 2600;
-    if (model.supportsAudio && String(attachment.mimeType || '').startsWith('audio/')) return sum + Math.max(1200, Math.ceil(Number(attachment.size || 0) / 1600));
+    if (model.supportsVision && String(attachment.mimeType || '').startsWith('image/') && Number(attachment.size || 0) <= 15 * 1024 * 1024) {
+      return sum + estimateBase64PartTokens(attachment.size, 160);
+    }
+    if (model.supportsAudio && String(attachment.mimeType || '').startsWith('audio/') && Number(attachment.size || 0) <= 20 * 1024 * 1024) {
+      return sum + estimateBase64PartTokens(attachment.size, 120);
+    }
     return sum + estimateTokens(`${attachment.name || ''} ${attachment.path || ''}`);
   }, 0);
+}
+
+function estimateBase64PartTokens(size, overhead) {
+  const bytes = Math.max(0, Number(size) || 0);
+  const base64Length = Math.ceil(bytes / 3) * 4;
+  return Math.max(1200, Math.ceil((base64Length + Math.max(0, Number(overhead) || 0)) / 3.5));
+}
+
+function estimateMessageTokens(message, model, store) {
+  const attachments = (message?.attachments || []).map((item) => store?.get?.('ragAttachments', item.id) || item).filter(Boolean);
+  return estimateTokens(message?.content || '') + estimateAttachmentTokens(attachments, model);
 }
 
 function splitTextByTokenBudget(value, budgetTokens) {
@@ -1684,6 +1810,82 @@ function readUtf8Prefix(file, maximumCharacters) {
   }
 }
 
+function readUtf8LineRange(file, startLine, lineCount, startColumn, maximumCharacters) {
+  const descriptor = fs.openSync(file, 'r');
+  const decoder = new StringDecoder('utf8');
+  const chunkSize = 64 * 1024;
+  const buffer = Buffer.alloc(chunkSize);
+  let carry = '';
+  let lineNumber = 1;
+  let selectedLines = 0;
+  let selected = '';
+  let column = Math.max(0, Number(startColumn) || 0);
+  let next = null;
+  let stopped = false;
+  let bytesRead = 0;
+
+  const processLine = (line) => {
+    if (stopped) return;
+    if (lineNumber < startLine) {
+      lineNumber += 1;
+      return;
+    }
+    if (selectedLines >= lineCount) {
+      next = { line: lineNumber, column: 0 };
+      stopped = true;
+      return;
+    }
+    const remaining = line.slice(column);
+    const capacity = Math.max(0, maximumCharacters - selected.length);
+    if (remaining.length > capacity) {
+      selected += remaining.slice(0, capacity);
+      next = { line: lineNumber, column: column + capacity };
+      stopped = true;
+      return;
+    }
+    selected += remaining;
+    selectedLines += 1;
+    lineNumber += 1;
+    column = 0;
+  };
+
+  const processText = (text) => {
+    if (!text || stopped) return;
+    carry += text;
+    const lines = carry.split('\n');
+    carry = lines.pop() || '';
+    for (const line of lines) {
+      processLine(`${line}\n`);
+      if (stopped) break;
+    }
+  };
+
+  try {
+    while (!stopped && (bytesRead = fs.readSync(descriptor, buffer, 0, chunkSize, null)) > 0) {
+      processText(decoder.write(buffer.subarray(0, bytesRead)));
+    }
+    if (!stopped) {
+      processText(decoder.end());
+      if (!stopped && carry) processLine(carry);
+      if (!stopped) {
+        if (selectedLines >= lineCount) next = null;
+        lineNumber = Math.max(lineNumber, startLine + selectedLines);
+      }
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+
+  const reachedEnd = !next && !stopped;
+  return {
+    selected,
+    next,
+    endLine: Math.max(startLine, next?.line || (startLine + Math.max(0, selectedLines - 1))),
+    totalLinesKnown: reachedEnd,
+    totalLines: reachedEnd ? Math.max(0, lineNumber - 1) : 0
+  };
+}
+
 function killProcessTree(child) {
   if (!child || child.killed) return;
   if (process.platform === 'win32' && child.pid) {
@@ -1696,4 +1898,15 @@ function killProcessTree(child) {
   try { child.kill('SIGTERM'); } catch {}
 }
 
-module.exports = { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, MAX_RAG_TOOL_ROUNDS, RAG_AUTO_COMPACT_TRIGGER, RagAssistant, normalizeModel, splitTextByTokenBudget };
+module.exports = {
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  MAX_RAG_TOOL_ROUNDS,
+  RAG_AUTO_COMPACT_TRIGGER,
+  RagAssistant,
+  normalizeModel,
+  readUtf8LineRange,
+  splitInlineReasoning,
+  splitTextByTokenBudget,
+  estimateAttachmentTokens
+};
