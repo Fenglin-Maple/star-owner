@@ -412,7 +412,11 @@
     const providers = modelState.providers || [];
     if (!editingProviderId && providers.length) editingProviderId = providers[0].id;
     elements.modelProviderList.innerHTML = providers.map((provider) => `<button type="button" class="rag-provider-item ${provider.id === editingProviderId ? 'active' : ''}" data-ai-provider="${esc(provider.id)}"><strong>${html(provider.name)}</strong><span>${html(provider.type)} / ${html(provider.baseUrl)}</span></button>`).join('') || '<div class="rag-list-empty">暂无供应商</div>';
-    for (const button of elements.modelProviderList.querySelectorAll('[data-ai-provider]')) button.addEventListener('click', () => { editingProviderId = button.dataset.aiProvider; renderModelPage(); });
+    for (const button of elements.modelProviderList.querySelectorAll('[data-ai-provider]')) button.addEventListener('click', async () => {
+      try { await flushPendingModelSave(); } catch (error) { notify('模型配置自动保存失败', error.message || String(error), 'error'); }
+      editingProviderId = button.dataset.aiProvider;
+      renderModelPage();
+    });
     const provider = providers.find((item) => item.id === editingProviderId);
     if (editingProviderId === '__new__') fillProviderForm(null);
     else fillProviderForm(provider);
@@ -455,9 +459,13 @@
   }
 
   async function saveProviderForm() {
+    await flushPendingModelSave();
+    const editorBeforeSave = editingProviderId;
     const provider = await window.orchestrator.ragSaveProvider({ id: elements.modelProviderId.value || undefined, name: elements.modelProviderName.value, type: elements.modelProviderType.value, baseUrl: elements.modelProviderBaseUrl.value, apiKey: elements.modelProviderApiKey.value, temperature: Number(elements.modelProviderTemperature.value), maxOutputTokens: Number(elements.modelProviderMaxTokens.value), extraHeaders: elements.modelProviderHeaders.value });
-    editingProviderId = provider.id;
+    const editorStillBound = editingProviderId === editorBeforeSave;
+    if (editorStillBound) editingProviderId = provider.id;
     await refreshAll({ quiet: true });
+    if (editorStillBound) renderModelPage();
     dispatchModelConfigChanged();
     return provider;
   }
@@ -487,16 +495,18 @@
   }
 
   async function saveEnabledModels() {
-    if (!editingProviderId || editingProviderId === '__new__') return;
-    const provider = (modelState.providers || []).find((item) => item.id === editingProviderId);
+    const providerId = editingProviderId;
+    if (!providerId || providerId === '__new__') return;
+    const provider = (modelState.providers || []).find((item) => item.id === providerId);
     const source = new Map([...(provider?.remoteModels || []), ...(provider?.enabledModels || [])].map((item) => [item.id, item]));
     const models = [...elements.modelRemote.querySelectorAll('.rag-remote-model')].filter((row) => row.querySelector('.rag-model-enabled').checked).map((row) => {
       const caps = {};
       for (const toggle of row.querySelectorAll('[data-cap]')) caps[toggle.dataset.cap] = toggle.classList.contains('active');
       return { ...(source.get(row.dataset.modelId) || { id: row.dataset.modelId, name: row.dataset.modelId }), ...caps, contextWindow: Number(row.querySelector('.rag-model-context').value) || 1000000, maxOutputTokens: Number(row.querySelector('.rag-model-output').value) || 128000 };
     });
-    await window.orchestrator.ragUpdateModels({ providerId: editingProviderId, models });
+    await window.orchestrator.ragUpdateModels({ providerId, models });
     await refreshAll({ quiet: true });
+    if (editingProviderId === providerId) renderModelPage();
     dispatchModelConfigChanged();
   }
 
@@ -512,13 +522,19 @@
   }
 
   async function deleteProvider(button) {
-    if (!editingProviderId || editingProviderId === '__new__') return;
+    const providerId = editingProviderId;
+    if (!providerId || providerId === '__new__') return;
     if (button.dataset.confirm !== '1') {
       button.dataset.confirm = '1'; button.textContent = '再次点击确认';
       setTimeout(() => { button.dataset.confirm = ''; button.textContent = '删除'; }, 2600);
       return;
     }
-    try { await window.orchestrator.ragDeleteProvider(editingProviderId); editingProviderId = ''; await refreshAll({ quiet: true }); dispatchModelConfigChanged(); }
+    try {
+      await window.orchestrator.ragDeleteProvider(providerId);
+      if (editingProviderId === providerId) editingProviderId = '';
+      await refreshAll({ quiet: true });
+      dispatchModelConfigChanged();
+    }
     catch (error) { notify('无法删除供应商', error.message || String(error), 'error'); }
   }
 

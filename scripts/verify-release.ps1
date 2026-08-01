@@ -118,6 +118,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "1.1.0 startup folder probe and QR refresh test failed." }
   & npm run test:local-toolbox
   if ($LASTEXITCODE -ne 0) { throw "Local toolbox integration test failed." }
+  & npm run test:renderer-state
+  if ($LASTEXITCODE -ne 0) { throw "Renderer state guard test failed." }
   & npm run test:runtime-isolation
   if ($LASTEXITCODE -ne 0) { throw "Project runtime isolation test failed." }
   & npm run test:runtime-node

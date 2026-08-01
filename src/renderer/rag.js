@@ -20,10 +20,14 @@
   let activeSessionId = localStorage.getItem('ragActiveSessionId') || '';
   let pendingAttachments = [];
   const streamingBySession = new Map();
+  const sessionMutationQueues = new Map();
+  const rendererGuards = window.StarOwnerRendererGuards;
   let currentApproval = null;
+  let approvalSubmittingId = '';
   const approvalQueue = [];
   let editingProviderId = '';
   let remoteModelSaveTimer = null;
+  let remoteModelSavePromise = Promise.resolve();
   let streamRenderTimer = null;
   let messageRenderQueue = Promise.resolve();
   let refreshSequence = 0;
@@ -309,9 +313,10 @@
   }
 
   async function updateKnowledgeSelection(sourceMenu) {
-    if (!activeSessionId) return;
+    const sessionId = activeSessionId;
+    if (!sessionId) return;
     const ids = [...sourceMenu.querySelectorAll('input:checked')].map((input) => input.value);
-    await updateSession({ knowledgeCollectionIds: ids });
+    await updateSession({ knowledgeCollectionIds: ids }, { sessionId });
   }
 
   function toggleKnowledgeMenu(menu, toggle) {
@@ -330,19 +335,27 @@
   }
 
   async function removeKnowledge(id) {
-    const ids = (state.activeSession?.knowledgeCollectionIds || []).filter((item) => item !== id);
-    await updateSession({ knowledgeCollectionIds: ids });
+    const sessionId = activeSessionId;
+    const session = state.sessions.find((item) => item.id === sessionId) || state.activeSession;
+    const ids = (session?.knowledgeCollectionIds || []).filter((item) => item !== id);
+    await updateSession({ knowledgeCollectionIds: ids }, { sessionId });
   }
 
-  async function updateSession(patch, { quiet = true } = {}) {
-    if (!activeSessionId) return;
-    try {
-      await window.orchestrator.ragUpdateSession({ sessionId: activeSessionId, patch });
-      await refresh(activeSessionId, { quiet: true });
-    } catch (error) {
-      if (!quiet) notify('会话设置保存失败', error.message || String(error), 'error');
-      else notify('设置未保存', error.message || String(error), 'error');
-    }
+  function updateSession(patch, { quiet = true, sessionId = activeSessionId } = {}) {
+    const targetSessionId = String(sessionId || '');
+    if (!targetSessionId) return Promise.resolve();
+    const previous = sessionMutationQueues.get(targetSessionId) || new rendererGuards.SerialQueue();
+    const operation = previous.run(async () => {
+      try {
+        await window.orchestrator.ragUpdateSession({ sessionId: targetSessionId, patch });
+        if (activeSessionId === targetSessionId) await refresh(targetSessionId, { quiet: true });
+      } catch (error) {
+        if (!quiet) notify('会话设置保存失败', error.message || String(error), 'error');
+        else notify('设置未保存', error.message || String(error), 'error');
+      }
+    });
+    sessionMutationQueues.set(targetSessionId, previous);
+    return operation;
   }
 
   async function renderMessages() {
@@ -631,7 +644,8 @@
   function renderProviderManager() {
     elements.providerList.innerHTML = state.providers.map((provider) => `<button type="button" class="rag-provider-item ${provider.id === editingProviderId ? 'active' : ''}" data-provider-id="${escapeAttr(provider.id)}"><strong>${escapeHtml(provider.name)}</strong><span>${escapeHtml(provider.type)} / ${escapeHtml(provider.baseUrl)}</span></button>`).join('');
     if (!state.providers.length) elements.providerList.innerHTML = '<div class="rag-list-empty">暂无供应商</div>';
-    for (const button of elements.providerList.querySelectorAll('[data-provider-id]')) button.addEventListener('click', () => {
+    for (const button of elements.providerList.querySelectorAll('[data-provider-id]')) button.addEventListener('click', async () => {
+      try { await flushRemoteModelSave(); } catch (error) { notify('模型配置自动保存失败', error.message || String(error), 'error'); }
       editingProviderId = button.dataset.providerId;
       renderProviderManager();
     });
@@ -671,6 +685,8 @@
   }
 
   async function saveProviderForm() {
+    await flushRemoteModelSave();
+    const editorBeforeSave = editingProviderId;
     const provider = await window.orchestrator.ragSaveProvider({
       id: elements.providerId.value || undefined,
       name: elements.providerName.value.trim(),
@@ -681,17 +697,33 @@
       maxOutputTokens: Number(elements.providerMaxTokens.value),
       extraHeaders: elements.providerHeaders.value.trim()
     });
-    editingProviderId = provider.id;
+    const editorStillBound = editingProviderId === editorBeforeSave;
+    if (editorStillBound) editingProviderId = provider.id;
     await refresh(activeSessionId, { quiet: true });
-    renderProviderManager();
+    if (editorStillBound) renderProviderManager();
     return provider;
   }
 
   function scheduleModelSave() {
     if (remoteModelSaveTimer) clearTimeout(remoteModelSaveTimer);
     remoteModelSaveTimer = setTimeout(() => {
-      saveEnabledModels().catch((error) => notify('模型配置自动保存失败', error.message || String(error), 'error'));
+      remoteModelSaveTimer = null;
+      queueRemoteModelSave().catch((error) => notify('模型配置自动保存失败', error.message || String(error), 'error'));
     }, 240);
+  }
+
+  function queueRemoteModelSave() {
+    remoteModelSavePromise = remoteModelSavePromise.catch(() => {}).then(() => saveEnabledModels());
+    return remoteModelSavePromise;
+  }
+
+  function flushRemoteModelSave() {
+    if (remoteModelSaveTimer) {
+      clearTimeout(remoteModelSaveTimer);
+      remoteModelSaveTimer = null;
+      return queueRemoteModelSave();
+    }
+    return remoteModelSavePromise;
   }
 
   async function saveEnabledModels() {
@@ -707,19 +739,18 @@
     });
     await window.orchestrator.ragUpdateModels({ providerId, models });
     await refresh(activeSessionId, { quiet: true });
-    editingProviderId = providerId;
-    renderProviderManager();
+    if (editingProviderId === providerId) renderProviderManager();
   }
 
   async function fetchRemoteModels() {
     try {
       const provider = await saveProviderForm();
+      const editorStillBound = editingProviderId === provider.id;
       elements.fetchModels.disabled = true;
       elements.fetchModels.textContent = '正在拉取...';
       await window.orchestrator.ragFetchModels(provider.id);
       await refresh(activeSessionId, { quiet: true });
-      editingProviderId = provider.id;
-      renderProviderManager();
+      if (editorStillBound && editingProviderId === provider.id) renderProviderManager();
       notify('模型列表已更新', '请选择需要在会话中使用的模型。', 'success');
     } catch (error) {
       notify('模型拉取失败', error.message || String(error), 'error');
@@ -729,7 +760,8 @@
     }
   }
 
-  function newProviderForm() {
+  async function newProviderForm() {
+    await flushRemoteModelSave();
     editingProviderId = '';
     elements.providerId.value = '';
     renderProviderManager();
@@ -762,21 +794,39 @@
     elements.approvalAction.textContent = approval.action || '受限操作';
     elements.approvalTarget.textContent = approval.target || '-';
     elements.approvalDetail.textContent = approval.detail || '';
+    const submitting = approvalSubmittingId === approval.id;
+    elements.denyApproval.disabled = submitting;
+    elements.approveOnce.disabled = submitting;
+    elements.approveFull.disabled = submitting;
     elements.approvalModal.hidden = false;
   }
 
   async function resolveApproval(approved, fullAccess = false) {
-    if (!currentApproval) return;
-    const id = currentApproval.id;
-    currentApproval = null;
-    elements.approvalModal.hidden = true;
+    if (!currentApproval || approvalSubmittingId) return;
+    const approval = currentApproval;
+    const id = approval.id;
+    approvalSubmittingId = id;
+    showApproval(approval);
     try {
-      await window.orchestrator.ragResolveApproval({ id, approved, fullAccess });
+      const result = await window.orchestrator.ragResolveApproval({ id, approved, fullAccess });
+      if (result?.resolved === false) {
+        currentApproval = null;
+        elements.approvalModal.hidden = true;
+        notify('审批已失效', '这次操作已经超时或被后台结束。', 'info');
+      } else {
+        currentApproval = null;
+        elements.approvalModal.hidden = true;
+      }
     } catch (error) {
+      currentApproval = approval;
+      showApproval(approval);
       notify('权限响应失败', error.message || String(error), 'error');
     } finally {
-      const next = approvalQueue.shift();
-      if (next) showApproval(next);
+      approvalSubmittingId = '';
+      if (!currentApproval) {
+        const next = approvalQueue.shift();
+        if (next) showApproval(next);
+      } else showApproval(currentApproval);
     }
   }
 
@@ -806,7 +856,7 @@
       }
     } else if (event.type === 'assistant-delta') {
       const streaming = streamingBySession.get(eventSessionId);
-      if (!streaming) return;
+      if (!rendererGuards.streamMatches(streaming, event.messageId)) return;
       if (event.content) streaming.content += event.content;
       if (event.reasoning) streaming.reasoning += event.reasoning;
       if (active && visible) {
@@ -815,7 +865,7 @@
       }
     } else if (event.type === 'tool') {
       const streaming = streamingBySession.get(eventSessionId);
-      if (!streaming) return;
+      if (!rendererGuards.streamMatches(streaming, event.messageId)) return;
       const index = streaming.toolEvents.findIndex((item) => item.id === event.tool.id);
       if (index >= 0) streaming.toolEvents[index] = event.tool;
       else streaming.toolEvents.push(event.tool);
@@ -836,11 +886,17 @@
         }
       }
     } else if (event.type === 'assistant-complete') {
+      const streaming = streamingBySession.get(eventSessionId);
+      const completedMessageId = event.messageId || event.message?.id || '';
+      if (streaming && !rendererGuards.streamMatches(streaming, completedMessageId)) return;
       streamingBySession.delete(eventSessionId);
       if (active && visible) setGenerating(false);
       if (visible) renderSessions();
       refresh(activeSessionId, { quiet: true });
     } else if (event.type === 'assistant-error') {
+      const streaming = streamingBySession.get(eventSessionId);
+      const failedMessageId = event.messageId || event.message?.id || '';
+      if (streaming && !rendererGuards.streamMatches(streaming, failedMessageId)) return;
       streamingBySession.delete(eventSessionId);
       if (active && visible) {
         setGenerating(false);
@@ -1001,7 +1057,7 @@
   elements.openModelCenter.addEventListener('click', openAiModelCenter);
   elements.closeProviders.addEventListener('click', closeProviderModal);
   elements.providerModal.addEventListener('click', (event) => { if (event.target === elements.providerModal) closeProviderModal(); });
-  elements.newProvider.addEventListener('click', newProviderForm);
+  elements.newProvider.addEventListener('click', () => newProviderForm().catch((error) => notify('模型配置自动保存失败', error.message || String(error), 'error')));
   elements.saveProvider.addEventListener('click', async () => {
     try { await saveProviderForm(); notify('供应商已保存', 'API Key 已通过系统安全存储加密。', 'success'); }
     catch (error) { notify('保存失败', error.message || String(error), 'error'); }
