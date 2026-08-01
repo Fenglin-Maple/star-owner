@@ -39,7 +39,10 @@ async function startFakeProvider() {
   const server = http.createServer(async (request, response) => {
     if (request.method === 'GET' && request.url === '/v1/models') {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ data: [{ id: 'fake-agent' }, { id: 'fake-reader' }] }));
+      response.end(JSON.stringify({ data: [
+        { id: 'fake-agent', context_length: 65536, max_output_tokens: 4096, architecture: { modality: 'text+image->text' }, supported_parameters: ['tools', 'reasoning_effort'] },
+        { id: 'fake-reader', context_window: 8192, max_completion_tokens: 2048, input_modalities: ['text'] }
+      ] }));
       return;
     }
     if (request.method !== 'POST' || request.url !== '/v1/chat/completions') {
@@ -50,6 +53,39 @@ async function startFakeProvider() {
     requests.push(body);
     const userText = latestUserText(body.messages || []);
     const toolResult = [...(body.messages || [])].reverse().find((item) => item.role === 'tool');
+    if (userText.includes('COMPAT_PARAMETERS')) {
+      if (request.url === '/chat/completions') {
+        response.writeHead(404, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'route not found' } }));
+        return;
+      }
+      if (Object.prototype.hasOwnProperty.call(body, 'max_tokens')) {
+        response.writeHead(400, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'max_tokens is not supported; use max_completion_tokens' } }));
+        return;
+      }
+      if (body.stream_options) {
+        response.writeHead(400, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'stream_options is not supported' } }));
+        return;
+      }
+      if (Number(body.temperature) !== 1) {
+        response.writeHead(422, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'temperature must be 1' } }));
+        return;
+      }
+      sse(response, [{ choices: [{ delta: { content: '兼容参数成功。' } }] }]);
+      return;
+    }
+    if (userText.includes('COMPAT_NO_TEMPERATURE')) {
+      if (Object.prototype.hasOwnProperty.call(body, 'temperature')) {
+        response.writeHead(422, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'temperature is not supported' } }));
+        return;
+      }
+      sse(response, [{ choices: [{ delta: { content: '无温度参数兼容成功。' } }] }]);
+      return;
+    }
     if (body.stream === false) {
       if (userText.includes('COMPACT_DELAY')) await new Promise((resolve) => setTimeout(resolve, 60));
       response.writeHead(200, { 'content-type': 'application/json' });
@@ -188,6 +224,8 @@ async function startFakeProvider() {
     const provider = assistant.saveProvider({ name: 'Fake NewAPI', type: 'newapi', baseUrl: fake.url.replace(/\/v1$/, ''), apiKey: 'secret' });
     const remoteModels = await assistant.fetchModels(provider.id);
     assert(remoteModels.length === 2, 'remote model list was not fetched');
+    assert(remoteModels[0].contextWindow === 65536 && remoteModels[0].maxOutputTokens === 4096 && remoteModels[0].supportsVision && remoteModels[0].supportsTools && remoteModels[0].supportsReasoning, 'model endpoint metadata was not mapped to context or capabilities');
+    assert(remoteModels[1].contextWindow === 8192 && remoteModels[1].maxOutputTokens === 2048 && !remoteModels[1].supportsVision, 'text-only model metadata was not respected');
     assert(assistant.rawProvider(provider.id).resolvedBaseUrl === fake.url, 'NewAPI /v1 endpoint was not discovered');
     assistant.updateProviderModels(provider.id, [
       { id: 'fake-agent', contextWindow: 4096, maxOutputTokens: 2048, supportsTools: true, supportsReasoning: true, supportsVision: true, supportsCompression: true, supportsSubagents: true },
@@ -261,6 +299,18 @@ async function startFakeProvider() {
     const thinkTagSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: 'Inline reasoning tag test' });
     const thinkTagReply = await assistant.send(thinkTagSession.id, { content: 'THINK_TAG_TEST' });
     assert(thinkTagReply.content === '正文前正文后' && thinkTagReply.reasoning === '隐藏推理' && !/<\/?think>/i.test(thinkTagReply.content), 'inline think tags were not separated from the final answer');
+
+    const compatibilityProvider = assistant.saveProvider({ name: 'Compatibility fallback', type: 'openai', baseUrl: fake.url.replace(/\/v1$/, ''), apiKey: 'secret' });
+    assistant.updateProviderModels(compatibilityProvider.id, [{ id: 'fake-agent', contextWindow: 32768, maxOutputTokens: 2048, supportsTools: false, supportsReasoning: false, supportsCompression: true }]);
+    const compatibilitySession = assistant.createSession({ providerId: compatibilityProvider.id, modelId: 'fake-agent', title: 'Provider compatibility test' });
+    const compatibilityReply = await assistant.send(compatibilitySession.id, { content: 'COMPAT_PARAMETERS' });
+    assert(compatibilityReply.content === '兼容参数成功。', 'provider parameter compatibility retries did not complete');
+    assert(assistant.rawProvider(compatibilityProvider.id).resolvedBaseUrl === fake.url, 'chat completion did not remember the working /v1 endpoint');
+    const compatibilityRequests = fake.requests.filter((item) => latestUserText(item.messages || []).includes('COMPAT_PARAMETERS'));
+    assert(compatibilityRequests.some((item) => item.max_tokens !== undefined) && compatibilityRequests.some((item) => item.max_completion_tokens !== undefined && !item.stream_options && item.temperature === 1), 'provider compatibility retries did not switch output parameter, stream options, and fixed temperature');
+    const noTemperatureSession = assistant.createSession({ providerId: compatibilityProvider.id, modelId: 'fake-agent', title: 'No temperature compatibility test' });
+    const noTemperatureReply = await assistant.send(noTemperatureSession.id, { content: 'COMPAT_NO_TEMPERATURE' });
+    assert(noTemperatureReply.content === '无温度参数兼容成功。' && fake.requests.some((item) => latestUserText(item.messages || []).includes('COMPAT_NO_TEMPERATURE') && item.temperature === undefined), 'unsupported temperature parameter was not removed on retry');
 
     const disposableSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: 'Attachment cleanup test' });
     const disposableSessionImage = await assistant.importBuffer(disposableSession.id, {

@@ -179,6 +179,16 @@ class RagAssistant {
     return `${provider.resolvedBaseUrl || provider.baseUrl}/${String(resource || '').replace(/^\/+/, '')}`;
   }
 
+  rememberProviderRoot(provider, root) {
+    if (!provider || provider.resolvedBaseUrl === root) return;
+    provider.resolvedBaseUrl = root;
+    if (provider.id && this.store.get('ragProviders', provider.id)) {
+      provider.updatedAt = new Date().toISOString();
+      this.store.set('ragProviders', provider.id, provider);
+      this.store.save();
+    }
+  }
+
   outputTokenLimit(provider, modelInput) {
     const model = typeof modelInput === 'string'
       ? normalizeModel(provider?.enabledModels?.find((item) => item.id === modelInput) || { id: modelInput })
@@ -1129,19 +1139,7 @@ class RagAssistant {
   }
 
   async streamCompletionRequest(provider, body, signal, onDelta) {
-    const url = this.providerEndpoint(provider, 'chat/completions');
-    const requestBody = { ...body, stream: true, stream_options: { include_usage: true } };
-    let response = await providerFetch(url, { method: 'POST', headers: this.providerHeaders(provider), body: JSON.stringify(requestBody) }, signal);
-    if (!response.ok) {
-      const errorText = await response.text();
-      if (/stream_options/i.test(errorText)) {
-        delete requestBody.stream_options;
-        response = await providerFetch(url, { method: 'POST', headers: this.providerHeaders(provider), body: JSON.stringify(requestBody) }, signal);
-      } else {
-        throw providerHttpError(response.status, errorText);
-      }
-    }
-    if (!response.ok) throw providerHttpError(response.status, await response.text());
+    const response = await this.requestCompletion(provider, { ...body, stream: true, stream_options: { include_usage: true } }, signal);
     const contentType = String(response.headers.get('content-type') || '').toLowerCase();
     if (contentType.includes('application/json')) {
       const payload = parseJson(await response.text(), 'Model provider returned invalid JSON data.');
@@ -1214,7 +1212,7 @@ class RagAssistant {
 
   async complete(provider, body, signal) {
     try {
-      const response = await providerFetch(this.providerEndpoint(provider, 'chat/completions'), { method: 'POST', headers: this.providerHeaders(provider), body: JSON.stringify({ ...body, stream: false }) }, signal);
+      const response = await this.requestCompletion(provider, { ...body, stream: false }, signal);
       const text = await response.text();
       if (!response.ok) throw providerHttpError(response.status, text);
       const payload = parseJson(text, 'Model provider returned non-JSON data.');
@@ -1224,6 +1222,54 @@ class RagAssistant {
     } catch (error) {
       throw normalizeProviderError(error, signal);
     }
+  }
+
+  async requestCompletion(provider, body, signal) {
+    const roots = candidateApiRoots(provider);
+    const errors = [];
+    let lastError = null;
+    for (const root of roots) {
+      let requestBody = { ...body };
+      const attemptedVariants = new Set([requestVariantSignature(requestBody)]);
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        let response;
+        try {
+          response = await providerFetch(`${root}/chat/completions`, {
+            method: 'POST',
+            headers: this.providerHeaders(provider),
+            body: JSON.stringify(requestBody)
+          }, signal);
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          lastError = error;
+          errors.push(`${root}/chat/completions: ${error.message || String(error)}`);
+          break;
+        }
+        if (response.ok) {
+          this.rememberProviderRoot(provider, root);
+          return response;
+        }
+        const errorText = await response.text();
+        const compatibleBody = nextCompatibleRequestBody(requestBody, response.status, errorText);
+        if (compatibleBody && !attemptedVariants.has(requestVariantSignature(compatibleBody))) {
+          attemptedVariants.add(requestVariantSignature(compatibleBody));
+          requestBody = compatibleBody;
+          continue;
+        }
+        if (shouldTryAnotherApiRoot(response.status, errorText) && root !== roots.at(-1)) {
+          errors.push(`${root}/chat/completions: HTTP ${response.status}: ${errorText.slice(0, 500)}`);
+          break;
+        }
+        throw providerHttpError(response.status, errorText);
+      }
+    }
+    if (lastError && !errors.length) throw lastError;
+    const error = new Error(`No compatible chat completion endpoint responded. ${errors.join(' | ').slice(0, 1600)}`);
+    error.code = 'MODEL_PROVIDER_FAILURE';
+    error.failureKind = 'infrastructure';
+    error.possibleCauses = ['供应商 Base URL 可能缺少或错误包含 /v1', '供应商接口暂时不可用或网络连接失败', '检查 AI 模型配置中的 Base URL、API Key 和接口兼容性'];
+    error.cause = lastError;
+    throw error;
   }
 
   saveMessage(input) {
@@ -1292,19 +1338,78 @@ function normalizeModel(item = {}) {
   const id = String(item.id || item.name || '');
   const lower = id.toLowerCase();
   const defaults = inferModelTokenLimits(lower);
+  const capability = (name) => modelCapability(item, name);
   return {
     id,
     name: String(item.name || item.id || ''),
-    contextWindow: positiveInteger(item.contextWindow || item.context_window || item.context_length || item.max_context_tokens || item.input_token_limit, null, defaults.contextWindow),
-    maxOutputTokens: positiveInteger(item.maxOutputTokens || item.max_output_tokens || item.output_token_limit || item.max_completion_tokens, null, defaults.maxOutputTokens),
-    supportsTools: item.supportsTools === undefined ? true : Boolean(item.supportsTools),
-    supportsReasoning: item.supportsReasoning === undefined ? /reason|thinking|o[1-9]|r1|deepseek/.test(lower) : Boolean(item.supportsReasoning),
-    supportsVision: item.supportsVision === undefined ? /vision|gpt-4o|gpt-5|gemini|claude|vl/.test(lower) : Boolean(item.supportsVision),
-    supportsAudio: item.supportsAudio === undefined ? /audio|omni|realtime/.test(lower) : Boolean(item.supportsAudio),
-    supportsImages: item.supportsImages === undefined ? /image|gpt-4o|gpt-5|gemini/.test(lower) : Boolean(item.supportsImages),
-    supportsCompression: item.supportsCompression === undefined ? true : Boolean(item.supportsCompression),
-    supportsSubagents: item.supportsSubagents === undefined ? true : Boolean(item.supportsSubagents)
+    contextWindow: positiveInteger(item.contextWindow || item.context_window || item.contextLength || item.context_length || item.max_context_tokens || item.max_context_length || item.max_model_len || item.input_token_limit, null, defaults.contextWindow),
+    maxOutputTokens: positiveInteger(item.maxOutputTokens || item.max_output_tokens || item.output_token_limit || item.max_completion_tokens || item.max_tokens, null, defaults.maxOutputTokens),
+    supportsTools: capability('tools') ?? true,
+    supportsReasoning: capability('reasoning') ?? /reason|thinking|o[1-9]|r1|deepseek/.test(lower),
+    supportsVision: capability('vision') ?? /vision|gpt-4o|gpt-5|gemini|claude|vl/.test(lower),
+    supportsAudio: capability('audio') ?? /audio|omni|realtime/.test(lower),
+    supportsImages: capability('images') ?? /image|gpt-4o|gpt-5|gemini/.test(lower),
+    supportsCompression: capability('compression') ?? true,
+    supportsSubagents: capability('subagents') ?? true
   };
+}
+
+function modelCapability(item, name) {
+  const aliases = {
+    tools: ['supportsTools', 'supports_tools', 'toolCalling', 'tool_calling', 'functionCalling', 'function_calling'],
+    reasoning: ['supportsReasoning', 'supports_reasoning', 'reasoning', 'thinking'],
+    vision: ['supportsVision', 'supports_vision', 'vision', 'multimodal', 'imageInput', 'image_input'],
+    audio: ['supportsAudio', 'supports_audio', 'audioInput', 'audio_input'],
+    images: ['supportsImages', 'supports_images', 'imageOutput', 'image_output'],
+    compression: ['supportsCompression', 'supports_compression'],
+    subagents: ['supportsSubagents', 'supports_subagents']
+  };
+  for (const key of aliases[name] || []) {
+    const value = explicitBoolean(item, key);
+    if (value !== undefined) return value;
+  }
+  for (const source of [item.capabilities, item.features, item.metadata]) {
+    if (!source || typeof source !== 'object') continue;
+    for (const key of aliases[name] || []) {
+      const value = explicitBoolean(source, key);
+      if (value !== undefined) return value;
+    }
+  }
+
+  const supportedParameters = firstArray(item.supported_parameters, item.supportedParameters, item.capabilities?.supported_parameters, item.capabilities?.supportedParameters);
+  if (supportedParameters) {
+    const values = supportedParameters.map((value) => String(value).toLowerCase());
+    if (name === 'tools') return values.some((value) => /tool|function/.test(value));
+    if (name === 'reasoning') return values.some((value) => /reason|thinking/.test(value));
+  }
+
+  const architecture = item.architecture && typeof item.architecture === 'object' ? item.architecture : {};
+  const inputModalities = firstArray(item.input_modalities, item.inputModalities, architecture.input_modalities, architecture.inputModalities);
+  const outputModalities = firstArray(item.output_modalities, item.outputModalities, architecture.output_modalities, architecture.outputModalities);
+  const modalitiesText = [item.modality, item.modalities, architecture.modality, inputModalities, outputModalities].flat(Infinity).filter(Boolean).join(' ').toLowerCase();
+  if (name === 'vision' && (inputModalities || item.modalities || architecture.modality)) return /image|vision|video/.test(modalitiesText);
+  if (name === 'audio' && (inputModalities || item.modalities || architecture.modality)) return /audio|speech|video/.test(modalitiesText);
+  if (name === 'images' && outputModalities) return outputModalities.some((value) => /image/.test(String(value).toLowerCase()));
+  return undefined;
+}
+
+function explicitBoolean(source, key) {
+  if (!Object.prototype.hasOwnProperty.call(source || {}, key)) return undefined;
+  const value = source[key];
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    if (/^(?:true|yes|on|1)$/i.test(value.trim())) return true;
+    if (/^(?:false|no|off|0)$/i.test(value.trim())) return false;
+  }
+  return undefined;
+}
+
+function firstArray(...values) {
+  for (const value of values) {
+    if (Array.isArray(value)) return value;
+  }
+  return null;
 }
 
 function inferModelTokenLimits(lowerId) {
@@ -1326,6 +1431,60 @@ function candidateApiRoots(provider = {}) {
   append(provider.baseUrl);
   if (provider.baseUrl && !/\/v1$/i.test(provider.baseUrl)) append(`${provider.baseUrl}/v1`);
   return roots;
+}
+
+function nextCompatibleRequestBody(body, status, responseText) {
+  if (![400, 404, 405, 415, 422].includes(Number(status))) return null;
+  const text = String(responseText || '');
+  const lower = text.toLowerCase();
+  if (body.stream_options && /stream[_ -]?options|include[_ -]?usage|unknown field|additional propert|不支持.*stream|stream.*不支持/i.test(text)) {
+    const next = { ...body };
+    delete next.stream_options;
+    return next;
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'max_tokens') && /max[_ -]?tokens/.test(lower) && /unsupported|not support|unknown|invalid|unrecognized|use max[_ -]?completion[_ -]?tokens|不支持|未知|无效|改用/i.test(text)) {
+    const next = { ...body, max_completion_tokens: body.max_tokens };
+    delete next.max_tokens;
+    return next;
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'max_completion_tokens') && /max[_ -]?completion[_ -]?tokens/.test(lower) && /unsupported|not support|unknown|invalid|unrecognized|use max[_ -]?tokens|不支持|未知|无效|改用/i.test(text)) {
+    const next = { ...body, max_tokens: body.max_completion_tokens };
+    delete next.max_completion_tokens;
+    return next;
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'temperature')) {
+    if (/(?:temperature|温度).{0,80}(?:unsupported|not support|unknown|not allowed|不支持|不接受|未知)/i.test(text)) {
+      const next = { ...body };
+      delete next.temperature;
+      return next;
+    }
+    const fixed = fixedTemperatureFromError(text);
+    if (fixed !== null && Number(body.temperature) !== fixed) return { ...body, temperature: fixed };
+  }
+  return null;
+}
+
+function fixedTemperatureFromError(value) {
+  const text = String(value || '');
+  const match = text.match(/(?:temperature|温度).{0,100}?(?:only|must(?:\s+be)?|fixed(?:\s+at)?|只能|必须|固定为)[^\d]{0,20}(0(?:\.\d+)?|1(?:\.0+)?)(?![\d.])/i);
+  if (!match) return null;
+  const number = Number(match[1]);
+  return number >= 0 && number <= 1 ? number : null;
+}
+
+function shouldTryAnotherApiRoot(status, responseText) {
+  if ([404, 405, 501].includes(Number(status))) return true;
+  if (Number(status) !== 400) return false;
+  return /route|endpoint|path|not found|cannot post|method not allowed|unknown url|不存在|路径|接口/i.test(String(responseText || ''));
+}
+
+function requestVariantSignature(body = {}) {
+  return JSON.stringify({
+    max_tokens: body.max_tokens,
+    max_completion_tokens: body.max_completion_tokens,
+    temperature: body.temperature,
+    stream_options: body.stream_options ? 'present' : 'absent'
+  });
 }
 
 function normalizeBaseUrl(value) {
