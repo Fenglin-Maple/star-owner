@@ -180,6 +180,7 @@ The builder verifies required runtime files, model files, license notices, packa
 6. Verify archive extraction in a clean directory.
 7. Check shortcuts, icon, first-run dependency prompt, login persistence, both themes and one real video workflow.
 8. For a code-only Release, upload only the core ZIP and checksum. Keep `dependencyReleaseVersion` pinned to the compatible dependency Release; publish new model/runtime assets only when their content or layout changes.
+9. Write the GitHub Release title and body in a UTF-8 Markdown file (prefer UTF-8 without BOM). When updating through PowerShell/API, send UTF-8 bytes explicitly; do not use the shell's default `Out-File`/`Set-Content` encoding for Chinese text. After publishing, read the Release back and verify the title, body and unchanged asset names before announcing it.
 
 ## 7. Verification Commands
 

@@ -71,6 +71,7 @@ The service binds to `127.0.0.1`, accepts origin-less local process requests, re
 - Keep model IDs, compute types, package IDs and hardware thresholds centralized in `src/core/asr-models.js`; do not add model-specific ternaries back to ToolRunner or hardware detection.
 - `package.json.dependencyReleaseVersion` is the explicit compatibility contract shared by the dependency manager and portable manifest. A code-only Release keeps it pinned and uploads only the new core ZIP plus checksum.
 - Never change probes or layouts without updating dependency manager, packaging, deployment docs, and regression tests.
+- GitHub Release titles and notes are UTF-8 metadata. Keep notes in a UTF-8 Markdown file, send explicit UTF-8 bytes when using an API or PowerShell, and read the Release back after publishing to verify Chinese text and asset names. Never pipe release notes through a shell's default encoding.
 
 ## Required Tests
 
