@@ -5,7 +5,7 @@ const JSZip = require('jszip');
 const { LocalToolboxManager } = require('../src/core/local-toolbox-manager');
 const { runFfmpeg } = require('../src/core/local-media-runtime');
 const { extractFrames } = require('../tools/video-tool');
-const { inspectDocument } = require('../src/core/local-document-importer');
+const { importDocument, inspectDocument } = require('../src/core/local-document-importer');
 const { RagAssistant } = require('../src/core/rag-assistant');
 const { Store } = require('../src/core/store');
 const { ToolRunner } = require('../src/core/tool-runner');
@@ -132,10 +132,44 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
     const documentFiles = await createDocumentFixtures(documentRoot);
     const oversizedPdf = path.join(documentRoot, 'oversized.pdf');
     const oversizedExcel = path.join(documentRoot, 'oversized.xlsx');
+    const oversizedText = path.join(documentRoot, 'oversized.txt');
     createSparseFile(oversizedPdf, 257 * 1024 * 1024);
-    createSparseFile(oversizedExcel, 257 * 1024 * 1024);
+    createSparseFile(oversizedExcel, 129 * 1024 * 1024);
+    createSparseFile(oversizedText, 65 * 1024 * 1024);
     assert.throws(() => inspectDocument(oversizedPdf), /256 MiB/);
-    assert.throws(() => inspectDocument(oversizedExcel), /256 MiB/);
+    assert.throws(() => inspectDocument(oversizedExcel), /128 MiB/);
+    assert.throws(() => inspectDocument(oversizedText), /64 MiB/);
+
+    const oversizedXml = path.join(documentRoot, 'oversized-entry.pptx');
+    await writeZip(oversizedXml, { 'ppt/slides/slide1.xml': '<p:sld />' });
+    patchZipUncompressedSize(oversizedXml, 33 * 1024 * 1024);
+    await assert.rejects(() => importDocument(oversizedXml, path.join(root, 'oversized-xml-import')), /条目过大|32 MiB/);
+
+    const oversizedMedia = path.join(documentRoot, 'oversized-media.pptx');
+    await writeZip(oversizedMedia, { 'ppt/media/image.png': PNG });
+    patchZipUncompressedSize(oversizedMedia, 65 * 1024 * 1024);
+    await assert.rejects(() => importDocument(oversizedMedia, path.join(root, 'oversized-media-import')), /条目过大|媒体/);
+
+    const oversizedExpanded = path.join(documentRoot, 'oversized-expanded.docx');
+    await writeZip(oversizedExpanded, Object.fromEntries(Array.from({ length: 6 }, (_, index) => [`word/custom-${index}.bin`, 'x'])));
+    patchZipUncompressedSize(oversizedExpanded, 90 * 1024 * 1024);
+    await assert.rejects(() => importDocument(oversizedExpanded, path.join(root, 'oversized-expanded-import')), /512 MiB/);
+
+    const largeSheet = path.join(documentRoot, 'large-sheet.xlsx');
+    const largeRows = Array.from({ length: 100001 }, (_, index) => `<row r="${index + 1}"><c r="A${index + 1}"><v>${'x'.repeat(100)}</v></c></row>`).join('');
+    await writeZip(largeSheet, {
+      'xl/worksheets/sheet1.xml': `<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${largeRows}</sheetData></worksheet>`
+    });
+    const largeImport = await importDocument(largeSheet, path.join(root, 'large-sheet-import'));
+    assert(largeImport.warnings.some((warning) => /超过单表读取上限/.test(warning)), 'large spreadsheet row limit did not produce a warning');
+    assert(largeImport.warnings.some((warning) => /索引上限/.test(warning)), 'large spreadsheet index budget did not produce a warning');
+
+    const abortedDocument = path.join(documentRoot, 'aborted.txt');
+    fs.writeFileSync(abortedDocument, 'cancel me', 'utf8');
+    const abortedImport = new AbortController();
+    abortedImport.abort();
+    await assert.rejects(() => importDocument(abortedDocument, path.join(root, 'aborted-import'), { signal: abortedImport.signal }), (error) => error.code === 'LOCAL_DOCUMENT_CANCELLED');
+
     const documentSelection = manager.inspectDocumentSelection(documentFiles);
     const documentJob = manager.startDocumentImport(documentSelection.id, { collectionName: '本地资料库', choices: {} });
     const documentResult = await waitForJob(manager, store, documentJob.id, 30000);
@@ -345,6 +379,33 @@ async function writeZip(target, entries) {
   const zip = new JSZip();
   for (const [name, content] of Object.entries(entries)) zip.file(name, content);
   fs.writeFileSync(target, await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
+}
+
+function patchZipUncompressedSize(target, size) {
+  const buffer = fs.readFileSync(target);
+  let offset = 0;
+  while (offset + 4 <= buffer.length) {
+    const signature = buffer.readUInt32LE(offset);
+    if (signature === 0x04034b50) {
+      const compressedSize = buffer.readUInt32LE(offset + 18);
+      const nameLength = buffer.readUInt16LE(offset + 26);
+      const extraLength = buffer.readUInt16LE(offset + 28);
+      buffer.writeUInt32LE(size, offset + 22);
+      offset += 30 + nameLength + extraLength + compressedSize;
+      continue;
+    }
+    if (signature === 0x02014b50) {
+      const compressedSize = buffer.readUInt32LE(offset + 20);
+      const nameLength = buffer.readUInt16LE(offset + 28);
+      const extraLength = buffer.readUInt16LE(offset + 30);
+      const commentLength = buffer.readUInt16LE(offset + 32);
+      buffer.writeUInt32LE(size, offset + 24);
+      offset += 46 + nameLength + extraLength + commentLength;
+      continue;
+    }
+    offset += 1;
+  }
+  fs.writeFileSync(target, buffer);
 }
 
 function makePdf(text) {

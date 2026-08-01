@@ -319,7 +319,7 @@ class LocalToolboxManager {
       try {
         this.updateItem(jobId, file.id, { status: 'running', phase: '解析文档并复制资源', progress: 0.15 });
         const importedAt = new Date().toISOString();
-        const result = await importDocument(file.path, workDir, { importedAt });
+        const result = await importDocument(file.path, workDir, { importedAt, signal });
         this.assertNotCancelled(jobId, signal);
         this.updateItem(jobId, file.id, { phase: '建立知识库索引', progress: 0.82 });
         const task = this.commitDocumentImport({ jobId, file, workDir, result, collection, existing, importedAt });
@@ -576,7 +576,7 @@ class LocalToolboxManager {
     Promise.resolve().then(() => operation(controller.signal)).catch((error) => {
       const latest = this.store.get('localToolJobs', jobId);
       if (!latest) return;
-      const cancelled = this.cancelRequested.has(jobId) || controller.signal.aborted || error.code === 'LOCAL_TOOL_CANCELLED' || error.code === 'SCHEDULER_CANCELLED';
+      const cancelled = this.cancelRequested.has(jobId) || controller.signal.aborted || error.code === 'LOCAL_TOOL_CANCELLED' || error.code === 'LOCAL_DOCUMENT_CANCELLED' || error.code === 'SCHEDULER_CANCELLED';
       this.updateJob(latest, {
         status: cancelled ? (latest.status === 'interrupted' ? 'interrupted' : 'cancelled') : 'failed',
         phase: cancelled ? '任务已停止，当前未完成条目已清理' : '任务失败',
