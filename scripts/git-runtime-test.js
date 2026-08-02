@@ -30,6 +30,9 @@ const { GitRuntime, gitAuthorizationHeader, normalizeGitAuthor, normalizeGitRemo
     assert.strictEqual(runtime.state().credentialScope, 'application-dpapi', '内置 GitHub 凭据没有声明应用私有 DPAPI 范围');
     const described = await runtime.describe();
     assert(described.available && /git version/i.test(described.version), '项目内置 Git 健康检查失败');
+    const canceled = new AbortController();
+    canceled.abort();
+    await assert.rejects(() => runtime.run(['--version'], { signal: canceled.signal }), /abort|中止/i, '内置 Git 没有响应上传取消信号');
     assert(/^Authorization: Basic [A-Za-z0-9+/=]+$/.test(gitAuthorizationHeader('test-token')), 'GitHub Git 推送没有使用 Basic 认证头');
     assert.strictEqual(normalizeGitRemote('https://github.com/Fenglin-Maple/Blibili-Markdowns.git'), normalizeGitRemote('https://github.com/fenglin-maple/Blibili-Markdowns/'), '仓库主人提交没有识别同一远程仓库');
     assert.deepStrictEqual(normalizeGitAuthor({ name: 'alice', email: '123456+alice@users.noreply.github.com' }), { name: 'alice', email: '123456+alice@users.noreply.github.com' }, '共享提交没有保留实际 GitHub 贡献者作者');

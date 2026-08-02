@@ -793,6 +793,11 @@
                       <div class="shared-auth-more-body"><label class="shared-token-field"><span>备用：粘贴 Fine-grained Token</span><input id="sharedToken" type="password" autocomplete="off" placeholder="仅上传 / PR 需要" /></label><button id="sharedSetToken" class="secondary-button" type="button">保存 Token</button><div class="shared-auth-clear"><button id="sharedLogout" class="secondary-button compact-button danger-button" type="button" hidden>清除星藏家 GitHub 授权</button><small>清除应用数据库和内置 Git 私有存储中的令牌，用于切换提交账户；绝不清除系统 Git、系统凭据库或用户全局 Git 配置。</small></div></div>
                     </details>
                   </div>
+                  <div class="shared-repository-card">
+                    <div class="shared-auth-intro"><strong>当前共享仓库</strong><span id="sharedRepositoryStatus">正在读取仓库配置...</span></div>
+                    <div class="shared-repository-switch"><input id="sharedRepositoryInput" placeholder="owner/repository 或完整 GitHub 链接" /><button id="sharedRepositorySave" class="secondary-button" type="button">切换并保存</button><button id="sharedRepositoryOpen" class="secondary-button compact-button" type="button">打开仓库</button></div>
+                    <details class="shared-repository-create"><summary>创建我自己的共享文档仓库</summary><div><label><span>公开仓库名称</span><input id="sharedRepositoryCreateName" value="star-owner-shared-knowledge" /></label><button id="sharedRepositoryCreate" class="primary-button" type="button">一键创建并初始化</button><small>将创建公开仓库，并预置 README、贡献规范、目录校验与目录索引 GitHub Actions。</small></div></details>
+                  </div>
                   <div class="outside-split-layout shared-layout">
                     <div class="outside-pane shared-download-pane">
                       <div class="outside-pane-title"><span>01 · 下载与挂载</span><small>远程目录 → 本地共享用户</small></div>
@@ -814,7 +819,7 @@
                       <div class="shared-upload-duration duration-filter"><div><span>视频时长</span><strong id="sharedUploadDurationLabel">全部时长</strong></div><div class="dual-range"><input id="sharedUploadDurationMin" type="range" min="0" max="1" value="0" step="1" /><input id="sharedUploadDurationMax" type="range" min="0" max="1" value="1" step="1" /></div></div>
                       <div class="shared-upload-actions"><button id="sharedUploadSelectAll" class="secondary-button" type="button">全选当前筛选结果</button><button id="sharedUpload" class="primary-button" type="button">创建 Fork / PR</button></div>
                       <div id="sharedUploadList" class="shared-upload-list"><div class="empty-state">暂无可上传文档。</div></div>
-                      <div class="shared-upload-preparation"><div class="outside-subpanel-title"><strong>准备上传列表</strong><span id="sharedUploadSelectedCount">已选 0 篇</span></div><div id="sharedUploadPrepareList" class="shared-upload-prepare-list"><div class="empty-state">从上方筛选结果中选择要共享的总结文档。</div></div></div>
+                      <div class="shared-upload-preparation"><div class="outside-subpanel-title"><strong>准备上传列表</strong><span id="sharedUploadSelectedCount">已选 0 篇</span></div><div class="shared-upload-prepare-toolbar"><input id="sharedUploadPrepareCollectionFilter" list="sharedUploadPrepareCollectionOptions" placeholder="筛选准备列表中的收藏夹" /><datalist id="sharedUploadPrepareCollectionOptions"></datalist><input id="sharedUploadPrepareFilter" placeholder="筛选标题 / BV / UP主" /><button id="sharedUploadPrepareSelectAll" class="secondary-button compact-button" type="button">全选筛选结果</button><button id="sharedUploadPrepareRemove" class="secondary-button compact-button danger-button" type="button">移除勾选</button></div><div id="sharedUploadPrepareResultCount" class="shared-upload-prepare-count">显示 0 / 0 篇</div><div id="sharedUploadPrepareList" class="shared-upload-prepare-list"><div class="empty-state">从上方筛选结果中选择要共享的总结文档。</div></div></div>
                     </div>
                   </div>
                 </div>
@@ -1030,6 +1035,13 @@
       </div>
       <div class="rag-image-lightbox-stage"><img id="ragImageLightboxImage" alt="" /></div>
       <p>左键空白处或按 Esc 关闭，右键图片可复制原图</p>
+    </div>
+    <div id="sharedUploadProgressModal" class="rag-modal shared-upload-progress-modal" hidden>
+      <section class="rag-modal-dialog compact shared-upload-progress-dialog" role="alertdialog" aria-modal="true" aria-labelledby="sharedUploadProgressTitle">
+        <header><div><h2 id="sharedUploadProgressTitle">正在上传共享文档</h2><p>上传期间应用已锁定，完成、中止或发生错误后会自动恢复。</p></div></header>
+        <div class="shared-upload-progress-body"><div class="shared-upload-progress-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M8 7l4-4 4 4M5 12v7h14v-7"/></svg></div><div><strong id="sharedUploadProgressMessage">正在准备文档...</strong><span id="sharedUploadProgressCount">0 / 0 篇</span></div><div class="local-progress shared-upload-progress-track"><span id="sharedUploadProgressBar" style="width:0%"></span></div><div id="sharedUploadProgressPercent" class="shared-upload-progress-percent">0%</div></div>
+        <footer><span></span><span></span><span></span><button id="sharedUploadCancel" class="secondary-button danger-button" type="button">中止上传</button></footer>
+      </section>
     </div>
     <div id="toastViewport" class="toast-viewport" aria-live="polite" aria-atomic="true"></div>
     <script src="../../node_modules/mermaid/dist/mermaid.min.js"></script>

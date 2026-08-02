@@ -78,7 +78,7 @@ let backendReady = false;
 let toolHealth = [];
 let pathSafety = null;
 let bootstrapStarted = false;
-const VOLATILE_ACTIVITY_TYPES = new Set(['collection-sync-progress', 'asr-progress', 'asr-service-log', 'video-cache-job-updated', 'video-cache-queue-updated', 'local-toolbox-job-created', 'local-toolbox-job-updated', 'local-toolbox-queue-updated']);
+const VOLATILE_ACTIVITY_TYPES = new Set(['collection-sync-progress', 'asr-progress', 'asr-service-log', 'video-cache-job-updated', 'video-cache-queue-updated', 'local-toolbox-job-created', 'local-toolbox-job-updated', 'local-toolbox-queue-updated', 'shared-upload-progress']);
 const pendingRagApprovals = new Map();
 const taskDisplayCoverCache = new Map();
 let bootstrapState = {
@@ -769,6 +769,16 @@ ipcMain.handle('shared:logout', async () => {
   return sharedKnowledgeManager.clearToken();
 });
 
+ipcMain.handle('shared:set-repository', async (_event, payload = {}) => {
+  assertBackendReady();
+  return sharedKnowledgeManager.setRepository(payload);
+});
+
+ipcMain.handle('shared:create-repository', async (_event, payload = {}) => {
+  assertBackendReady();
+  return sharedKnowledgeManager.createRepository(payload);
+});
+
 ipcMain.handle('shared:catalog', async () => {
   assertBackendReady();
   return sharedKnowledgeManager.remoteCatalog();
@@ -777,6 +787,11 @@ ipcMain.handle('shared:catalog', async () => {
 ipcMain.handle('shared:upload', async (_event, payload = {}) => {
   assertBackendReady();
   return sharedKnowledgeManager.upload(payload);
+});
+
+ipcMain.handle('shared:upload-cancel', async () => {
+  assertBackendReady();
+  return sharedKnowledgeManager.cancelUpload();
 });
 
 ipcMain.handle('shared:mount', async (_event, payload = {}) => {

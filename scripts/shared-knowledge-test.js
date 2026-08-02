@@ -1,9 +1,11 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 const { Store } = require('../src/core/store');
-const { SharedKnowledgeManager, DOCUMENT_META_FILE, MAX_SHARED_FILE_BYTES, githubCommitAuthor, validateShareableFiles, stableDocumentId, isShareableBilibiliTask } = require('../src/core/shared-knowledge-manager');
+const { SharedKnowledgeManager, DOCUMENT_META_FILE, MAX_SHARED_FILE_BYTES, MAX_SHARED_PR_DOCUMENTS, githubCommitAuthor, parseRepositoryInput, validateShareableFiles, stableDocumentId, isShareableBilibiliTask } = require('../src/core/shared-knowledge-manager');
 const { deleteCompletedDocument } = require('../src/core/document-lifecycle');
+const { sharedRepositoryTemplate } = require('../src/core/shared-repository-template');
 
 (async () => {
   const root = path.join(__dirname, '..', '.cache', 'shared-knowledge-test');
@@ -39,6 +41,7 @@ const { deleteCompletedDocument } = require('../src/core/document-lifecycle');
   const request = async (endpoint, options = {}) => {
     requests.push({ endpoint, options });
     if (endpoint === '/user') return { login: 'alice', id: 123456 };
+    if (endpoint === '/repos/Fenglin-Maple/Blibili-Markdowns') return { name: 'Blibili-Markdowns', default_branch: 'main', private: false, html_url: 'https://github.com/Fenglin-Maple/Blibili-Markdowns', owner: { login: 'Fenglin-Maple', id: 124229028 } };
     if (endpoint.includes('/git/ref/heads/')) return { object: { sha: 'base-sha' } };
     if (endpoint === '/repos/alice/Blibili-Markdowns') { const error = new Error('not found'); error.status = 404; throw error; }
     if (endpoint.endsWith('/forks')) return { owner: { login: 'alice' }, name: 'Blibili-Markdowns' };
@@ -86,6 +89,9 @@ const { deleteCompletedDocument } = require('../src/core/document-lifecycle');
   const stableOne = manager.prepareDocument({ ...task, id: 'task-id-one', githubUserId: '123456' });
   const stableTwo = manager.prepareDocument({ ...task, id: 'task-id-two', githubUserId: '123456' });
   assert.strictEqual(stableOne.documentId, stableTwo.documentId, 'stable shared document id changed with local task id');
+  assert(stableOne.files.some((file) => file.relative === 'summary.md' && file.sourcePath && !file.buffer), '共享上传仍把所有文档资源长期保存在内存 Buffer 中');
+  assert.strictEqual(MAX_SHARED_PR_DOCUMENTS, 1000, '共享上传单批数量没有提升到 1000 篇');
+  assert.deepStrictEqual(parseRepositoryInput('https://github.com/example/shared-docs.git'), { owner: 'example', name: 'shared-docs', branch: '' }, '共享仓库 URL 解析失败');
   const upload = await manager.upload({ taskIds: [task.id] });
   assert.strictEqual(upload.prNumber, 7, '共享上传没有创建 PR');
   assert(puts.length > 0 && puts.every((item) => item.remotePath.startsWith('123456/')), '共享目录没有使用 GitHub 数字 ID');
@@ -95,6 +101,7 @@ const { deleteCompletedDocument } = require('../src/core/document-lifecycle');
   let ownerPullRequest = null;
   manager.requestOverride = async (endpoint, options = {}) => {
     if (endpoint === '/user') return { login: 'Fenglin-Maple', id: 998877 };
+    if (endpoint === '/repos/Fenglin-Maple/Blibili-Markdowns') return { name: 'Blibili-Markdowns', default_branch: 'main', private: false, html_url: 'https://github.com/Fenglin-Maple/Blibili-Markdowns', owner: { login: 'Fenglin-Maple', id: 998877 } };
     if (endpoint.includes('/git/ref/heads/')) return { object: { sha: 'owner-base-sha' } };
     if (options.method === 'POST' && endpoint.endsWith('/git/refs')) return { ref: options.body.ref };
     if (options.method === 'PUT' && endpoint.includes('/contents/')) return { content: { path: decodeContentPath(endpoint) } };
@@ -128,6 +135,84 @@ const { deleteCompletedDocument } = require('../src/core/document-lifecycle');
   assert.strictEqual(isShareableBilibiliTask({ ...task, singleTask: true }, { ...collection, mediaId: '' , internal: true }), true, '内置单视频总结没有被识别为可共享来源');
   assert.strictEqual(isShareableBilibiliTask({ ...task, multiPartRole: 'parent' }, { ...collection, collectionKind: 'bilibili-multipart', internal: true, mediaId: '' }), true, '多P父任务没有被识别为可共享来源');
   assert.throws(() => manager.prepareDocument({ ...task, multiPartRole: 'part' }), /多P视频请从父任务目录上传/);
+
+  const repositoryStore = await Store.open(path.join(root, 'repository-settings.sqlite'));
+  const initializedFiles = [];
+  const repositoryManager = new SharedKnowledgeManager({
+    store: repositoryStore,
+    encryptSecret: (value) => ({ mode: 'test', value }),
+    decryptSecret: (secret) => secret.value,
+    request: async (endpoint, options = {}) => {
+      if (endpoint === '/user') return { login: 'repo-owner', id: 778899 };
+      if (endpoint === '/repos/example/shared-docs') return { name: 'shared-docs', default_branch: 'trunk', private: false, html_url: 'https://github.com/example/shared-docs', owner: { login: 'example', id: 112233 } };
+      if (endpoint === '/user/repos' && options.method === 'POST') return { name: options.body.name, default_branch: 'main', private: false, html_url: `https://github.com/repo-owner/${options.body.name}`, owner: { login: 'repo-owner', id: 778899 } };
+      if (endpoint.includes('/repos/repo-owner/star-owner-shared/contents/')) {
+        if (options.method === 'PUT') { initializedFiles.push(decodeContentPath(endpoint)); return { content: { path: decodeContentPath(endpoint) } }; }
+        const error = new Error('not found'); error.status = 404; throw error;
+      }
+      throw new Error(`unexpected repository endpoint: ${endpoint}`);
+    },
+    gitRuntime: { state: () => ({ available: true, isolated: true, path: 'test-git' }) }
+  });
+  const switched = await repositoryManager.setRepository({ repository: 'https://github.com/example/shared-docs' });
+  assert.strictEqual(switched.repository.branch, 'trunk', '切换共享仓库没有读取远程默认分支');
+  await repositoryManager.setToken('repo-token');
+  const createdRepository = await repositoryManager.createRepository({ name: 'star-owner-shared' });
+  assert.strictEqual(createdRepository.repository.ownerId, '778899', '个人共享仓库没有绑定当前 GitHub 数字 ID');
+  assert(initializedFiles.includes('README.md') && initializedFiles.includes('.github/workflows/validate-shared-docs.yml') && initializedFiles.includes('scripts/build-catalog.mjs'), '个人共享仓库缺少 README、GitHub Action 或目录脚本');
+  const templateRoot = path.join(root, 'template-check');
+  for (const file of sharedRepositoryTemplate({ owner: 'repo-owner', name: 'star-owner-shared' })) {
+    const target = path.join(templateRoot, file.relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, file.buffer);
+  }
+  execFileSync(process.execPath, ['--check', path.join(templateRoot, 'scripts', 'validate-shared-docs.mjs')]);
+  execFileSync(process.execPath, ['--check', path.join(templateRoot, 'scripts', 'build-catalog.mjs')]);
+  execFileSync(process.execPath, [path.join(templateRoot, 'scripts', 'validate-shared-docs.mjs')], { cwd: templateRoot, stdio: 'pipe' });
+  fs.writeFileSync(path.join(templateRoot, 'unlisted.md'), '# 不允许的仓库根文件\n', 'utf8');
+  assert.throws(() => execFileSync(process.execPath, [path.join(templateRoot, 'scripts', 'validate-shared-docs.mjs')], { cwd: templateRoot, stdio: 'pipe' }), '共享仓库校验脚本允许了白名单外文件');
+  fs.rmSync(path.join(templateRoot, 'unlisted.md'), { force: true });
+  const trunkTemplate = sharedRepositoryTemplate({ owner: 'repo-owner', name: 'trunk-shared', branch: 'trunk' });
+  const trunkWorkflow = trunkTemplate.find((file) => file.relative === '.github/workflows/validate-shared-docs.yml')?.buffer.toString('utf8') || '';
+  assert(trunkWorkflow.includes('branches: ["trunk"]'), '一键建仓模板没有使用仓库实际默认分支');
+
+  const privateStore = await Store.open(path.join(root, 'private-repository.sqlite'));
+  let privateTreeAuthorized = false;
+  let privateContentAuthorized = false;
+  const privateRemoteRoot = '778899/bilibili/col-aaaaaaaaaaaaaaaaaaaaaaaa/doc-bbbbbbbbbbbbbbbbbbbbbbbb';
+  const privateMetadata = { ...remoteMeta, documentId: 'doc-bbbbbbbbbbbbbbbbbbbbbbbb', contributorGithubId: '778899' };
+  const privateManager = new SharedKnowledgeManager({
+    store: privateStore,
+    encryptSecret: (value) => ({ mode: 'test', value }),
+    decryptSecret: (secret) => secret.value,
+    request: async (endpoint, options = {}) => {
+      if (endpoint === '/user') return { login: 'private-user', id: 778899 };
+      if (endpoint === '/repos/private-user/private-shared') return { name: 'private-shared', default_branch: 'main', private: true, html_url: 'https://github.com/private-user/private-shared', owner: { login: 'private-user', id: 778899 } };
+      if (endpoint.includes('/git/trees/')) {
+        privateTreeAuthorized = options.token === 'private-token';
+        return { sha: 'private-tree', tree: [{ type: 'blob', path: `${privateRemoteRoot}/${DOCUMENT_META_FILE}`, sha: 'private-meta' }] };
+      }
+      if (endpoint.includes('/contents/')) {
+        privateContentAuthorized = options.token === 'private-token';
+        return { content: Buffer.from(`${JSON.stringify(privateMetadata)}\n`, 'utf8').toString('base64'), encoding: 'base64', sha: 'private-meta' };
+      }
+      throw new Error(`unexpected private repository endpoint: ${endpoint}`);
+    },
+    gitRuntime: { state: () => ({ available: true, isolated: true, path: 'test-git' }) }
+  });
+  await privateManager.setToken('private-token');
+  await privateManager.setRepository({ repository: 'private-user/private-shared' });
+  const privateCatalog = await privateManager.remoteCatalog();
+  assert.strictEqual(privateCatalog.total, 1, '已授权私有共享仓库目录无法读取');
+  assert(privateTreeAuthorized && privateContentAuthorized, '私有共享仓库读取没有使用星藏家私有授权');
+
+  manager.requestOverride = request;
+  await manager.setToken('test-token');
+  const canceledUpload = manager.upload({ taskIds: [task.id] });
+  const cancelResult = manager.cancelUpload();
+  assert.strictEqual(cancelResult.canceled, true, '共享上传事务无法由用户中止');
+  await assert.rejects(() => canceledUpload, /已由用户中止/);
+  assert.strictEqual(manager.state().upload, null, '中止共享上传后仍残留活动事务');
 
   const catalog = await manager.remoteCatalog();
   const secondRoot = remoteRoot.replace('remote-document', 'remote-document-2');
@@ -177,6 +262,22 @@ const { deleteCompletedDocument } = require('../src/core/document-lifecycle');
   assert(multiParent?.status === 'done' && multiParts.length === 2 && multiParts.every((item) => fs.existsSync(item.outputMarkdown)), '远程多P父文档或 P 子文档没有正确挂载');
   assert.strictEqual(path.basename(multiParent.outputMarkdown), 'index.md', '多P父文档没有优先使用 index.md');
   assert(multiParts.every((item) => item.parentDocumentId === multiParent.sharedDocumentId), '多P P 子文档没有绑定父文档 ID');
+  const collisionCid = '909090';
+  const collisionParts = [{ cid: collisionCid, page: 1, part: '同 CID', title: '跨仓库同 CID' }];
+  const collisionParents = [
+    { ...multiParent, id: `${multiParent.id}:repo-one`, sharedRepository: { owner: 'owner-one', name: 'shared', branch: 'main' }, sharedMountId: 'mount-one' },
+    { ...multiParent, id: `${multiParent.id}:repo-two`, sharedRepository: { owner: 'owner-two', name: 'shared', branch: 'main' }, sharedMountId: 'mount-two' }
+  ];
+  for (let index = 0; index < collisionParents.length; index += 1) {
+    const parentRoot = path.join(workspace.root, `cross-repository-${index + 1}`);
+    const partRoot = path.join(parentRoot, 'parts', `cid-${collisionCid}`);
+    fs.mkdirSync(partRoot, { recursive: true });
+    fs.writeFileSync(path.join(partRoot, 'summary.md'), `# 跨仓库 P ${index + 1}\n`, 'utf8');
+    manager.importMultipartParts({ parts: collisionParts }, parentRoot, collisionParents[index], `${privateRemoteRoot}/${DOCUMENT_META_FILE}`, new Date().toISOString());
+  }
+  const isolatedParts = store.listTasks({ collectionId: multiMount.collectionId }).filter((item) => item.cid === collisionCid);
+  assert.strictEqual(isolatedParts.length, 2, '不同共享仓库的同一多P文档发生子任务覆盖');
+  assert.strictEqual(new Set(isolatedParts.map((item) => item.id)).size, 2, '多仓库 P 子任务 ID 没有按父任务隔离');
   await manager.syncMount(multiMount.id, { documents: [] });
   assert(store.getTask(multiParent.id).remoteState === 'remote-deleted' && multiParts.every((item) => store.getTask(item.id).remoteState === 'remote-deleted'), '远程删除没有标记多P父/子文档失效');
 

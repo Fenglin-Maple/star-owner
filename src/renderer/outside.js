@@ -57,6 +57,12 @@
     sharedSetToken: $('#sharedSetToken'),
     sharedLogout: $('#sharedLogout'),
     sharedAuthStatus: $('#sharedAuthStatus'),
+    sharedRepositoryStatus: $('#sharedRepositoryStatus'),
+    sharedRepositoryInput: $('#sharedRepositoryInput'),
+    sharedRepositorySave: $('#sharedRepositorySave'),
+    sharedRepositoryOpen: $('#sharedRepositoryOpen'),
+    sharedRepositoryCreateName: $('#sharedRepositoryCreateName'),
+    sharedRepositoryCreate: $('#sharedRepositoryCreate'),
     sharedCatalog: $('#sharedCatalog'),
     sharedFilter: $('#sharedFilter'),
     sharedRemotePrefix: $('#sharedRemotePrefix'),
@@ -80,7 +86,20 @@
     sharedUploadResultCount: $('#sharedUploadResultCount'),
     sharedUploadSelectedCount: $('#sharedUploadSelectedCount'),
     sharedUploadList: $('#sharedUploadList'),
-    sharedUploadPrepareList: $('#sharedUploadPrepareList')
+    sharedUploadPrepareCollectionFilter: $('#sharedUploadPrepareCollectionFilter'),
+    sharedUploadPrepareCollectionOptions: $('#sharedUploadPrepareCollectionOptions'),
+    sharedUploadPrepareFilter: $('#sharedUploadPrepareFilter'),
+    sharedUploadPrepareSelectAll: $('#sharedUploadPrepareSelectAll'),
+    sharedUploadPrepareRemove: $('#sharedUploadPrepareRemove'),
+    sharedUploadPrepareResultCount: $('#sharedUploadPrepareResultCount'),
+    sharedUploadPrepareList: $('#sharedUploadPrepareList'),
+    sharedUploadProgressModal: $('#sharedUploadProgressModal'),
+    sharedUploadProgressMessage: $('#sharedUploadProgressMessage'),
+    sharedUploadProgressCount: $('#sharedUploadProgressCount'),
+    sharedUploadProgressBar: $('#sharedUploadProgressBar'),
+    sharedUploadProgressPercent: $('#sharedUploadProgressPercent'),
+    sharedUploadCancel: $('#sharedUploadCancel'),
+    appShell: $('#appShell')
   };
   if (!elements.page) return;
 
@@ -98,7 +117,11 @@
   let previewTimer = null;
   let activeToolId = '';
   let uploadDurationMaximum = 1;
+  let outsideBackendReady = false;
+  let readyRefreshStarted = false;
+  let sharedUploadInvocationActive = false;
   const selectedUploadTaskIds = new Set();
+  const selectedPreparedTaskIds = new Set();
   const toolCards = new Map();
   const toolBodies = new Map();
 
@@ -184,6 +207,12 @@
     renderMultipart();
     renderShared();
     return state;
+  }
+
+  function scheduleInitialReadyRefresh() {
+    if (!outsideBackendReady || readyRefreshStarted) return;
+    readyRefreshStarted = true;
+    refresh().catch((error) => notify('加载本地工具失败', error));
   }
 
   async function loadMultipartProviders() {
@@ -373,15 +402,98 @@
     else if (collections.length && !elements.sharedCollectionName.value) elements.sharedCollection.value = collections[0].id;
   }
 
+  function sharedRepositoryFullName(repository = sharedData.repository || {}) {
+    return repository.owner && repository.name ? `${repository.owner}/${repository.name}` : '';
+  }
+
+  function sharedRepositoryOwnerMode(repository = sharedData.repository || {}) {
+    const sameId = repository.ownerId && sharedData.userId && String(repository.ownerId) === String(sharedData.userId);
+    const sameLogin = repository.owner && sharedData.login && String(repository.owner).toLowerCase() === String(sharedData.login).toLowerCase();
+    return Boolean(sameId || (!repository.ownerId && sameLogin));
+  }
+
+  function sameSharedRepository(left = {}, right = {}) {
+    return String(left.owner || '').toLowerCase() === String(right.owner || '').toLowerCase()
+      && String(left.name || '').toLowerCase() === String(right.name || '').toLowerCase()
+      && String(left.branch || 'main').toLowerCase() === String(right.branch || 'main').toLowerCase();
+  }
+
+  function renderSharedRepository() {
+    const repository = sharedData.repository || {};
+    const fullName = sharedRepositoryFullName(repository);
+    const role = !sharedData.authenticated ? '未授权时可读取公开目录' : sharedRepositoryOwnerMode(repository) ? '当前账户是仓库主人，将直接创建分支 / PR' : '当前账户不是仓库主人，将使用 Fork / PR';
+    elements.sharedRepositoryStatus.textContent = fullName ? `${fullName} · ${repository.branch || 'main'} · ${role}` : '尚未配置共享仓库。';
+    if (document.activeElement !== elements.sharedRepositoryInput && elements.sharedRepositoryInput.dataset.currentRepository !== fullName) {
+      elements.sharedRepositoryInput.value = fullName;
+      elements.sharedRepositoryInput.dataset.currentRepository = fullName;
+    }
+    elements.sharedRepositoryOpen.disabled = !repository.htmlUrl && !fullName;
+  }
+
+  async function saveSharedRepository() {
+    const repository = elements.sharedRepositoryInput.value.trim();
+    if (!repository) return notify('切换共享仓库失败', '请填写 owner/repository 或完整 GitHub 仓库链接。');
+    setBusy(elements.sharedRepositorySave, true, '验证中');
+    try {
+      const result = await window.orchestrator.sharedSetRepository({ repository });
+      sharedCatalogData = { repository: result.repository, documents: [] };
+      selectedUploadTaskIds.clear();
+      selectedPreparedTaskIds.clear();
+      await refresh();
+      notify('共享仓库已切换', `${result.repository.owner}/${result.repository.name} · ${result.repository.branch}`, 'success');
+    } catch (error) { notify('切换共享仓库失败', error); }
+    finally { setBusy(elements.sharedRepositorySave, false, '切换并保存'); }
+  }
+
+  async function createSharedRepository() {
+    const name = elements.sharedRepositoryCreateName.value.trim();
+    if (!name) return notify('创建共享仓库失败', '请填写公开仓库名称。');
+    if (!window.confirm(`将在当前授权的 GitHub 账户下创建公开仓库“${name}”，并写入 README、配置文件和 GitHub Actions。是否继续？`)) return;
+    setBusy(elements.sharedRepositoryCreate, true, '创建中');
+    try {
+      const result = await window.orchestrator.sharedCreateRepository({ name });
+      sharedCatalogData = { repository: result.repository, documents: [] };
+      selectedUploadTaskIds.clear();
+      selectedPreparedTaskIds.clear();
+      await refresh();
+      notify('个人共享仓库已创建', `已初始化 ${result.initializedFiles} 个配置文件，并切换到 ${result.repository.owner}/${result.repository.name}。`, 'success');
+    } catch (error) { notify('创建共享仓库失败', error); }
+    finally { setBusy(elements.sharedRepositoryCreate, false, '一键创建并初始化'); }
+  }
+
+  async function openSharedRepository() {
+    const repository = sharedData.repository || {};
+    const url = repository.htmlUrl || (sharedRepositoryFullName(repository) ? `https://github.com/${sharedRepositoryFullName(repository)}` : '');
+    if (url) await window.orchestrator.openExternal(url);
+  }
+
+  function renderSharedUploadProgress(upload = sharedData.upload) {
+    const active = Boolean(upload && ['running', 'cancelling'].includes(upload.status)) || sharedUploadInvocationActive;
+    elements.sharedUploadProgressModal.hidden = !active;
+    elements.appShell.inert = active;
+    document.body.classList.toggle('shared-upload-locked', active);
+    if (!active) return;
+    const progress = Math.max(0, Math.min(1, Number(upload?.progress || 0)));
+    elements.sharedUploadProgressMessage.textContent = upload?.message || '正在准备共享文档...';
+    elements.sharedUploadProgressCount.textContent = `${Number(upload?.current || 0)} / ${Number(upload?.total || selectedUploadTaskIds.size || 0)} 篇`;
+    elements.sharedUploadProgressBar.style.width = `${Math.round(progress * 100)}%`;
+    elements.sharedUploadProgressPercent.textContent = `${Math.round(progress * 100)}%`;
+    elements.sharedUploadCancel.disabled = upload?.status === 'cancelling';
+    elements.sharedUploadCancel.textContent = upload?.status === 'cancelling' ? '正在中止' : '中止上传';
+    requestAnimationFrame(() => elements.sharedUploadCancel.focus());
+  }
+
   function renderShared() {
     const method = sharedData.authMethod === 'browser' ? '浏览器授权' : sharedData.authMethod === 'token' ? 'Token 授权' : '';
     const login = sharedData.authenticated ? `已授权：${sharedData.login || 'GitHub 用户'}（${sharedData.userId || 'ID 已隐藏'}${method ? ` · ${method}` : ''}）` : '公共仓库目录可以直接浏览；上传和创建 Pull Request 需要 GitHub 授权。';
     elements.sharedAuthStatus.textContent = login;
     elements.sharedLogout.hidden = !sharedData.authenticated;
+    renderSharedRepository();
     renderSharedCollections();
     renderSharedCatalog();
     renderSharedMounts();
     renderSharedUploads();
+    renderSharedUploadProgress();
   }
 
   function filteredSharedDocuments() {
@@ -396,7 +508,9 @@
 
   function sharedDocumentLocalStatus(document) {
     const targetCollectionId = elements.sharedCollection.value === '__new__' ? '' : elements.sharedCollection.value;
-    const matches = (sharedData.documents || []).filter((item) => String(item.sharedRemotePath || '') === String(document.path || '') || String(item.sharedDocumentId || '') === String(document.documentId || ''));
+    const repository = sharedCatalogData.repository || sharedData.repository || {};
+    const matches = (sharedData.documents || []).filter((item) => sameSharedRepository(item.sharedRepository || {}, repository)
+      && (String(item.sharedRemotePath || '') === String(document.path || '') || String(item.sharedDocumentId || '') === String(document.documentId || '')));
     const target = targetCollectionId ? matches.filter((item) => item.collectionId === targetCollectionId) : [];
     const local = target[0] || matches[0];
     if (document.invalid) return { label: '远程元数据无效', code: 'invalid' };
@@ -469,7 +583,7 @@
 
   function renderSharedMounts() {
     const mounts = sharedData.mounts || [];
-    elements.sharedMountList.innerHTML = mounts.length ? mounts.map((mount) => `<div class="shared-mount-row-item"><div><strong>${esc(mount.collectionName || mount.collectionId)}</strong><small>${esc(mount.remotePrefix || '')} · ${Number(mount.remoteDocumentCount || 0)} 篇 · ${mount.lastSyncedAt ? `上次同步 ${esc(mount.lastSyncedAt)}` : '尚未同步'}</small></div><div class="shared-mount-actions"><button class="secondary-button compact-button" type="button" data-shared-action="sync" data-mount-id="${escAttr(mount.id)}">同步</button><button class="secondary-button compact-button danger-button" type="button" data-shared-action="unmount" data-mount-id="${escAttr(mount.id)}">解除挂载</button></div></div>`).join('') : '<div class="empty-state">还没有共享挂载。</div>';
+    elements.sharedMountList.innerHTML = mounts.length ? mounts.map((mount) => `<div class="shared-mount-row-item"><div><strong>${esc(mount.collectionName || mount.collectionId)}</strong><small>${esc(sharedRepositoryFullName(mount.repository || {}))} · ${esc(mount.remotePrefix || '')} · ${Number(mount.remoteDocumentCount || 0)} 篇 · ${mount.lastSyncedAt ? `上次同步 ${esc(mount.lastSyncedAt)}` : '尚未同步'}</small></div><div class="shared-mount-actions"><button class="secondary-button compact-button" type="button" data-shared-action="sync" data-mount-id="${escAttr(mount.id)}">同步</button><button class="secondary-button compact-button danger-button" type="button" data-shared-action="unmount" data-mount-id="${escAttr(mount.id)}">解除挂载</button></div></div>`).join('') : '<div class="empty-state">还没有共享挂载。</div>';
   }
 
   function shareableUploadItems() {
@@ -554,23 +668,48 @@
     elements.sharedUploadCollectionOptions.innerHTML = collections.map((collection) => `<option value="${escAttr(collection.name)}">${esc(collection.userName)}</option>`).join('');
   }
 
+  function filteredPreparedUploadItems(items) {
+    const collectionQuery = elements.sharedUploadPrepareCollectionFilter.value.trim().toLocaleLowerCase();
+    const query = elements.sharedUploadPrepareFilter.value.trim().toLocaleLowerCase();
+    return items.filter((item) => {
+      const task = item.task;
+      const collectionText = `${item.collectionName}\n${item.userName}`.toLocaleLowerCase();
+      const itemText = `${task.title || ''}\n${task.bvid || ''}\n${task.owner || ''}`.toLocaleLowerCase();
+      return (!collectionQuery || collectionText.includes(collectionQuery)) && (!query || itemText.includes(query));
+    });
+  }
+
   function renderSharedUploadPreparation(items) {
     const selectedItems = items.filter((item) => selectedUploadTaskIds.has(String(item.task.id)));
-    elements.sharedUploadSelectedCount.textContent = `已选 ${selectedItems.length} 篇`;
-    const ownerMode = String(sharedData.login || '').toLowerCase() === String(sharedData.repository?.owner || '').toLowerCase();
+    const maximum = Number(sharedData.limits?.maxUploadDocuments || 1000);
+    const visibleItems = filteredPreparedUploadItems(selectedItems);
+    const visibleIds = new Set(visibleItems.map((item) => String(item.task.id)));
+    for (const id of [...selectedPreparedTaskIds]) if (!selectedUploadTaskIds.has(id) || !visibleIds.has(id)) selectedPreparedTaskIds.delete(id);
+    elements.sharedUploadSelectedCount.textContent = `已选 ${selectedItems.length} / ${maximum} 篇`;
+    elements.sharedUploadPrepareResultCount.textContent = `显示 ${visibleItems.length} / ${selectedItems.length} 篇 · 已勾选 ${selectedPreparedTaskIds.size} 篇`;
+    const collectionNames = [...new Set(selectedItems.map((item) => item.collectionName))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+    elements.sharedUploadPrepareCollectionOptions.innerHTML = collectionNames.map((name) => `<option value="${escAttr(name)}"></option>`).join('');
+    elements.sharedUploadPrepareSelectAll.disabled = !visibleItems.length;
+    elements.sharedUploadPrepareRemove.disabled = !selectedPreparedTaskIds.size;
+    const ownerMode = sharedRepositoryOwnerMode();
     elements.sharedUpload.textContent = ownerMode ? '创建分支 / PR' : '创建 Fork / PR';
-    elements.sharedUpload.disabled = !selectedItems.length;
+    elements.sharedUpload.disabled = !selectedItems.length || selectedItems.length > maximum || Boolean(sharedData.upload);
     if (!selectedItems.length) {
       elements.sharedUploadPrepareList.innerHTML = '<div class="empty-state">从上方筛选结果中选择要共享的总结文档。</div>';
       return;
     }
+    if (!visibleItems.length) {
+      elements.sharedUploadPrepareList.innerHTML = '<div class="empty-state">准备上传列表中没有符合筛选条件的文档。</div>';
+      return;
+    }
     const groups = new Map();
-    for (const item of selectedItems) {
+    for (const item of visibleItems) {
       const key = String(item.collection.id || `${item.userId}:${item.collectionName}`);
       if (!groups.has(key)) groups.set(key, { collectionName: item.collectionName, userName: item.userName, items: [] });
       groups.get(key).items.push(item);
     }
-    elements.sharedUploadPrepareList.innerHTML = [...groups.values()].sort((a, b) => a.collectionName.localeCompare(b.collectionName, 'zh-CN')).map((group) => `<details class="shared-upload-prep-group"><summary><span><strong>${esc(group.collectionName)}</strong><small>${esc(group.userName)}</small></span><em>${group.items.length} 篇</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><div>${group.items.map((item) => `<div class="shared-upload-prep-item"><span><strong>${esc(item.task.title || item.task.bvid)}</strong><small>${esc(item.task.bvid)} · ${formatUploadDuration(item.duration)} · ${esc(formatUploadDate(item.completedAt))}</small></span><button class="secondary-button compact-button" type="button" data-shared-upload-remove="${escAttr(item.task.id)}">移除</button></div>`).join('')}</div></details>`).join('');
+    const forceOpen = Boolean(elements.sharedUploadPrepareCollectionFilter.value.trim() || elements.sharedUploadPrepareFilter.value.trim());
+    elements.sharedUploadPrepareList.innerHTML = [...groups.values()].sort((a, b) => a.collectionName.localeCompare(b.collectionName, 'zh-CN')).map((group) => `<details class="shared-upload-prep-group" ${forceOpen ? 'open' : ''}><summary><span><strong>${esc(group.collectionName)}</strong><small>${esc(group.userName)}</small></span><em>${group.items.length} 篇</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><div>${group.items.map((item) => `<div class="shared-upload-prep-item"><input class="app-checkbox" type="checkbox" data-shared-upload-prep-select="${escAttr(item.task.id)}" ${selectedPreparedTaskIds.has(String(item.task.id)) ? 'checked' : ''}/><span><strong>${esc(item.task.title || item.task.bvid)}</strong><small>${esc(item.task.bvid)} · ${esc(item.task.owner || '未知UP主')} · ${formatUploadDuration(item.duration)} · ${esc(formatUploadDate(item.completedAt))}</small></span><button class="secondary-button compact-button" type="button" data-shared-upload-remove="${escAttr(item.task.id)}">移除</button></div>`).join('')}</div></details>`).join('');
   }
 
   function renderSharedUploads() {
@@ -581,10 +720,12 @@
     renderSharedUploadFilterOptions(allItems);
     const items = filteredSharedUploadItems(allItems);
     elements.sharedUploadResultCount.textContent = `筛选结果 ${items.length} / ${allItems.length}`;
-    elements.sharedUploadSelectAll.disabled = !items.length;
+    const maximum = Number(sharedData.limits?.maxUploadDocuments || 1000);
+    elements.sharedUploadSelectAll.disabled = !items.length || selectedUploadTaskIds.size >= maximum;
     elements.sharedUploadList.innerHTML = items.length ? items.map((item) => {
       const task = item.task;
-      return `<label class="shared-upload-row"><input class="app-checkbox" type="checkbox" data-shared-upload-task="${escAttr(task.id)}" ${selectedUploadTaskIds.has(String(task.id)) ? 'checked' : ''}/><span><strong>${esc(task.title || task.bvid)}</strong><small>${esc(task.bvid || '')} · ${esc(task.owner || '未知UP主')} · ${esc(item.userName)} / ${esc(item.collectionName)}</small></span><span class="shared-upload-candidate-meta"><strong>${task.sharedUploadPr ? '已创建过 PR' : '未上传'}</strong><small>${formatUploadDuration(item.duration)} · ${esc(formatUploadDate(item.completedAt))}</small></span></label>`;
+      const selected = selectedUploadTaskIds.has(String(task.id));
+      return `<label class="shared-upload-row"><input class="app-checkbox" type="checkbox" data-shared-upload-task="${escAttr(task.id)}" ${selected ? 'checked' : ''} ${!selected && selectedUploadTaskIds.size >= maximum ? 'disabled' : ''}/><span><strong>${esc(task.title || task.bvid)}</strong><small>${esc(task.bvid || '')} · ${esc(task.owner || '未知UP主')} · ${esc(item.userName)} / ${esc(item.collectionName)}</small></span><span class="shared-upload-candidate-meta"><strong>${task.sharedUploadPr ? '已创建过 PR' : '未上传'}</strong><small>${formatUploadDuration(item.duration)} · ${esc(formatUploadDate(item.completedAt))}</small></span></label>`;
     }).join('') : '<div class="empty-state">当前筛选条件下没有可共享的 B站视频总结产物。</div>';
     renderSharedUploadPreparation(allItems);
   }
@@ -592,15 +733,36 @@
   async function uploadShared() {
     const taskIds = [...selectedUploadTaskIds];
     if (!taskIds.length) return notify('无法创建共享 PR', '请先把至少一篇总结文档加入准备上传列表。');
-    const ownerMode = String(sharedData.login || '').toLowerCase() === String(sharedData.repository?.owner || '').toLowerCase();
+    const maximum = Number(sharedData.limits?.maxUploadDocuments || 1000);
+    if (taskIds.length > maximum) return notify('无法创建共享 PR', `一次最多上传 ${maximum} 篇文档，请从准备上传列表移除一部分。`);
+    const ownerMode = sharedRepositoryOwnerMode();
+    let result = null;
+    sharedUploadInvocationActive = true;
+    renderSharedUploadProgress({ status: 'running', progress: 0, current: 0, total: taskIds.length, message: '正在启动共享上传事务...' });
     setBusy(elements.sharedUpload, true, '创建中');
     try {
-      const result = await window.orchestrator.sharedUpload({ taskIds });
+      result = await window.orchestrator.sharedUpload({ taskIds });
       selectedUploadTaskIds.clear();
+      selectedPreparedTaskIds.clear();
       await refresh();
-      if (result.prUrl) await window.orchestrator.openExternal(result.prUrl);
-    } catch (error) { notify(ownerMode ? '创建 GitHub 分支 / PR 失败' : '创建 GitHub Fork / PR 失败', error); }
-    finally { setBusy(elements.sharedUpload, false, ownerMode ? '创建分支 / PR' : '创建 Fork / PR'); renderSharedUploads(); }
+    } catch (error) {
+      if (/已由用户中止|已中止/.test(String(error?.message || error))) notify('共享上传已中止', '应用已恢复操作；已完成的远程 PR 不会被误删。', 'success');
+      else notify(ownerMode ? '创建 GitHub 分支 / PR 失败' : '创建 GitHub Fork / PR 失败', error);
+    } finally {
+      sharedUploadInvocationActive = false;
+      sharedData.upload = null;
+      renderSharedUploadProgress();
+      setBusy(elements.sharedUpload, false, ownerMode ? '创建分支 / PR' : '创建 Fork / PR');
+      renderSharedUploads();
+    }
+    if (result?.prUrl) await window.orchestrator.openExternal(result.prUrl);
+  }
+
+  async function cancelSharedUpload() {
+    elements.sharedUploadCancel.disabled = true;
+    elements.sharedUploadCancel.textContent = '正在中止';
+    try { await window.orchestrator.sharedCancelUpload(); }
+    catch (error) { notify('中止共享上传失败', error); }
   }
 
   async function handleSharedAction(event) {
@@ -895,6 +1057,9 @@
   elements.sharedLogin.addEventListener('click', browserSharedLogin);
   elements.sharedSetToken.addEventListener('click', setSharedToken);
   elements.sharedLogout.addEventListener('click', clearSharedAuthorization);
+  elements.sharedRepositorySave.addEventListener('click', saveSharedRepository);
+  elements.sharedRepositoryOpen.addEventListener('click', () => openSharedRepository().catch((error) => notify('打开共享仓库失败', error)));
+  elements.sharedRepositoryCreate.addEventListener('click', createSharedRepository);
   elements.sharedCatalog.addEventListener('click', loadSharedCatalog);
   elements.sharedFilter.addEventListener('input', renderSharedCatalog);
   elements.sharedRemotePrefix.addEventListener('change', renderSharedCatalog);
@@ -905,8 +1070,13 @@
     catch (error) { notify('同步共享挂载失败', error); }
   });
   elements.sharedUpload.addEventListener('click', uploadShared);
+  elements.sharedUploadCancel.addEventListener('click', cancelSharedUpload);
   elements.sharedUploadSelectAll.addEventListener('click', () => {
-    for (const item of filteredSharedUploadItems()) selectedUploadTaskIds.add(String(item.task.id));
+    const maximum = Number(sharedData.limits?.maxUploadDocuments || 1000);
+    for (const item of filteredSharedUploadItems()) {
+      if (selectedUploadTaskIds.size >= maximum) break;
+      selectedUploadTaskIds.add(String(item.task.id));
+    }
     renderSharedUploads();
   });
   for (const control of [elements.sharedUploadFilter, elements.sharedUploadUserFilter, elements.sharedUploadCollectionFilter, elements.sharedUploadSort]) control.addEventListener('input', renderSharedUploads);
@@ -915,14 +1085,41 @@
   elements.sharedUploadList.addEventListener('change', (event) => {
     const input = event.target.closest('[data-shared-upload-task]');
     if (!input) return;
-    if (input.checked) selectedUploadTaskIds.add(String(input.dataset.sharedUploadTask));
-    else selectedUploadTaskIds.delete(String(input.dataset.sharedUploadTask));
+    const id = String(input.dataset.sharedUploadTask);
+    const maximum = Number(sharedData.limits?.maxUploadDocuments || 1000);
+    if (input.checked && selectedUploadTaskIds.size >= maximum && !selectedUploadTaskIds.has(id)) {
+      input.checked = false;
+      notify('准备上传列表已满', `一次最多上传 ${maximum} 篇文档。`);
+    } else if (input.checked) selectedUploadTaskIds.add(id);
+    else { selectedUploadTaskIds.delete(id); selectedPreparedTaskIds.delete(id); }
     renderSharedUploads();
+  });
+  for (const control of [elements.sharedUploadPrepareCollectionFilter, elements.sharedUploadPrepareFilter]) control.addEventListener('input', renderSharedUploads);
+  elements.sharedUploadPrepareSelectAll.addEventListener('click', () => {
+    const selectedItems = shareableUploadItems().filter((item) => selectedUploadTaskIds.has(String(item.task.id)));
+    for (const item of filteredPreparedUploadItems(selectedItems)) selectedPreparedTaskIds.add(String(item.task.id));
+    renderSharedUploads();
+  });
+  elements.sharedUploadPrepareRemove.addEventListener('click', () => {
+    if (!selectedPreparedTaskIds.size) return;
+    for (const id of selectedPreparedTaskIds) selectedUploadTaskIds.delete(id);
+    selectedPreparedTaskIds.clear();
+    renderSharedUploads();
+  });
+  elements.sharedUploadPrepareList.addEventListener('change', (event) => {
+    const input = event.target.closest('[data-shared-upload-prep-select]');
+    if (!input) return;
+    const id = String(input.dataset.sharedUploadPrepSelect);
+    if (input.checked) selectedPreparedTaskIds.add(id);
+    else selectedPreparedTaskIds.delete(id);
+    renderSharedUploadPreparation(shareableUploadItems());
   });
   elements.sharedUploadPrepareList.addEventListener('click', (event) => {
     const button = event.target.closest('[data-shared-upload-remove]');
     if (!button) return;
-    selectedUploadTaskIds.delete(String(button.dataset.sharedUploadRemove));
+    const id = String(button.dataset.sharedUploadRemove);
+    selectedUploadTaskIds.delete(id);
+    selectedPreparedTaskIds.delete(id);
     renderSharedUploads();
   });
   elements.sharedMountList.addEventListener('click', handleSharedAction);
@@ -943,7 +1140,10 @@
   });
   elements.toolBack.addEventListener('click', () => closeOutsideTool());
   elements.multipartViewerCollection.addEventListener('change', renderMultipart);
-  document.querySelector('[data-page="outside-bilibili"]')?.addEventListener('click', () => { closeOutsideTool({ focus: false }); refresh().catch((error) => notify('刷新本地工具失败', error)); });
+  document.querySelector('[data-page="outside-bilibili"]')?.addEventListener('click', () => {
+    closeOutsideTool({ focus: false });
+    if (outsideBackendReady) refresh().catch((error) => notify('刷新本地工具失败', error));
+  });
   window.orchestrator.onLocalToolboxEvent((event) => {
     if (event.localToolbox) { state = event.localToolbox; renderJobs(); renderOutsideCards(); }
     else refresh().catch(() => {});
@@ -956,5 +1156,18 @@
     if (event.sharedKnowledge) { sharedData = event.sharedKnowledge; renderShared(); renderOutsideCards(); }
     else refresh().catch(() => {});
   });
-  refresh().catch((error) => notify('加载本地工具失败', error));
+  window.orchestrator.onRuntime((data) => {
+    if (!data?.backendReady) return;
+    outsideBackendReady = true;
+    scheduleInitialReadyRefresh();
+  });
+  window.orchestrator.onBootstrap((data) => {
+    if (data?.phase !== 'ready') return;
+    outsideBackendReady = true;
+    scheduleInitialReadyRefresh();
+  });
+  window.orchestrator.getRuntime().then((data) => {
+    outsideBackendReady = Boolean(data?.backendReady);
+    scheduleInitialReadyRefresh();
+  }).catch(() => {});
 })();

@@ -63,12 +63,13 @@ class GitRuntime {
       windowsHide: true,
       timeout: Number(options.timeoutMs || 10 * 60 * 1000),
       maxBuffer: 8 * 1024 * 1024,
-      encoding: 'utf8'
+      encoding: 'utf8',
+      signal: options.signal || undefined
     });
     return { stdout: String(result.stdout || ''), stderr: String(result.stderr || '') };
   }
 
-  async commitAndPush({ upstream, fork, baseBranch = 'main', branch, token, files, replaceRoots = [], message, author = null }) {
+  async commitAndPush({ upstream, fork, baseBranch = 'main', branch, token, files, replaceRoots = [], message, author = null, signal = null, onProgress = null }) {
     await this.assertAvailable();
     if (!upstream?.owner || !upstream?.name || !fork?.owner || !fork?.name) throw new Error('GitHub 共享仓库信息不完整，无法提交。');
     if (!/^[A-Za-z0-9._/-]{1,120}$/.test(String(branch || ''))) throw new Error('共享分支名称不安全。');
@@ -81,40 +82,66 @@ class GitRuntime {
       GIT_CONFIG_KEY_0: 'http.extraHeader',
       GIT_CONFIG_VALUE_0: gitAuthorizationHeader(token)
     };
+    const report = (stage, progress, messageText) => { if (typeof onProgress === 'function') onProgress({ stage, progress, message: messageText }); };
     try {
-      await this.run(['clone', '--depth', '1', '--single-branch', '--branch', String(baseBranch), remoteUrl, checkout], { cwd: workRoot, env: gitEnv });
-      await this.run(['checkout', '-b', String(branch)], { cwd: checkout, env: gitEnv });
+      throwIfAborted(signal);
+      report('git-clone', 0.02, '正在读取目标仓库 main 分支...');
+      await this.run(['clone', '--depth', '1', '--single-branch', '--branch', String(baseBranch), remoteUrl, checkout], { cwd: workRoot, env: gitEnv, signal });
+      report('git-branch', 0.16, '正在创建临时共享分支...');
+      await this.run(['checkout', '-b', String(branch)], { cwd: checkout, env: gitEnv, signal });
       for (const root of [...new Set((replaceRoots || []).map(normalizeRelative))]) {
+        throwIfAborted(signal);
         const target = assertInside(checkout, path.join(checkout, root));
         if (target !== checkout) fs.rmSync(target, { recursive: true, force: true });
       }
       const written = [];
-      for (const file of files || []) {
+      const uploadFiles = files || [];
+      for (let index = 0; index < uploadFiles.length; index += 1) {
+        throwIfAborted(signal);
+        const file = uploadFiles[index];
         const relative = normalizeRelative(file.relative);
         const destination = assertInside(checkout, path.join(checkout, relative));
         ensureDir(path.dirname(destination));
-        fs.writeFileSync(destination, Buffer.isBuffer(file.buffer) ? file.buffer : Buffer.from(file.buffer || ''));
+        if (file.sourcePath) {
+          const source = path.resolve(file.sourcePath);
+          const stat = fs.statSync(source);
+          if (!stat.isFile()) throw new Error(`共享源文件不是普通文件：${relative}`);
+          fs.copyFileSync(source, destination);
+        } else {
+          fs.writeFileSync(destination, Buffer.isBuffer(file.buffer) ? file.buffer : Buffer.from(file.buffer || ''));
+        }
         written.push(relative);
+        if (index === uploadFiles.length - 1 || index % 10 === 0) report('git-copy', 0.18 + ((index + 1) / Math.max(1, uploadFiles.length)) * 0.5, `正在整理共享文件 ${index + 1} / ${uploadFiles.length}...`);
       }
       if (!written.length) throw new Error('没有可提交的共享文件。');
-      await this.run(['add', '--', ...written], { cwd: checkout, env: gitEnv });
-      const status = await this.run(['status', '--porcelain', '--', ...written], { cwd: checkout, env: gitEnv });
+      report('git-index', 0.7, '正在建立 Git 提交索引...');
+      await this.run(['add', '--all'], { cwd: checkout, env: gitEnv, signal });
+      const status = await this.run(['status', '--porcelain'], { cwd: checkout, env: gitEnv, signal });
       if (!status.stdout.trim()) {
         const error = new Error('选中的共享文档与仓库当前内容相同，没有需要提交的变更。');
         error.code = 'SHARED_GIT_NO_CHANGES';
         throw error;
       }
       const commitAuthor = normalizeGitAuthor(author);
-      await this.run(['-c', `user.name=${commitAuthor.name}`, '-c', `user.email=${commitAuthor.email}`, 'commit', '-m', String(message || 'docs: update shared knowledge')], { cwd: checkout, env: gitEnv });
+      report('git-commit', 0.78, '正在创建 Git 提交...');
+      await this.run(['-c', `user.name=${commitAuthor.name}`, '-c', `user.email=${commitAuthor.email}`, 'commit', '-m', String(message || 'docs: update shared knowledge')], { cwd: checkout, env: gitEnv, signal });
       const sameRepository = normalizeGitRemote(remoteUrl) === normalizeGitRemote(forkUrl);
       const targetRemote = sameRepository ? 'origin' : 'fork';
-      if (!sameRepository) await this.run(['remote', 'add', targetRemote, forkUrl], { cwd: checkout, env: gitEnv });
-      await this.run(['push', targetRemote, `HEAD:refs/heads/${String(branch)}`], { cwd: checkout, env: gitEnv });
+      if (!sameRepository) await this.run(['remote', 'add', targetRemote, forkUrl], { cwd: checkout, env: gitEnv, signal });
+      report('git-push', 0.84, '正在推送共享分支到 GitHub...');
+      await this.run(['push', targetRemote, `HEAD:refs/heads/${String(branch)}`], { cwd: checkout, env: gitEnv, signal, timeoutMs: 30 * 60 * 1000 });
+      report('git-pushed', 1, '共享分支已推送。');
       return { branch: String(branch), files: written };
     } catch (error) {
+      if (isAbortError(error) || signal?.aborted) {
+        const canceled = new Error('项目内置 Git 操作已中止。');
+        canceled.name = 'AbortError';
+        canceled.code = 'ABORT_ERR';
+        throw canceled;
+      }
       throw new Error(`项目内置 Git 提交共享文档失败：${sanitizeGitError(error)}`);
     } finally {
-      fs.rmSync(checkout, { recursive: true, force: true });
+      await removeCheckout(checkout);
     }
   }
 
@@ -167,6 +194,28 @@ class GitRuntime {
       });
       child.stdin.end('protocol=https\nhost=github.com\n\n');
     });
+  }
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  const error = new Error('操作已中止。');
+  error.name = 'AbortError';
+  error.code = 'ABORT_ERR';
+  throw error;
+}
+
+function isAbortError(error) {
+  return error?.name === 'AbortError' || error?.code === 'ABORT_ERR' || error?.code === 'ABORTED';
+}
+
+async function removeCheckout(directory) {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      fs.rmSync(directory, { recursive: true, force: true });
+      if (!fs.existsSync(directory)) return;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
   }
 }
 

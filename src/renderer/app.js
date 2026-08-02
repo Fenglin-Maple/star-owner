@@ -168,7 +168,8 @@ const SNAPSHOT_IGNORED_EVENTS = new Set([
   'video-cache-job-updated',
   'video-cache-queue-updated',
   'local-toolbox-job-updated',
-  'local-toolbox-queue-updated'
+  'local-toolbox-queue-updated',
+  'shared-upload-progress'
 ]);
 
 async function initializeBiliView() {

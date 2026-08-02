@@ -29,11 +29,12 @@ function deleteCompletedDocument({ store, taskId, source = 'document-library' })
   store.transaction(() => {
     if (!restoreToPending) {
       if (collection.collectionKind === 'shared' && task.sharedRemotePath) {
-        const exclusionId = sharedExclusionId(collection.id, task.sharedRemotePath);
+        const exclusionId = sharedExclusionId(collection.id, task.sharedRemotePath, task.sharedRepository);
         store.set('sharedExclusions', exclusionId, {
           id: exclusionId,
           collectionId: collection.id,
           remotePath: task.sharedRemotePath,
+          repository: task.sharedRepository || null,
           documentId: task.sharedDocumentId || '',
           excludedAt: now,
           reason: '用户从文档库删除共享文档。'
