@@ -8,6 +8,7 @@ const MULTIPART_KIND = 'bilibili-multipart';
 const MULTIPART_USER_ID = 'builtin-agent-user';
 const MULTIPART_USER_NAME = '内置用户';
 const ACTIVE_SESSION_STATUSES = new Set(['running', 'draining', 'stopping']);
+const MAX_INDEX_PART_SUMMARY_CHARACTERS = 8000;
 
 class MultiPartManager {
   constructor({ store, bili, internalAgentManager, ragAssistant, emit }) {
@@ -16,6 +17,8 @@ class MultiPartManager {
     this.internalAgentManager = internalAgentManager;
     this.ragAssistant = ragAssistant;
     this.emit = emit || (() => {});
+    this.indexRefreshFailures = [];
+    this.refreshStoredIndexes();
   }
 
   state() {
@@ -248,6 +251,21 @@ class MultiPartManager {
     return this.internalAgentManager.listSessions().filter((session) => session.mode === 'multipart' && (ACTIVE_SESSION_STATUSES.has(session.status) || this.internalAgentManager.running?.has(session.id)));
   }
 
+  refreshStoredIndexes() {
+    this.indexRefreshFailures = [];
+    let refreshed = 0;
+    for (const parent of this.store.list('multiPartParents')) {
+      if (!parent?.parentRoot || !fs.existsSync(parent.parentRoot)) continue;
+      try {
+        this.writeIndex(parent);
+        refreshed += 1;
+      } catch (error) {
+        this.indexRefreshFailures.push({ parentId: parent.id, error: error.message });
+      }
+    }
+    return { refreshed, failures: [...this.indexRefreshFailures] };
+  }
+
   requireOrCreateCollection(collectionId, name) {
     if (collectionId) {
       const existing = this.store.getCollectionById(String(collectionId));
@@ -396,6 +414,7 @@ class MultiPartManager {
     const parent = this.store.get('multiPartParents', parentInput.id) || parentInput;
     ensureDir(parent.parentRoot);
     const parts = this.partTasks(parent.id).sort((a, b) => Number(a.page || 0) - Number(b.page || 0));
+    const partSummaries = parts.flatMap((task) => partSummaryLines(parent, task));
     const lines = [
       `# ${parent.title} · 多P视频目录`, '',
       '## 小结', '',
@@ -403,11 +422,13 @@ class MultiPartManager {
       '## 思维导图', '', '```mermaid', 'flowchart TD', '  A[多P视频] --> B[逐P总结]', ...parts.map((task) => `  B --> P${task.page}[P${task.page} ${escapeMermaid(task.part)}]`), '```', '',
       '## 目录', '',
       ...parts.map((task) => `- [P${task.page} ${task.part}](parts/cid-${safeName(task.cid, 'part', 40)}/summary.md) · ${task.status === 'done' ? '已完成' : task.pageState === 'removed' ? '远程已移除' : '待处理'}`), '',
+      '## 每 P 小结', '',
+      ...partSummaries,
       '## 字幕', '', '每个 P 的 ASR 时间戳和站内字幕位于对应 P 的产物目录。', '',
       '## 处理记录', '', `- BV：${parent.bvid}`, `- 最后刷新：${parent.lastRefreshedAt || parent.updatedAt}`, `- 产物身份：${parent.parentDocumentId}`
     ];
-    fs.writeFileSync(path.join(parent.parentRoot, 'index.md'), `${lines.join('\n')}\n`, 'utf8');
-    fs.writeFileSync(path.join(parent.parentRoot, 'metadata.json'), `${JSON.stringify({ ...parent, parts: parts.map(publicPartMetadata) }, null, 2)}\n`, 'utf8');
+    writeTextIfChanged(path.join(parent.parentRoot, 'index.md'), `${lines.join('\n')}\n`);
+    writeTextIfChanged(path.join(parent.parentRoot, 'metadata.json'), `${JSON.stringify({ ...parent, parts: parts.map(publicPartMetadata) }, null, 2)}\n`);
   }
 
   publicParent(parent) {
@@ -474,5 +495,90 @@ function publicPart(task) {
 function publicPartMetadata(task) { return publicPart(task); }
 function publicCollection(collection) { const { cookieFile, collectionRoot, videosDir, exportDir, ...safe } = collection; return safe; }
 function escapeMermaid(value) { return String(value || '').replace(/[\[\]{}()<>"']/g, '').slice(0, 80); }
+
+function partSummaryLines(parent, task) {
+  const cid = safeName(task.cid, 'part', 40);
+  const title = `P${Number(task.page || 1)} ${String(task.part || '').replace(/[\r\n]+/g, ' ').trim()}`.trim();
+  const link = `parts/cid-${cid}/summary.md`;
+  const completed = task.status === 'done';
+  const status = completed
+    ? (task.pageState === 'removed' ? '已完成，远程页面已移除' : '已完成')
+    : task.pageState === 'removed' ? '远程已移除'
+      : task.status === 'failed' ? '处理失败，可继续重试'
+        : '待处理';
+  const lines = [`### ${title}`, '', `- 状态：${status}`, `- CID：${task.cid || '-'}`];
+  if (completed) lines.push(`- [打开本 P 完整总结](${link})`);
+  lines.push('');
+  if (!completed) {
+    lines.push(`> ${task.pageState === 'removed' ? '该 P 尚未完成且远程页面已移除，当前没有可展示的小结。' : '该 P 尚未完成；完成后会自动在这里写入小结。'}`, '');
+    return lines;
+  }
+  const summary = readPartSummary(parent, task, `parts/cid-${cid}`);
+  lines.push('#### 小结', '', summary || '> 该 P 已完成，但总结文档中没有可提取的“小结”章节；请打开完整总结查看。', '');
+  return lines;
+}
+
+function readPartSummary(parent, task, relativePartDirectory) {
+  try {
+    if (!task.outputMarkdown) return '';
+    const markdownFile = assertInside(parent.parentRoot, task.outputMarkdown);
+    if (!fs.existsSync(markdownFile) || !fs.statSync(markdownFile).isFile()) return '';
+    const section = extractLevelTwoSummary(fs.readFileSync(markdownFile, 'utf8'));
+    if (!section) return '';
+    let value = rebaseRelativeMarkdownDestinations(section, relativePartDirectory)
+      .replace(/^(#{1,6})\s+(.+)$/gm, (_match, marks, heading) => `${'#'.repeat(Math.min(6, marks.length + 2))} ${heading}`)
+      .trim();
+    if (value.length > MAX_INDEX_PART_SUMMARY_CHARACTERS) {
+      value = `${value.slice(0, MAX_INDEX_PART_SUMMARY_CHARACTERS).trimEnd()}\n\n> 本 P 小结过长，目录中已截断；请打开完整总结查看剩余内容。`;
+    }
+    return value;
+  } catch {
+    return '';
+  }
+}
+
+function extractLevelTwoSummary(markdown) {
+  const lines = String(markdown || '').replace(/\r\n?/g, '\n').split('\n');
+  const result = [];
+  let collecting = false;
+  let fence = '';
+  for (const line of lines) {
+    const marker = line.match(/^\s*(`{3,}|~{3,})/);
+    if (marker) {
+      const token = marker[1][0];
+      if (!fence) fence = token;
+      else if (fence === token) fence = '';
+    }
+    if (!collecting) {
+      if (!fence && /^##\s+小结\s*$/u.test(line.trim())) collecting = true;
+      continue;
+    }
+    if (!fence && /^##\s+\S/u.test(line)) break;
+    result.push(line);
+  }
+  return result.join('\n').trim();
+}
+
+function rebaseRelativeMarkdownDestinations(markdown, relativeDirectory) {
+  const prefix = String(relativeDirectory || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  if (!prefix) return markdown;
+  return String(markdown || '').replace(/(!?\[[^\]\r\n]*\])\(([^)\r\n]+)\)/g, (whole, label, rawDestination) => {
+    const destination = String(rawDestination || '').trim();
+    const angle = destination.match(/^<([^>]+)>(.*)$/);
+    const target = angle ? angle[1] : destination.match(/^(\S+)/)?.[1];
+    const suffix = angle ? angle[2] : destination.slice(String(target || '').length);
+    if (!target || /^(?:[a-z][a-z0-9+.-]*:|#|\/)/i.test(target)) return whole;
+    const rebased = `${prefix}/${target.replace(/^\.\//, '')}`;
+    return `${label}(${angle ? `<${rebased}>` : rebased}${suffix})`;
+  });
+}
+
+function writeTextIfChanged(file, content) {
+  try {
+    if (fs.existsSync(file) && fs.readFileSync(file, 'utf8') === content) return false;
+  } catch {}
+  fs.writeFileSync(file, content, 'utf8');
+  return true;
+}
 
 module.exports = { MultiPartManager, MULTIPART_KIND, MULTIPART_USER_ID, MULTIPART_USER_NAME, parentIdFor, assertMultipartVideoSupported };

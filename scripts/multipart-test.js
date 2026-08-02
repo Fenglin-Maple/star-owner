@@ -59,11 +59,31 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
 
   const partOne = store.getTask(`${created.id}:part:101`);
   fs.mkdirSync(partOne.preallocatedArtifactDir, { recursive: true });
-  fs.writeFileSync(path.join(partOne.preallocatedArtifactDir, 'summary.md'), '# P1\n', 'utf8');
+  fs.mkdirSync(path.join(partOne.preallocatedArtifactDir, 'frames'), { recursive: true });
+  fs.writeFileSync(path.join(partOne.preallocatedArtifactDir, 'frames', 'frame-001.jpg'), Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+  fs.writeFileSync(path.join(partOne.preallocatedArtifactDir, 'summary.md'), '# P1\n\n## 小结\n\n这是第一 P 应写入父目录的小结。\n\n![代表画面](frames/frame-001.jpg)\n\n### 小结内要点\n\n- 保留结构化要点。\n\n## 思维导图\n\n不应复制到父目录的小结区域。\n', 'utf8');
   store.upsertTask({ ...partOne, status: 'done', outputMarkdown: path.join(partOne.preallocatedArtifactDir, 'summary.md'), completedAt: new Date().toISOString() });
   store.commit();
   manager.handleAgentEvent({ taskId: partOne.id, parentId: created.id });
   assert.strictEqual(manager.state().parents[0].completed, 1, '多P完成进度没有回写父任务');
+  const indexFile = path.join(partOne.preallocatedArtifactDir, '..', '..', 'index.md');
+  const completedIndex = fs.readFileSync(indexFile, 'utf8');
+  assert(completedIndex.includes('## 每 P 小结') && completedIndex.includes('这是第一 P 应写入父目录的小结。'), '父目录没有包含已完成 P 的小结');
+  assert(completedIndex.includes('parts/cid-101/frames/frame-001.jpg'), '父目录中的 P 小结图片没有改写为相对父目录的路径');
+  assert(completedIndex.includes('##### 小结内要点'), 'P 小结内部标题没有降级到父目录层级之下');
+  assert(!completedIndex.includes('不应复制到父目录的小结区域。'), '父目录错误复制了 P 小结之后的正文');
+  assert(completedIndex.includes('该 P 尚未完成；完成后会自动在这里写入小结。'), '父目录没有显示未完成 P 的小结占位状态');
+
+  fs.writeFileSync(indexFile, '# 旧版目录\n', 'utf8');
+  const startupManager = new MultiPartManager({
+    store,
+    bili,
+    internalAgentManager,
+    ragAssistant: { rawProvider: (id) => store.get('ragProviders', id) },
+    emit: () => {}
+  });
+  assert(fs.readFileSync(indexFile, 'utf8').includes('这是第一 P 应写入父目录的小结。'), '应用启动时没有升级既有多P父目录');
+  assert.strictEqual(startupManager.indexRefreshFailures.length, 0, '既有多P父目录启动刷新发生异常');
 
   currentPages = [...currentPages, page(4, '104', '追加集')];
   const added = await manager.refresh(created.id);
