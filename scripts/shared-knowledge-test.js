@@ -2,7 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const { Store } = require('../src/core/store');
-const { SharedKnowledgeManager, DOCUMENT_META_FILE, MAX_SHARED_FILE_BYTES, validateShareableFiles, stableDocumentId, isShareableBilibiliTask } = require('../src/core/shared-knowledge-manager');
+const { SharedKnowledgeManager, DOCUMENT_META_FILE, MAX_SHARED_FILE_BYTES, githubCommitAuthor, validateShareableFiles, stableDocumentId, isShareableBilibiliTask } = require('../src/core/shared-knowledge-manager');
 const { deleteCompletedDocument } = require('../src/core/document-lifecycle');
 
 (async () => {
@@ -73,11 +73,16 @@ const { deleteCompletedDocument } = require('../src/core/document-lifecycle');
     encryptSecret: (value) => ({ mode: 'test', value }),
     decryptSecret: (secret) => secret.value,
     request: async (endpoint) => endpoint === '/user' ? { login: 'browser-user', id: 654321 } : (() => { throw new Error(`unexpected browser endpoint: ${endpoint}`); })(),
-    gitRuntime: { browserLogin: async () => ({ username: 'browser-user', password: 'browser-token' }), state: () => ({ available: true, isolated: true, path: 'test-git' }) }
+    gitRuntime: { browserLogin: async () => ({ username: 'browser-user', password: 'browser-token' }), clearCredentialStore: async () => ({ cleared: true, scope: 'application-dpapi' }), state: () => ({ available: true, isolated: true, path: 'test-git' }) }
   });
   const browserAuth = await browserManager.browserLogin();
   assert.strictEqual(browserAuth.authMethod, 'browser', '浏览器 GitHub 授权没有记录授权方式');
   assert.strictEqual(browserManager.state().login, 'browser-user', '浏览器授权没有保存 GitHub 用户');
+  assert.deepStrictEqual(githubCommitAuthor({ login: 'browser-user', id: 654321 }), { name: 'browser-user', email: '654321+browser-user@users.noreply.github.com' }, '共享提交没有绑定实际 GitHub 贡献者作者');
+  const clearedBrowserAuth = await browserManager.clearToken();
+  assert.strictEqual(clearedBrowserAuth.scope, 'application-only', '清除共享授权没有限制在星藏家应用范围');
+  assert.strictEqual(clearedBrowserAuth.gitCredential.scope, 'application-dpapi', '清除共享授权没有清理内置 Git 私有凭据');
+  assert.strictEqual(browserManager.state().authenticated, false, '清除共享授权后应用仍显示已授权');
   const stableOne = manager.prepareDocument({ ...task, id: 'task-id-one', githubUserId: '123456' });
   const stableTwo = manager.prepareDocument({ ...task, id: 'task-id-two', githubUserId: '123456' });
   assert.strictEqual(stableOne.documentId, stableTwo.documentId, 'stable shared document id changed with local task id');
@@ -87,6 +92,30 @@ const { deleteCompletedDocument } = require('../src/core/document-lifecycle');
   assert(puts.some((item) => item.remotePath.endsWith('summary.md')), '共享上传缺少 Markdown');
   assert(!puts.some((item) => item.remotePath.endsWith('video.mp4')), '共享上传错误包含原始视频');
   assert(puts.every((item) => /^123456\/(?:bilibili|single|multipart)\/col-[a-f0-9]+\//.test(item.remotePath)), '共享目录没有使用稳定来源收藏夹命名空间');
+  let ownerPullRequest = null;
+  manager.requestOverride = async (endpoint, options = {}) => {
+    if (endpoint === '/user') return { login: 'Fenglin-Maple', id: 998877 };
+    if (endpoint.includes('/git/ref/heads/')) return { object: { sha: 'owner-base-sha' } };
+    if (options.method === 'POST' && endpoint.endsWith('/git/refs')) return { ref: options.body.ref };
+    if (options.method === 'PUT' && endpoint.includes('/contents/')) return { content: { path: decodeContentPath(endpoint) } };
+    if (endpoint.includes('/contents/')) { const error = new Error('not found'); error.status = 404; throw error; }
+    if (options.method === 'POST' && endpoint.endsWith('/pulls')) { ownerPullRequest = options.body; return { number: 8, html_url: 'https://github.com/Fenglin-Maple/Blibili-Markdowns/pull/8' }; }
+    throw new Error(`unhandled owner endpoint: ${endpoint}`);
+  };
+  await manager.setToken('owner-token');
+  const ownerUpload = await manager.upload({ taskIds: [task.id] });
+  assert.strictEqual(ownerUpload.prNumber, 8, '共享仓库主人没有直接创建分支 PR');
+  assert(ownerPullRequest?.head?.startsWith('star-owner/') && !ownerPullRequest.head.includes(':'), '共享仓库主人仍使用了 Fork head 格式');
+  manager.requestOverride = request;
+  await manager.setToken('test-token');
+  const conflictingForkManager = new SharedKnowledgeManager({
+    store,
+    encryptSecret: (value) => ({ mode: 'test', value }),
+    decryptSecret: (secret) => secret.value,
+    request: async (endpoint) => endpoint === '/repos/alice/Blibili-Markdowns' ? { fork: false, full_name: 'alice/Blibili-Markdowns' } : (() => { throw new Error(`unexpected conflicting endpoint: ${endpoint}`); })(),
+    gitRuntime: { state: () => ({ available: true, isolated: true, path: 'test-git' }) }
+  });
+  await assert.rejects(() => conflictingForkManager.ensureFork('alice', 'test-token'), /同名但不是共享仓库 Fork/);
   assert.throws(() => validateShareableFiles([{ relative: 'too-large.png', buffer: Buffer.alloc(MAX_SHARED_FILE_BYTES + 1) }]), /单文件上限/);
   assert.throws(() => validateShareableFiles([{ relative: 'unsafe.exe', buffer: Buffer.from('x') }]), /不允许的文件/);
   assert.notStrictEqual(

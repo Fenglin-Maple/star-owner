@@ -2,6 +2,14 @@
   const $ = (selector) => document.querySelector(selector);
   const elements = {
     page: $('#page-outside-bilibili'),
+    homeHead: $('#outsideToolHomeHead'),
+    toolStack: $('#outsideToolStack'),
+    toolDetail: $('#outsideToolDetail'),
+    toolDetailBody: $('#outsideToolDetailBody'),
+    toolDetailKicker: $('#outsideToolDetailKicker'),
+    toolDetailTitle: $('#outsideToolDetailTitle'),
+    toolDetailDescription: $('#outsideToolDetailDescription'),
+    toolBack: $('#outsideToolBack'),
     subtitleChoose: $('#localSubtitleChoose'),
     subtitleStart: $('#localSubtitleStart'),
     subtitleSelection: $('#localSubtitleSelection'),
@@ -59,8 +67,20 @@
     sharedSyncAll: $('#sharedSyncAll'),
     sharedMountList: $('#sharedMountList'),
     sharedUpload: $('#sharedUpload'),
+    sharedUploadSelectAll: $('#sharedUploadSelectAll'),
     sharedUploadFilter: $('#sharedUploadFilter'),
-    sharedUploadList: $('#sharedUploadList')
+    sharedUploadUserFilter: $('#sharedUploadUserFilter'),
+    sharedUploadUserOptions: $('#sharedUploadUserOptions'),
+    sharedUploadCollectionFilter: $('#sharedUploadCollectionFilter'),
+    sharedUploadCollectionOptions: $('#sharedUploadCollectionOptions'),
+    sharedUploadSort: $('#sharedUploadSort'),
+    sharedUploadDurationMin: $('#sharedUploadDurationMin'),
+    sharedUploadDurationMax: $('#sharedUploadDurationMax'),
+    sharedUploadDurationLabel: $('#sharedUploadDurationLabel'),
+    sharedUploadResultCount: $('#sharedUploadResultCount'),
+    sharedUploadSelectedCount: $('#sharedUploadSelectedCount'),
+    sharedUploadList: $('#sharedUploadList'),
+    sharedUploadPrepareList: $('#sharedUploadPrepareList')
   };
   if (!elements.page) return;
 
@@ -76,6 +96,77 @@
   let documentSelection = null;
   let documentPreview = null;
   let previewTimer = null;
+  let activeToolId = '';
+  let uploadDurationMaximum = 1;
+  const selectedUploadTaskIds = new Set();
+  const toolCards = new Map();
+  const toolBodies = new Map();
+
+  function setupToolNavigation() {
+    for (const card of elements.toolStack.querySelectorAll('[data-outside-open]')) {
+      const id = card.dataset.outsideOpen;
+      const body = card.querySelector('.outside-tool-body');
+      if (!id || !body) continue;
+      toolCards.set(id, card);
+      toolBodies.set(id, body);
+      body.remove();
+    }
+  }
+
+  function openOutsideTool(id) {
+    const card = toolCards.get(String(id || ''));
+    const body = toolBodies.get(String(id || ''));
+    if (!card || !body) return;
+    if (activeToolId && activeToolId !== id) closeOutsideTool({ focus: false });
+    activeToolId = String(id);
+    body.hidden = false;
+    elements.toolDetailBody.replaceChildren(body);
+    elements.toolDetailKicker.textContent = card.querySelector('.outside-tool-kicker')?.textContent || '';
+    elements.toolDetailTitle.textContent = card.querySelector('h2')?.textContent || '工具';
+    elements.toolDetailDescription.textContent = card.querySelector('.outside-tool-description')?.textContent || '';
+    elements.homeHead.hidden = true;
+    elements.toolStack.hidden = true;
+    elements.toolDetail.hidden = false;
+    elements.page.scrollTop = 0;
+    elements.toolBack.focus();
+  }
+
+  function closeOutsideTool({ focus = true } = {}) {
+    if (!activeToolId) return;
+    const id = activeToolId;
+    const card = toolCards.get(id);
+    const body = toolBodies.get(id);
+    activeToolId = '';
+    if (body) {
+      body.hidden = true;
+      card?.appendChild(body);
+    }
+    elements.toolDetailBody.replaceChildren();
+    elements.toolDetail.hidden = true;
+    elements.homeHead.hidden = false;
+    elements.toolStack.hidden = false;
+    elements.page.scrollTop = 0;
+    if (focus) card?.focus();
+  }
+
+  function renderOutsideCards() {
+    const jobs = state.jobs || [];
+    const activeJobs = (type) => jobs.filter((job) => job.type === type && ['queued', 'running'].includes(job.status)).length;
+    const latestJob = (type) => jobs.filter((job) => job.type === type).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))[0];
+    const parents = multipartState.parents || [];
+    const runningParents = parents.filter((parent) => parent.activeSessions?.length || parent.status === 'running').length;
+    const cards = {
+      multipart: [`${parents.length} 个父任务`, `${runningParents} 个处理中`, `${(multipartState.collections || []).length} 个多P收藏夹`],
+      shared: [`${(sharedData.mounts || []).length} 个远程挂载`, `${(sharedData.documents || []).length} 篇本地共享文档`, sharedData.authenticated ? `已授权 ${sharedData.login || 'GitHub'}` : '未授权上传'],
+      subtitles: [`${activeJobs('subtitles')} 个处理中`, latestJob('subtitles') ? `最近：${statusLabel(latestJob('subtitles').status)}` : '尚无执行记录'],
+      'video-import': [`${(state.videoCollections || []).length} 个缓存收藏夹`, `${activeJobs('video-import')} 个处理中`, latestJob('video-import') ? `最近：${statusLabel(latestJob('video-import').status)}` : '尚无执行记录'],
+      'document-import': [`${(state.documentCollections || []).length} 个文档收藏夹`, `${activeJobs('document-import')} 个处理中`, latestJob('document-import') ? `最近：${statusLabel(latestJob('document-import').status)}` : '尚无执行记录']
+    };
+    for (const [id, values] of Object.entries(cards)) {
+      const target = elements.toolStack.querySelector(`[data-outside-tool-stats="${id}"]`);
+      if (target) target.innerHTML = values.map((value) => `<span>${esc(value)}</span>`).join('');
+    }
+  }
 
   async function refresh() {
     const [local, multipart, shared, currentSnapshot] = await Promise.all([
@@ -88,6 +179,7 @@
     multipartState = multipart;
     sharedData = shared;
     snapshot = currentSnapshot;
+    renderOutsideCards();
     renderJobs();
     renderMultipart();
     renderShared();
@@ -217,7 +309,7 @@
         const stateClass = task.pageState === 'removed' ? 'is-removed' : task.status === 'done' ? 'is-done' : 'is-pending';
         return `<label class="multipart-parent-page ${stateClass}"><input class="app-checkbox" type="checkbox" data-parent-id="${escAttr(parent.id)}" data-parent-page="${escAttr(page.cid)}" ${checked ? 'checked' : ''} ${task.pageState === 'removed' || task.status === 'done' ? 'disabled' : ''}/><span>P${Number(page.page || 1)} ${esc(page.part || '')}</span><small>${task.status === 'done' ? '已完成' : task.pageState === 'removed' ? '远程已移除' : '待处理'}</small></label>`;
       }).join('');
-      return `<article class="multipart-parent-record" data-parent-record="${escAttr(parent.id)}"><div class="multipart-parent-head"><div><strong>${esc(parent.title)}</strong><small>${esc(parent.bvid)} · ${esc(parent.collectionName || '')} · ${status}</small></div><div class="multipart-parent-actions"><button class="ghost-button compact-button" type="button" data-multipart-action="refresh" data-parent-id="${escAttr(parent.id)}">刷新 P</button>${parent.activeSessions?.length ? `<button class="secondary-button compact-button" type="button" data-multipart-action="stop" data-parent-id="${escAttr(parent.id)}">停止</button>` : `<button class="primary-button compact-button" type="button" data-multipart-action="start" data-parent-id="${escAttr(parent.id)}">继续</button>`}<button class="ghost-button compact-button danger-text" type="button" data-multipart-action="delete" data-parent-id="${escAttr(parent.id)}">删除</button></div></div><div class="local-progress"><span style="width:${Math.round(Number(parent.progress || 0) * 100)}%"></span></div><div class="multipart-parent-summary">${parent.completed}/${parent.total} P · ${Math.round(Number(parent.progress || 0) * 100)}% · ${esc(status)}</div><div class="multipart-parent-pages">${pages}</div></article>`;
+      return `<article class="multipart-parent-record" data-parent-record="${escAttr(parent.id)}"><div class="multipart-parent-head"><div><strong>${esc(parent.title)}</strong><small>${esc(parent.bvid)} · ${esc(parent.collectionName || '')} · ${status}</small></div><div class="multipart-parent-actions"><button class="secondary-button compact-button" type="button" data-multipart-action="refresh" data-parent-id="${escAttr(parent.id)}">刷新 P</button>${parent.activeSessions?.length ? `<button class="secondary-button compact-button" type="button" data-multipart-action="stop" data-parent-id="${escAttr(parent.id)}">停止</button>` : `<button class="primary-button compact-button" type="button" data-multipart-action="start" data-parent-id="${escAttr(parent.id)}">继续</button>`}<button class="secondary-button compact-button danger-button" type="button" data-multipart-action="delete" data-parent-id="${escAttr(parent.id)}">删除</button></div></div><div class="local-progress"><span style="width:${Math.round(Number(parent.progress || 0) * 100)}%"></span></div><div class="multipart-parent-summary">${parent.completed}/${parent.total} P · ${Math.round(Number(parent.progress || 0) * 100)}% · ${esc(status)}</div><div class="multipart-parent-pages">${pages}</div></article>`;
     }).join('') : '<div class="empty-state">这个收藏夹还没有多P父任务。</div>';
   }
 
@@ -356,6 +448,17 @@
     finally { setBusy(elements.sharedLogin, false, '浏览器登录 GitHub'); }
   }
 
+  async function clearSharedAuthorization() {
+    if (!window.confirm('将清除星藏家应用数据库和内置 Git 私有存储中的 GitHub 授权，用于切换提交账户。\n\n绝不会清除系统 Git、系统凭据库或用户全局 Git 配置。是否继续？')) return;
+    try {
+      const result = await window.orchestrator.sharedLogout();
+      selectedUploadTaskIds.clear();
+      document.querySelector('#sharedAuthMore').open = false;
+      await refresh();
+      notify('GitHub 授权已清除', result?.message || '已清除星藏家保存的 GitHub 授权。', 'success');
+    } catch (error) { notify('清除 GitHub 授权失败', error); }
+  }
+
   async function mountShared() {
     const paths = [...elements.sharedCatalogList.querySelectorAll('[data-shared-path]:checked')].map((input) => input.dataset.sharedPath);
     const remotePrefix = elements.sharedRemotePrefix.value;
@@ -366,23 +469,138 @@
 
   function renderSharedMounts() {
     const mounts = sharedData.mounts || [];
-    elements.sharedMountList.innerHTML = mounts.length ? mounts.map((mount) => `<div class="shared-mount-row-item"><div><strong>${esc(mount.collectionName || mount.collectionId)}</strong><small>${esc(mount.remotePrefix || '')} · ${Number(mount.remoteDocumentCount || 0)} 篇 · ${mount.lastSyncedAt ? `上次同步 ${esc(mount.lastSyncedAt)}` : '尚未同步'}</small></div><div class="shared-mount-actions"><button class="secondary-button compact-button" type="button" data-shared-action="sync" data-mount-id="${escAttr(mount.id)}">同步</button><button class="ghost-button compact-button danger-text" type="button" data-shared-action="unmount" data-mount-id="${escAttr(mount.id)}">解除挂载</button></div></div>`).join('') : '<div class="empty-state">还没有共享挂载。</div>';
+    elements.sharedMountList.innerHTML = mounts.length ? mounts.map((mount) => `<div class="shared-mount-row-item"><div><strong>${esc(mount.collectionName || mount.collectionId)}</strong><small>${esc(mount.remotePrefix || '')} · ${Number(mount.remoteDocumentCount || 0)} 篇 · ${mount.lastSyncedAt ? `上次同步 ${esc(mount.lastSyncedAt)}` : '尚未同步'}</small></div><div class="shared-mount-actions"><button class="secondary-button compact-button" type="button" data-shared-action="sync" data-mount-id="${escAttr(mount.id)}">同步</button><button class="secondary-button compact-button danger-button" type="button" data-shared-action="unmount" data-mount-id="${escAttr(mount.id)}">解除挂载</button></div></div>`).join('') : '<div class="empty-state">还没有共享挂载。</div>';
+  }
+
+  function shareableUploadItems() {
+    const collections = new Map((snapshot.collections || []).map((collection) => [String(collection.id), collection]));
+    const users = new Map((snapshot.users || []).map((user) => [String(user.id), user]));
+    return (snapshot.tasks || []).filter((task) => {
+      const collection = collections.get(String(task.collectionId)) || {};
+      return isShareableSnapshotTask(task, collection);
+    }).map((task) => {
+      const collection = collections.get(String(task.collectionId)) || {};
+      const user = users.get(String(collection.userId)) || {};
+      return {
+        task,
+        collection,
+        userName: String(collection.userName || user.name || '未知用户'),
+        userId: String(collection.userId || user.id || ''),
+        collectionName: String(collection.name || task.collectionName || task.collectionId || '未知收藏夹'),
+        completedAt: String(task.completedAt || task.updatedAt || task.createdAt || ''),
+        duration: Math.max(0, Number(task.duration || 0))
+      };
+    });
+  }
+
+  function isShareableSnapshotTask(task, collection) {
+    const sourceType = String(task.sourceType || '');
+    if (task.status !== 'done' || !task.outputMarkdown || task.documentExists === false || !task.bvid || sourceType.startsWith('local-') || sourceType.startsWith('shared-') || task.multiPartRole === 'part') return false;
+    if (task.multiPartRole === 'parent') return collection.collectionKind === 'bilibili-multipart' && collection.internal === true;
+    if (task.singleTask === true) return collection.internal === true && !collection.mediaId && !['video-cache', 'multimodal-document', 'document-archive', 'bilibili-multipart', 'shared'].includes(collection.collectionKind);
+    return Boolean(collection.mediaId) && collection.internal !== true && !['video-cache', 'multimodal-document', 'document-archive', 'bilibili-multipart', 'shared'].includes(collection.collectionKind);
+  }
+
+  function updateSharedUploadDuration(items) {
+    const nextMaximum = Math.max(1, ...items.map((item) => Math.ceil(item.duration || 0)));
+    if (nextMaximum !== uploadDurationMaximum) {
+      const previousMaximum = uploadDurationMaximum;
+      const previousUpper = Number(elements.sharedUploadDurationMax.value || previousMaximum);
+      elements.sharedUploadDurationMin.max = String(nextMaximum);
+      elements.sharedUploadDurationMax.max = String(nextMaximum);
+      elements.sharedUploadDurationMin.value = String(Math.min(Number(elements.sharedUploadDurationMin.value || 0), nextMaximum));
+      elements.sharedUploadDurationMax.value = String(previousMaximum <= 1 || previousUpper >= previousMaximum ? nextMaximum : Math.min(previousUpper, nextMaximum));
+      uploadDurationMaximum = nextMaximum;
+    }
+    normalizeSharedUploadDuration();
+  }
+
+  function normalizeSharedUploadDuration(changed = '') {
+    let minimum = Number(elements.sharedUploadDurationMin.value || 0);
+    let maximum = Number(elements.sharedUploadDurationMax.value || uploadDurationMaximum);
+    if (minimum > maximum) {
+      if (changed === 'minimum') maximum = minimum;
+      else minimum = maximum;
+    }
+    elements.sharedUploadDurationMin.value = String(minimum);
+    elements.sharedUploadDurationMax.value = String(maximum);
+    elements.sharedUploadDurationLabel.textContent = minimum <= 0 && maximum >= uploadDurationMaximum
+      ? '全部时长'
+      : `${formatUploadDuration(minimum)} - ${maximum >= uploadDurationMaximum ? '不限' : formatUploadDuration(maximum)}`;
+  }
+
+  function filteredSharedUploadItems(allItems = shareableUploadItems()) {
+    const query = elements.sharedUploadFilter.value.trim().toLocaleLowerCase();
+    const userQuery = elements.sharedUploadUserFilter.value.trim().toLocaleLowerCase();
+    const collectionQuery = elements.sharedUploadCollectionFilter.value.trim().toLocaleLowerCase();
+    const minimum = Number(elements.sharedUploadDurationMin.value || 0);
+    const maximum = Number(elements.sharedUploadDurationMax.value || uploadDurationMaximum);
+    const direction = elements.sharedUploadSort.value === 'completed-asc' ? 1 : -1;
+    return allItems.filter((item) => {
+      const task = item.task;
+      const haystack = [task.title, task.bvid, task.owner].map((value) => String(value || '').toLocaleLowerCase()).join('\n');
+      return (!query || haystack.includes(query))
+        && (!userQuery || `${item.userName}\n${item.userId}`.toLocaleLowerCase().includes(userQuery))
+        && (!collectionQuery || `${item.collectionName}\n${item.collection.id || ''}`.toLocaleLowerCase().includes(collectionQuery))
+        && item.duration >= minimum && item.duration <= maximum;
+    }).sort((left, right) => direction * (String(left.completedAt).localeCompare(String(right.completedAt)) || String(left.task.title || '').localeCompare(String(right.task.title || ''), 'zh-CN')));
+  }
+
+  function renderSharedUploadFilterOptions(items) {
+    const users = [...new Map(items.map((item) => [`${item.userId}\n${item.userName}`, { id: item.userId, name: item.userName }])).values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+    elements.sharedUploadUserOptions.innerHTML = users.map((user) => `<option value="${escAttr(user.name)}">${esc(user.id)}</option>`).join('');
+    const userQuery = elements.sharedUploadUserFilter.value.trim().toLocaleLowerCase();
+    const collections = [...new Map(items.filter((item) => !userQuery || `${item.userName}\n${item.userId}`.toLocaleLowerCase().includes(userQuery)).map((item) => [String(item.collection.id || item.collectionName), { id: item.collection.id || '', name: item.collectionName, userName: item.userName }])).values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+    elements.sharedUploadCollectionOptions.innerHTML = collections.map((collection) => `<option value="${escAttr(collection.name)}">${esc(collection.userName)}</option>`).join('');
+  }
+
+  function renderSharedUploadPreparation(items) {
+    const selectedItems = items.filter((item) => selectedUploadTaskIds.has(String(item.task.id)));
+    elements.sharedUploadSelectedCount.textContent = `已选 ${selectedItems.length} 篇`;
+    const ownerMode = String(sharedData.login || '').toLowerCase() === String(sharedData.repository?.owner || '').toLowerCase();
+    elements.sharedUpload.textContent = ownerMode ? '创建分支 / PR' : '创建 Fork / PR';
+    elements.sharedUpload.disabled = !selectedItems.length;
+    if (!selectedItems.length) {
+      elements.sharedUploadPrepareList.innerHTML = '<div class="empty-state">从上方筛选结果中选择要共享的总结文档。</div>';
+      return;
+    }
+    const groups = new Map();
+    for (const item of selectedItems) {
+      const key = String(item.collection.id || `${item.userId}:${item.collectionName}`);
+      if (!groups.has(key)) groups.set(key, { collectionName: item.collectionName, userName: item.userName, items: [] });
+      groups.get(key).items.push(item);
+    }
+    elements.sharedUploadPrepareList.innerHTML = [...groups.values()].sort((a, b) => a.collectionName.localeCompare(b.collectionName, 'zh-CN')).map((group) => `<details class="shared-upload-prep-group"><summary><span><strong>${esc(group.collectionName)}</strong><small>${esc(group.userName)}</small></span><em>${group.items.length} 篇</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><div>${group.items.map((item) => `<div class="shared-upload-prep-item"><span><strong>${esc(item.task.title || item.task.bvid)}</strong><small>${esc(item.task.bvid)} · ${formatUploadDuration(item.duration)} · ${esc(formatUploadDate(item.completedAt))}</small></span><button class="secondary-button compact-button" type="button" data-shared-upload-remove="${escAttr(item.task.id)}">移除</button></div>`).join('')}</div></details>`).join('');
   }
 
   function renderSharedUploads() {
-    const query = elements.sharedUploadFilter.value.trim().toLocaleLowerCase();
-    const tasks = (snapshot.tasks || []).filter((task) => task.status === 'done' && task.outputMarkdown && !String(task.sourceType || '').startsWith('shared-') && task.sourceType !== 'local-video' && task.sourceType !== 'local-document' && task.multiPartRole !== 'part' && (task.bvid || task.multiPartRole === 'parent'))
-      .filter((task) => !query || [task.title, task.bvid, task.owner, task.collectionName, task.collectionId].some((value) => String(value || '').toLocaleLowerCase().includes(query)));
-    elements.sharedUploadList.innerHTML = tasks.length ? tasks.map((task) => `<label class="shared-upload-row"><input class="app-checkbox" type="checkbox" data-shared-upload-task="${escAttr(task.id)}" /><span><strong>${esc(task.title || task.bvid)}</strong><small>${esc(task.bvid || '')} · ${esc(task.collectionName || task.collectionId || '')} · ${task.sharedUploadPr ? '已创建过 PR' : '未上传'}</small></span></label>`).join('') : '<div class="empty-state">暂无可上传的 B站视频总结产物。</div>';
+    const allItems = shareableUploadItems();
+    const availableIds = new Set(allItems.map((item) => String(item.task.id)));
+    for (const id of [...selectedUploadTaskIds]) if (!availableIds.has(id)) selectedUploadTaskIds.delete(id);
+    updateSharedUploadDuration(allItems);
+    renderSharedUploadFilterOptions(allItems);
+    const items = filteredSharedUploadItems(allItems);
+    elements.sharedUploadResultCount.textContent = `筛选结果 ${items.length} / ${allItems.length}`;
+    elements.sharedUploadSelectAll.disabled = !items.length;
+    elements.sharedUploadList.innerHTML = items.length ? items.map((item) => {
+      const task = item.task;
+      return `<label class="shared-upload-row"><input class="app-checkbox" type="checkbox" data-shared-upload-task="${escAttr(task.id)}" ${selectedUploadTaskIds.has(String(task.id)) ? 'checked' : ''}/><span><strong>${esc(task.title || task.bvid)}</strong><small>${esc(task.bvid || '')} · ${esc(task.owner || '未知UP主')} · ${esc(item.userName)} / ${esc(item.collectionName)}</small></span><span class="shared-upload-candidate-meta"><strong>${task.sharedUploadPr ? '已创建过 PR' : '未上传'}</strong><small>${formatUploadDuration(item.duration)} · ${esc(formatUploadDate(item.completedAt))}</small></span></label>`;
+    }).join('') : '<div class="empty-state">当前筛选条件下没有可共享的 B站视频总结产物。</div>';
+    renderSharedUploadPreparation(allItems);
   }
 
   async function uploadShared() {
-    const taskIds = [...elements.sharedUploadList.querySelectorAll('[data-shared-upload-task]:checked')].map((input) => input.dataset.sharedUploadTask);
-    if (!taskIds.length) return notify('无法创建共享 PR', '请至少选择一篇已完成的 B站视频总结。');
+    const taskIds = [...selectedUploadTaskIds];
+    if (!taskIds.length) return notify('无法创建共享 PR', '请先把至少一篇总结文档加入准备上传列表。');
+    const ownerMode = String(sharedData.login || '').toLowerCase() === String(sharedData.repository?.owner || '').toLowerCase();
     setBusy(elements.sharedUpload, true, '创建中');
-    try { const result = await window.orchestrator.sharedUpload({ taskIds }); await refresh(); if (result.prUrl) await window.orchestrator.openExternal(result.prUrl); }
-    catch (error) { notify('创建 GitHub Fork / PR 失败', error); }
-    finally { setBusy(elements.sharedUpload, false, '创建 Fork / PR'); }
+    try {
+      const result = await window.orchestrator.sharedUpload({ taskIds });
+      selectedUploadTaskIds.clear();
+      await refresh();
+      if (result.prUrl) await window.orchestrator.openExternal(result.prUrl);
+    } catch (error) { notify(ownerMode ? '创建 GitHub 分支 / PR 失败' : '创建 GitHub Fork / PR 失败', error); }
+    finally { setBusy(elements.sharedUpload, false, ownerMode ? '创建分支 / PR' : '创建 Fork / PR'); renderSharedUploads(); }
   }
 
   async function handleSharedAction(event) {
@@ -620,17 +838,6 @@
     button.textContent = label;
   }
 
-  function toggleOutsideTool(button) {
-    const tool = button.closest('.outside-tool');
-    const body = tool?.querySelector('.outside-tool-body');
-    if (!body) return;
-    const expanded = body.hidden;
-    body.hidden = !expanded;
-    button.setAttribute('aria-expanded', String(expanded));
-    button.querySelector('span').textContent = expanded ? '收起' : '展开';
-    tool.classList.toggle('is-expanded', expanded);
-  }
-
   function notify(title, detail, type = 'error') {
     const message = detail?.message || String(detail || '');
     if (typeof window.showToast === 'function') window.showToast(title, message, type);
@@ -651,9 +858,23 @@
     return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
   }
 
+  function formatUploadDuration(value) {
+    const total = Math.max(0, Math.round(Number(value || 0)));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const seconds = total % 60;
+    return hours ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}` : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  function formatUploadDate(value) {
+    const time = Date.parse(value || '');
+    return Number.isFinite(time) ? new Date(time).toLocaleString('zh-CN', { hour12: false }) : '生成时间未知';
+  }
+
   function esc(value) { return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;'); }
   function escAttr(value) { return esc(value); }
 
+  setupToolNavigation();
   elements.subtitleChoose.addEventListener('click', chooseSubtitles);
   elements.subtitleStart.addEventListener('click', startSubtitles);
   elements.videoChooseFiles.addEventListener('click', () => chooseVideos('files'));
@@ -673,7 +894,7 @@
   elements.multipartParentList.addEventListener('click', handleMultipartAction);
   elements.sharedLogin.addEventListener('click', browserSharedLogin);
   elements.sharedSetToken.addEventListener('click', setSharedToken);
-  elements.sharedLogout.addEventListener('click', () => window.orchestrator.sharedLogout().then(refresh).catch((error) => notify('退出 GitHub 授权失败', error)));
+  elements.sharedLogout.addEventListener('click', clearSharedAuthorization);
   elements.sharedCatalog.addEventListener('click', loadSharedCatalog);
   elements.sharedFilter.addEventListener('input', renderSharedCatalog);
   elements.sharedRemotePrefix.addEventListener('change', renderSharedCatalog);
@@ -684,29 +905,55 @@
     catch (error) { notify('同步共享挂载失败', error); }
   });
   elements.sharedUpload.addEventListener('click', uploadShared);
-  elements.sharedUploadFilter.addEventListener('input', renderSharedUploads);
+  elements.sharedUploadSelectAll.addEventListener('click', () => {
+    for (const item of filteredSharedUploadItems()) selectedUploadTaskIds.add(String(item.task.id));
+    renderSharedUploads();
+  });
+  for (const control of [elements.sharedUploadFilter, elements.sharedUploadUserFilter, elements.sharedUploadCollectionFilter, elements.sharedUploadSort]) control.addEventListener('input', renderSharedUploads);
+  elements.sharedUploadDurationMin.addEventListener('input', () => { normalizeSharedUploadDuration('minimum'); renderSharedUploads(); });
+  elements.sharedUploadDurationMax.addEventListener('input', () => { normalizeSharedUploadDuration('maximum'); renderSharedUploads(); });
+  elements.sharedUploadList.addEventListener('change', (event) => {
+    const input = event.target.closest('[data-shared-upload-task]');
+    if (!input) return;
+    if (input.checked) selectedUploadTaskIds.add(String(input.dataset.sharedUploadTask));
+    else selectedUploadTaskIds.delete(String(input.dataset.sharedUploadTask));
+    renderSharedUploads();
+  });
+  elements.sharedUploadPrepareList.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-shared-upload-remove]');
+    if (!button) return;
+    selectedUploadTaskIds.delete(String(button.dataset.sharedUploadRemove));
+    renderSharedUploads();
+  });
   elements.sharedMountList.addEventListener('click', handleSharedAction);
   $('#localVideoImportClose').addEventListener('click', () => closeImportModal('video'));
   $('#localVideoImportCancel').addEventListener('click', () => closeImportModal('video'));
   $('#localDocumentImportClose').addEventListener('click', () => closeImportModal('document'));
   $('#localDocumentImportCancel').addEventListener('click', () => closeImportModal('document'));
   elements.page.addEventListener('click', (event) => {
-    const toggle = event.target.closest('[data-outside-tool-toggle]');
-    if (toggle) { toggleOutsideTool(toggle); return; }
+    const card = event.target.closest('[data-outside-open]');
+    if (card && card.closest('#outsideToolStack')) { openOutsideTool(card.dataset.outsideOpen); return; }
     handleJobAction(event);
   });
+  elements.page.addEventListener('keydown', (event) => {
+    const card = event.target.closest('[data-outside-open]');
+    if (!card || !['Enter', ' '].includes(event.key)) return;
+    event.preventDefault();
+    openOutsideTool(card.dataset.outsideOpen);
+  });
+  elements.toolBack.addEventListener('click', () => closeOutsideTool());
   elements.multipartViewerCollection.addEventListener('change', renderMultipart);
-  document.querySelector('[data-page="outside-bilibili"]')?.addEventListener('click', () => refresh().catch((error) => notify('刷新本地工具失败', error)));
+  document.querySelector('[data-page="outside-bilibili"]')?.addEventListener('click', () => { closeOutsideTool({ focus: false }); refresh().catch((error) => notify('刷新本地工具失败', error)); });
   window.orchestrator.onLocalToolboxEvent((event) => {
-    if (event.localToolbox) { state = event.localToolbox; renderJobs(); }
+    if (event.localToolbox) { state = event.localToolbox; renderJobs(); renderOutsideCards(); }
     else refresh().catch(() => {});
   });
   window.orchestrator.onMultipartEvent((event) => {
-    if (event.multiPart) { multipartState = event.multiPart; renderMultipart(); }
+    if (event.multiPart) { multipartState = event.multiPart; renderMultipart(); renderOutsideCards(); }
     else refresh().catch(() => {});
   });
   window.orchestrator.onSharedEvent((event) => {
-    if (event.sharedKnowledge) { sharedData = event.sharedKnowledge; renderShared(); }
+    if (event.sharedKnowledge) { sharedData = event.sharedKnowledge; renderShared(); renderOutsideCards(); }
     else refresh().catch(() => {});
   });
   refresh().catch((error) => notify('加载本地工具失败', error));

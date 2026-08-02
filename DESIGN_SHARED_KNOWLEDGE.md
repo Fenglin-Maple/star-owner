@@ -26,7 +26,7 @@
 - 仓库：`Fenglin-Maple/Blibili-Markdowns`
 - 地址：https://github.com/Fenglin-Maple/Blibili-Markdowns
 - 默认目标分支：`main`
-- 当前状态：仓库为空。首次接收贡献前，维护者需要在 `main` 创建一个初始提交（例如贡献说明和许可证）；GitHub 不允许从没有 base branch 的空仓库创建普通 Pull Request。之后应用才会自动提交贡献者 Fork/PR，只有合并到 `main` 的内容才进入下载者目录。
+- 当前状态：`main` 已初始化 README、共享目录契约和校验 Actions；应用可以创建贡献分支/PR，只有审核合并到 `main` 的内容才进入下载者目录。
 
 应用实现时不应把仓库名称、分支名称或目录结构硬编码在渲染层，应由共享知识库配置和后端校验共同维护。
 
@@ -151,25 +151,25 @@ documentId = sha256(
 - 总结完成时间；
 - 已上传、待上传、远程已有更新等状态。
 
-用户可以多选文档，应用在提交前执行一次本地预检：文件存在性、Markdown 图片引用、文件大小、路径边界、元数据完整性和是否为共享来源。
+上传列表支持按用户、收藏夹、标题/BVID/UP 主、生成时间和视频时长筛选，并可一次全选当前筛选结果。选中的文档进入独立准备上传列表，默认只显示涉及的收藏夹，展开后显示每篇文档并允许移除。应用在提交前执行一次本地预检：文件存在性、Markdown 图片引用、文件大小、路径边界、元数据完整性和是否为共享来源。
 
 ### 5.2 自动 Fork 和 PR
 
 首次使用时：
 
-1. 应用调用系统默认浏览器打开 GitHub 仓库/授权说明页面；
-2. 用户在 GitHub 创建具有仓库读写权限的 Fine-grained Token，并将 Token 粘贴回应用授权框；
-3. 主进程调用 GitHub `/user` 校验 Token，读取并保存 GitHub 登录名和稳定数字 ID，不接收或保存浏览器 Cookie；
-4. Token 使用应用已有的加密安全存储保存，不写入项目目录、Git 配置或日志；
-5. 应用自动创建或复用用户 Fork；
-6. 在用户 Fork 中创建一次性分支，例如 `share/<submission-id>`；
-7. 使用项目自带 Git 环境提交选中文档和 manifest，并推送到用户 Fork；
+1. 用户点击“浏览器登录 GitHub”，应用通过项目自带 Git Credential Manager 调用系统默认浏览器；
+2. GCM 把浏览器授权结果写入星藏家项目目录内专用的 DPAPI 加密凭据存储，不使用 Windows 全局凭据库；
+3. 主进程调用 GitHub `/user` 校验令牌，读取并加密保存必要的登录名、稳定数字 ID 和令牌，不接收或保存浏览器 Cookie；
+4. Fine-grained Token 粘贴保留在“更多授权选项”中作为备用路径；
+5. 普通贡献者自动创建或复用父仓库匹配的合法 Fork；若同名仓库不是目标 Fork，则停止并提示重命名；
+6. 普通贡献者在 Fork 中创建一次性分支；共享仓库主人直接在上游仓库创建临时分支，不尝试 Fork 自己的仓库；
+7. 使用项目自带 Git 环境提交选中文档和 manifest，commit author 使用授权账户的 GitHub noreply 身份；
 8. 自动创建指向主仓库 `main` 的 Pull Request；
 9. 显示 PR 地址、提交数量和后续审核状态。
 
 用户不需要执行 clone、checkout、commit 或 push。
 
-GitHub 登录不嵌入应用 WebView，也不复制浏览器 Cookie。当前版本不实现 OAuth loopback/PKCE 回调；用户完成 GitHub 授权后主动粘贴 Fine-grained Token，应用仅保留必要的 Token、登录名和数字 ID，并允许用户退出登录和清除本地凭据。
+GitHub 登录不嵌入应用 WebView，也不复制浏览器 Cookie。用户可以清除星藏家数据库和内置 Git 私有 DPAPI 存储中的授权以切换 PR 账户；该操作绝不调用系统 GCM logout/erase，也不清除 Windows Credential Manager、系统 Git 或用户全局 Git 配置。旧版本可能写入系统凭据库的历史记录不会由应用擅自删除，新版本也不会读取或写入该位置。
 
 ### 5.3 项目自带 Git 环境
 
@@ -191,6 +191,7 @@ Git 子进程使用受控环境：
 - 使用一次性进程环境中的 `http.extraHeader` 传递 Token，不把 Token 写入 remote URL、`.git/config`、命令行参数或日志；
 - 完成一次操作后清理临时凭据、临时仓库和工作区；
 - 清理 `PATH`、`GIT_CONFIG_GLOBAL`、`GIT_CONFIG_SYSTEM`、`HOME` 等可能指向用户全局环境的变量；
+- 显式设置 `GCM_CREDENTIAL_STORE=dpapi` 与项目内 `GCM_DPAPI_STORE_PATH`，阻止 Windows 默认 `wincredman` 存储介入；
 - Git 运行失败时给出明确错误，不尝试使用电脑上的其它 Git 版本。
 
 启动检查应显示内置 Git 版本、路径和健康状态。内置 Git 缺失、校验失败或版本不兼容时，只禁用共享仓库操作，不影响 B 站同步、RAG 和普通视频总结。Git 发行包的许可证和第三方声明必须随发布包提供。

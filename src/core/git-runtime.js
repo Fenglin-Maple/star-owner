@@ -14,6 +14,7 @@ class GitRuntime {
     const bundledRoot = path.resolve(this.projectRoot, 'runtime', 'git');
     if (this.gitRoot.toLowerCase() !== bundledRoot.toLowerCase()) throw new Error('共享功能只能使用项目 runtime/git 中的 Git，拒绝外部 Git 路径。');
     this.gitHome = path.join(this.projectRoot, '.cache', 'shared-git', 'home');
+    this.credentialStorePath = path.join(this.gitHome, '.gcm', 'dpapi_store');
   }
 
   state() {
@@ -22,6 +23,7 @@ class GitRuntime {
       path: this.gitPath,
       runtimeRoot: this.gitRoot,
       isolated: true,
+      credentialScope: 'application-dpapi',
       version: ''
     };
   }
@@ -66,7 +68,7 @@ class GitRuntime {
     return { stdout: String(result.stdout || ''), stderr: String(result.stderr || '') };
   }
 
-  async commitAndPush({ upstream, fork, baseBranch = 'main', branch, token, files, replaceRoots = [], message }) {
+  async commitAndPush({ upstream, fork, baseBranch = 'main', branch, token, files, replaceRoots = [], message, author = null }) {
     await this.assertAvailable();
     if (!upstream?.owner || !upstream?.name || !fork?.owner || !fork?.name) throw new Error('GitHub 共享仓库信息不完整，无法提交。');
     if (!/^[A-Za-z0-9._/-]{1,120}$/.test(String(branch || ''))) throw new Error('共享分支名称不安全。');
@@ -102,9 +104,12 @@ class GitRuntime {
         error.code = 'SHARED_GIT_NO_CHANGES';
         throw error;
       }
-      await this.run(['-c', 'user.name=Star Owner', '-c', 'user.email=star-owner-noreply@users.noreply.github.com', 'commit', '-m', String(message || 'docs: update shared knowledge')], { cwd: checkout, env: gitEnv });
-      await this.run(['remote', 'add', 'fork', forkUrl], { cwd: checkout, env: gitEnv });
-      await this.run(['push', 'fork', `HEAD:refs/heads/${String(branch)}`], { cwd: checkout, env: gitEnv });
+      const commitAuthor = normalizeGitAuthor(author);
+      await this.run(['-c', `user.name=${commitAuthor.name}`, '-c', `user.email=${commitAuthor.email}`, 'commit', '-m', String(message || 'docs: update shared knowledge')], { cwd: checkout, env: gitEnv });
+      const sameRepository = normalizeGitRemote(remoteUrl) === normalizeGitRemote(forkUrl);
+      const targetRemote = sameRepository ? 'origin' : 'fork';
+      if (!sameRepository) await this.run(['remote', 'add', targetRemote, forkUrl], { cwd: checkout, env: gitEnv });
+      await this.run(['push', targetRemote, `HEAD:refs/heads/${String(branch)}`], { cwd: checkout, env: gitEnv });
       return { branch: String(branch), files: written };
     } catch (error) {
       throw new Error(`项目内置 Git 提交共享文档失败：${sanitizeGitError(error)}`);
@@ -121,6 +126,12 @@ class GitRuntime {
     const credential = await this.readCredential();
     if (!credential.password) throw new Error('浏览器授权完成，但没有从项目内置 Git 凭据环境读取到 GitHub 凭据。');
     return credential;
+  }
+
+  clearCredentialStore() {
+    const storePath = assertInside(this.gitHome, this.credentialStorePath);
+    fs.rmSync(storePath, { recursive: true, force: true });
+    return { cleared: true, scope: 'application-dpapi', path: storePath };
   }
 
   credentialManagerPath() {
@@ -187,6 +198,17 @@ function parseCredential(output) {
   return result;
 }
 
+function normalizeGitRemote(value) {
+  return String(value || '').trim().replace(/\.git$/i, '').replace(/\/+$/, '').toLowerCase();
+}
+
+function normalizeGitAuthor(author) {
+  const name = String(author?.name || '').trim();
+  const email = String(author?.email || '').trim();
+  if (/^[^\u0000-\u001f\u007f]{1,80}$/.test(name) && /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+$/.test(email)) return { name, email };
+  return { name: 'Star Owner', email: 'star-owner-noreply@users.noreply.github.com' };
+}
+
 function createGitEnvironment({ source = process.env, overrides = {}, projectRoot, gitRoot, gitHome } = {}) {
   const base = source || {};
   const env = {};
@@ -194,7 +216,8 @@ function createGitEnvironment({ source = process.env, overrides = {}, projectRoo
     'path', 'home', 'userprofile', 'homedrive', 'homepath', 'xdg_config_home', 'git_config_global', 'git_config_system',
     'git_config_nosystem', 'git_dir', 'git_work_tree', 'git_index_file', 'git_object_directory', 'git_alternates',
     'git_askpass', 'git_ssh', 'git_ssh_command', 'ssh_auth_sock', 'ssh_agent_pid', 'ssh_askpass', 'gcm_interactive',
-    'gcm_credential_provider', 'git_credential_helper', 'git_trace', 'git_trace_packet', 'git_curl_verbose'
+    'gcm_credential_provider', 'gcm_credential_store', 'gcm_dpapi_store_path', 'gcm_plaintext_store_path',
+    'git_credential_helper', 'git_trace', 'git_trace_packet', 'git_curl_verbose'
   ]);
   for (const [key, value] of Object.entries(base)) {
     const lower = String(key).toLowerCase();
@@ -222,6 +245,8 @@ function createGitEnvironment({ source = process.env, overrides = {}, projectRoo
   env.GIT_CONFIG_NOSYSTEM = '1';
   env.GIT_TERMINAL_PROMPT = '0';
   env.GCM_INTERACTIVE = 'Never';
+  env.GCM_CREDENTIAL_STORE = 'dpapi';
+  env.GCM_DPAPI_STORE_PATH = path.join(resolvedHome, '.gcm', 'dpapi_store');
   env.HOME = resolvedHome;
   env.USERPROFILE = resolvedHome;
   env.XDG_CONFIG_HOME = resolvedHome;
@@ -236,4 +261,4 @@ function createGitEnvironment({ source = process.env, overrides = {}, projectRoo
   return env;
 }
 
-module.exports = { GitRuntime, createGitEnvironment, gitAuthorizationHeader, normalizeRelative, parseCredential, sanitizeGitError };
+module.exports = { GitRuntime, createGitEnvironment, gitAuthorizationHeader, normalizeGitAuthor, normalizeGitRemote, normalizeRelative, parseCredential, sanitizeGitError };

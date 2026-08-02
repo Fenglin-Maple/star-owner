@@ -754,10 +754,10 @@
           </section>
 
           <section class="page outside-bilibili-page" id="page-outside-bilibili">
-            <div class="page-head"><h1>B站之外</h1><p>本地媒体处理与多模态知识库工具。</p></div>
-            <div class="outside-tool-stack">
-              <section class="section-block outside-tool multipart-tool" data-outside-tool="multipart">
-                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 9h8M8 13h5M8 17h8M18 9h1M18 13h1M18 17h1"/></svg></div><div><span class="outside-tool-kicker">B站媒体工作流</span><h2>B站多P视频总结 [工具]</h2><p class="outside-tool-description">逐 P 选择、排队总结，并在父任务中继续追加新 P。</p></div><button class="outside-tool-toggle" type="button" data-outside-tool-toggle aria-expanded="false"><span>展开</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></div>
+            <div id="outsideToolHomeHead" class="page-head"><h1>B站之外</h1><p>选择一个独立工具进入，运行状态和结果会持续保留。</p></div>
+            <div id="outsideToolStack" class="outside-tool-stack">
+              <section class="section-block outside-tool multipart-tool" data-outside-tool="multipart" data-outside-open="multipart" role="button" tabindex="0" aria-label="打开 B站多P视频总结工具">
+                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 9h8M8 13h5M8 17h8M18 9h1M18 13h1M18 17h1"/></svg></div><div><span class="outside-tool-kicker">B站媒体工作流</span><h2>B站多P视频总结 [工具]</h2><p class="outside-tool-description">逐 P 选择、排队总结，并在父任务中继续追加新 P。</p><div class="outside-tool-card-stats" data-outside-tool-stats="multipart"><span>正在读取父任务...</span></div></div><svg class="outside-tool-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></div>
                 <div class="outside-tool-body" hidden>
                   <div class="outside-tool-meta"><span class="outside-status-dot"></span><span>一次只运行一个父任务，内部 P 并发仍受应用资源调度器控制。</span></div>
                   <div class="outside-split-layout multipart-layout">
@@ -782,10 +782,17 @@
                 </div>
               </section>
 
-              <section class="section-block outside-tool shared-tool" data-outside-tool="shared">
-                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M12 3v12M8 7l4-4 4 4M5 12v7h14v-7M8 16h8"/></svg></div><div><span class="outside-tool-kicker">GitHub 共享知识</span><h2>GitHub 文档共享 [工具]</h2><p class="outside-tool-description">把已完成的 B站总结上传为 PR，或将远程目录挂载到本地“共享”用户。</p></div><button class="outside-tool-toggle" type="button" data-outside-tool-toggle aria-expanded="false"><span>展开</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></div>
+              <section class="section-block outside-tool shared-tool" data-outside-tool="shared" data-outside-open="shared" role="button" tabindex="0" aria-label="打开 GitHub 文档共享工具">
+                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M12 3v12M8 7l4-4 4 4M5 12v7h14v-7M8 16h8"/></svg></div><div><span class="outside-tool-kicker">GitHub 共享知识</span><h2>GitHub 文档共享 [工具]</h2><p class="outside-tool-description">把已完成的 B站总结上传为 PR，或将远程目录挂载到本地“共享”用户。</p><div class="outside-tool-card-stats" data-outside-tool-stats="shared"><span>正在读取共享状态...</span></div></div><svg class="outside-tool-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></div>
                 <div class="outside-tool-body" hidden>
-                  <div class="shared-auth-card"><div class="shared-auth-intro"><strong>GitHub 授权</strong><span>浏览器登录会调用项目内置 Git Credential Manager；Token 粘贴是备用方式。</span></div><div class="shared-auth-row"><button id="sharedLogin" class="primary-button" type="button">浏览器登录 GitHub</button><label class="shared-token-field"><span>备用：粘贴 Fine-grained Token</span><input id="sharedToken" type="password" autocomplete="off" placeholder="仅上传 / PR 需要" /></label><button id="sharedSetToken" class="secondary-button" type="button">保存 Token</button><button id="sharedLogout" class="ghost-button" type="button" hidden>退出授权</button></div><div id="sharedAuthStatus" class="local-selection-summary">公共仓库目录可以直接浏览；上传和创建 Pull Request 需要 GitHub 授权。</div></div>
+                  <div class="shared-auth-card">
+                    <div class="shared-auth-intro"><strong>GitHub 授权</strong><span>公共目录无需登录；上传和创建 Pull Request 才需要授权。</span></div>
+                    <div class="shared-auth-primary"><button id="sharedLogin" class="primary-button" type="button">浏览器登录 GitHub</button><div id="sharedAuthStatus" class="local-selection-summary">尚未授权 GitHub。</div></div>
+                    <details id="sharedAuthMore" class="shared-auth-more">
+                      <summary>更多授权选项</summary>
+                      <div class="shared-auth-more-body"><label class="shared-token-field"><span>备用：粘贴 Fine-grained Token</span><input id="sharedToken" type="password" autocomplete="off" placeholder="仅上传 / PR 需要" /></label><button id="sharedSetToken" class="secondary-button" type="button">保存 Token</button><div class="shared-auth-clear"><button id="sharedLogout" class="secondary-button compact-button danger-button" type="button" hidden>清除星藏家 GitHub 授权</button><small>清除应用数据库和内置 Git 私有存储中的令牌，用于切换提交账户；绝不清除系统 Git、系统凭据库或用户全局 Git 配置。</small></div></div>
+                    </details>
+                  </div>
                   <div class="outside-split-layout shared-layout">
                     <div class="outside-pane shared-download-pane">
                       <div class="outside-pane-title"><span>01 · 下载与挂载</span><small>远程目录 → 本地共享用户</small></div>
@@ -797,29 +804,44 @@
                     </div>
                     <div class="outside-pane shared-upload-pane">
                       <div class="outside-pane-title"><span>02 · 上传与提交</span><small>已完成 B站总结 → Fork / PR</small></div>
-                      <div class="outside-subpanel-title shared-upload-title"><strong>我的 B站总结</strong><span>只显示可共享产物</span></div>
-                      <div class="shared-upload-controls"><input id="sharedUploadFilter" class="shared-upload-filter" placeholder="筛选标题、BV、收藏夹" /><button id="sharedUpload" class="primary-button" type="button">创建 Fork / PR</button></div>
+                      <div class="outside-subpanel-title shared-upload-title"><strong>我的 B站总结</strong><span id="sharedUploadResultCount">正在读取可共享产物</span></div>
+                      <div class="shared-upload-filter-grid">
+                        <label><span>用户</span><input id="sharedUploadUserFilter" list="sharedUploadUserOptions" placeholder="全部用户，可输入关键词" /><datalist id="sharedUploadUserOptions"></datalist></label>
+                        <label><span>收藏夹</span><input id="sharedUploadCollectionFilter" list="sharedUploadCollectionOptions" placeholder="全部收藏夹，可输入关键词" /><datalist id="sharedUploadCollectionOptions"></datalist></label>
+                        <label><span>标题 / BV / UP主</span><input id="sharedUploadFilter" placeholder="输入关键词筛选" /></label>
+                        <label><span>生成时间排序</span><select id="sharedUploadSort"><option value="completed-desc">生成时间：新到旧</option><option value="completed-asc">生成时间：旧到新</option></select></label>
+                      </div>
+                      <div class="shared-upload-duration duration-filter"><div><span>视频时长</span><strong id="sharedUploadDurationLabel">全部时长</strong></div><div class="dual-range"><input id="sharedUploadDurationMin" type="range" min="0" max="1" value="0" step="1" /><input id="sharedUploadDurationMax" type="range" min="0" max="1" value="1" step="1" /></div></div>
+                      <div class="shared-upload-actions"><button id="sharedUploadSelectAll" class="secondary-button" type="button">全选当前筛选结果</button><button id="sharedUpload" class="primary-button" type="button">创建 Fork / PR</button></div>
                       <div id="sharedUploadList" class="shared-upload-list"><div class="empty-state">暂无可上传文档。</div></div>
+                      <div class="shared-upload-preparation"><div class="outside-subpanel-title"><strong>准备上传列表</strong><span id="sharedUploadSelectedCount">已选 0 篇</span></div><div id="sharedUploadPrepareList" class="shared-upload-prepare-list"><div class="empty-state">从上方筛选结果中选择要共享的总结文档。</div></div></div>
                     </div>
                   </div>
                 </div>
               </section>
 
-              <section class="section-block outside-tool" data-local-tool="subtitles">
-                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 10h4M7 14h7M16 10h1"/></svg></div><div><span class="outside-tool-kicker">本地媒体</span><h2>视频 / 音频字幕生成 [工具]</h2><p class="outside-tool-description">选择一个视频或音频文件，把字幕写回原文件所在目录。</p></div><button class="outside-tool-toggle" type="button" data-outside-tool-toggle aria-expanded="false"><span>展开</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></div>
+              <section class="section-block outside-tool" data-local-tool="subtitles" data-outside-open="subtitles" role="button" tabindex="0" aria-label="打开视频或音频字幕生成工具">
+                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 10h4M7 14h7M16 10h1"/></svg></div><div><span class="outside-tool-kicker">本地媒体</span><h2>视频 / 音频字幕生成 [工具]</h2><p class="outside-tool-description">选择一个视频或音频文件，把字幕写回原文件所在目录。</p><div class="outside-tool-card-stats" data-outside-tool-stats="subtitles"><span>正在读取任务状态...</span></div></div><svg class="outside-tool-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></div>
                 <div class="outside-tool-body" hidden><div class="local-subtitle-options"><span>输出格式</span><label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="srt" checked /><span>SRT</span></label><label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="vtt" checked /><span>VTT</span></label><label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="lrc" /><span>LRC</span></label><label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="txt" /><span>TXT</span></label><label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="json" /><span>JSON</span></label></div><div id="localSubtitleSelection" class="local-selection-summary">尚未选择视频或音频文件</div><div class="outside-tool-actions"><button id="localSubtitleChoose" class="secondary-button" type="button">选择视频或音频</button><button id="localSubtitleStart" class="primary-button" type="button" disabled>开始生成字幕</button></div><div id="localSubtitleJob" class="local-tool-job-slot"></div></div>
               </section>
 
-              <section class="section-block outside-tool" data-local-tool="video-import">
-                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9 9l6 3-6 3zM4 19h16"/></svg></div><div><span class="outside-tool-kicker">本地媒体</span><h2>本地视频 / 音频导入内置缓存收藏夹 [工具]</h2><p class="outside-tool-description">压缩并规范化本地视频或音频，导入后可由 Agent 视频总结工作流直接处理。</p></div><button class="outside-tool-toggle" type="button" data-outside-tool-toggle aria-expanded="false"><span>展开</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></div>
+              <section class="section-block outside-tool" data-local-tool="video-import" data-outside-open="video-import" role="button" tabindex="0" aria-label="打开本地视频或音频导入工具">
+                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9 9l6 3-6 3zM4 19h16"/></svg></div><div><span class="outside-tool-kicker">本地媒体</span><h2>本地视频 / 音频导入内置缓存收藏夹 [工具]</h2><p class="outside-tool-description">压缩并规范化本地视频或音频，导入后可由 Agent 视频总结工作流直接处理。</p><div class="outside-tool-card-stats" data-outside-tool-stats="video-import"><span>正在读取缓存收藏夹...</span></div></div><svg class="outside-tool-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></div>
                 <div class="outside-tool-body" hidden><div class="outside-tool-actions"><button id="localVideoChooseFiles" class="primary-button" type="button">选择视频 / 音频</button><button id="localVideoChooseFolder" class="secondary-button" type="button">选择视频 / 音频文件夹</button></div><div id="localVideoJob" class="local-tool-job-slot"></div></div>
               </section>
 
-              <section class="section-block outside-tool" data-local-tool="document-import">
-                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M9 12h6M9 16h6"/></svg></div><div><span class="outside-tool-kicker">本地知识库</span><h2>本地文档知识库导入 [工具]</h2><p class="outside-tool-description">导入图片、PDF、DOCX、PPTX、XLSX、Markdown 与常见文本文件。</p></div><button class="outside-tool-toggle" type="button" data-outside-tool-toggle aria-expanded="false"><span>展开</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></div>
+              <section class="section-block outside-tool" data-local-tool="document-import" data-outside-open="document-import" role="button" tabindex="0" aria-label="打开本地文档知识库导入工具">
+                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M9 12h6M9 16h6"/></svg></div><div><span class="outside-tool-kicker">本地知识库</span><h2>本地文档知识库导入 [工具]</h2><p class="outside-tool-description">导入图片、PDF、DOCX、PPTX、XLSX、Markdown 与常见文本文件。</p><div class="outside-tool-card-stats" data-outside-tool-stats="document-import"><span>正在读取知识库收藏夹...</span></div></div><svg class="outside-tool-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></div>
                 <div class="outside-tool-body" hidden><div class="outside-tool-actions"><button id="localDocumentChoose" class="primary-button" type="button">选择文档</button></div><div id="localDocumentJob" class="local-tool-job-slot"></div></div>
               </section>
             </div>
+            <section id="outsideToolDetail" class="outside-tool-detail" hidden>
+              <div class="outside-detail-head">
+                <button id="outsideToolBack" class="secondary-button compact-button outside-back-button" type="button" title="返回 B站之外工具箱"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg><span>返回工具箱</span></button>
+                <div><span id="outsideToolDetailKicker" class="outside-tool-kicker"></span><h2 id="outsideToolDetailTitle"></h2><p id="outsideToolDetailDescription"></p></div>
+              </div>
+              <div id="outsideToolDetailBody" class="outside-tool-detail-body"></div>
+            </section>
           </section>
 
           <section class="page readme-layout" id="page-readme">

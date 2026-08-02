@@ -15,6 +15,7 @@ const MAX_SHARED_DOCUMENT_BYTES = 100 * 1024 * 1024;
 const MAX_SHARED_PR_DOCUMENTS = 50;
 const MAX_SHARED_PR_BYTES = 200 * 1024 * 1024;
 const MAX_REMOTE_METADATA_BYTES = 512 * 1024;
+const APPLICATION_VERSION = require('../../package.json').version;
 
 class SharedKnowledgeManager {
   constructor({ store, encryptSecret, decryptSecret, openExternal, emit, repository = DEFAULT_REPOSITORY, request = null, gitRuntime = null }) {
@@ -46,7 +47,7 @@ class SharedKnowledgeManager {
 
   async openLogin() {
     await this.openExternal(`https://github.com/${this.repository.owner}/${this.repository.name}`);
-    return { ok: true, url: `https://github.com/${this.repository.owner}/${this.repository.name}`, message: '已打开 GitHub。返回应用后可点击“浏览器登录 GitHub”完成项目内置凭据授权，也可以粘贴 Fine-grained Token 作为备用；凭据只保存在系统安全存储。' };
+    return { ok: true, url: `https://github.com/${this.repository.owner}/${this.repository.name}`, message: '已打开 GitHub。返回应用后可点击“浏览器登录 GitHub”完成项目内置凭据授权，也可以粘贴 Fine-grained Token 作为备用；浏览器授权凭据只保存在星藏家的独立 DPAPI 加密存储中。' };
   }
 
   async browserLogin() {
@@ -78,11 +79,14 @@ class SharedKnowledgeManager {
     return { login: user.login || '', userId: String(user.id || ''), authenticated: true, previousLogin: current.login || '' };
   }
 
-  clearToken() {
+  async clearToken() {
+    const gitCredential = typeof this.gitRuntime.clearCredentialStore === 'function'
+      ? await this.gitRuntime.clearCredentialStore()
+      : { cleared: false, scope: 'unavailable' };
     this.store.delete('settings', 'sharedGithub');
     this.store.save();
     this.emitState('shared-github-logged-out');
-    return { authenticated: false };
+    return { authenticated: false, cleared: true, scope: 'application-only', gitCredential, message: '已清除星藏家应用数据库与内置 Git 私有存储中的 GitHub 授权，不会修改系统 Git、系统凭据库或用户全局 Git 配置。' };
   }
 
   async remoteCatalog() {
@@ -131,34 +135,37 @@ class SharedKnowledgeManager {
     const branch = `star-owner/${safeBranch(auth.user.login)}-${Date.now().toString(36)}`;
     const fork = await this.ensureFork(auth.user.login, auth.token);
     await this.waitForFork(fork, auth.token);
+    const forkOwner = String(fork.owner?.login || fork.owner || auth.user.login);
     const uploaded = documents.map((document) => ({ taskId: document.task.id, documentId: document.documentId, remoteRoot: document.remoteRoot, metadataPath: `${document.remoteRoot}/${DOCUMENT_META_FILE}` }));
     if (this.requestOverride) {
-      await this.githubRequest(`/repos/${fork.owner}/${fork.name}/git/refs`, { token: auth.token, method: 'POST', body: { ref: `refs/heads/${branch}`, sha: base.object.sha } });
+      await this.githubRequest(`/repos/${forkOwner}/${fork.name}/git/refs`, { token: auth.token, method: 'POST', body: { ref: `refs/heads/${branch}`, sha: base.object.sha } });
       for (const document of documents) {
         for (const file of document.files) {
           const pathName = `${document.remoteRoot}/${file.relative}`;
-          const existing = await this.findRemoteFile(fork.owner, fork.name, pathName, auth.token);
+          const existing = await this.findRemoteFile(forkOwner, fork.name, pathName, auth.token);
           const body = { message: `docs: update ${document.documentId}`, content: file.buffer.toString('base64'), branch };
           if (existing?.sha) body.sha = existing.sha;
-          await this.githubRequest(`/repos/${fork.owner}/${fork.name}/contents/${encodePath(pathName)}`, { token: auth.token, method: 'PUT', body });
+          await this.githubRequest(`/repos/${forkOwner}/${fork.name}/contents/${encodePath(pathName)}`, { token: auth.token, method: 'PUT', body });
         }
       }
     } else {
       await this.gitRuntime.commitAndPush({
         upstream: this.repository,
-        fork: { owner: fork.owner?.login || fork.owner || auth.user.login, name: fork.name },
+        fork: { owner: forkOwner, name: fork.name },
         baseBranch: this.repository.branch,
         branch,
         token: auth.token,
         files: documents.flatMap((document) => document.files.map((file) => ({ relative: `${document.remoteRoot}/${file.relative}`, buffer: file.buffer }))),
         replaceRoots: documents.map((document) => document.remoteRoot),
-        message: `docs: update ${documents.length} shared document${documents.length === 1 ? '' : 's'}`
+        message: `docs: update ${documents.length} shared document${documents.length === 1 ? '' : 's'}`,
+        author: githubCommitAuthor(auth.user)
       });
     }
+    const head = forkOwner.toLowerCase() === String(this.repository.owner).toLowerCase() ? branch : `${forkOwner}:${branch}`;
     const pr = await this.githubRequest(`/repos/${this.repository.owner}/${this.repository.name}/pulls`, {
       token: auth.token,
       method: 'POST',
-      body: { title: String(input.title || `星藏家共享文档 · ${documents.length} 篇`), body: buildPullRequestBody(documents), head: `${auth.user.login}:${branch}`, base: this.repository.branch }
+      body: { title: String(input.title || `星藏家共享文档 · ${documents.length} 篇`), body: buildPullRequestBody(documents), head, base: this.repository.branch }
     });
     const record = { id: `shared-upload:${Date.now()}-${crypto.randomBytes(4).toString('hex')}`, prNumber: pr.number, prUrl: pr.html_url, branch, uploaded, status: 'open', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     this.store.set('sharedUploads', record.id, record);
@@ -565,7 +572,7 @@ class SharedKnowledgeManager {
     const settings = this.store.get('settings', 'sharedGithub') || {};
     const raw = process.env.STAR_OWNER_GITHUB_TOKEN || '';
     const token = validateGithubToken(raw || (settings.encryptedToken ? this.decryptSecret(settings.encryptedToken) : ''));
-    if (!token) throw new Error('请先点击“登录 GitHub”，完成授权后输入 Token。浏览远程目录无需登录，创建 Fork/PR 必须授权。');
+    if (!token) throw new Error('请先点击“浏览器登录 GitHub”，或展开更多授权选项粘贴 Token。浏览远程目录无需登录，创建 Fork/PR 必须授权。');
     const user = settings.login && /^\d+$/.test(String(settings.userId || ''))
       ? { login: settings.login, id: settings.userId }
       : await this.githubRequest('/user', { token });
@@ -573,8 +580,15 @@ class SharedKnowledgeManager {
   }
 
   async ensureFork(login, token) {
+    if (String(login || '').toLowerCase() === String(this.repository.owner || '').toLowerCase()) {
+      return { owner: this.repository.owner, name: this.repository.name, full_name: `${this.repository.owner}/${this.repository.name}`, _ownerRepository: true };
+    }
     const pathName = `/repos/${login}/${this.repository.name}`;
-    try { return await this.githubRequest(pathName, { token }); }
+    try {
+      const existing = await this.githubRequest(pathName, { token });
+      if (existing?.fork === true && String(existing?.parent?.full_name || '').toLowerCase() === `${this.repository.owner}/${this.repository.name}`.toLowerCase()) return existing;
+      throw new Error(`GitHub 账户 ${login} 已存在同名但不是共享仓库 Fork 的仓库，请重命名该仓库后再上传。`);
+    }
     catch (error) {
       if (error.status !== 404) throw error;
       const fork = await this.githubRequest(`/repos/${this.repository.owner}/${this.repository.name}/forks`, { token, method: 'POST', body: { default_branch_only: false } });
@@ -618,7 +632,7 @@ class SharedKnowledgeManager {
 
   async githubRequest(endpoint, options = {}) {
     if (this.requestOverride) return this.requestOverride(endpoint, options);
-    const headers = { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', 'user-agent': 'star-owner/1.4.1' };
+    const headers = { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', 'user-agent': `star-owner/${APPLICATION_VERSION}` };
     if (options.token) headers.authorization = `Bearer ${options.token}`;
     if (options.body) headers['content-type'] = 'application/json';
     const response = await fetch(`https://api.github.com${endpoint}`, { method: options.method || 'GET', headers, body: options.body ? JSON.stringify(options.body) : undefined, signal: AbortSignal.timeout(60000) });
@@ -642,6 +656,13 @@ function stableDocumentId(task, collection) {
       ? `single:${collection.stableId || collection.id}`
       : `bilibili:${collection.mediaId || collection.id}`;
   return `doc-${hash(`v1|github:${githubId}|bilibili:${bilibiliUid}|collection:${sourceCollection}|bvid:${String(task.bvid || '').toUpperCase()}`)}`;
+}
+
+function githubCommitAuthor(user) {
+  const login = String(user?.login || '').trim();
+  const id = String(user?.id || '').trim();
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login) || !/^\d+$/.test(id)) throw new Error('GitHub 账户身份不完整，无法生成可归属到贡献者的提交作者。请退出后重新授权。');
+  return { name: login, email: `${id}+${login}@users.noreply.github.com` };
 }
 function remoteRootFor(task, collection, documentId) {
   const author = safeName(task.githubUserId || 'pending-github-id', 'pending-github-id', 80);
@@ -802,4 +823,4 @@ function validateGithubToken(value) {
   return token;
 }
 
-module.exports = { DEFAULT_REPOSITORY, DOCUMENT_META_FILE, SHARED_USER_ID, SHARED_USER_NAME, MAX_SHARED_FILE_BYTES, MAX_SHARED_DOCUMENT_FILES, MAX_SHARED_DOCUMENT_BYTES, MAX_SHARED_PR_DOCUMENTS, MAX_SHARED_PR_BYTES, SharedKnowledgeManager, collectShareableFiles, isShareableBilibiliTask, isShareableRelative, mountCoversPath, remoteRootFor, sharedExclusionId, stableDocumentId, validateGithubToken, validateShareableFiles };
+module.exports = { DEFAULT_REPOSITORY, DOCUMENT_META_FILE, SHARED_USER_ID, SHARED_USER_NAME, MAX_SHARED_FILE_BYTES, MAX_SHARED_DOCUMENT_FILES, MAX_SHARED_DOCUMENT_BYTES, MAX_SHARED_PR_DOCUMENTS, MAX_SHARED_PR_BYTES, SharedKnowledgeManager, collectShareableFiles, githubCommitAuthor, isShareableBilibiliTask, isShareableRelative, mountCoversPath, remoteRootFor, sharedExclusionId, stableDocumentId, validateGithubToken, validateShareableFiles };

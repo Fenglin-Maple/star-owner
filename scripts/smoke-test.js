@@ -678,14 +678,20 @@ function verifyRendererContracts() {
   if (!preload.includes("ipcRenderer.invoke('dependencies:import-local'") || !ai.includes('data-import-dependency') || !ai.includes('data-dependency-release') || !ai.includes('if (response?.canceled) return')) {
     throw new Error('local ASR model import, Release links, or file-picker cancellation recovery is missing from the renderer contract');
   }
-  if (!index.includes('data-outside-tool-toggle') || !index.includes('id="multipartViewerCollection"') || !index.includes('保留过程中的 ASR 字幕、B站字幕、缓存视频等。')) {
-    throw new Error('B站之外工具折叠层级、父任务收藏夹选择或缓存说明缺失');
+  if (!index.includes('data-outside-open="multipart"') || !index.includes('id="outsideToolDetail"') || !index.includes('id="outsideToolBack"') || !index.includes('id="multipartViewerCollection"') || !index.includes('保留过程中的 ASR 字幕、B站字幕、缓存视频等。')) {
+    throw new Error('B站之外工具入口导航、独立视图、父任务收藏夹选择或缓存说明缺失');
   }
-  if (!outside.includes('function toggleOutsideTool') || !outside.includes('sharedBrowserLogin') || !outside.includes('selectedCollectionId')) {
-    throw new Error('B站之外工具的展开收起、浏览器授权或父任务过滤逻辑缺失');
+  if (!outside.includes('function setupToolNavigation') || !outside.includes('function openOutsideTool') || !outside.includes('sharedBrowserLogin') || !outside.includes('selectedCollectionId')) {
+    throw new Error('B站之外工具的卡片导航、浏览器授权或父任务过滤逻辑缺失');
   }
-  if (!outsideStyles.includes('.outside-split-layout') || !outsideStyles.includes('.shared-auth-card') || !outsideStyles.includes('.outside-tool:not(.is-expanded)')) {
-    throw new Error('B站之外工具的分栏和默认收起样式缺失');
+  if (!index.includes('id="sharedUploadUserFilter"') || !index.includes('id="sharedUploadCollectionFilter"') || !index.includes('id="sharedUploadDurationMin"') || !index.includes('id="sharedUploadPrepareList"') || !index.includes('id="sharedAuthMore"')) {
+    throw new Error('共享上传的用户收藏夹筛选、时长筛选、准备列表或更多授权选项缺失');
+  }
+  if (!outside.includes('selectedUploadTaskIds') || !outside.includes('filteredSharedUploadItems') || !outside.includes('clearSharedAuthorization') || !outside.includes('sharedUploadSelectAll')) {
+    throw new Error('共享上传选择状态、筛选、全选或应用授权清理逻辑缺失');
+  }
+  if (!outsideStyles.includes('.outside-tool-detail') || !outsideStyles.includes('.outside-tool-card-stats') || !outsideStyles.includes('.shared-auth-more') || !outsideStyles.includes('.shared-upload-prep-group')) {
+    throw new Error('B站之外工具独立视图、入口数据、更多授权或准备上传列表样式缺失');
   }
   if (!preload.includes('sharedBrowserLogin')) {
     throw new Error('GitHub 浏览器授权没有暴露到 Renderer');
