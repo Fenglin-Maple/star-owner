@@ -757,57 +757,67 @@
             <div class="page-head"><h1>B站之外</h1><p>本地媒体处理与多模态知识库工具。</p></div>
             <div class="outside-tool-stack">
               <section class="section-block outside-tool multipart-tool" data-outside-tool="multipart">
-                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 9h8M8 13h5M8 17h8M18 9h1M18 13h1M18 17h1"/></svg></div><div><h2>B站多P视频总结</h2><p>一次处理一个多P视频，按 P 选择内容，完成后可在父任务查看器中继续追加。</p></div></div>
-                <div class="outside-inline-form multipart-input-row"><label><span>BV号或视频链接</span><input id="multipartBvid" placeholder="BV1xxxxxxxxx" /></label><button id="multipartInspect" class="primary-button" type="button">读取 P 列表</button></div>
-                <div id="multipartInspectResult" class="outside-subpanel" hidden></div>
-                <div id="multipartSettings" class="outside-subpanel" hidden>
-                  <div class="outside-subpanel-title"><strong>多P任务设置</strong><span>每次只允许一个父任务进入处理流程</span></div>
-                  <div class="outside-form-grid"><label><span>供应商</span><select id="multipartProvider"></select></label><label><span>模型</span><select id="multipartModel"></select></label><label><span>处理并发数</span><input id="multipartConcurrency" type="number" min="1" max="4" value="2" /></label><label><span>最少关键帧</span><input id="multipartMinimumFrames" type="number" min="8" max="300" value="8" /></label><label><span>每多少秒增加 1 张</span><input id="multipartFrameInterval" type="number" min="1" max="600" value="25" /></label><label class="outside-checkbox-field"><input id="multipartRetainCache" class="app-checkbox" type="checkbox" /><span>保留处理过程缓存</span></label></div>
-                  <label class="outside-wide-field"><span>补充要求</span><textarea id="multipartRequirements" rows="3" placeholder="留空则使用默认的视频总结要求。"></textarea></label>
-                  <div class="outside-inline-form"><label><span>存储到 B站多P类型收藏夹</span><select id="multipartCollection"></select></label><label><span>新收藏夹名称</span><input id="multipartCollectionName" placeholder="例如：课程系列多P" /></label></div>
-                  <div class="outside-tool-actions"><button id="multipartCreate" class="secondary-button" type="button">创建父任务</button><button id="multipartCreateStart" class="primary-button" type="button">创建并开始</button></div>
+                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 9h8M8 13h5M8 17h8M18 9h1M18 13h1M18 17h1"/></svg></div><div><span class="outside-tool-kicker">B站媒体工作流</span><h2>B站多P视频总结 [工具]</h2><p class="outside-tool-description">逐 P 选择、排队总结，并在父任务中继续追加新 P。</p></div><button class="outside-tool-toggle" type="button" data-outside-tool-toggle aria-expanded="false"><span>展开</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></div>
+                <div class="outside-tool-body" hidden>
+                  <div class="outside-tool-meta"><span class="outside-status-dot"></span><span>一次只运行一个父任务，内部 P 并发仍受应用资源调度器控制。</span></div>
+                  <div class="outside-split-layout multipart-layout">
+                    <div class="outside-pane multipart-create-pane">
+                      <div class="outside-pane-title"><span>01 · 创建与执行</span><small>读取 P 列表后选择范围</small></div>
+                      <div class="outside-inline-form multipart-input-row"><label><span>BV号或视频链接</span><input id="multipartBvid" placeholder="BV1xxxxxxxxx" /></label><button id="multipartInspect" class="primary-button" type="button">读取 P 列表</button></div>
+                      <div id="multipartInspectResult" class="outside-subpanel" hidden></div>
+                      <div id="multipartSettings" class="outside-subpanel" hidden>
+                        <div class="outside-subpanel-title"><strong>多P任务设置</strong><span>设置会保存到父任务</span></div>
+                        <div class="outside-form-grid"><label><span>供应商</span><select id="multipartProvider"></select></label><label><span>模型</span><select id="multipartModel"></select></label><label><span>处理并发数</span><input id="multipartConcurrency" type="number" min="1" max="4" value="2" /></label><label><span>最少关键帧</span><input id="multipartMinimumFrames" type="number" min="8" max="300" value="8" /></label><label><span>每多少秒增加 1 张</span><input id="multipartFrameInterval" type="number" min="1" max="600" value="25" /></label><label class="outside-checkbox-field"><input id="multipartRetainCache" class="app-checkbox" type="checkbox" /><span><strong>保留处理过程文件</strong><small>保留过程中的 ASR 字幕、B站字幕、缓存视频等。</small></span></label></div>
+                        <label class="outside-wide-field"><span>补充要求</span><textarea id="multipartRequirements" rows="3" placeholder="留空则使用默认的视频总结要求。"></textarea></label>
+                        <div class="outside-inline-form"><label><span>存储到 B站多P类型收藏夹</span><select id="multipartCollection"></select></label><label><span>新收藏夹名称</span><input id="multipartCollectionName" placeholder="例如：课程系列多P" /></label></div>
+                        <div class="outside-tool-actions"><button id="multipartCreate" class="secondary-button" type="button">创建父任务</button><button id="multipartCreateStart" class="primary-button" type="button">创建并开始</button></div>
+                      </div>
+                    </div>
+                    <div class="outside-pane multipart-viewer-pane">
+                      <div class="outside-pane-title"><span>02 · 父任务查看器</span><small>按一个多P收藏夹查看</small></div>
+                      <div class="outside-inline-form multipart-viewer-toolbar"><label><span>选择多P视频收藏夹</span><select id="multipartViewerCollection"></select></label><button id="multipartRefreshState" class="secondary-button" type="button">刷新列表</button></div>
+                      <div id="multipartParentList" class="outside-record-list"><div class="empty-state">请选择一个 B站多P类型收藏夹。</div></div>
+                    </div>
+                  </div>
                 </div>
-                <div class="outside-subpanel-title multipart-list-title"><strong>父任务查看器</strong><button id="multipartRefreshState" class="secondary-button compact-button" type="button">刷新</button></div>
-                <div id="multipartParentList" class="outside-record-list"><div class="empty-state">还没有多P父任务。</div></div>
               </section>
 
               <section class="section-block outside-tool shared-tool" data-outside-tool="shared">
-                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M12 3v12M8 7l4-4 4 4M5 12v7h14v-7M8 16h8"/></svg></div><div><h2>GitHub 文档共享</h2><p>只共享已完成的 B站视频总结；远程文档挂载到“共享”用户下，不进入 Agent 派发。</p></div></div>
-                <div class="shared-auth-row"><button id="sharedLogin" class="secondary-button" type="button">打开 GitHub</button><input id="sharedToken" type="password" autocomplete="off" placeholder="粘贴 Fine-grained Token（仅上传/PR需要）" /><button id="sharedSetToken" class="primary-button" type="button">保存授权</button><button id="sharedLogout" class="ghost-button" type="button" hidden>退出授权</button></div>
-                <div id="sharedAuthStatus" class="local-selection-summary">公共仓库目录可以直接浏览；创建 Fork / Pull Request 需要 GitHub 授权。</div>
-                <div class="shared-toolbar"><button id="sharedCatalog" class="secondary-button" type="button">读取远程目录</button><input id="sharedFilter" placeholder="按标题、作者、BV、收藏夹筛选" /><select id="sharedRemotePrefix"><option value="">选择远程收藏夹目录（可选）</option></select></div>
-                <div id="sharedCatalogList" class="shared-catalog-list"><div class="empty-state">尚未读取远程目录。</div></div>
-                <div class="shared-mount-row"><label><span>挂载到共享收藏夹</span><select id="sharedCollection"></select></label><label><span>新收藏夹名称</span><input id="sharedCollectionName" placeholder="例如：公开课程" /></label><button id="sharedMount" class="primary-button" type="button">挂载选中</button></div>
-                <div class="outside-subpanel-title"><strong>本地共享挂载</strong><button id="sharedSyncAll" class="secondary-button compact-button" type="button">同步全部</button></div>
-                <div id="sharedMountList" class="outside-record-list"><div class="empty-state">还没有共享挂载。</div></div>
-                <div class="outside-subpanel-title shared-upload-title"><strong>上传我的 B站总结</strong><span>仅显示已完成且非共享导入的 B站视频总结</span><input id="sharedUploadFilter" class="shared-upload-filter" placeholder="筛选标题、BV、收藏夹" /><button id="sharedUpload" class="primary-button compact-button" type="button">创建 Fork / PR</button></div>
-                <div id="sharedUploadList" class="shared-upload-list"><div class="empty-state">暂无可上传文档。</div></div>
+                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M12 3v12M8 7l4-4 4 4M5 12v7h14v-7M8 16h8"/></svg></div><div><span class="outside-tool-kicker">GitHub 共享知识</span><h2>GitHub 文档共享 [工具]</h2><p class="outside-tool-description">把已完成的 B站总结上传为 PR，或将远程目录挂载到本地“共享”用户。</p></div><button class="outside-tool-toggle" type="button" data-outside-tool-toggle aria-expanded="false"><span>展开</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></div>
+                <div class="outside-tool-body" hidden>
+                  <div class="shared-auth-card"><div class="shared-auth-intro"><strong>GitHub 授权</strong><span>浏览器登录会调用项目内置 Git Credential Manager；Token 粘贴是备用方式。</span></div><div class="shared-auth-row"><button id="sharedLogin" class="primary-button" type="button">浏览器登录 GitHub</button><label class="shared-token-field"><span>备用：粘贴 Fine-grained Token</span><input id="sharedToken" type="password" autocomplete="off" placeholder="仅上传 / PR 需要" /></label><button id="sharedSetToken" class="secondary-button" type="button">保存 Token</button><button id="sharedLogout" class="ghost-button" type="button" hidden>退出授权</button></div><div id="sharedAuthStatus" class="local-selection-summary">公共仓库目录可以直接浏览；上传和创建 Pull Request 需要 GitHub 授权。</div></div>
+                  <div class="outside-split-layout shared-layout">
+                    <div class="outside-pane shared-download-pane">
+                      <div class="outside-pane-title"><span>01 · 下载与挂载</span><small>远程目录 → 本地共享用户</small></div>
+                      <div class="shared-toolbar"><button id="sharedCatalog" class="secondary-button" type="button">读取远程目录</button><input id="sharedFilter" placeholder="按标题、作者、BV、收藏夹筛选" /><select id="sharedRemotePrefix"><option value="">选择远程收藏夹目录（可选）</option></select></div>
+                      <div id="sharedCatalogList" class="shared-catalog-list"><div class="empty-state">尚未读取远程目录。</div></div>
+                      <div class="shared-mount-row"><label><span>挂载到共享收藏夹</span><select id="sharedCollection"></select></label><label><span>新收藏夹名称</span><input id="sharedCollectionName" placeholder="例如：公开课程" /></label><button id="sharedMount" class="primary-button" type="button">挂载选中</button></div>
+                      <div class="outside-subpanel-title"><strong>本地共享挂载</strong><button id="sharedSyncAll" class="secondary-button compact-button" type="button">同步全部</button></div>
+                      <div id="sharedMountList" class="outside-record-list"><div class="empty-state">还没有共享挂载。</div></div>
+                    </div>
+                    <div class="outside-pane shared-upload-pane">
+                      <div class="outside-pane-title"><span>02 · 上传与提交</span><small>已完成 B站总结 → Fork / PR</small></div>
+                      <div class="outside-subpanel-title shared-upload-title"><strong>我的 B站总结</strong><span>只显示可共享产物</span></div>
+                      <div class="shared-upload-controls"><input id="sharedUploadFilter" class="shared-upload-filter" placeholder="筛选标题、BV、收藏夹" /><button id="sharedUpload" class="primary-button" type="button">创建 Fork / PR</button></div>
+                      <div id="sharedUploadList" class="shared-upload-list"><div class="empty-state">暂无可上传文档。</div></div>
+                    </div>
+                  </div>
+                </div>
               </section>
 
               <section class="section-block outside-tool" data-local-tool="subtitles">
-                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 10h4M7 14h7M16 10h1"/></svg></div><div><h2>视频 / 音频字幕生成</h2><p>选择一个视频或音频文件，生成的字幕写回原文件所在目录。</p></div><button id="localSubtitleChoose" class="primary-button" type="button">选择视频或音频</button></div>
-                <div class="local-subtitle-options">
-                  <span>输出格式</span>
-                  <label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="srt" checked /><span>SRT</span></label>
-                  <label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="vtt" checked /><span>VTT</span></label>
-                  <label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="lrc" /><span>LRC</span></label>
-                  <label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="txt" /><span>TXT</span></label>
-                  <label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="json" /><span>JSON</span></label>
-                </div>
-                <div id="localSubtitleSelection" class="local-selection-summary">尚未选择视频或音频文件</div>
-                <div class="outside-tool-actions"><button id="localSubtitleStart" class="primary-button" type="button" disabled>开始生成字幕</button></div>
-                <div id="localSubtitleJob" class="local-tool-job-slot"></div>
+                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 10h4M7 14h7M16 10h1"/></svg></div><div><span class="outside-tool-kicker">本地媒体</span><h2>视频 / 音频字幕生成 [工具]</h2><p class="outside-tool-description">选择一个视频或音频文件，把字幕写回原文件所在目录。</p></div><button class="outside-tool-toggle" type="button" data-outside-tool-toggle aria-expanded="false"><span>展开</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></div>
+                <div class="outside-tool-body" hidden><div class="local-subtitle-options"><span>输出格式</span><label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="srt" checked /><span>SRT</span></label><label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="vtt" checked /><span>VTT</span></label><label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="lrc" /><span>LRC</span></label><label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="txt" /><span>TXT</span></label><label><input class="app-checkbox" type="checkbox" name="localSubtitleFormat" value="json" /><span>JSON</span></label></div><div id="localSubtitleSelection" class="local-selection-summary">尚未选择视频或音频文件</div><div class="outside-tool-actions"><button id="localSubtitleChoose" class="secondary-button" type="button">选择视频或音频</button><button id="localSubtitleStart" class="primary-button" type="button" disabled>开始生成字幕</button></div><div id="localSubtitleJob" class="local-tool-job-slot"></div></div>
               </section>
 
               <section class="section-block outside-tool" data-local-tool="video-import">
-                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9 9l6 3-6 3zM4 19h16"/></svg></div><div><h2>本地视频 / 音频导入内置缓存收藏夹</h2><p>压缩并规范化本地视频或音频，导入后可由 Agent 视频总结工作流直接处理。</p></div></div>
-                <div class="outside-tool-actions"><button id="localVideoChooseFiles" class="primary-button" type="button">选择视频 / 音频</button><button id="localVideoChooseFolder" class="secondary-button" type="button">选择视频 / 音频文件夹</button></div>
-                <div id="localVideoJob" class="local-tool-job-slot"></div>
+                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9 9l6 3-6 3zM4 19h16"/></svg></div><div><span class="outside-tool-kicker">本地媒体</span><h2>本地视频 / 音频导入内置缓存收藏夹 [工具]</h2><p class="outside-tool-description">压缩并规范化本地视频或音频，导入后可由 Agent 视频总结工作流直接处理。</p></div><button class="outside-tool-toggle" type="button" data-outside-tool-toggle aria-expanded="false"><span>展开</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></div>
+                <div class="outside-tool-body" hidden><div class="outside-tool-actions"><button id="localVideoChooseFiles" class="primary-button" type="button">选择视频 / 音频</button><button id="localVideoChooseFolder" class="secondary-button" type="button">选择视频 / 音频文件夹</button></div><div id="localVideoJob" class="local-tool-job-slot"></div></div>
               </section>
 
               <section class="section-block outside-tool" data-local-tool="document-import">
-                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M9 12h6M9 16h6"/></svg></div><div><h2>本地文档知识库导入</h2><p>导入图片、PDF、DOCX、PPTX、XLSX、Markdown 与常见文本文件。</p></div><button id="localDocumentChoose" class="primary-button" type="button">选择文档</button></div>
-                <div id="localDocumentJob" class="local-tool-job-slot"></div>
+                <div class="outside-tool-head"><div class="outside-tool-icon"><svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M9 12h6M9 16h6"/></svg></div><div><span class="outside-tool-kicker">本地知识库</span><h2>本地文档知识库导入 [工具]</h2><p class="outside-tool-description">导入图片、PDF、DOCX、PPTX、XLSX、Markdown 与常见文本文件。</p></div><button class="outside-tool-toggle" type="button" data-outside-tool-toggle aria-expanded="false"><span>展开</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></div>
+                <div class="outside-tool-body" hidden><div class="outside-tool-actions"><button id="localDocumentChoose" class="primary-button" type="button">选择文档</button></div><div id="localDocumentJob" class="local-tool-job-slot"></div></div>
               </section>
             </div>
           </section>

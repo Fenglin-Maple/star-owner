@@ -36,6 +36,7 @@ class SharedKnowledgeManager {
       authenticated: Boolean(settings.encryptedToken || process.env.STAR_OWNER_GITHUB_TOKEN),
       login: String(settings.login || ''),
       userId: String(settings.userId || ''),
+      authMethod: String(settings.authMethod || (settings.encryptedToken ? 'token' : '')),
       collections: this.store.listCollections().filter((item) => item.collectionKind === 'shared').map(publicCollection),
       mounts: this.store.list('sharedMounts').map(publicMount),
       documents: this.store.list('tasks').filter((task) => task.sourceType === 'shared-bilibili' || task.sourceType === 'shared-bilibili-multipart-summary').map(publicSharedTask),
@@ -45,7 +46,25 @@ class SharedKnowledgeManager {
 
   async openLogin() {
     await this.openExternal(`https://github.com/${this.repository.owner}/${this.repository.name}`);
-    return { ok: true, url: `https://github.com/${this.repository.owner}/${this.repository.name}`, message: '已打开 GitHub。完成授权后，将 GitHub Fine-grained Token 粘贴到共享工具的授权框中；令牌只保存在系统安全存储。' };
+    return { ok: true, url: `https://github.com/${this.repository.owner}/${this.repository.name}`, message: '已打开 GitHub。返回应用后可点击“浏览器登录 GitHub”完成项目内置凭据授权，也可以粘贴 Fine-grained Token 作为备用；凭据只保存在系统安全存储。' };
+  }
+
+  async browserLogin() {
+    const credential = await this.gitRuntime.browserLogin();
+    const value = validateGithubToken(credential.password);
+    const user = await this.githubRequest('/user', { token: value });
+    const current = this.store.get('settings', 'sharedGithub') || {};
+    this.store.set('settings', 'sharedGithub', {
+      id: 'sharedGithub',
+      encryptedToken: this.encryptSecret(value),
+      login: user.login || credential.username || '',
+      userId: String(user.id || ''),
+      authMethod: 'browser',
+      updatedAt: new Date().toISOString()
+    });
+    this.store.save();
+    this.emitState('shared-github-authenticated');
+    return { login: user.login || credential.username || '', userId: String(user.id || ''), authenticated: true, authMethod: 'browser', previousLogin: current.login || '' };
   }
 
   async setToken(token) {
@@ -53,7 +72,7 @@ class SharedKnowledgeManager {
     if (!value) throw new Error('GitHub Token 不能为空。');
     const user = await this.githubRequest('/user', { token: value });
     const current = this.store.get('settings', 'sharedGithub') || {};
-    this.store.set('settings', 'sharedGithub', { id: 'sharedGithub', encryptedToken: this.encryptSecret(value), login: user.login || '', userId: String(user.id || ''), updatedAt: new Date().toISOString() });
+    this.store.set('settings', 'sharedGithub', { id: 'sharedGithub', encryptedToken: this.encryptSecret(value), login: user.login || '', userId: String(user.id || ''), authMethod: 'token', updatedAt: new Date().toISOString() });
     this.store.save();
     this.emitState('shared-github-authenticated');
     return { login: user.login || '', userId: String(user.id || ''), authenticated: true, previousLogin: current.login || '' };
@@ -599,7 +618,7 @@ class SharedKnowledgeManager {
 
   async githubRequest(endpoint, options = {}) {
     if (this.requestOverride) return this.requestOverride(endpoint, options);
-    const headers = { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', 'user-agent': 'star-owner/1.4.0' };
+    const headers = { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', 'user-agent': 'star-owner/1.4.1' };
     if (options.token) headers.authorization = `Bearer ${options.token}`;
     if (options.body) headers['content-type'] = 'application/json';
     const response = await fetch(`https://api.github.com${endpoint}`, { method: options.method || 'GET', headers, body: options.body ? JSON.stringify(options.body) : undefined, signal: AbortSignal.timeout(60000) });

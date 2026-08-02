@@ -754,6 +754,11 @@ ipcMain.handle('shared:open-login', async () => {
   return sharedKnowledgeManager.openLogin();
 });
 
+ipcMain.handle('shared:browser-login', async () => {
+  assertBackendReady();
+  return sharedKnowledgeManager.browserLogin();
+});
+
 ipcMain.handle('shared:set-token', async (_event, token) => {
   assertBackendReady();
   return sharedKnowledgeManager.setToken(token);

@@ -42,6 +42,7 @@
     multipartCreate: $('#multipartCreate'),
     multipartCreateStart: $('#multipartCreateStart'),
     multipartRefreshState: $('#multipartRefreshState'),
+    multipartViewerCollection: $('#multipartViewerCollection'),
     multipartParentList: $('#multipartParentList'),
     sharedLogin: $('#sharedLogin'),
     sharedToken: $('#sharedToken'),
@@ -124,11 +125,16 @@
 
   function renderMultipartCollections() {
     const collections = multipartState.collections || [];
+    const currentCollection = elements.multipartCollection.value;
     elements.multipartCollection.innerHTML = `<option value="__new__">创建新收藏夹</option>${collections.map((item) => `<option value="${escAttr(item.id)}">${esc(item.name)}</option>`).join('')}`;
+    if (collections.some((item) => item.id === currentCollection)) elements.multipartCollection.value = currentCollection;
     const defaultName = multipartInspection ? `${multipartInspection.title || multipartInspection.bvid} 多P` : '';
     const sameName = collections.find((item) => item.name === defaultName);
-    elements.multipartCollection.value = sameName?.id || '__new__';
+    if (!currentCollection || currentCollection === '__new__') elements.multipartCollection.value = sameName?.id || '__new__';
     if (!elements.multipartCollectionName.value) elements.multipartCollectionName.value = defaultName;
+    const currentViewer = elements.multipartViewerCollection.value;
+    elements.multipartViewerCollection.innerHTML = `<option value="">选择多P视频收藏夹</option>${collections.map((item) => `<option value="${escAttr(item.id)}">${esc(item.name)}</option>`).join('')}`;
+    elements.multipartViewerCollection.value = collections.some((item) => item.id === currentViewer) ? currentViewer : (collections[0]?.id || '');
   }
 
   function renderMultipartModels() {
@@ -199,8 +205,11 @@
 
   function renderMultipart() {
     renderMultipartCollections();
-    const parents = multipartState.parents || [];
-    elements.multipartParentList.innerHTML = parents.length ? parents.map((parent) => {
+    const selectedCollectionId = elements.multipartViewerCollection.value;
+    const parents = (multipartState.parents || []).filter((parent) => !selectedCollectionId || String(parent.collectionId) === String(selectedCollectionId));
+    elements.multipartParentList.innerHTML = !selectedCollectionId
+      ? '<div class="empty-state">请选择一个 B站多P类型收藏夹。</div>'
+      : parents.length ? parents.map((parent) => {
       const status = parentStatusLabel(parent.status);
       const pages = (parent.pages || []).map((page) => {
         const task = page.task || {};
@@ -209,7 +218,7 @@
         return `<label class="multipart-parent-page ${stateClass}"><input class="app-checkbox" type="checkbox" data-parent-id="${escAttr(parent.id)}" data-parent-page="${escAttr(page.cid)}" ${checked ? 'checked' : ''} ${task.pageState === 'removed' || task.status === 'done' ? 'disabled' : ''}/><span>P${Number(page.page || 1)} ${esc(page.part || '')}</span><small>${task.status === 'done' ? '已完成' : task.pageState === 'removed' ? '远程已移除' : '待处理'}</small></label>`;
       }).join('');
       return `<article class="multipart-parent-record" data-parent-record="${escAttr(parent.id)}"><div class="multipart-parent-head"><div><strong>${esc(parent.title)}</strong><small>${esc(parent.bvid)} · ${esc(parent.collectionName || '')} · ${status}</small></div><div class="multipart-parent-actions"><button class="ghost-button compact-button" type="button" data-multipart-action="refresh" data-parent-id="${escAttr(parent.id)}">刷新 P</button>${parent.activeSessions?.length ? `<button class="secondary-button compact-button" type="button" data-multipart-action="stop" data-parent-id="${escAttr(parent.id)}">停止</button>` : `<button class="primary-button compact-button" type="button" data-multipart-action="start" data-parent-id="${escAttr(parent.id)}">继续</button>`}<button class="ghost-button compact-button danger-text" type="button" data-multipart-action="delete" data-parent-id="${escAttr(parent.id)}">删除</button></div></div><div class="local-progress"><span style="width:${Math.round(Number(parent.progress || 0) * 100)}%"></span></div><div class="multipart-parent-summary">${parent.completed}/${parent.total} P · ${Math.round(Number(parent.progress || 0) * 100)}% · ${esc(status)}</div><div class="multipart-parent-pages">${pages}</div></article>`;
-    }).join('') : '<div class="empty-state">还没有多P父任务。</div>';
+    }).join('') : '<div class="empty-state">这个收藏夹还没有多P父任务。</div>';
   }
 
   function parentStatusLabel(status) { return ({ pending: '待开始', running: '处理中', partial: '部分完成', stopped: '已停止', completed: '已完成' })[status] || status || '未知'; }
@@ -273,7 +282,8 @@
   }
 
   function renderShared() {
-    const login = sharedData.authenticated ? `已授权：${sharedData.login || 'GitHub 用户'}（${sharedData.userId || 'ID 已隐藏'}）` : '公共仓库目录可以直接浏览；创建 Fork / Pull Request 需要 GitHub 授权。';
+    const method = sharedData.authMethod === 'browser' ? '浏览器授权' : sharedData.authMethod === 'token' ? 'Token 授权' : '';
+    const login = sharedData.authenticated ? `已授权：${sharedData.login || 'GitHub 用户'}（${sharedData.userId || 'ID 已隐藏'}${method ? ` · ${method}` : ''}）` : '公共仓库目录可以直接浏览；上传和创建 Pull Request 需要 GitHub 授权。';
     elements.sharedAuthStatus.textContent = login;
     elements.sharedLogout.hidden = !sharedData.authenticated;
     renderSharedCollections();
@@ -336,7 +346,14 @@
     setBusy(elements.sharedSetToken, true, '验证中');
     try { await window.orchestrator.sharedSetToken(token); elements.sharedToken.value = ''; await refresh(); }
     catch (error) { notify('GitHub 授权失败', error); }
-    finally { setBusy(elements.sharedSetToken, false, '保存授权'); }
+    finally { setBusy(elements.sharedSetToken, false, '保存 Token'); }
+  }
+
+  async function browserSharedLogin() {
+    setBusy(elements.sharedLogin, true, '等待浏览器授权');
+    try { await window.orchestrator.sharedBrowserLogin(); await refresh(); notify('GitHub 授权成功', '已从项目内置 Git 凭据环境读取授权，可创建 Fork / Pull Request。', 'success'); }
+    catch (error) { notify('GitHub 浏览器授权失败', error); }
+    finally { setBusy(elements.sharedLogin, false, '浏览器登录 GitHub'); }
   }
 
   async function mountShared() {
@@ -603,9 +620,20 @@
     button.textContent = label;
   }
 
-  function notify(title, detail) {
+  function toggleOutsideTool(button) {
+    const tool = button.closest('.outside-tool');
+    const body = tool?.querySelector('.outside-tool-body');
+    if (!body) return;
+    const expanded = body.hidden;
+    body.hidden = !expanded;
+    button.setAttribute('aria-expanded', String(expanded));
+    button.querySelector('span').textContent = expanded ? '收起' : '展开';
+    tool.classList.toggle('is-expanded', expanded);
+  }
+
+  function notify(title, detail, type = 'error') {
     const message = detail?.message || String(detail || '');
-    if (typeof window.showToast === 'function') window.showToast(title, message, 'error');
+    if (typeof window.showToast === 'function') window.showToast(title, message, type);
     else console.error(title, message);
   }
 
@@ -643,7 +671,7 @@
   elements.multipartCreateStart.addEventListener('click', () => createMultipart(true));
   elements.multipartRefreshState.addEventListener('click', () => refresh().catch((error) => notify('刷新多P父任务失败', error)));
   elements.multipartParentList.addEventListener('click', handleMultipartAction);
-  elements.sharedLogin.addEventListener('click', () => window.orchestrator.sharedOpenLogin().catch((error) => notify('打开 GitHub 失败', error)));
+  elements.sharedLogin.addEventListener('click', browserSharedLogin);
   elements.sharedSetToken.addEventListener('click', setSharedToken);
   elements.sharedLogout.addEventListener('click', () => window.orchestrator.sharedLogout().then(refresh).catch((error) => notify('退出 GitHub 授权失败', error)));
   elements.sharedCatalog.addEventListener('click', loadSharedCatalog);
@@ -662,7 +690,12 @@
   $('#localVideoImportCancel').addEventListener('click', () => closeImportModal('video'));
   $('#localDocumentImportClose').addEventListener('click', () => closeImportModal('document'));
   $('#localDocumentImportCancel').addEventListener('click', () => closeImportModal('document'));
-  elements.page.addEventListener('click', handleJobAction);
+  elements.page.addEventListener('click', (event) => {
+    const toggle = event.target.closest('[data-outside-tool-toggle]');
+    if (toggle) { toggleOutsideTool(toggle); return; }
+    handleJobAction(event);
+  });
+  elements.multipartViewerCollection.addEventListener('change', renderMultipart);
   document.querySelector('[data-page="outside-bilibili"]')?.addEventListener('click', () => refresh().catch((error) => notify('刷新本地工具失败', error)));
   window.orchestrator.onLocalToolboxEvent((event) => {
     if (event.localToolbox) { state = event.localToolbox; renderJobs(); }

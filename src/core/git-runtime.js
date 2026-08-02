@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const { promisify } = require('util');
 const { ensureDir, assertInside } = require('./workspace');
 
@@ -77,7 +77,7 @@ class GitRuntime {
     const gitEnv = {
       GIT_CONFIG_COUNT: '1',
       GIT_CONFIG_KEY_0: 'http.extraHeader',
-      GIT_CONFIG_VALUE_0: `Authorization: Bearer ${String(token || '')}`
+      GIT_CONFIG_VALUE_0: gitAuthorizationHeader(token)
     };
     try {
       await this.run(['clone', '--depth', '1', '--single-branch', '--branch', String(baseBranch), remoteUrl, checkout], { cwd: workRoot, env: gitEnv });
@@ -112,6 +112,51 @@ class GitRuntime {
       fs.rmSync(checkout, { recursive: true, force: true });
     }
   }
+
+  async browserLogin() {
+    await this.assertAvailable();
+    const credentialManager = this.credentialManagerPath();
+    if (!fs.existsSync(credentialManager)) throw new Error('项目内置 Git 缺少 Git Credential Manager，无法启动浏览器授权。');
+    await this.runCredentialManager(['github', 'login', '--browser', '--force'], { interactive: true, timeoutMs: 10 * 60 * 1000 });
+    const credential = await this.readCredential();
+    if (!credential.password) throw new Error('浏览器授权完成，但没有从项目内置 Git 凭据环境读取到 GitHub 凭据。');
+    return credential;
+  }
+
+  credentialManagerPath() {
+    return path.join(this.gitRoot, 'mingw64', 'bin', process.platform === 'win32' ? 'git-credential-manager.exe' : 'git-credential-manager');
+  }
+
+  async runCredentialManager(args, { interactive = false, timeoutMs = 10 * 60 * 1000 } = {}) {
+    const env = createGitEnvironment({ source: process.env, projectRoot: this.projectRoot, gitRoot: this.gitRoot, gitHome: this.gitHome });
+    env.GCM_INTERACTIVE = interactive ? 'Always' : 'Never';
+    env.GCM_GUI_PROMPT = interactive ? '1' : '0';
+    const helper = this.credentialManagerPath();
+    const result = await execFileAsync(helper, args, { cwd: this.projectRoot, env, windowsHide: true, timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024, encoding: 'utf8' });
+    return { stdout: String(result.stdout || ''), stderr: String(result.stderr || '') };
+  }
+
+  async readCredential() {
+    const env = createGitEnvironment({ source: process.env, projectRoot: this.projectRoot, gitRoot: this.gitRoot, gitHome: this.gitHome });
+    env.GCM_INTERACTIVE = 'Never';
+    env.GCM_GUI_PROMPT = '0';
+    const helper = this.credentialManagerPath();
+    return new Promise((resolve, reject) => {
+      const child = spawn(helper, ['get'], { cwd: this.projectRoot, env, windowsHide: true });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.setEncoding('utf8');
+      child.stderr.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.once('error', reject);
+      child.once('close', (code) => {
+        if (code !== 0) return reject(new Error(`读取项目内置 GitHub 凭据失败：${sanitizeGitError({ stderr })}`));
+        resolve(parseCredential(stdout));
+      });
+      child.stdin.end('protocol=https\nhost=github.com\n\n');
+    });
+  }
 }
 
 function normalizeRelative(value) {
@@ -121,8 +166,25 @@ function normalizeRelative(value) {
 }
 
 function sanitizeGitError(error) {
-  const message = String(error?.stderr || error?.message || error || '').replace(/Authorization:\s*Bearer\s+\S+/gi, 'Authorization: Bearer [redacted]');
+  const message = String(error?.stderr || error?.message || error || '').replace(/Authorization:\s*(?:Bearer|Basic)\s+\S+/gi, 'Authorization: [redacted]');
   return message.slice(0, 800) || '未知 Git 错误';
+}
+
+function gitAuthorizationHeader(token) {
+  const value = String(token || '').trim();
+  if (!value) throw new Error('GitHub Token 不能为空。');
+  const encoded = Buffer.from(`x-access-token:${value}`, 'utf8').toString('base64');
+  return `Authorization: Basic ${encoded}`;
+}
+
+function parseCredential(output) {
+  const result = {};
+  for (const line of String(output || '').split(/\r?\n/)) {
+    const separator = line.indexOf('=');
+    if (separator <= 0) continue;
+    result[line.slice(0, separator)] = line.slice(separator + 1);
+  }
+  return result;
 }
 
 function createGitEnvironment({ source = process.env, overrides = {}, projectRoot, gitRoot, gitHome } = {}) {
@@ -174,4 +236,4 @@ function createGitEnvironment({ source = process.env, overrides = {}, projectRoo
   return env;
 }
 
-module.exports = { GitRuntime, createGitEnvironment, normalizeRelative, sanitizeGitError };
+module.exports = { GitRuntime, createGitEnvironment, gitAuthorizationHeader, normalizeRelative, parseCredential, sanitizeGitError };

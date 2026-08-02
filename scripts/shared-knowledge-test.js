@@ -67,6 +67,17 @@ const { deleteCompletedDocument } = require('../src/core/document-lifecycle');
   });
 
   await manager.setToken('test-token');
+  const browserStore = await Store.open(path.join(root, 'browser-auth.sqlite'));
+  const browserManager = new SharedKnowledgeManager({
+    store: browserStore,
+    encryptSecret: (value) => ({ mode: 'test', value }),
+    decryptSecret: (secret) => secret.value,
+    request: async (endpoint) => endpoint === '/user' ? { login: 'browser-user', id: 654321 } : (() => { throw new Error(`unexpected browser endpoint: ${endpoint}`); })(),
+    gitRuntime: { browserLogin: async () => ({ username: 'browser-user', password: 'browser-token' }), state: () => ({ available: true, isolated: true, path: 'test-git' }) }
+  });
+  const browserAuth = await browserManager.browserLogin();
+  assert.strictEqual(browserAuth.authMethod, 'browser', '浏览器 GitHub 授权没有记录授权方式');
+  assert.strictEqual(browserManager.state().login, 'browser-user', '浏览器授权没有保存 GitHub 用户');
   const stableOne = manager.prepareDocument({ ...task, id: 'task-id-one', githubUserId: '123456' });
   const stableTwo = manager.prepareDocument({ ...task, id: 'task-id-two', githubUserId: '123456' });
   assert.strictEqual(stableOne.documentId, stableTwo.documentId, 'stable shared document id changed with local task id');

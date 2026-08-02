@@ -1,6 +1,6 @@
 # 星藏家 Design
 
-Version: `1.4.0`
+Version: `1.4.1`
 
 ## 1. Product Goal
 
@@ -314,7 +314,7 @@ The Bilibili WebView partition is derived from the normalized absolute project r
 
 The two current models support local ZIP import. The accepted asset name is generated only from `dependencyReleaseVersion`; the selected file must exactly match that name and the official Release SHA-256. Archive inspection rejects links, traversal, foreign runtime paths, the wrong model directory and missing probes before maintenance mode or target replacement. Import cancels and joins an in-flight automatic download for the same model, removes its `.partial`, archive, staging, backup and transaction residue, then copies the selected file into a managed temporary location. Existing healthy model files remain untouched until verified staging commits atomically, and remain available after validation failure. Package-name links and error dialogs point to the exact dependency Release. The v1.0.0 medium asset remains untouched for older applications.
 
-Version `1.4.0` keeps runtime and ASR dependencies pinned to baseline `1.0.0`. The current dependency manager exposes `large-v3-turbo` as the required default and `small` as an optional alternate. The historical `medium` package remains untouched in the v1.0.0 Release for older applications and is not exposed by the current model registry. The published Turbo asset contract is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; packaging can build it with `npm run package:model:turbo`. The shared-document uploader additionally requires the project-local Portable Git under `runtime/git`; it never falls back to a system Git installation or global Git configuration.
+Version `1.4.1` keeps runtime and ASR dependencies pinned to baseline `1.0.0`. The current dependency manager exposes `large-v3-turbo` as the required default and `small` as an optional alternate. The historical `medium` package remains untouched in the v1.0.0 Release for older applications and is not exposed by the current model registry. The published Turbo asset contract is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; packaging can build it with `npm run package:model:turbo`. The shared-document uploader additionally requires the project-local Portable Git under `runtime/git`; it never falls back to a system Git installation or global Git configuration.
 
 Media tool subprocesses never resolve `node` through the system `PATH`. Normal source tests use `process.execPath`; the desktop application launches its bundled Electron executable with `ELECTRON_RUN_AS_NODE=1`. Python processes receive `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`, and streamed stdout/stderr use incremental UTF-8 decoders so a multibyte Chinese character split across chunks is not replaced.
 
@@ -326,11 +326,15 @@ The ordinary single-video and batch Agent workflows accept ordinary Bilibili BV 
 
 Only completed Bilibili summary artifacts can be shared. A single-video artifact uses a stable contributor/source-collection/BVID identity; a multi-part artifact is shared as one complete parent package containing the index, P child summaries, metadata and permitted raster resources. The remote path is rooted at the contributor GitHub numeric ID and a stable source namespace, so Bilibili account and collection display-name changes do not misroute updates.
 
-The uploader validates the local task and artifact, opens GitHub in the default browser for authorization, creates or reuses the contributor Fork, creates a branch and Pull Request, and writes through the project-local Git runtime. The runtime uses an empty project-local Git config, isolated HOME and a controlled PATH. The downloader reads only the repository main branch, displays per-document freshness/status, and mounts selected documents or a complete remote collection into the local `共享` user. Mounts keep remote identity metadata, update atomically, mark remote deletions without deleting local knowledge, and remain outside task dispatch.
+The uploader validates the local task and artifact, opens GitHub in the default browser for authorization, reads the resulting credential through the project-local Git Credential Manager, creates or reuses the contributor Fork, creates a branch and Pull Request, and writes through the project-local Git runtime. A pasted Fine-grained Token remains an explicit fallback. The runtime uses an empty project-local Git config, isolated HOME and a controlled PATH. The downloader reads only the repository main branch, displays per-document freshness/status, and mounts selected documents or a complete remote collection into the local `共享` user. Mounts keep remote identity metadata, update atomically, mark remote deletions without deleting local knowledge, and remain outside task dispatch.
 
 Shared and multi-part tasks enter the existing knowledge API and RAG as read-only completed documents. RAG sees the multi-part parent/index metadata and can retrieve P children by `parentDocumentId` plus `partId`/`cid`; it must not collapse same-BVID documents from different contributors or source collections.
 
-## 20. Security and Reliability
+## 20. Outside Tools UI
+
+The “B站之外” page is organized as independent tool cards. Cards are collapsed by default and show the tool title with the `[工具]` marker; expanding a card reveals its functional controls without changing the existing backend contracts. The multi-part card uses a left creation/execution pane and a right parent-task viewer. The viewer has its own multi-part collection selector and only lists parents from the selected collection. The shared-knowledge card uses a left remote catalog/mount pane and a right local-summary upload pane. Responsive rules stack these panes on narrow windows, while the supplementary multi-part requirements field follows the active theme's text and background colors.
+
+## 21. Security and Reliability
 
 - Electron main and WebView run with sandbox boundaries and strict navigation policies.
 - Credentials require safeStorage; cookies remain local plaintext only where tools require it.
@@ -340,7 +344,7 @@ Shared and multi-part tasks enter the existing knowledge API and RAG as read-onl
 - Application shutdown and restart recovery abort active video attempts rather than resuming partial state.
 - SQLite and dependency installation use recoverable writes.
 
-## 21. Verification
+## 22. Verification
 
 `npm run verify:release` checks package/lock versions, machine-specific paths, JavaScript/Python syntax, all integration tests including local media/document tools, multi-part/shared knowledge, Git/Node/Python runtime isolation, both ASR models and npm audit. `test:runtime-node` deliberately removes the global `PATH` and verifies that the bundled Electron Node mode still executes the video tool; `test:runtime-isolation` checks controlled PATH/environment handling and project-owned child-process boundaries; `test:git-runtime` verifies that global Git config and external Git paths are rejected.
 

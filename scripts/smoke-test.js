@@ -619,6 +619,8 @@ function verifyRendererContracts() {
   const ai = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'ai.js'), 'utf8');
   const cache = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'cache.js'), 'utf8');
   const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
+  const outside = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'outside.js'), 'utf8');
+  const outsideStyles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'outside.css'), 'utf8');
   if (!index.includes('id="singleDuplicateModal"') || !index.includes('id="documentDeleteModal"') || !index.includes('id="documentContextMenu"')) {
     throw new Error('single-video/document lifecycle dialogs are missing from the renderer');
   }
@@ -675,5 +677,17 @@ function verifyRendererContracts() {
   }
   if (!preload.includes("ipcRenderer.invoke('dependencies:import-local'") || !ai.includes('data-import-dependency') || !ai.includes('data-dependency-release') || !ai.includes('if (response?.canceled) return')) {
     throw new Error('local ASR model import, Release links, or file-picker cancellation recovery is missing from the renderer contract');
+  }
+  if (!index.includes('data-outside-tool-toggle') || !index.includes('id="multipartViewerCollection"') || !index.includes('保留过程中的 ASR 字幕、B站字幕、缓存视频等。')) {
+    throw new Error('B站之外工具折叠层级、父任务收藏夹选择或缓存说明缺失');
+  }
+  if (!outside.includes('function toggleOutsideTool') || !outside.includes('sharedBrowserLogin') || !outside.includes('selectedCollectionId')) {
+    throw new Error('B站之外工具的展开收起、浏览器授权或父任务过滤逻辑缺失');
+  }
+  if (!outsideStyles.includes('.outside-split-layout') || !outsideStyles.includes('.shared-auth-card') || !outsideStyles.includes('.outside-tool:not(.is-expanded)')) {
+    throw new Error('B站之外工具的分栏和默认收起样式缺失');
+  }
+  if (!preload.includes('sharedBrowserLogin')) {
+    throw new Error('GitHub 浏览器授权没有暴露到 Renderer');
   }
 }

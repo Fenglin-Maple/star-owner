@@ -134,3 +134,66 @@
   .multipart-tool, .shared-tool { grid-column: 1 / -1; }
   .outside-form-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
+
+/* The two primary tools expose their hierarchy before showing detail. */
+.outside-tool-stack { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.outside-tool { display: block; min-height: 0; padding: 0; overflow: hidden; border-color: color-mix(in srgb, var(--line) 86%, var(--accent)); background: color-mix(in srgb, var(--row) 48%, var(--bg)); }
+.multipart-tool, .shared-tool { grid-column: 1 / -1; }
+.outside-tool-head { grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; min-height: 76px; padding: 14px 16px; background: color-mix(in srgb, var(--row) 68%, transparent); }
+.outside-tool.is-expanded .outside-tool-head { border-bottom: 1px solid color-mix(in srgb, var(--accent) 34%, var(--line)); background: color-mix(in srgb, var(--accent-soft) 58%, var(--row)); }
+.outside-tool-head > button.outside-tool-toggle { grid-column: auto; width: auto; min-width: 72px; height: 30px; padding: 0 8px; border: 1px solid var(--line); color: var(--muted); background: transparent; font: 600 11px var(--font-ui); }
+.outside-tool-head > button.outside-tool-toggle:hover { border-color: var(--accent); color: var(--text); background: var(--accent-soft); }
+.outside-tool-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 5px; }
+.outside-tool-toggle svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; transition: transform .18s ease; }
+.outside-tool-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.outside-tool-kicker { display: block; margin-bottom: 3px; color: var(--accent); font-size: 10px; font-weight: 750; text-transform: uppercase; }
+.outside-tool-head h2 { font-size: 15px; }
+.outside-tool:not(.is-expanded) .outside-tool-kicker, .outside-tool:not(.is-expanded) .outside-tool-description { display: none; }
+.outside-tool-body { display: grid; gap: 14px; padding: 14px 16px 16px; }
+.outside-tool-meta { display: flex; align-items: center; gap: 7px; min-height: 28px; padding: 7px 9px; border-left: 2px solid var(--accent); color: var(--muted); background: color-mix(in srgb, var(--accent-soft) 54%, transparent); font-size: 11px; line-height: 1.4; }
+.outside-status-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.outside-split-layout { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; min-width: 0; }
+.outside-pane { display: grid; align-content: start; gap: 11px; min-width: 0; padding: 13px; border: 1px solid color-mix(in srgb, var(--line) 88%, var(--accent)); background: color-mix(in srgb, var(--bg) 42%, var(--row)); }
+.outside-pane-title { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding-bottom: 8px; border-bottom: 1px solid color-mix(in srgb, var(--line) 76%, transparent); }
+.outside-pane-title span { color: var(--text); font-size: 12px; font-weight: 750; }
+.outside-pane-title small { color: var(--muted); font-size: 10px; text-align: right; }
+.outside-form-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.outside-checkbox-field { align-items: start !important; min-height: 40px; gap: 8px; }
+.outside-checkbox-field > span { display: grid; gap: 2px; color: var(--text) !important; font-size: 11px !important; line-height: 1.35; }
+.outside-checkbox-field > span small { color: var(--muted); font-size: 10px; font-weight: 400; }
+.multipart-viewer-toolbar { grid-template-columns: minmax(0, 1fr) auto; }
+.multipart-viewer-toolbar label { min-width: 0; }
+.multipart-parent-list { min-height: 120px; max-height: 560px; overflow-y: auto; padding-right: 3px; }
+.multipart-parent-record { border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); background: color-mix(in srgb, var(--row) 70%, transparent); }
+.shared-auth-card { display: grid; gap: 10px; padding: 12px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); background: color-mix(in srgb, var(--accent-soft) 42%, var(--row)); }
+.shared-auth-intro { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.shared-auth-intro strong { color: var(--text); font-size: 12px; }
+.shared-auth-intro span { color: var(--muted); font-size: 10px; text-align: right; }
+.shared-auth-row { grid-template-columns: auto minmax(180px, 1fr) auto auto; align-items: end; }
+.shared-token-field { display: grid; gap: 5px; min-width: 0; }
+.shared-token-field > span { color: var(--muted); font-size: 10px; }
+.shared-layout .outside-pane { min-height: 360px; }
+.shared-catalog-list, .shared-upload-list { max-height: 360px; }
+.shared-upload-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+.shared-upload-filter { width: 100%; min-width: 0; }
+.multipart-create-pane textarea, .shared-tool textarea { color: var(--text); background: color-mix(in srgb, var(--bg) 70%, var(--row)); }
+.multipart-create-pane textarea::placeholder, .shared-tool textarea::placeholder { color: var(--muted-2); }
+
+@media (max-width: 900px) {
+  .outside-tool-stack { grid-template-columns: 1fr; }
+  .outside-split-layout { grid-template-columns: 1fr; }
+  .shared-layout .outside-pane { min-height: 0; }
+}
+
+@media (max-width: 760px) {
+  .outside-tool-head { grid-template-columns: 34px minmax(0, 1fr) auto; min-height: 68px; padding: 11px 12px; }
+  .outside-tool-icon { width: 34px; height: 34px; }
+  .outside-tool-icon svg { width: 20px; height: 20px; }
+  .outside-tool-head > button.outside-tool-toggle { min-width: 58px; padding: 0 6px; }
+  .outside-tool-body { padding: 11px 12px 12px; }
+  .outside-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .outside-pane-title, .shared-auth-intro { align-items: flex-start; flex-direction: column; }
+  .outside-pane-title small, .shared-auth-intro span { text-align: left; }
+  .multipart-viewer-toolbar, .shared-auth-row, .shared-upload-controls { grid-template-columns: 1fr; }
+  .shared-auth-row > button, .shared-upload-controls > button { width: 100%; }
+}

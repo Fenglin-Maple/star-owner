@@ -94,6 +94,7 @@ contextBridge.exposeInMainWorld('orchestrator', {
   multiPartDelete: (parentId) => ipcRenderer.invoke('multipart:delete', parentId),
   sharedState: () => ipcRenderer.invoke('shared:state'),
   sharedOpenLogin: () => ipcRenderer.invoke('shared:open-login'),
+  sharedBrowserLogin: () => ipcRenderer.invoke('shared:browser-login'),
   sharedSetToken: (token) => ipcRenderer.invoke('shared:set-token', token),
   sharedLogout: () => ipcRenderer.invoke('shared:logout'),
   sharedCatalog: () => ipcRenderer.invoke('shared:catalog'),

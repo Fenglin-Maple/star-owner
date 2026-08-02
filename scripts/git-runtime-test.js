@@ -2,7 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { GitRuntime } = require('../src/core/git-runtime');
+const { GitRuntime, gitAuthorizationHeader, parseCredential } = require('../src/core/git-runtime');
 
 (async () => {
   const root = path.resolve(__dirname, '..');
@@ -27,6 +27,8 @@ const { GitRuntime } = require('../src/core/git-runtime');
     assert(runtime.state().path.toLowerCase().startsWith(path.join(root, 'runtime', 'git').toLowerCase()), 'Git 路径不是项目 runtime/git');
     const described = await runtime.describe();
     assert(described.available && /git version/i.test(described.version), '项目内置 Git 健康检查失败');
+    assert(/^Authorization: Basic [A-Za-z0-9+/=]+$/.test(gitAuthorizationHeader('test-token')), 'GitHub Git 推送没有使用 Basic 认证头');
+    assert.deepStrictEqual(parseCredential('protocol=https\nhost=github.com\nusername=alice\npassword=token\n'), { protocol: 'https', host: 'github.com', username: 'alice', password: 'token' }, 'Git Credential Manager 输出解析错误');
     assert.throws(() => new GitRuntime({ projectRoot: root, gitPath: path.join(root, 'node_modules', '.bin', 'git.exe') }), /runtime\\git|外部 Git/);
     console.log('git runtime isolation test passed');
   } finally {
