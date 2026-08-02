@@ -21,17 +21,17 @@
 
 **Built with OpenAI Codex.**
 
-> `1.4.3` 版本边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
+> `1.4.4` 版本边界：视频总结任务只由应用内 Agent 工作流执行。外部 Codex、Claude Code、OpenCode 或其它 Agent 不再领取视频任务，也不能调用媒体工具或提交产物；它们可以通过本机只读 HTTP API 访问全部已完成 Markdown 知识库。
 >
 > “视频总结（单个）”和批量 Agent 工作流仍只处理普通 BV 单 P 视频；多 P、番剧、电影、纪录片、综艺、互动视频和其它特殊页面在这两个入口会被明确拒绝。`B站之外 -> B站多P视频总结`提供独立的多 P 父任务、逐 P 处理、追加 P、父任务查看器和 RAG 目录支持，不会改变上述两个旧入口的保护边界。
 
-`1.4.3` 默认使用多语言 `large-v3-turbo` ASR：NVIDIA GPU 使用 `int8_float16`，CPU 使用 `int8`。CPU 与 CUDA 是互斥的独立运行模式，ASR 请求仍在选定通道中排队。当前版本只在应用中暴露 `large-v3-turbo` 和 `small`；旧版 `medium` 依赖包保留在历史 Release 中供旧应用使用，不会被新版本删除或展示。
+`1.4.4` 默认使用多语言 `large-v3-turbo` ASR：NVIDIA GPU 使用 `int8_float16`，CPU 使用 `int8`。CPU 与 CUDA 是互斥的独立运行模式，ASR 请求仍在选定通道中排队。当前版本只在应用中暴露 `large-v3-turbo` 和 `small`；旧版 `medium` 依赖包保留在历史 Release 中供旧应用使用，不会被新版本删除或展示。
 
 本版本提供多 P 视频父任务处理与 GitHub B站总结共享。完整 B站总结可按稳定文档 ID 上传并创建 PR，审核合并后的文档可按单篇或远程收藏夹挂载到本地“共享”用户，进入文档库和 RAG；共享用户不进入任务总览或 Agent 派发。共享目标仓库可切换并持久保存，默认仍为 `Fenglin-Maple/Blibili-Markdowns`；用户也可以一键在当前 GitHub 账号下创建公开共享仓库，应用会预置 README、贡献规范、CODEOWNERS、PR 模板和校验/目录索引 Actions。私有自定义仓库只有在星藏家当前授权可访问时才会读取。
 
-共享上传使用核心包内的 Portable Git，不读取用户全局 Git、SSH、HOME 或凭据配置。单次最多选择 `1000` 篇且总提交不超过 `1 GiB`；上传期间应用显示不可绕过的进度窗口并锁定其它操作，用户可主动中止，网络或 Git 中断也会清理可识别的临时分支和工作目录。候选区支持用户、收藏夹、标题/BV/UP主、生成时间和时长筛选；准备上传列表在固定高度区域内滚动，可继续筛选、全选当前结果并批量移除。应用按 GitHub 数字 ID 判断目标仓库主人：主人直接创建临时分支/PR，其他贡献者使用 Fork/PR，commit author 绑定实际登录账户。
+共享上传使用核心包内的 Portable Git，不读取用户全局 Git、SSH、HOME 或凭据配置。单次最多选择 `1000` 篇且总提交不超过 `1 GiB`；上传期间应用显示不可绕过的进度窗口并锁定其它操作，用户可主动中止，网络或 Git 中断也会清理可识别的临时分支和工作目录。候选区支持用户、收藏夹、标题/BV/UP主、生成时间和时长筛选；准备上传列表在固定高度区域内滚动，可继续筛选、全选当前结果并批量移除。应用按 GitHub 数字 ID 判断目标仓库主人：主人直接创建临时分支/PR，其他贡献者使用 Fork/PR，commit author 绑定实际登录账户。共享包会把单视频最终正文规范为 `summary.md`，把多 P 规范为 `index.md` 与 `parts/cid-*/summary.md`；只附带图片和脱敏共享元数据，不上传 Agent 草稿、ASR、字幕、评论或本地过程 JSON。
 
-“B站之外”首页只展示带运行数据的工具入口卡，点击后进入独占工具视图并可返回工具箱；常规窗口中多 P 与共享功能左右分栏，接近最小窗口宽度时自动改为单列。GitHub 授权优先通过默认浏览器调用项目内置 Git Credential Manager，凭据强制保存在应用私有 DPAPI 目录；Token 粘贴仍作为备用路径。应用提供仅清除自身数据库与内置 Git 私有令牌的账户切换操作，绝不清理系统凭据库或用户全局 Git。1.4.3 继续沿用前端会话设置串行保存、旧流事件门控、审批失败重试和模型配置供应商绑定；同时保留 OpenAI/NewAPI 的 `/v1` 根路径探测、模型能力识别、RAG 上下文预检和大 Markdown 分页读取。
+“B站之外”首页只展示带运行数据的工具入口卡，点击后进入独占工具视图并可返回工具箱；常规窗口中多 P 与共享功能左右分栏，接近最小窗口宽度时自动改为单列。GitHub 授权优先通过默认浏览器调用项目内置 Git Credential Manager，凭据强制保存在应用私有 DPAPI 目录；Token 粘贴仍作为备用路径。应用提供仅清除自身数据库与内置 Git 私有令牌的账户切换操作，绝不清理系统凭据库或用户全局 Git。1.4.4 继续沿用前端会话设置串行保存、旧流事件门控、审批失败重试和模型配置供应商绑定；同时保留 OpenAI/NewAPI 的 `/v1` 根路径探测、模型能力识别、RAG 上下文预检和大 Markdown 分页读取。
 
 ## 快速安装与第一次使用
 
@@ -328,7 +328,7 @@ Windows 10/11 x64 用户可从 [GitHub Releases](https://github.com/Fenglin-Mapl
 4. 首次启动若提示缺少 ASR 模型，可允许应用自动下载；也可在设置的“项目依赖包”中点击模型名称打开正确 Release，下载完整 ZIP 后直接“从本地导入”。下载中的按钮会变成“暂停”，暂停会保留 `.partial` 断点缓存，之后可继续下载；下载中或暂停时点击“从本地导入”会先中止自动下载并清理受管缓存。默认使用 `large-v3-turbo`，资源不足时可切换 `small`；如果没有 NVIDIA/CUDA，可在设置中改用独立 CPU ASR。
 5. 按启动页“第一次上手”依次完成模型配置、B站登录、收藏夹同步、任务检查和 Agent 工作流创建。
 
-运行时和模型 ZIP 是应用内依赖管理器使用的独立资产。设置页可以重新检查、下载或修复依赖，并可导入手动下载的 `small`、`large-v3-turbo` ZIP。`1.4.3` 继续使用 `v1.0.0` 依赖基线，接受精确名称 `Star-Owner-v1.0.0-model-small.zip` 和 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`；旧版 `medium` ZIP 仍保留在该 Release 供旧应用使用。依赖管理器核对 GitHub Release SHA-256、模型类型和目录结构，未经校验的包不会安装，错误导入不会损伤原有健康模型。
+运行时和模型 ZIP 是应用内依赖管理器使用的独立资产。设置页可以重新检查、下载或修复依赖，并可导入手动下载的 `small`、`large-v3-turbo` ZIP。`1.4.4` 继续使用 `v1.0.0` 依赖基线，接受精确名称 `Star-Owner-v1.0.0-model-small.zip` 和 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`；旧版 `medium` ZIP 仍保留在该 Release 供旧应用使用。依赖管理器核对 GitHub Release SHA-256、模型类型和目录结构，未经校验的包不会安装，错误导入不会损伤原有健康模型。
 
 每个项目副本根据其绝对项目根目录派生独立的 B 站 WebView partition。空白目录不会读取另一份星藏家的登录 Cookie；从旧版本升级时，仅当当前目录已有用户数据库记录，才会把旧固定 partition 的 B 站 Cookie 做一次兼容迁移，旧 partition 不会被清空。
 

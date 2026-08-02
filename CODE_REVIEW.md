@@ -2,7 +2,7 @@
 
 审查日期：2026-08-03
 
-目标版本：`1.4.3`
+目标版本：`1.4.4`
 
 ## 审查范围
 
@@ -19,6 +19,14 @@
 - 依赖安装、便携打包、文档、版本、测试和发布门禁。
 
 ## 本版本修复
+
+### 1.4.4 GitHub Action 入口 Markdown 契约修复
+
+- 复现确认首个 19 篇共享 PR 中，应用保留了最终总结的长文件名，而仓库 Action 硬编码要求 `summary.md`，因此全部错误报告“缺少入口 Markdown”。
+- 同时发现上传器按文件名顺序选中 `agent-draft-1.md` 计算正文哈希，远程挂载在缺少规范文件时也可能先读草稿。单视频上传现把任务明确指定的最终 Markdown 映射为 `summary.md`；多 P 固定为 `index.md` 与 `parts/cid-*/summary.md`。
+- 共享包不再递归上传 Agent 草稿、ASR、字幕、评论、本地 manifest/info 等过程 JSON，只保留规范 Markdown、允许的图片与 `_star-owner-document.json`。元数据新增 `entryMarkdown` 和各 Markdown SHA-256。
+- 仓库校验模板新增 schema v3 规范入口、过程缓存禁入、正文/Markdown/资源 SHA-256 与路径边界校验；下载挂载优先读取 `entryMarkdown`，并对旧包避开 `agent-draft-*`。
+- 回归测试使用“长文件名最终总结 + Agent 草稿 + ASR JSON”真实形态，并覆盖单视频、多 P、Action 成功校验及正文篡改失败。本轮不创建或上传星藏家 Release。
 
 ### 1.4.3 可切换共享仓库与大批量可中止上传
 

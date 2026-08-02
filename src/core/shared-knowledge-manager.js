@@ -438,9 +438,10 @@ class SharedKnowledgeManager {
   prepareDocument(task) {
     if (task.status !== 'done' || !task.outputMarkdown || !fs.existsSync(task.outputMarkdown)) throw new Error(`文档未完成或文件不存在：${task.title || task.id}`);
     if (task.multiPartRole === 'part') throw new Error(`多P视频请从父任务目录上传，不能单独上传 P${task.page || ''}：${task.title || task.id}`);
+    let multipartParts = [];
     if (task.multiPartRole === 'parent') {
-      const parts = this.store.listTasks({ collectionId: task.collectionId }).filter((item) => item.multiPartParentId === task.id && item.multiPartRole === 'part' && item.pageState !== 'removed');
-      if (!parts.length || parts.some((item) => item.status !== 'done' || !item.outputMarkdown || !fs.existsSync(item.outputMarkdown))) {
+      multipartParts = this.store.listTasks({ collectionId: task.collectionId }).filter((item) => item.multiPartParentId === task.id && item.multiPartRole === 'part' && item.pageState !== 'removed');
+      if (!multipartParts.length || multipartParts.some((item) => item.status !== 'done' || !item.outputMarkdown || !fs.existsSync(item.outputMarkdown))) {
         throw new Error(`多P父任务尚未完成全部 P，暂不能上传共享：${task.title || task.bvid}`);
       }
     }
@@ -449,12 +450,10 @@ class SharedKnowledgeManager {
     const documentId = stableDocumentId(task, collection);
     const remoteRoot = remoteRootFor(task, collection, documentId);
     const sourceRoot = path.resolve(task.multiPartRole === 'parent' ? task.artifactDir : path.dirname(task.outputMarkdown));
-    const files = collectShareableFiles(sourceRoot)
-      .filter((file) => file.relative !== DOCUMENT_META_FILE)
-      .map((file) => ({ relative: file.relative, sourcePath: file.path, size: fs.statSync(file.path).size }));
+    const files = buildSharedDocumentFiles(task, sourceRoot, multipartParts);
     validateShareableFiles(files);
     const preferredMarkdown = task.multiPartRole === 'parent' ? 'index.md' : 'summary.md';
-    const markdownFile = files.find((file) => file.relative.toLowerCase() === preferredMarkdown) || files.find((file) => /\.md$/i.test(file.relative));
+    const markdownFile = files.find((file) => file.relative.toLowerCase() === preferredMarkdown);
     if (!markdownFile || !fs.readFileSync(markdownFile.sourcePath, 'utf8').trim()) throw new Error(`共享文档缺少非空 Markdown：${task.title || task.id}`);
     const now = new Date().toISOString();
     const sourceBilibiliUid = String(task.sourceBilibiliUid || task.bilibiliUid || collection.bilibiliUid || collection.userId || '').trim();
@@ -487,8 +486,10 @@ class SharedKnowledgeManager {
       uploadedAt: task.sharedUploadedAt || task.sharedCreatedAt || now,
       updatedAt: now,
       completedAt: task.completedAt || '',
+      entryMarkdown: preferredMarkdown,
       files: files.map((item) => item.relative),
-      contentSha256: sha256File(files.find((item) => /\.md$/i.test(item.relative))?.sourcePath),
+      contentSha256: sha256File(markdownFile.sourcePath),
+      markdownSha256: Object.fromEntries(files.filter((item) => /\.md$/i.test(item.relative)).map((item) => [item.relative, sha256File(item.sourcePath)])),
       assetSha256: Object.fromEntries(files.filter((item) => !/\.md$/i.test(item.relative)).map((item) => [item.relative, sha256File(item.sourcePath)]))
     };
     if (task.multiPartRole === 'parent') {
@@ -563,7 +564,7 @@ class SharedKnowledgeManager {
         this.store.set('tasks', existing.id, preserved);
         return preserved;
       }
-      const incomingMarkdownName = findMarkdown(temp, isMultipartParent ? 'index.md' : 'summary.md');
+      const incomingMarkdownName = findMarkdown(temp, incomingMetadata.entryMarkdown || (isMultipartParent ? 'index.md' : 'summary.md'));
       if (!incomingMarkdownName) throw new Error(`远程文档缺少 Markdown：${document.path}`);
       const previous = `${target}.previous-${Date.now().toString(36)}`;
       if (fs.existsSync(target)) fs.renameSync(target, previous);
@@ -886,6 +887,33 @@ function collectShareableFiles(root) {
   visit(root);
   return result;
 }
+function buildSharedDocumentFiles(task, sourceRoot, multipartParts = []) {
+  const root = path.resolve(sourceRoot);
+  const files = [];
+  const seen = new Set();
+  const add = (sourcePath, relative) => {
+    const source = assertInside(root, path.resolve(sourcePath));
+    const normalized = String(relative || '').replace(/\\/g, '/');
+    if (seen.has(normalized)) return;
+    const stat = fs.lstatSync(source);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`共享文档包含无效文件：${normalized}`);
+    seen.add(normalized);
+    files.push({ relative: normalized, sourcePath: source, size: stat.size });
+  };
+  add(task.outputMarkdown, task.multiPartRole === 'parent' ? 'index.md' : 'summary.md');
+  if (task.multiPartRole === 'parent') {
+    for (const part of [...multipartParts].sort((a, b) => Number(a.page || 0) - Number(b.page || 0))) {
+      const cid = String(part.cid || part.multiPartId || '').trim();
+      if (!cid) throw new Error(`多P共享子任务缺少 CID：${part.title || part.id}`);
+      add(part.outputMarkdown, `parts/cid-${safeName(cid, 'part', 40)}/summary.md`);
+    }
+  }
+  for (const file of collectShareableFiles(root)) {
+    if (!/\.(?:png|jpe?g|webp|avif|gif)$/i.test(file.relative)) continue;
+    add(file.path, file.relative);
+  }
+  return files;
+}
 function isShareableRelative(relative) {
   const value = String(relative || '').replace(/\\/g, '/');
   const extension = path.extname(value).toLowerCase();
@@ -894,14 +922,17 @@ function isShareableRelative(relative) {
 function findMarkdown(root, preferred = '') {
   const files = collectShareableFiles(root).filter((file) => /\.md$/i.test(file.relative) && path.basename(file.relative) !== DOCUMENT_META_FILE);
   const preferredName = String(preferred || '').replace(/\\/g, '/').toLowerCase();
-  return files.find((file) => file.relative.toLowerCase() === preferredName)?.relative || files[0]?.relative || '';
+  return files.find((file) => file.relative.toLowerCase() === preferredName)?.relative
+    || files.find((file) => !/^agent-draft(?:-\d+)?\.md$/i.test(path.basename(file.relative)))?.relative
+    || files[0]?.relative
+    || '';
 }
 function readJsonFile(file) {
   try { return file && fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null; } catch { return null; }
 }
 function localSharedDocumentModified(root, metadata, isMultipartParent = false) {
   if (!metadata?.contentSha256) return true;
-  const markdown = findMarkdown(root, isMultipartParent ? 'index.md' : 'summary.md');
+  const markdown = findMarkdown(root, metadata.entryMarkdown || (isMultipartParent ? 'index.md' : 'summary.md'));
   if (!markdown || sha256(fs.readFileSync(path.join(root, markdown))) !== String(metadata.contentSha256)) return true;
   for (const [relative, expected] of Object.entries(metadata.assetSha256 || {})) {
     const file = path.join(root, relative);
@@ -1007,6 +1038,7 @@ function validateRemoteMetadata(metadata, metadataPath = '') {
   if (!metadata || typeof metadata !== 'object') throw new Error(`远程元数据不是对象：${metadataPath}`);
   if (metadata.sourceType !== 'bilibili-video-summary') throw new Error(`远程文档来源类型不受支持：${metadataPath}`);
   if (!String(metadata.documentId || '').trim() || /[\\/]/.test(String(metadata.documentId))) throw new Error(`远程文档 ID 无效：${metadataPath}`);
+  if (metadata.entryMarkdown && (!isShareableRelative(metadata.entryMarkdown) || !/\.md$/i.test(String(metadata.entryMarkdown)))) throw new Error(`远程文档入口 Markdown 无效：${metadataPath}`);
   if (!['single-video', 'multipart-parent'].includes(String(metadata.documentType || 'single-video'))) throw new Error(`远程文档类型不受支持：${metadataPath}`);
   if (metadata.contributorGithubId && !/^\d+$/.test(String(metadata.contributorGithubId))) throw new Error(`远程贡献者 ID 无效：${metadataPath}`);
   return metadata;

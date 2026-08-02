@@ -122,6 +122,7 @@ function textFile(relative, content) {
 
 const VALIDATOR_SCRIPT = `import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
 const root = process.cwd();
@@ -153,6 +154,7 @@ function safeRelative(value) {
   const normalized = String(value || '').replaceAll('\\\\', '/');
   return Boolean(normalized) && !normalized.startsWith('/') && !normalized.split('/').some((part) => !part || part === '.' || part === '..');
 }
+function sha256File(file) { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); }
 function pullRequestChanges() {
   if (process.env.GITHUB_EVENT_NAME !== 'pull_request' || !process.env.GITHUB_EVENT_PATH) return { files: [], actorId: '' };
   try {
@@ -188,6 +190,7 @@ for (const metadataFile of metadataFiles) {
   if (!/^BV[0-9A-Za-z]{10}$/i.test(String(metadata.bvid || ''))) fail(metadataPath + ': BVID 格式错误');
   const expectedType = namespace === 'multipart' ? 'multipart-parent' : 'single-video';
   if (metadata.documentType !== expectedType) fail(metadataPath + ': documentType 应为 ' + expectedType);
+  const schemaVersion = Number(metadata.schemaVersion || 0);
   const files = Array.isArray(metadata.files) ? metadata.files : [];
   const declared = new Set([metadataName]);
   if (!files.length) fail(metadataPath + ': files 不能为空');
@@ -201,8 +204,39 @@ for (const metadataFile of metadataFiles) {
     if (!target.startsWith(documentRoot + path.sep) || !fs.existsSync(target) || !fs.statSync(target).isFile()) fail(metadataPath + ': 缺少资源 ' + itemPath);
     if (fs.existsSync(target) && fs.statSync(target).size > 25 * 1024 * 1024) fail(metadataPath + ': 单文件超过 25 MiB ' + itemPath);
   }
-  const markdown = namespace === 'multipart' ? 'index.md' : 'summary.md';
-  if (!files.includes(markdown)) fail(metadataPath + ': 缺少入口 Markdown ' + markdown);
+  const canonicalMarkdown = namespace === 'multipart' ? 'index.md' : 'summary.md';
+  const entryMarkdown = String(metadata.entryMarkdown || canonicalMarkdown).replaceAll('\\\\', '/');
+  const documentRoot = path.resolve(path.dirname(metadataFile));
+  if (!safeRelative(entryMarkdown) || !/\.md$/i.test(entryMarkdown)) fail(metadataPath + ': 入口 Markdown 路径不安全');
+  if (schemaVersion >= 3 && entryMarkdown !== canonicalMarkdown) fail(metadataPath + ': schema v3 入口 Markdown 必须是 ' + canonicalMarkdown);
+  if (!files.includes(entryMarkdown)) fail(metadataPath + ': 缺少入口 Markdown ' + entryMarkdown);
+  if (schemaVersion >= 3) {
+    for (const item of files) {
+      const itemPath = String(item || '').replaceAll('\\\\', '/');
+      const extension = path.extname(itemPath).toLowerCase();
+      const allowedMarkdown = namespace === 'multipart'
+        ? itemPath === 'index.md' || /^parts\\/cid-[A-Za-z0-9._-]+\\/summary\\.md$/.test(itemPath)
+        : itemPath === 'summary.md';
+      if (extension === '.md' && !allowedMarkdown) fail(metadataPath + ': schema v3 不允许过程 Markdown ' + itemPath);
+      if (extension !== '.md' && !new Set(['.png', '.jpg', '.jpeg', '.webp', '.avif', '.gif']).has(extension)) fail(metadataPath + ': schema v3 不允许过程缓存 ' + itemPath);
+    }
+  }
+  const entryFile = path.resolve(path.dirname(metadataFile), entryMarkdown);
+  const contentHash = String(metadata.contentSha256 || '');
+  if (schemaVersion >= 3 && !/^[a-f0-9]{64}$/i.test(contentHash)) fail(metadataPath + ': 缺少有效的入口 Markdown SHA-256');
+  if (entryFile.startsWith(documentRoot + path.sep) && fs.existsSync(entryFile) && /^[a-f0-9]{64}$/i.test(contentHash) && sha256File(entryFile) !== contentHash.toLowerCase()) {
+    fail(metadataPath + ': 入口 Markdown SHA-256 不匹配');
+  }
+  for (const [itemPath, expectedHash] of Object.entries(metadata.markdownSha256 || {})) {
+    if (!safeRelative(itemPath) || !files.includes(itemPath)) { fail(metadataPath + ': Markdown 哈希声明路径无效 ' + itemPath); continue; }
+    const target = path.resolve(path.dirname(metadataFile), itemPath);
+    if (!target.startsWith(documentRoot + path.sep) || !fs.existsSync(target) || !/^[a-f0-9]{64}$/i.test(String(expectedHash)) || sha256File(target) !== String(expectedHash).toLowerCase()) fail(metadataPath + ': Markdown SHA-256 不匹配 ' + itemPath);
+  }
+  for (const [itemPath, expectedHash] of Object.entries(metadata.assetSha256 || {})) {
+    if (!safeRelative(itemPath) || !files.includes(itemPath)) { fail(metadataPath + ': 资源哈希声明路径无效 ' + itemPath); continue; }
+    const target = path.resolve(path.dirname(metadataFile), itemPath);
+    if (!target.startsWith(documentRoot + path.sep) || !fs.existsSync(target) || !/^[a-f0-9]{64}$/i.test(String(expectedHash)) || sha256File(target) !== String(expectedHash).toLowerCase()) fail(metadataPath + ': 资源 SHA-256 不匹配 ' + itemPath);
+  }
   declaredByRoot.set(segments.slice(0, 4).join('/'), declared);
 }
 

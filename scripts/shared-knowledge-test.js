@@ -18,10 +18,14 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   const collection = store.upsertCollection({ id: 'bili-collection', mediaId: '100', userId: 'bili-user', userName: '测试B站用户', name: '测试收藏夹', collectionKind: 'bilibili', workspaceId: workspace.id, workspaceRoot: workspace.root, collectionRoot: path.join(workspace.root, '测试B站用户', '测试收藏夹'), syncReady: true, syncState: 'ready' });
   const artifact = path.join(collection.collectionRoot, 'BV-SHARED');
   fs.mkdirSync(artifact, { recursive: true });
-  fs.writeFileSync(path.join(artifact, 'summary.md'), '# 共享测试\n\n这是可以上传的 B站总结。\n', 'utf8');
+  const finalMarkdown = path.join(artifact, '[BV-BV1SHARED001][标题-真实长文件名总结].md');
+  fs.writeFileSync(finalMarkdown, '# 共享测试\n\n这是可以上传的 B站最终总结。\n', 'utf8');
+  fs.writeFileSync(path.join(artifact, 'agent-draft-1.md'), '# Agent 过程草稿\n', 'utf8');
+  fs.mkdirSync(path.join(artifact, 'asr'), { recursive: true });
+  fs.writeFileSync(path.join(artifact, 'asr', 'asr-result.json'), '{"process":"cache"}\n', 'utf8');
   fs.writeFileSync(path.join(artifact, 'cover.png'), Buffer.from('89504e470d0a1a0a', 'hex'));
   fs.writeFileSync(path.join(artifact, 'video.mp4'), Buffer.from('must not upload'));
-  const task = { id: 'bili-task-1', collectionId: collection.id, bvid: 'BV1SHARED001', title: '共享测试视频', owner: 'UP主', status: 'done', outputMarkdown: path.join(artifact, 'summary.md'), artifactDir: artifact, completedAt: '2026-08-01T00:00:00.000Z' };
+  const task = { id: 'bili-task-1', collectionId: collection.id, bvid: 'BV1SHARED001', title: '共享测试视频', owner: 'UP主', status: 'done', outputMarkdown: finalMarkdown, artifactDir: artifact, completedAt: '2026-08-01T00:00:00.000Z' };
   store.upsertTask(task);
   const localArtifact = path.join(workspace.root, 'local-doc');
   fs.mkdirSync(localArtifact, { recursive: true });
@@ -90,13 +94,38 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   const stableTwo = manager.prepareDocument({ ...task, id: 'task-id-two', githubUserId: '123456' });
   assert.strictEqual(stableOne.documentId, stableTwo.documentId, 'stable shared document id changed with local task id');
   assert(stableOne.files.some((file) => file.relative === 'summary.md' && file.sourcePath && !file.buffer), '共享上传仍把所有文档资源长期保存在内存 Buffer 中');
+  assert.strictEqual(stableOne.files.find((file) => file.relative === 'summary.md').sourcePath, finalMarkdown, '长文件名最终总结没有规范映射为 summary.md');
+  assert.strictEqual(stableOne.metadata.entryMarkdown, 'summary.md', '共享元数据没有声明规范入口 Markdown');
+  assert.strictEqual(stableOne.metadata.contentSha256, stableOne.metadata.markdownSha256['summary.md'], '正文哈希没有绑定最终总结 Markdown');
+  assert(!stableOne.files.some((file) => /agent-draft|asr-result/i.test(file.relative) || (/\.json$/i.test(file.relative) && file.relative !== DOCUMENT_META_FILE)), '共享包错误包含 Agent 草稿、ASR 或过程 JSON');
+  const multipartCollection = store.upsertCollection({ id: 'multipart-collection', userId: 'internal-user', userName: '内置用户', name: '多P共享测试', collectionKind: 'bilibili-multipart', internal: true, workspaceId: workspace.id, workspaceRoot: workspace.root, collectionRoot: path.join(workspace.root, '内置用户', '多P共享测试') });
+  const multipartRoot = path.join(multipartCollection.collectionRoot, 'parent-BV1MULTIP001');
+  const multipartPartRoot = path.join(multipartRoot, 'parts', 'cid-101');
+  fs.mkdirSync(path.join(multipartPartRoot, 'frames'), { recursive: true });
+  fs.writeFileSync(path.join(multipartRoot, 'index.md'), '# 多P目录\n\n- [P1](parts/cid-101/summary.md)\n', 'utf8');
+  fs.writeFileSync(path.join(multipartPartRoot, 'summary.md'), '# P1 最终总结\n', 'utf8');
+  fs.writeFileSync(path.join(multipartPartRoot, 'agent-draft-1.md'), '# P1 草稿\n', 'utf8');
+  fs.writeFileSync(path.join(multipartPartRoot, 'frames', 'frame-001.png'), Buffer.from('89504e470d0a1a0a', 'hex'));
+  fs.writeFileSync(path.join(multipartRoot, 'metadata.json'), `${JSON.stringify({ parts: [{ cid: '101', page: 1, part: '第一P', title: '多P共享测试 P1', duration: 60, status: 'done' }] })}\n`, 'utf8');
+  const multipartParent = { id: 'multipart-parent', collectionId: multipartCollection.id, bvid: 'BV1MULTIP001', title: '多P共享测试', owner: 'UP主', status: 'done', outputMarkdown: path.join(multipartRoot, 'index.md'), artifactDir: multipartRoot, multiPartRole: 'parent', completedAt: '2026-08-01T00:00:00.000Z' };
+  const multipartPart = { id: 'multipart-parent:part:101', collectionId: multipartCollection.id, bvid: multipartParent.bvid, title: '多P共享测试 P1', owner: 'UP主', status: 'done', outputMarkdown: path.join(multipartPartRoot, 'summary.md'), artifactDir: multipartPartRoot, multiPartRole: 'part', multiPartParentId: multipartParent.id, multiPartId: '101', cid: '101', page: 1, pageState: 'active' };
+  store.upsertTask(multipartParent);
+  store.upsertTask(multipartPart);
+  const multipartPackage = manager.prepareDocument({ ...multipartParent, githubUserId: '123456' });
+  assert.deepStrictEqual(multipartPackage.files.filter((file) => /\.md$/i.test(file.relative)).map((file) => file.relative).sort(), ['index.md', 'parts/cid-101/summary.md'], '多P共享包没有规范化目录和 P 正文');
+  assert(multipartPackage.files.some((file) => file.relative === 'parts/cid-101/frames/frame-001.png'), '多P共享包遗漏 P 总结图片');
+  assert(!multipartPackage.files.some((file) => /agent-draft|metadata\.json/i.test(file.relative)), '多P共享包包含过程草稿或本地元数据');
+  assert.strictEqual(multipartPackage.metadata.entryMarkdown, 'index.md', '多P共享包入口不是 index.md');
   assert.strictEqual(MAX_SHARED_PR_DOCUMENTS, 1000, '共享上传单批数量没有提升到 1000 篇');
   assert.deepStrictEqual(parseRepositoryInput('https://github.com/example/shared-docs.git'), { owner: 'example', name: 'shared-docs', branch: '' }, '共享仓库 URL 解析失败');
   const upload = await manager.upload({ taskIds: [task.id] });
   assert.strictEqual(upload.prNumber, 7, '共享上传没有创建 PR');
   assert(puts.length > 0 && puts.every((item) => item.remotePath.startsWith('123456/')), '共享目录没有使用 GitHub 数字 ID');
   assert(puts.some((item) => item.remotePath.endsWith('summary.md')), '共享上传缺少 Markdown');
+  const uploadedSummary = puts.find((item) => item.remotePath.endsWith('summary.md'));
+  assert(Buffer.from(uploadedSummary.body.content, 'base64').toString('utf8').includes('最终总结'), '共享上传把过程草稿当成了最终正文');
   assert(!puts.some((item) => item.remotePath.endsWith('video.mp4')), '共享上传错误包含原始视频');
+  assert(!puts.some((item) => /agent-draft|\/asr\/|\/subtitles\/|\/comments\//i.test(item.remotePath)), '共享上传错误包含过程缓存');
   assert(puts.every((item) => /^123456\/(?:bilibili|single|multipart)\/col-[a-f0-9]+\//.test(item.remotePath)), '共享目录没有使用稳定来源收藏夹命名空间');
   let ownerPullRequest = null;
   manager.requestOverride = async (endpoint, options = {}) => {
@@ -166,9 +195,23 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, file.buffer);
   }
+  for (const file of stableOne.files) {
+    const target = path.join(templateRoot, stableOne.remoteRoot, file.relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, file.buffer || fs.readFileSync(file.sourcePath));
+  }
+  for (const file of multipartPackage.files) {
+    const target = path.join(templateRoot, multipartPackage.remoteRoot, file.relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, file.buffer || fs.readFileSync(file.sourcePath));
+  }
   execFileSync(process.execPath, ['--check', path.join(templateRoot, 'scripts', 'validate-shared-docs.mjs')]);
   execFileSync(process.execPath, ['--check', path.join(templateRoot, 'scripts', 'build-catalog.mjs')]);
   execFileSync(process.execPath, [path.join(templateRoot, 'scripts', 'validate-shared-docs.mjs')], { cwd: templateRoot, stdio: 'pipe' });
+  const templateSummary = path.join(templateRoot, stableOne.remoteRoot, 'summary.md');
+  fs.appendFileSync(templateSummary, '\n被篡改的正文\n', 'utf8');
+  assert.throws(() => execFileSync(process.execPath, [path.join(templateRoot, 'scripts', 'validate-shared-docs.mjs')], { cwd: templateRoot, stdio: 'pipe' }), '共享仓库校验脚本没有发现正文 SHA-256 不匹配');
+  fs.writeFileSync(templateSummary, fs.readFileSync(finalMarkdown));
   fs.writeFileSync(path.join(templateRoot, 'unlisted.md'), '# 不允许的仓库根文件\n', 'utf8');
   assert.throws(() => execFileSync(process.execPath, [path.join(templateRoot, 'scripts', 'validate-shared-docs.mjs')], { cwd: templateRoot, stdio: 'pipe' }), '共享仓库校验脚本允许了白名单外文件');
   fs.rmSync(path.join(templateRoot, 'unlisted.md'), { force: true });
