@@ -21,6 +21,7 @@ $required = @(
   "THIRD_PARTY_NOTICES.md",
   "DEPLOYMENT.md",
   "AGENTS.md",
+  "DESIGN_SHARED_KNOWLEDGE.md",
   "runtime-requirements.txt",
   "package.json",
   "package-lock.json",
@@ -37,6 +38,7 @@ $required = @(
   "runtime\vc-runtime\msvcp140_codecvt_ids.dll",
   "runtime\vc-runtime\vcruntime140.dll",
   "runtime\vc-runtime\vcruntime140_1.dll",
+  "runtime\git\cmd\git.exe",
   "runtime\models\small\model.bin",
   "runtime\models\large-v3-turbo\model.bin"
 )
@@ -66,7 +68,7 @@ $scanFiles = $scanFiles | Where-Object {
 }
 $scanFiles += @(
   "README.md", "DESIGN.md", "DEPLOYMENT.md", "AGENTS.md", "SECURITY.md", "CODE_REVIEW.md",
-  "THIRD_PARTY_NOTICES.md", "package.json", "package-lock.json", "runtime-requirements.txt"
+  "THIRD_PARTY_NOTICES.md", "DESIGN_SHARED_KNOWLEDGE.md", "package.json", "package-lock.json", "runtime-requirements.txt"
 ) | ForEach-Object { Get-Item -LiteralPath (Join-Path $root $_) }
 $forbidden = $scanFiles | Select-String -Pattern "[A-Za-z]:\\(Users|AIcode)\\|C:/Users/|D:/AIcode/|AppData\\Local\\Temp" -ErrorAction SilentlyContinue
 if ($forbidden) {
@@ -98,6 +100,10 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "RAG assistant test failed." }
   & npm run test:internal-agent
   if ($LASTEXITCODE -ne 0) { throw "Internal agent test failed." }
+  & npm run test:multipart
+  if ($LASTEXITCODE -ne 0) { throw "Multi-part summary test failed." }
+  & npm run test:shared-knowledge
+  if ($LASTEXITCODE -ne 0) { throw "Shared knowledge test failed." }
   & npm run test:task-attempt
   if ($LASTEXITCODE -ne 0) { throw "Task attempt rollback test failed." }
   & npm run test:document-lifecycle
@@ -122,6 +128,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Renderer state guard test failed." }
   & npm run test:runtime-isolation
   if ($LASTEXITCODE -ne 0) { throw "Project runtime isolation test failed." }
+  & npm run test:git-runtime
+  if ($LASTEXITCODE -ne 0) { throw "Project Git runtime isolation test failed." }
   & npm run test:runtime-node
   if ($LASTEXITCODE -ne 0) { throw "Bundled Electron Node runtime test failed." }
   & npm run test:image-clipboard

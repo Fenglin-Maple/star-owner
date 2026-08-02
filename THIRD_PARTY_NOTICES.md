@@ -14,6 +14,7 @@ This inventory is a practical release checklist, not legal advice. Release publi
 | mammoth | 1.11.0 | BSD-2-Clause | DOCX text extraction for RAG attachments, [mwilliamson/mammoth.js](https://github.com/mwilliamson/mammoth.js) |
 | pdf-parse | 1.1.1 | MIT | PDF text extraction for RAG attachments, [autokent/pdf-parse](https://gitlab.com/autokent/pdf-parse) |
 | sql.js | 1.14.1 | MIT | SQLite/WASM persistence, [sql-js/sql.js](https://github.com/sql-js/sql.js) |
+| MinGit for Windows | 2.55.0.windows.3 | GPL-2.0-or-later with the Git for Windows distribution terms | Project-local Git transport for shared-document Fork/PR uploads, [git-for-windows/git](https://github.com/git-for-windows/git) |
 
 The npm dependency tree also contains MIT, ISC, BSD-2-Clause, BSD-3-Clause, Apache-2.0, Python-2.0, and similarly permissive transitive packages. Their package license files are preserved inside bundled `node_modules`; `package-lock.json` is the authoritative version inventory.
 

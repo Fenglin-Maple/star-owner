@@ -68,15 +68,23 @@ function readJson(file) {
   const helper = path.join(__dirname, 'apply-portable-operation.ps1');
   const stage = path.join(projectRoot, '.updates', 'stage');
   fs.mkdirSync(path.join(stage, 'node_modules', 'electron', 'dist'), { recursive: true });
+  fs.mkdirSync(path.join(stage, 'runtime', 'git', 'cmd'), { recursive: true });
   fs.mkdirSync(path.join(stage, 'templates'), { recursive: true });
   fs.mkdirSync(path.join(projectRoot, 'templates'), { recursive: true });
   fs.mkdirSync(path.join(projectRoot, 'node_modules', 'electron', 'dist'), { recursive: true });
+  fs.mkdirSync(path.join(projectRoot, 'runtime', 'git', 'cmd'), { recursive: true });
   fs.writeFileSync(path.join(stage, 'package.json'), JSON.stringify({ version: '9.9.9' }));
+  fs.writeFileSync(path.join(stage, 'DESIGN_SHARED_KNOWLEDGE.md'), 'new-shared-design');
+  fs.writeFileSync(path.join(stage, 'runtime', 'git', 'cmd', 'git.exe'), 'new-portable-git');
   fs.writeFileSync(path.join(stage, 'templates', 'video-summary-template.md'), 'new-template');
   fs.writeFileSync(path.join(stage, 'node_modules', 'electron', 'dist', 'electron.exe'), 'electron');
   fs.writeFileSync(path.join(projectRoot, 'templates', 'video-summary-template.md'), 'old-template');
+  fs.writeFileSync(path.join(projectRoot, 'DESIGN_SHARED_KNOWLEDGE.md'), 'old-shared-design');
+  fs.writeFileSync(path.join(projectRoot, 'runtime', 'git', 'cmd', 'git.exe'), 'old-portable-git');
   runPowerShell(helper, helperArgs('update', projectRoot, { stagedRoot: stage, targetVersion: '9.9.9', operationId: 'update-fixture' }));
   assert.strictEqual(fs.readFileSync(path.join(projectRoot, 'templates', 'video-summary-template.md'), 'utf8'), 'new-template', 'portable update did not replace templates');
+  assert.strictEqual(fs.readFileSync(path.join(projectRoot, 'DESIGN_SHARED_KNOWLEDGE.md'), 'utf8'), 'new-shared-design', 'portable update did not replace shared design documentation');
+  assert.strictEqual(fs.readFileSync(path.join(projectRoot, 'runtime', 'git', 'cmd', 'git.exe'), 'utf8'), 'new-portable-git', 'portable update did not install the project-local Git runtime');
   assert.strictEqual(readJson(path.join(projectRoot, '.updates', 'operation-result.json')).status, 'succeeded', 'portable update helper did not write a success result');
 
   const source = path.join(root, 'old-project');

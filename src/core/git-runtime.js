@@ -1,0 +1,177 @@
+const fs = require('fs');
+const path = require('path');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const { ensureDir, assertInside } = require('./workspace');
+
+const execFileAsync = promisify(execFile);
+
+class GitRuntime {
+  constructor({ projectRoot, gitPath = '' } = {}) {
+    this.projectRoot = path.resolve(projectRoot || path.join(__dirname, '..', '..'));
+    this.gitPath = path.resolve(gitPath || path.join(this.projectRoot, 'runtime', 'git', 'cmd', 'git.exe'));
+    this.gitRoot = path.resolve(this.gitPath, '..', '..');
+    const bundledRoot = path.resolve(this.projectRoot, 'runtime', 'git');
+    if (this.gitRoot.toLowerCase() !== bundledRoot.toLowerCase()) throw new Error('共享功能只能使用项目 runtime/git 中的 Git，拒绝外部 Git 路径。');
+    this.gitHome = path.join(this.projectRoot, '.cache', 'shared-git', 'home');
+  }
+
+  state() {
+    return {
+      available: fs.existsSync(this.gitPath),
+      path: this.gitPath,
+      runtimeRoot: this.gitRoot,
+      isolated: true,
+      version: ''
+    };
+  }
+
+  async describe() {
+    const current = this.state();
+    if (!current.available) return current;
+    try {
+      const result = await this.run(['--version']);
+      return { ...current, version: result.stdout.trim() };
+    } catch (error) {
+      return { ...current, available: false, error: sanitizeGitError(error) };
+    }
+  }
+
+  async assertAvailable() {
+    const status = await this.describe();
+    if (!status.available) {
+      const error = new Error('项目内置 Git 环境不可用，共享上传已停止。请重新下载包含 runtime/git 的完整核心包。');
+      error.code = 'SHARED_GIT_UNAVAILABLE';
+      throw error;
+    }
+    return status;
+  }
+
+  async run(args, options = {}) {
+    const env = createGitEnvironment({
+      source: process.env,
+      overrides: options.env,
+      projectRoot: this.projectRoot,
+      gitRoot: this.gitRoot,
+      gitHome: this.gitHome
+    });
+    const result = await execFileAsync(this.gitPath, args, {
+      cwd: options.cwd || this.projectRoot,
+      env,
+      windowsHide: true,
+      timeout: Number(options.timeoutMs || 10 * 60 * 1000),
+      maxBuffer: 8 * 1024 * 1024,
+      encoding: 'utf8'
+    });
+    return { stdout: String(result.stdout || ''), stderr: String(result.stderr || '') };
+  }
+
+  async commitAndPush({ upstream, fork, baseBranch = 'main', branch, token, files, replaceRoots = [], message }) {
+    await this.assertAvailable();
+    if (!upstream?.owner || !upstream?.name || !fork?.owner || !fork?.name) throw new Error('GitHub 共享仓库信息不完整，无法提交。');
+    if (!/^[A-Za-z0-9._/-]{1,120}$/.test(String(branch || ''))) throw new Error('共享分支名称不安全。');
+    const workRoot = ensureDir(path.join(this.projectRoot, '.cache', 'shared-git'));
+    const checkout = fs.mkdtempSync(path.join(workRoot, 'upload-'));
+    const remoteUrl = `https://github.com/${encodeURIComponent(upstream.owner)}/${encodeURIComponent(upstream.name)}.git`;
+    const forkUrl = `https://github.com/${encodeURIComponent(fork.owner)}/${encodeURIComponent(fork.name)}.git`;
+    const gitEnv = {
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'http.extraHeader',
+      GIT_CONFIG_VALUE_0: `Authorization: Bearer ${String(token || '')}`
+    };
+    try {
+      await this.run(['clone', '--depth', '1', '--single-branch', '--branch', String(baseBranch), remoteUrl, checkout], { cwd: workRoot, env: gitEnv });
+      await this.run(['checkout', '-b', String(branch)], { cwd: checkout, env: gitEnv });
+      for (const root of [...new Set((replaceRoots || []).map(normalizeRelative))]) {
+        const target = assertInside(checkout, path.join(checkout, root));
+        if (target !== checkout) fs.rmSync(target, { recursive: true, force: true });
+      }
+      const written = [];
+      for (const file of files || []) {
+        const relative = normalizeRelative(file.relative);
+        const destination = assertInside(checkout, path.join(checkout, relative));
+        ensureDir(path.dirname(destination));
+        fs.writeFileSync(destination, Buffer.isBuffer(file.buffer) ? file.buffer : Buffer.from(file.buffer || ''));
+        written.push(relative);
+      }
+      if (!written.length) throw new Error('没有可提交的共享文件。');
+      await this.run(['add', '--', ...written], { cwd: checkout, env: gitEnv });
+      const status = await this.run(['status', '--porcelain', '--', ...written], { cwd: checkout, env: gitEnv });
+      if (!status.stdout.trim()) {
+        const error = new Error('选中的共享文档与仓库当前内容相同，没有需要提交的变更。');
+        error.code = 'SHARED_GIT_NO_CHANGES';
+        throw error;
+      }
+      await this.run(['-c', 'user.name=Star Owner', '-c', 'user.email=star-owner-noreply@users.noreply.github.com', 'commit', '-m', String(message || 'docs: update shared knowledge')], { cwd: checkout, env: gitEnv });
+      await this.run(['remote', 'add', 'fork', forkUrl], { cwd: checkout, env: gitEnv });
+      await this.run(['push', 'fork', `HEAD:refs/heads/${String(branch)}`], { cwd: checkout, env: gitEnv });
+      return { branch: String(branch), files: written };
+    } catch (error) {
+      throw new Error(`项目内置 Git 提交共享文档失败：${sanitizeGitError(error)}`);
+    } finally {
+      fs.rmSync(checkout, { recursive: true, force: true });
+    }
+  }
+}
+
+function normalizeRelative(value) {
+  const normalized = String(value || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!normalized || normalized.split('/').some((part) => !part || part === '.' || part === '..')) throw new Error('共享文件路径不安全。');
+  return normalized;
+}
+
+function sanitizeGitError(error) {
+  const message = String(error?.stderr || error?.message || error || '').replace(/Authorization:\s*Bearer\s+\S+/gi, 'Authorization: Bearer [redacted]');
+  return message.slice(0, 800) || '未知 Git 错误';
+}
+
+function createGitEnvironment({ source = process.env, overrides = {}, projectRoot, gitRoot, gitHome } = {}) {
+  const base = source || {};
+  const env = {};
+  const blocked = new Set([
+    'path', 'home', 'userprofile', 'homedrive', 'homepath', 'xdg_config_home', 'git_config_global', 'git_config_system',
+    'git_config_nosystem', 'git_dir', 'git_work_tree', 'git_index_file', 'git_object_directory', 'git_alternates',
+    'git_askpass', 'git_ssh', 'git_ssh_command', 'ssh_auth_sock', 'ssh_agent_pid', 'ssh_askpass', 'gcm_interactive',
+    'gcm_credential_provider', 'git_credential_helper', 'git_trace', 'git_trace_packet', 'git_curl_verbose'
+  ]);
+  for (const [key, value] of Object.entries(base)) {
+    const lower = String(key).toLowerCase();
+    if (blocked.has(lower) || lower.startsWith('git_config_') || lower === 'node_options') continue;
+    env[key] = value;
+  }
+
+  const root = path.resolve(projectRoot || process.cwd());
+  const resolvedGitRoot = path.resolve(gitRoot || path.join(root, 'runtime', 'git'));
+  const resolvedHome = ensureDir(path.resolve(gitHome || path.join(root, '.cache', 'shared-git', 'home')));
+  const emptyConfig = path.join(resolvedHome, 'empty.gitconfig');
+  if (!fs.existsSync(emptyConfig)) fs.writeFileSync(emptyConfig, '# Project-local Git configuration intentionally starts empty.\n', 'utf8');
+
+  const pathEntries = [
+    path.join(resolvedGitRoot, 'cmd'),
+    path.join(resolvedGitRoot, 'mingw64', 'bin'),
+    path.join(resolvedGitRoot, 'mingw64', 'libexec', 'git-core')
+  ];
+  const systemRoot = base.SystemRoot || base.WINDIR || env.SystemRoot || env.WINDIR || '';
+  if (process.platform === 'win32' && systemRoot) pathEntries.push(path.join(systemRoot, 'System32'));
+  env.PATH = [...new Set(pathEntries.filter((item) => fs.existsSync(item)).map((item) => path.resolve(item)))].join(path.delimiter);
+  env.GIT_EXEC_PATH = path.join(resolvedGitRoot, 'mingw64', 'libexec', 'git-core');
+  env.GIT_CONFIG_GLOBAL = emptyConfig;
+  env.GIT_CONFIG_SYSTEM = emptyConfig;
+  env.GIT_CONFIG_NOSYSTEM = '1';
+  env.GIT_TERMINAL_PROMPT = '0';
+  env.GCM_INTERACTIVE = 'Never';
+  env.HOME = resolvedHome;
+  env.USERPROFILE = resolvedHome;
+  env.XDG_CONFIG_HOME = resolvedHome;
+  if (process.platform === 'win32') {
+    env.HOMEDRIVE = path.parse(resolvedHome).root.replace(/\\+$/, '');
+    env.HOMEPATH = resolvedHome.slice(path.parse(resolvedHome).root.length) || '\\';
+  }
+
+  // Only the ephemeral config entries deliberately supplied by the caller are allowed.
+  const optionEntries = Object.entries(overrides || {}).filter(([key]) => /^GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)$/i.test(key));
+  for (const [key, value] of optionEntries) env[key] = value;
+  return env;
+}
+
+module.exports = { GitRuntime, createGitEnvironment, normalizeRelative, sanitizeGitError };

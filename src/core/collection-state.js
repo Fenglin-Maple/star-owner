@@ -27,7 +27,7 @@ function removedFavoriteTitle(task = {}) {
 function isBiliCollection(collection = {}) {
   return Boolean(collection.mediaId)
     && collection.internal !== true
-    && collection.collectionKind !== 'video-cache';
+    && !['video-cache', 'bilibili-multipart', 'shared'].includes(collection.collectionKind);
 }
 
 function collectionStorageName(collection = {}) {
@@ -74,6 +74,8 @@ function favoriteStatus(task = {}, collection = {}) {
 function collectionKindInfo(collection = {}) {
   if (collection.collectionKind === 'video-cache') return { code: 'video-cache', label: '内置缓存视频' };
   if (collection.collectionKind === 'multimodal-document') return { code: 'multimodal-document', label: '多模态文档' };
+  if (collection.collectionKind === 'bilibili-multipart') return { code: 'bilibili-multipart', label: 'B站多P视频' };
+  if (collection.collectionKind === 'shared') return { code: 'shared', label: '共享挂载' };
   if (collection.internal === true) return { code: 'default', label: '默认' };
   return { code: 'bilibili', label: 'B站收藏夹' };
 }

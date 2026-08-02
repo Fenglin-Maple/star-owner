@@ -21,9 +21,11 @@ const { loadClipboardImage } = require('./core/image-clipboard');
 const { LocalToolboxManager } = require('./core/local-toolbox-manager');
 const { AUDIO_EXTENSIONS, VIDEO_EXTENSIONS } = require('./core/local-media-runtime');
 const { promoteMindMap, wrapMarkdownTables } = require('./core/markdown');
+const { MultiPartManager } = require('./core/multipart-manager');
 const { isPrivateNetworkHost } = require('./core/network-policy');
 const { repairPortablePythonHome } = require('./core/portable-runtime');
 const { RagAssistant } = require('./core/rag-assistant');
+const { SharedKnowledgeManager } = require('./core/shared-knowledge-manager');
 const { Store } = require('./core/store');
 const { StartupFolderProbe } = require('./core/startup-folder-probe');
 const { recoverPendingSubmissionFinalizations } = require('./core/submission-artifacts');
@@ -63,6 +65,8 @@ let internalAgentManager = null;
 let dependencyManager = null;
 let videoCacheManager = null;
 let localToolboxManager = null;
+let multiPartManager = null;
+let sharedKnowledgeManager = null;
 let collectionSyncService = null;
 let startupFolderProbe = null;
 let updateManager = null;
@@ -257,6 +261,20 @@ async function bootstrap() {
     videoCacheManager,
     emit: publishLocalToolboxEvent
   });
+  multiPartManager = new MultiPartManager({
+    store,
+    bili,
+    internalAgentManager,
+    ragAssistant,
+    emit: publishMultipartEvent
+  });
+  sharedKnowledgeManager = new SharedKnowledgeManager({
+    store,
+    encryptSecret,
+    decryptSecret,
+    openExternal: openExternalUrl,
+    emit: publishSharedEvent
+  });
   dependencyManager = new DependencyManager({
     store,
     projectRoot: path.resolve(__dirname, '..'),
@@ -434,6 +452,13 @@ ipcMain.handle('documents:open-folder', async (_event, taskId) => {
 
 ipcMain.handle('documents:delete', async (_event, taskId) => {
   assertBackendReady();
+  const targetTask = store.getTask(String(taskId || ''));
+  if (targetTask?.multiPartRole === 'parent' && multiPartManager && store.get('multiPartParents', targetTask.multiPartParentId || targetTask.id)) {
+    const result = await multiPartManager.delete(targetTask.multiPartParentId || targetTask.id);
+    taskDisplayCoverCache.delete(String(taskId || ''));
+    publishEvent({ type: 'document-deleted', ...result, multiPart: true });
+    return result;
+  }
   const result = deleteCompletedDocument({ store, taskId, source: 'document-library' });
   taskDisplayCoverCache.delete(String(taskId || ''));
   publishEvent({ type: 'document-deleted', ...result });
@@ -523,7 +548,7 @@ function refreshBilibiliUser() {
 }
 
 ipcMain.handle('store:snapshot', async () => {
-  if (!store) return { users: [], collections: [], tasks: [], tools: [], toolRuns: [], workspaces: [], videoCache: { collections: [], videos: [], jobs: [] }, localToolbox: { jobs: [], videoCollections: [], documentCollections: [] }, analytics: { collections: {}, tools: [] }, activities: [] };
+  if (!store) return { users: [], collections: [], tasks: [], tools: [], toolRuns: [], workspaces: [], videoCache: { collections: [], videos: [], jobs: [] }, localToolbox: { jobs: [], videoCollections: [], documentCollections: [] }, multiPart: { collections: [], parents: [] }, sharedKnowledge: { repository: null, authenticated: false, mounts: [], documents: [] }, analytics: { collections: {}, tools: [] }, activities: [] };
   return {
     users: store.list('users'),
     collections: store.listCollections().map(rendererCollection),
@@ -535,6 +560,8 @@ ipcMain.handle('store:snapshot', async () => {
     internalAgentSessions: internalAgentManager?.state().sessions || [],
     videoCache: videoCacheManager?.state() || { collections: [], videos: [], jobs: [] },
     localToolbox: localToolboxManager?.state() || { jobs: [], videoCollections: [], documentCollections: [] },
+    multiPart: multiPartManager?.state() || { collections: [], parents: [] },
+    sharedKnowledge: sharedKnowledgeManager?.state() || { repository: null, authenticated: false, mounts: [], documents: [] },
     analytics: buildAnalytics(store),
     scheduler: toolRunner?.getState() || null,
     settings: { filenameMetadata: store.getFilenameMetadata(), uiPreferences: store.getUiPreferences?.() || { showOutsideBilibili: true } },
@@ -680,6 +707,86 @@ ipcMain.handle('local-tools:open-output', async (_event, jobId) => {
   const error = await shell.openPath(directory);
   if (error) throw new Error(error);
   return { directory };
+});
+
+ipcMain.handle('multipart:state', async () => {
+  assertBackendReady();
+  return multiPartManager.state();
+});
+
+ipcMain.handle('multipart:inspect', async (_event, payload = {}) => {
+  assertBackendReady();
+  return multiPartManager.inspect(payload);
+});
+
+ipcMain.handle('multipart:create', async (_event, payload = {}) => {
+  assertBackendReady();
+  return multiPartManager.create(payload);
+});
+
+ipcMain.handle('multipart:refresh', async (_event, parentId) => {
+  assertBackendReady();
+  return multiPartManager.refresh(parentId);
+});
+
+ipcMain.handle('multipart:start', async (_event, payload = {}) => {
+  assertBackendReady();
+  return multiPartManager.start(payload);
+});
+
+ipcMain.handle('multipart:stop', async (_event, parentId) => {
+  assertBackendReady();
+  return multiPartManager.stop(parentId);
+});
+
+ipcMain.handle('multipart:delete', async (_event, parentId) => {
+  assertBackendReady();
+  return multiPartManager.delete(parentId);
+});
+
+ipcMain.handle('shared:state', async () => {
+  assertBackendReady();
+  return sharedKnowledgeManager.state();
+});
+
+ipcMain.handle('shared:open-login', async () => {
+  assertBackendReady();
+  return sharedKnowledgeManager.openLogin();
+});
+
+ipcMain.handle('shared:set-token', async (_event, token) => {
+  assertBackendReady();
+  return sharedKnowledgeManager.setToken(token);
+});
+
+ipcMain.handle('shared:logout', async () => {
+  assertBackendReady();
+  return sharedKnowledgeManager.clearToken();
+});
+
+ipcMain.handle('shared:catalog', async () => {
+  assertBackendReady();
+  return sharedKnowledgeManager.remoteCatalog();
+});
+
+ipcMain.handle('shared:upload', async (_event, payload = {}) => {
+  assertBackendReady();
+  return sharedKnowledgeManager.upload(payload);
+});
+
+ipcMain.handle('shared:mount', async (_event, payload = {}) => {
+  assertBackendReady();
+  return sharedKnowledgeManager.mount(payload);
+});
+
+ipcMain.handle('shared:sync-mount', async (_event, mountId) => {
+  assertBackendReady();
+  return sharedKnowledgeManager.syncMount(mountId);
+});
+
+ipcMain.handle('shared:unmount', async (_event, mountId) => {
+  assertBackendReady();
+  return sharedKnowledgeManager.unmount(mountId);
 });
 
 ipcMain.handle('settings:ui-preferences', async (_event, value = {}) => {
@@ -1235,6 +1342,8 @@ function sendRuntime() {
     dependencies: dependencyManager?.state() || null,
     videoCache: videoCacheManager?.state() || null,
     localToolbox: localToolboxManager?.state() || null,
+    multiPart: multiPartManager?.state() || null,
+    sharedKnowledge: sharedKnowledgeManager?.state() || null,
     pathSafety,
     backendReady,
     bootstrap: bootstrapState,
@@ -1299,6 +1408,16 @@ function publishLocalToolboxEvent(event) {
   if (event.type === 'local-knowledge-catalog-changed') mainWindow?.webContents.send('rag:event', { type: 'knowledge-catalog-changed', collectionId: event.collectionId || '' });
 }
 
+function publishMultipartEvent(event) {
+  publishEvent(event);
+  mainWindow?.webContents.send('multipart:event', event);
+}
+
+function publishSharedEvent(event) {
+  publishEvent(event);
+  mainWindow?.webContents.send('shared:event', event);
+}
+
 function publicCurrentUser(user) {
   if (!user) return null;
   const { cookieFile, ...safe } = user;
@@ -1356,6 +1475,7 @@ function publishInternalAgentEvent(event) {
     store.recordActivity({ ...record, type: `internal-agent-${event.type}` });
   }
   mainWindow?.webContents.send('internal-agent:event', record);
+  multiPartManager?.handleAgentEvent(record);
   if (['task-completed', 'task-attempt-aborted', 'video-unavailable'].includes(event.type)) {
     mainWindow?.webContents.send('app:event', {
       createdAt: record.createdAt,

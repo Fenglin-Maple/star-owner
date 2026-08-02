@@ -61,7 +61,7 @@ class ApiServer {
       return this.json(res, this.knowledgeApi.manifest(this.url()));
     }
     if (url.pathname === '/api/health') {
-      return this.json(res, { ok: true, mode: 'knowledge-read-only', protocolVersion: '3.0', url: this.url() });
+      return this.json(res, { ok: true, mode: 'knowledge-read-only', protocolVersion: '3.1', url: this.url() });
     }
     if (url.pathname === '/api/knowledge/catalog') {
       return this.json(res, this.knowledgeApi.catalog(this.url()));

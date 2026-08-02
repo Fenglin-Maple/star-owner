@@ -2296,7 +2296,7 @@ function renderDocumentLibrary() {
 function completedDocuments() {
   const collections = new Map((lastSnapshot.collections || []).map((collection) => [collection.id, collection]));
   return (lastSnapshot.tasks || [])
-    .filter((task) => task.status === 'done' && task.outputMarkdown && task.knowledgeActive !== false)
+    .filter((task) => task.status === 'done' && task.outputMarkdown && task.knowledgeActive !== false && task.multiPartRole !== 'part')
     .map((task) => ({ task, collection: collections.get(task.collectionId) }))
     .filter((item) => item.collection);
 }
@@ -3007,6 +3007,16 @@ window.addEventListener('blur', hideDocumentContextMenu);
 documentPreview?.addEventListener('click', (event) => {
   const anchor = event.target.closest('a');
   if (!anchor) return;
+  const rawHref = anchor.getAttribute('href') || '';
+  const parentTask = (lastSnapshot.tasks || []).find((task) => task.id === selectedDocumentId && task.multiPartRole === 'parent');
+  if (parentTask && rawHref && !/^[a-z][a-z0-9+.-]*:/i.test(rawHref) && !rawHref.startsWith('#')) {
+    const child = (lastSnapshot.tasks || []).find((task) => task.multiPartParentId === parentTask.id && task.multiPartRole === 'part' && rawHref.includes(`cid-${String(task.cid || '')}`));
+    if (child) {
+      event.preventDefault();
+      selectDocument(child.id);
+      return;
+    }
+  }
   const href = anchor.href || '';
   if (!/^https?:/i.test(href)) return;
   event.preventDefault();

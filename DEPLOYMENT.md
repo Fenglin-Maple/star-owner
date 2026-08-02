@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.1.2`
+Version: `1.4.0`
 
 ## 1. Portable Release for Users
 
@@ -19,6 +19,7 @@ On first launch:
 7. Verification prefers the SHA-256 digest in GitHub Release asset metadata. If the unauthenticated API is unavailable, the predictable direct URL fallback fetches the matching `.sha256` before downloading the large archive. A complete archive is retained across checksum-network failures and reused on retry; unverified content is never installed.
 8. Verified archives extract into staging and commit atomically below `runtime/`. Successful installation deletes the archive, refreshes ASR and tool health immediately, and an interrupted installation rolls back on next startup.
 9. Users may instead download a model ZIP manually and choose `设置 -> 应用设置 -> 项目依赖包 -> 从本地导入`. The application cancels the same model's automatic download, validates the exact baseline filename, official SHA-256 and archive layout, then uses the same atomic installer. Do not extract the ZIP manually.
+10. Shared-document upload uses `runtime/git/cmd/git.exe` from the same portable package. It does not use a global Git, SSH configuration, HOME, credential helper or user Git config.
 
 Release dependency assets:
 
@@ -31,11 +32,11 @@ Star-Owner-v<dependency-version>-model-large-v3-turbo.zip
 Star-Owner-v<dependency-version>-model-large-v3-turbo.zip.sha256
 ```
 
-The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.1.2` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.4.0` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads.
 
 ### Updating and migrating an existing installation
 
-For a portable installation, use `设置 -> 应用更新与迁移 -> 检查更新`. Only the GitHub `latest` stable Release is eligible. The application downloads the core archive with retry and Range continuation, verifies its SHA-256, inspects archive paths, stages it, and uses the staged package's helper to replace the complete application file set, including `templates`. `workspace/`, `runtime/` and `.updates/` are retained; a failed transaction rolls back and records the result for the next launch. An `operation-journal.json` left by an interrupted helper is surfaced on the next startup instead of being silently ignored.
+For a portable installation, use `设置 -> 应用更新与迁移 -> 检查更新`. Only the GitHub `latest` stable Release is eligible. The application downloads the core archive with retry and Range continuation, verifies its SHA-256, inspects archive paths, stages it, and uses the staged package's helper to replace the complete application file set, including `templates` and the newly packaged project-local `runtime/git`. `workspace/`, the ASR/runtime directories other than `runtime/git`, and `.updates/` are retained; a failed transaction rolls back and records the result for the next launch. An `operation-journal.json` left by an interrupted helper is surfaced on the next startup instead of being silently ignored.
 
 To move data from a v1.0.3 or newer installation, first stop all Agents and close the old application. Copy the complete old project directory to a short new location, start the new release, and use `设置 -> 应用更新与迁移 -> 从旧版目录迁移`. The application validates the source SQLite database and version, backs up the target workspace, migrates it atomically, and can restore the backup if the operation fails. Never copy only individual artifact folders or mix two live installations against the same workspace. Each project copy now gets an independent Bilibili login partition; a blank copy does not inherit another copy's cookies.
 
@@ -58,7 +59,7 @@ The application automatically checks:
 - whether faster-whisper and the selected model are installed;
 - OS, CPU architecture, memory and thread count for CPU fallback.
 
-The CUDA lane is disabled when these checks fail. CPU ASR is disabled by default and can be enabled only when the packaged CPU environment is supported. If neither path is valid, starting an internal video Agent is blocked with concrete diagnostic reasons.
+The CUDA lane is disabled when these checks fail. CPU ASR is disabled by default and can be enabled only when the packaged CPU environment is supported. If neither path is valid, starting an internal video Agent is blocked with concrete diagnostic reasons. The application never resolves the media or shared-document tools through a global Node, Python, FFmpeg, yt-dlp or Git.
 
 An 8GB laptop RTX 4070 is suitable for the default `large-v3-turbo` model with one persistent CUDA lane. Multiple video workflows may run concurrently, but ASR requests queue through the selected lane. CPU mode is an explicit alternative and is never loaded beside CUDA ASR. On that adapter, three real Bilibili samples measured about 1348 MiB Turbo peak allocation over baseline; lower-memory devices still need enough free memory for Windows display use and other applications.
 
@@ -207,7 +208,7 @@ The aggregate verifier also runs scheduler, RAG, task rollback, video cache, ima
 
 ### Automatic ASR model download is slow
 
-Open the dependency Release linked by a model name in Settings. For version `1.1.2`, the required published package is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; `Star-Owner-v1.0.0-model-small.zip` is the optional alternate. Keep the ZIP intact and click `从本地导入` on the matching row. The historical medium filename is only for older releases. The application stops an active automatic download for that model and removes its managed cache. A downloading model can be paused from the same row; pausing preserves the `.partial` file for a later ranged resume. Importing while downloading or paused first cancels the automatic transfer and removes its managed partial/install residue, but never removes the source ZIP selected by the user. A wrong version, wrong model, damaged file, modified archive or unexpected layout is rejected with the correct Release URL; an already healthy model remains installed.
+Open the dependency Release linked by a model name in Settings. For version `1.4.0`, the required published package is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; `Star-Owner-v1.0.0-model-small.zip` is the optional alternate. Keep the ZIP intact and click `从本地导入` on the matching row. The historical medium filename is only for older releases. The application stops an active automatic download for that model and removes its managed cache. A downloading model can be paused from the same row; pausing preserves the `.partial` file for a later ranged resume. Importing while downloading or paused first cancels the automatic transfer and removes its managed partial/install residue, but never removes the source ZIP selected by the user. A wrong version, wrong model, damaged file, modified archive or unexpected layout is rejected with the correct Release URL; an already healthy model remains installed.
 
 ### Windows reports a path-too-long risk
 

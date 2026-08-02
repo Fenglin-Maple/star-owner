@@ -148,7 +148,7 @@ New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 $projectItems = @(
   "assets", "src", "templates", "tools", "scripts", "packaging", "LICENSE", "README.md", "DESIGN.md",
-  "DEPLOYMENT.md", "AGENTS.md", "CODE_REVIEW.md", "THIRD_PARTY_NOTICES.md", "SECURITY.md",
+  "DEPLOYMENT.md", "AGENTS.md", "CODE_REVIEW.md", "DESIGN_SHARED_KNOWLEDGE.md", "THIRD_PARTY_NOTICES.md", "SECURITY.md",
   "package.json", "package-lock.json", "runtime-requirements.txt"
 )
 foreach ($relative in $projectItems) {
@@ -162,6 +162,7 @@ New-Item -ItemType Directory -Path (Join-Path $runtimeTarget "models") -Force | 
 Copy-Item -LiteralPath (Join-Path $root "runtime\python") -Destination (Join-Path $runtimeTarget "python") -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $root "runtime\faster-whisper") -Destination (Join-Path $runtimeTarget "faster-whisper") -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $root "runtime\vc-runtime") -Destination (Join-Path $runtimeTarget "vc-runtime") -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $root "runtime\git") -Destination (Join-Path $runtimeTarget "git") -Recurse -Force
 Set-PortableVenvHome $stage
 Remove-NonPortableVenvActivationScripts $stage
 if (-not $SeparateModelAsset) {
@@ -187,7 +188,7 @@ $manifest = [ordered]@{
   requiredRuntimeAssets = @("Star-Owner-v$dependencyVersion-runtime-win-x64.zip")
   builtAt = (Get-Date).ToUniversalTime().ToString("o")
   launcher = "Start-StarOwner.cmd"
-  bundled = @("Electron", "Node dependencies", "FFmpeg", "yt-dlp", "Python 3.12", "Microsoft Visual C++ runtime", "faster-whisper", "CTranslate2", "CUDA runtime", "Mermaid") + $(if ($splitModels.Count -eq 0 -and $ModelBundle -ne "none") { @("ASR model: $ModelBundle") } else { @() })
+  bundled = @("Electron", "Node dependencies", "FFmpeg", "yt-dlp", "Python 3.12", "Microsoft Visual C++ runtime", "faster-whisper", "CTranslate2", "CUDA runtime", "Mermaid", "Portable Git for Windows") + $(if ($splitModels.Count -eq 0 -and $ModelBundle -ne "none") { @("ASR model: $ModelBundle") } else { @() })
 }
 $manifestJson = $manifest | ConvertTo-Json -Depth 5
 $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)

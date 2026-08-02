@@ -1305,6 +1305,8 @@ class ToolRunner {
     if (action !== 'clean-cache') {
       args.push('--out', artifactDir);
       if (collection?.cookieFile && fs.existsSync(collection.cookieFile)) args.push('--cookies', collection.cookieFile);
+      if (task.page) args.push('--page', String(task.page));
+      if (task.cid) args.push('--cid', String(task.cid));
     } else if (options.preserveProcessCache) {
       args.push('--preserve-process-cache');
     } else if (options.preserveVideo || task.keepVideoCache || task.cachedVideoId) {

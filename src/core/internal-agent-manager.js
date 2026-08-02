@@ -80,7 +80,7 @@ class InternalAgentManager {
 
   listInternalCollections() {
     return this.store.listCollections().filter((collection) => (collection.userId === INTERNAL_USER_ID || collection.internal === true)
-      && !['video-cache', 'document-archive', 'multimodal-document'].includes(collection.collectionKind));
+      && !['video-cache', 'document-archive', 'multimodal-document', 'bilibili-multipart'].includes(collection.collectionKind));
   }
 
   createInternalCollection(name) {
@@ -127,7 +127,7 @@ class InternalAgentManager {
     const now = new Date().toISOString();
     const session = {
       id: `agent-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
-      mode: input.mode === 'single' ? 'single' : 'queue',
+      mode: ['single', 'multipart'].includes(input.mode) ? input.mode : 'queue',
       title: String(input.title || `Agent · ${collection.name}`).trim(),
       providerId: provider.id,
       modelId,
@@ -140,12 +140,14 @@ class InternalAgentManager {
       taskRequirements: String(input.taskRequirements || '').trim(),
       taskOptions: {
         frames: clamp(input.taskOptions?.frames, 4, 30, 12),
-        minimumFrames: clamp(input.taskOptions?.minimumFrames, 12, 300, 12),
+        minimumFrames: clamp(input.taskOptions?.minimumFrames, input.mode === 'multipart' ? 8 : 12, 300, input.mode === 'multipart' ? 8 : 12),
         frameIntervalSeconds: clamp(input.taskOptions?.frameIntervalSeconds, 1, 600, 25),
         commentLimit: clamp(input.taskOptions?.commentLimit, 0, 3, 3),
         retainProcessCache: Boolean(input.taskOptions?.retainProcessCache)
       },
       singleTaskId: String(input.singleTaskId || ''),
+      multiPartParentId: String(input.multiPartParentId || ''),
+      multiPartTaskIds: [...new Set((input.multiPartTaskIds || []).map(String))],
       currentTaskId: '',
       currentRunId: '',
       phase: '等待启动',
@@ -224,6 +226,7 @@ class InternalAgentManager {
       bvid,
       title: bvid,
       owner: '',
+      sourceBilibiliUid: String(this.getCurrentUser()?.mid || ''),
       duration: 0,
       url: `https://www.bilibili.com/video/${bvid}`,
       favoriteAddedAt: now,
@@ -789,6 +792,10 @@ class InternalAgentManager {
     const task = this.store.listTasks({ collectionId: collection.id }).find((item) => {
       if (excluded.has(item.id) || item.enabled === false || item.unsupportedVideo) return false;
       if (session.mode === 'single' && item.id !== session.singleTaskId) return false;
+      if (session.mode === 'multipart') {
+        if (item.multiPartRole !== 'part' || item.multiPartParentId !== session.multiPartParentId) return false;
+        if (session.multiPartTaskIds?.length && !session.multiPartTaskIds.includes(String(item.id))) return false;
+      } else if (item.multiPartParentId) return false;
       return item.status === 'pending' || item.status === 'failed' || (item.status === 'rejected' && !item.workId && !item.claimedBy);
     });
     if (!task) return null;
@@ -796,7 +803,10 @@ class InternalAgentManager {
     const canReuse = task.artifactDir && (task.cachedVideoId
       ? fs.existsSync(task.artifactDir)
       : task.workspaceId === dirs.workspace.id && path.resolve(task.workspaceRoot || dirs.workspace.root) === dirs.workspace.root);
-    const artifactDir = canReuse ? task.artifactDir : videoArtifactDir(dirs.videos, task, collection, this.store.getFilenameMetadata());
+    const preferredArtifact = task.preallocatedArtifactDir
+      ? assertInside(task.allowedRoot || dirs.root, task.preallocatedArtifactDir)
+      : '';
+    const artifactDir = preferredArtifact || (canReuse ? task.artifactDir : videoArtifactDir(dirs.videos, task, collection, this.store.getFilenameMetadata()));
     ensureDir(artifactDir);
     const now = new Date();
     Object.assign(task, {
@@ -808,7 +818,7 @@ class InternalAgentManager {
       attempts: Number(task.attempts || 0) + 1,
       workspaceId: dirs.workspace.id,
       workspaceRoot: dirs.workspace.root,
-      allowedRoot: task.cachedVideoId ? task.allowedRoot : dirs.root,
+      allowedRoot: task.cachedVideoId || task.multiPartParentId ? (task.allowedRoot || dirs.root) : dirs.root,
       artifactDir,
       validatorErrors: [],
       failureReason: '',
@@ -847,6 +857,7 @@ class InternalAgentManager {
     const commentLimit = Number(session.taskOptions?.commentLimit ?? 3);
     const bundle = this.startTool(session, task, toolCollection, 'material-bundle', {
       frames: calculateFrameBudget(task.duration, session.taskOptions),
+      minimumFrameFloor: session.mode === 'multipart' ? 8 : 12,
       comments: commentLimit > 0,
       skipComments: commentLimit <= 0,
       commentLimit: Math.max(0, commentLimit),
@@ -867,7 +878,9 @@ class InternalAgentManager {
     });
     await this.waitForRun(session, task, cleanup.id, signal, 0.89, 0.94);
     this.setProgress(session, '校验并归档产物', 0.95);
-    const finalized = this.submitTask(session, task, markdownFile);
+    const finalized = task.artifactLayout === 'multipart-part'
+      ? this.submitMultipartTask(session, task, markdownFile)
+      : this.submitTask(session, task, markdownFile);
     const latest = this.requireSession(session.id);
     latest.completed = Number(latest.completed || 0) + 1;
     latest.currentTaskId = '';
@@ -1295,6 +1308,7 @@ class InternalAgentManager {
     if (status === 'completed') session.progress = 1;
     session.updatedAt = new Date().toISOString();
     this.saveSession(session);
+    this.emit({ type: 'session-finished', sessionId: session.id, status, phase, parentId: session.multiPartParentId || '', collectionId: session.collectionId || '', internalAgent: true });
   }
 
   saveSession(session) {
@@ -1368,6 +1382,27 @@ class InternalAgentManager {
     const workspace = this.store.getDefaultWorkspace();
     if (!workspace) throw new Error('请先在设置中指定默认 Workspace。');
     return workspace;
+  }
+
+  submitMultipartTask(session, task, markdownFile) {
+    const metadataFile = path.join(task.artifactDir, 'info.json');
+    const validation = validateSubmission(task, { artifactDir: task.artifactDir, markdownFile, metadataFile }, { preserveProcessCache: shouldPreserveProcessCache(task, session) });
+    const now = new Date().toISOString();
+    this.store.recordSubmission(task.id, { createdAt: now, workerId: session.workerId, agentName: session.workerId, request: { artifactDir: task.artifactDir, markdownFile, metadataFile }, accepted: validation.ok, errors: validation.errors, internalAgent: true, multipart: true });
+    if (!validation.ok) throw new Error(`提交校验失败：${validation.errors.join('；')}`);
+    const finalMarkdown = path.join(task.artifactDir, 'summary.md');
+    if (path.resolve(markdownFile) !== path.resolve(finalMarkdown)) {
+      if (fs.existsSync(finalMarkdown)) fs.rmSync(finalMarkdown, { force: true });
+      fs.renameSync(markdownFile, finalMarkdown);
+    }
+    const metadata = readJson(metadataFile);
+    const completedTask = { ...task, status: 'done', workId: '', completedAt: now, outputMarkdown: finalMarkdown, metadataFile, validatorErrors: [], updatedAt: now };
+    const event = { id: `submission-completed:${task.workId || task.id}`, taskId: task.id, type: 'completed', createdAt: now, collectionId: task.collectionId, workerId: session.workerId, agentName: session.workerId, workId: task.workId || '', processingSeconds: secondsBetween(task.claimedAt, now), videoDuration: Number(task.duration || 0), internalAgent: true, multipart: true, parentDocumentId: task.parentDocumentId, partId: task.multiPartId };
+    this.store.set('tasks', task.id, completedTask);
+    this.store.set('taskEvents', event.id, event);
+    this.store.commit();
+    this.emitEvent({ type: 'task-completed', taskId: task.id, collectionId: task.collectionId, workerId: session.workerId, agentName: session.workerId, internalAgent: true, parentId: task.multiPartParentId, parentDocumentId: task.parentDocumentId, partId: task.multiPartId });
+    return { artifactDir: task.artifactDir, markdownFile: finalMarkdown, metadataFile };
   }
 
   collectionDirectories(collection) {
@@ -1779,7 +1814,8 @@ function addUsage(current = {}, next = {}) {
 }
 
 function calculateFrameBudget(duration, options = {}) {
-  const minimum = Math.max(12, Math.min(300, Number(options.minimumFrames) || 12));
+  const floor = Number(options.minimumFrameFloor) === 8 ? 8 : 12;
+  const minimum = Math.max(floor, Math.min(300, Number(options.minimumFrames) || floor));
   const interval = Math.max(1, Math.min(600, Number(options.frameIntervalSeconds) || 25));
   const seconds = Math.max(0, Number(duration) || 0);
   return Math.max(minimum, seconds > 0 ? Math.ceil(seconds / interval) : minimum);

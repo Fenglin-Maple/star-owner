@@ -10,10 +10,13 @@ The application can store or produce:
 - SQLite task, Worker, and activity records;
 - downloaded video/audio caches and generated knowledge documents.
 - remote-model supplier API keys, RAG conversations, selected knowledge passages, attachments, and sandbox files.
+- an encrypted GitHub sharing token and local Fork/PR operation metadata when the user enables shared-document upload.
 
 `workspace/`, runtime logs, databases, archives, and shortcuts are excluded from Git. Portable release builds create an empty Workspace and never copy maintainer data.
 
 Provider secrets and saved Bilibili account passwords require Electron `safeStorage`. If OS-backed encryption is unavailable, the application rejects the save operation; it never falls back to plaintext or reversible application-only storage. A selected remote provider receives the current conversation, selected retrieved passages, and compatible attachments. Do not select private knowledge or files unless that provider is trusted to process them.
+
+GitHub sharing only uploads completed Bilibili summary Markdown, required metadata and permitted raster assets. It rejects raw media, ASR cache, cookies, credentials, local documents and shared imports. The token is sent only to GitHub API/Git transport, is redacted from errors, and is stored through `safeStorage`; the project-local Git runtime disables global Git config, SSH configuration and credential helpers. Users remain responsible for the copyright, privacy and licensing status of summaries and screenshots they submit to a public repository.
 
 ## RAG Sandbox and Browsing
 

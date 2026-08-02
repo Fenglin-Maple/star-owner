@@ -21,9 +21,12 @@ function assert(condition, message) {
   store.upsertUser({ id: 'user-knowledge', name: '知识库用户' });
   store.upsertCollection({ id: 'collection-active', mediaId: '10', name: '活跃收藏夹', userId: 'user-knowledge', userName: '知识库用户', syncReady: true, syncState: 'ready' });
   store.upsertCollection({ id: 'collection-removed', mediaId: '11', name: '历史收藏夹', userId: 'user-knowledge', userName: '知识库用户', syncReady: true, syncState: 'ready' });
+  store.upsertCollection({ id: 'collection-multipart', name: '多P收藏夹', userId: 'user-knowledge', userName: '知识库用户', internal: true, collectionKind: 'bilibili-multipart', workspaceId: workspace.id, workspaceRoot: workspace.root, collectionRoot: path.join(workspace.root, '知识库用户', '多P收藏夹'), syncReady: true, syncState: 'ready' });
 
   const first = writeDocument(workspace.root, 'first', '# 第一篇\n\n逐字原文 alpha。\n\n结束。\n');
   const second = writeDocument(workspace.root, 'second', '# 第二篇\n\n逐字原文 beta。\n');
+  const multipartParent = writeDocument(workspace.root, 'multipart-parent', '# 多P目录\n\nP1、P2 的目录。\n');
+  const multipartPart = writeDocument(workspace.root, 'multipart-part', '# P1\n\n第一 P 的内容。\n');
   store.upsertTask(completedTask('doc-first', 'collection-active', first, {
     bvid: 'BVKNOWLEDGE1', title: '第一篇知识', owner: 'UP甲', tags: ['AI', '工具'],
     publishedAt: '2026-01-02T00:00:00.000Z', favoriteAddedAt: '2026-02-03T00:00:00.000Z', completedAt: '2026-03-04T00:00:00.000Z'
@@ -32,6 +35,12 @@ function assert(condition, message) {
     bvid: 'BVKNOWLEDGE2', title: '第二篇知识', owner: 'UP乙', tags: ['经验'],
     publishedAt: '2025-01-02T00:00:00.000Z', favoriteAddedAt: '2025-02-03T00:00:00.000Z', completedAt: '2025-03-04T00:00:00.000Z',
     removedFromFavorites: true, favoriteState: 'removed'
+  }));
+  store.upsertTask(completedTask('multi-parent', 'collection-multipart', multipartParent, {
+    bvid: 'BVMULTIPART01', title: '多P目录', completedAt: '2026-05-04T00:00:00.000Z', multiPartRole: 'parent', multiPartParentId: 'multi-parent', parentDocumentId: 'multi-parent'
+  }));
+  store.upsertTask(completedTask('multi-part-201', 'collection-multipart', multipartPart, {
+    bvid: 'BVMULTIPART01', title: '多P目录 P1', completedAt: '2026-05-03T00:00:00.000Z', multiPartRole: 'part', multiPartParentId: 'multi-parent', parentDocumentId: 'multi-parent', multiPartId: '201', cid: '201', page: 1
   }));
   const unmanagedMarkdown = path.join(outside, 'outside.md');
   fs.writeFileSync(unmanagedMarkdown, '# unmanaged\n', 'utf8');
@@ -44,10 +53,15 @@ function assert(condition, message) {
   await api.start(0);
   try {
     const manifest = await json(api.url() + '/api/manifest');
-    assert(manifest.response.status === 200 && manifest.body.protocolVersion === '3.0' && manifest.body.access.readOnly, 'knowledge manifest contract failed');
+    assert(manifest.response.status === 200 && manifest.body.protocolVersion === '3.1' && manifest.body.access.readOnly, 'knowledge manifest contract failed');
+    const health = await json(api.url() + '/api/health');
+    assert(health.response.status === 200 && health.body.protocolVersion === '3.1', 'knowledge health protocol contract failed');
 
     const catalog = await json(api.url() + '/api/knowledge/catalog');
-    assert(catalog.body.totals.documents === 3 && catalog.body.totals.collections === 2, 'catalog totals failed');
+    assert(catalog.body.totals.documents === 5 && catalog.body.totals.collections === 3, 'catalog totals failed');
+
+    const multipartDirectory = await json(api.url() + '/api/knowledge/documents?collectionId=collection-multipart&limit=10');
+    assert(multipartDirectory.body.total === 2 && multipartDirectory.body.documents.some((item) => item.multiPartRole === 'parent' && item.parentDocumentId === 'multi-parent') && multipartDirectory.body.documents.some((item) => item.multiPartRole === 'part' && item.partId === '201'), 'multi-part RAG metadata contract failed');
 
     const directory = await json(api.url() + '/api/knowledge/documents?collectionId=collection-active&limit=1&sort=completed-desc');
     assert(directory.body.total === 2 && directory.body.documents.length === 1 && directory.body.nextOffset === 1, 'document pagination failed');

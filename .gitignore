@@ -3,6 +3,10 @@ runtime/*
 !runtime/vc-runtime/
 !runtime/vc-runtime/*.dll
 !runtime/vc-runtime/README.md
+!runtime/git/
+runtime/git/*
+!runtime/git/README.md
+!runtime/git/**
 workspace/
 dist/
 release/

@@ -8,7 +8,7 @@
 
 External Codex, Claude Code, OpenCode, and other Agent applications are read-only knowledge clients.
 
-1. Read `GET /api/manifest` first. Protocol `3.0` describes the current knowledge-only surface.
+1. Read `GET /api/manifest` first. Protocol `3.1` describes the current knowledge-only surface, including multi-part and shared-document metadata.
 2. Use `GET /api/knowledge/catalog` to inspect users and collections before loading documents.
 3. Use the paginated `/api/knowledge/documents` directory and its metadata filters to select relevant documents.
 4. Treat `publishedAt` as the video publication date and `favoriteAddedAt` as the favorite-addition date. Preserve `favoriteMembership` in conclusions when a video or collection has been removed.
@@ -20,6 +20,14 @@ External Codex, Claude Code, OpenCode, and other Agent applications are read-onl
 10. Do not call `/api/workers`, `/api/tasks`, `/api/tools`, `/api/tool-runs`, or other retired external video workflow endpoints. They return HTTP `410` and `EXTERNAL_VIDEO_WORKFLOW_DISABLED`.
 
 The service binds to `127.0.0.1`, accepts origin-less local process requests, rejects unrelated browser origins, and has no mutation endpoint. This is not authentication against other local processes.
+
+## Shared Bilibili Knowledge Contract
+
+- GitHub sharing accepts only completed Bilibili video-summary artifacts. Local videos, local documents, raw media, ASR caches, cookies, credentials and shared imports are rejected; a multi-part video must be uploaded as its complete parent package, never as an isolated P child.
+- The shared repository is `https://github.com/Fenglin-Maple/Blibili-Markdowns`. Contributors are represented by GitHub numeric ID and stable document/source IDs, not by a mutable display name. The application opens the default browser for GitHub access, then uses the project-local `runtime/git` to create a Fork branch and Pull Request.
+- A downloaded document is mounted under the local `共享` user. A local shared collection can contain several independent remote collection mounts and single-document mounts; synchronization keys are the remote contributor/source collection/document IDs, not local or renamed display names.
+- Read the remote catalog before mounting. A remote deletion marks the local task `remote-deleted` and keeps its Markdown available; a remote update replaces the managed artifact atomically. Shared tasks are knowledge-only and never enter Bilibili sync, Task Overview, or Agent claims.
+- For multi-part knowledge, read the parent/index document first, then follow `parentDocumentId`, `partId`/`cid`, and P metadata to read the required child Markdown. Do not merge same-BVID documents from different contributors or source collections.
 
 ## Internal Video Agent Contract
 

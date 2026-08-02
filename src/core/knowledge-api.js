@@ -20,7 +20,7 @@ class KnowledgeApi {
     const base = String(baseUrl || '').replace(/\/$/, '');
     return {
       product: '星藏家',
-      protocolVersion: '3.0',
+      protocolVersion: '3.1',
       mode: 'knowledge-read-only',
       baseUrl: base,
       access: {
@@ -40,6 +40,8 @@ class KnowledgeApi {
         'Read this manifest first.',
         'List the catalog or paginated document directory and filter by user, collection, BV, title, owner, tag, or date metadata.',
         'Read one selected document in bounded line pages. Follow nextStartLine until null when the complete source is required.',
+        'For multi-part videos, list the parent directory document first, then use parentDocumentId and partId/cid to select individual P documents.',
+        'Shared mounted documents expose sharedRemotePath and remoteState; remote-deleted documents remain readable locally but should be treated as stale.',
         'List document assets before requesting an image. Asset identifiers are opaque and document-scoped.',
         'Use search only as a convenience index. Treat exact Markdown reads as the source of truth and cite document title, BV, and collection.'
       ],
@@ -254,6 +256,16 @@ class KnowledgeApi {
       completedAt: task.completedAt || '',
       favoriteMembership: status,
       singleTask: task.singleTask === true,
+      sourceType: String(task.sourceType || ''),
+      collectionKind: String(collection.collectionKind || ''),
+      parentDocumentId: String(task.parentDocumentId || task.multiPartParentId || ''),
+      partId: String(task.multiPartId || ''),
+      cid: String(task.cid || ''),
+      page: Number(task.page || 0),
+      multiPartRole: String(task.multiPartRole || ''),
+      sharedDocumentId: String(task.sharedDocumentId || ''),
+      sharedRemotePath: String(task.sharedRemotePath || ''),
+      remoteState: String(task.remoteState || ''),
       user: { id: String(collection.userId || user.id || ''), name: String(collection.userName || user.name || '') },
       collection: { id: String(collection.id || task.collectionId || ''), name: String(collection.name || ''), internal: collection.internal === true, deletedOnBilibili: collection.biliDeleted === true },
       endpoints: {

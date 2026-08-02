@@ -63,6 +63,34 @@ class BiliClient {
     }));
   }
 
+  async getVideoInfo(bvid) {
+    const data = await this.fetchJson(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(String(bvid || ''))}`);
+    return {
+      bvid: data.bvid || bvid,
+      aid: data.aid,
+      title: data.title || '',
+      owner: data.owner || {},
+      pubdate: data.pubdate || 0,
+      ctime: data.ctime || 0,
+      desc: data.desc || '',
+      pic: normalizeBilibiliAssetUrl(data.pic || ''),
+      duration: data.duration || 0,
+      dimension: data.dimension || null,
+      pages: Array.isArray(data.pages) ? data.pages.map((page) => ({
+        page: Number(page.page || 1),
+        cid: String(page.cid || ''),
+        part: String(page.part || `P${page.page || 1}`),
+        duration: Number(page.duration || 0),
+        from: page.from || '',
+        dimension: page.dimension || null
+      })) : [],
+      rights: data.rights || {},
+      stat: data.stat || {},
+      url: `https://www.bilibili.com/video/${data.bvid || bvid}`,
+      fetchedAt: new Date().toISOString()
+    };
+  }
+
   async fetchImageDataUrl(value) {
     const url = normalizeBilibiliAssetUrl(value);
     assertBilibiliImageUrl(url);

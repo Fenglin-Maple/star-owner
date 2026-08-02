@@ -1,4 +1,5 @@
 const { collectionStorageName, isBiliCollection, taskSourceTitle } = require('./collection-state');
+const { sharedExclusionId } = require('./shared-knowledge-manager');
 const { cleanupAttemptFiles, cleanupTaskSnapshot } = require('./task-attempt');
 
 function deleteCompletedDocument({ store, taskId, source = 'document-library' }) {
@@ -7,10 +8,12 @@ function deleteCompletedDocument({ store, taskId, source = 'document-library' })
   const collection = store.getCollectionById(task.collectionId);
   if (!collection) throw new Error('文档所属收藏夹不存在，无法安全更新任务状态。');
 
-  const singleFamily = task.singleTask === true
-    ? store.listTasks({ collectionId: task.collectionId }).filter((item) => item.singleTask === true && item.bvid === task.bvid)
-    : [task];
-  const cleanups = singleFamily.map((item) => ({ taskId: item.id, cleanupTask: cleanupTaskSnapshot(item), cleanup: cleanupAttemptFiles(store, item) }));
+  const documentFamily = task.multiPartRole === 'parent' && String(task.sourceType || '').startsWith('shared-')
+    ? store.listTasks({ collectionId: task.collectionId }).filter((item) => item.id === task.id || item.multiPartParentId === task.id)
+    : task.singleTask === true
+      ? store.listTasks({ collectionId: task.collectionId }).filter((item) => item.singleTask === true && item.bvid === task.bvid)
+      : [task];
+  const cleanups = documentFamily.map((item) => ({ taskId: item.id, cleanupTask: cleanupTaskSnapshot(item), cleanup: cleanupAttemptFiles(store, item) }));
   const cleanupTask = cleanupTaskSnapshot(task);
   const cleanup = cleanups.find((item) => item.taskId === task.id)?.cleanup || { mode: 'none', deleted: [], preserved: [] };
   const remoteMembershipGone = isBiliCollection(collection) && (
@@ -25,7 +28,18 @@ function deleteCompletedDocument({ store, taskId, source = 'document-library' })
 
   store.transaction(() => {
     if (!restoreToPending) {
-      for (const removedTask of singleFamily) {
+      if (collection.collectionKind === 'shared' && task.sharedRemotePath) {
+        const exclusionId = sharedExclusionId(collection.id, task.sharedRemotePath);
+        store.set('sharedExclusions', exclusionId, {
+          id: exclusionId,
+          collectionId: collection.id,
+          remotePath: task.sharedRemotePath,
+          documentId: task.sharedDocumentId || '',
+          excludedAt: now,
+          reason: '用户从文档库删除共享文档。'
+        });
+      }
+      for (const removedTask of documentFamily) {
         store.delete('tasks', removedTask.id);
         store.delete('videos', removedTask.id);
         for (const session of store.list('internalAgentSessions').filter((item) => item.singleTaskId === removedTask.id)) {

@@ -1923,7 +1923,9 @@ function knowledgeFavoriteMetadata(task, collection) {
   const status = favoriteStatus(task, collection || {});
   const statusAt = status.at ? ` | Status changed at: ${status.at}` : '';
   const collectionState = collection?.biliDeleted ? 'Deleted on Bilibili; completed local artifacts are retained.' : 'Available locally.';
-  return `Favorite membership status: ${status.label} (${status.code})${statusAt}\nCollection remote status: ${collectionState}`;
+  const multiPart = task.multiPartRole ? `\nMulti-part role: ${task.multiPartRole}; parentDocumentId: ${task.parentDocumentId || task.multiPartParentId || '-'}; partId/cid: ${task.multiPartId || task.cid || '-'}; page: ${task.page || '-'}` : '';
+  const shared = String(task.sourceType || '').startsWith('shared-') ? `\nShared remote state: ${task.remoteState || 'active'}; sharedDocumentId: ${task.sharedDocumentId || '-'}; remoteUpdatedAt: ${task.remoteUpdatedAt || '-'}` : '';
+  return `Favorite membership status: ${status.label} (${status.code})${statusAt}\nCollection remote status: ${collectionState}${multiPart}${shared}`;
 }
 
 function knowledgeEligible(task) {

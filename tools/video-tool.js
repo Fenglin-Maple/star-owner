@@ -39,7 +39,7 @@ async function main() {
   const args = parseArgs(rest);
   const outDir = path.resolve(args.out || '.');
   fs.mkdirSync(outDir, { recursive: true });
-  const videoUrl = normalizeVideoUrl(target);
+  const videoUrl = normalizeVideoUrl(target, args);
 
   if (command === 'info') return writeInfo(videoUrl, outDir, args);
   if (command === 'subtitles') return writeSubtitles(videoUrl, outDir, args);
@@ -560,6 +560,13 @@ async function getVideoInfo(videoUrl, args) {
   const apiUrl = `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`;
   const json = await fetchJson(apiUrl, args);
   const data = json.data || {};
+  const requestedPage = Number(args?.page || new URL(videoUrl).searchParams.get('p') || 0);
+  const requestedCid = String(args?.cid || '').trim();
+  const allPages = Array.isArray(data.pages) ? data.pages : [];
+  const selectedPage = requestedCid
+    ? allPages.find((page) => String(page.cid || '') === requestedCid)
+    : (requestedPage > 0 ? allPages.find((page) => Number(page.page) === requestedPage) : null);
+  if ((requestedPage > 0 || requestedCid) && !selectedPage) throw new Error(`指定的多P页面不存在：P${requestedPage || '?'} / CID ${requestedCid || '-'}`);
   return {
     bvid: data.bvid || bvid,
     aid: data.aid,
@@ -571,7 +578,9 @@ async function getVideoInfo(videoUrl, args) {
     pic: data.pic,
     duration: data.duration,
     dimension: data.dimension || null,
-    pages: data.pages || [],
+    pages: selectedPage ? [selectedPage] : allPages,
+    page: selectedPage?.page || 1,
+    cid: selectedPage?.cid || '',
     redirectUrl: data.redirect_url || '',
     rights: data.rights || {},
     stat: data.stat || {},
@@ -787,9 +796,10 @@ function parseArgs(rest) {
   return args;
 }
 
-function normalizeVideoUrl(target) {
+function normalizeVideoUrl(target, args = {}) {
   const bvid = extractBvid(target);
-  return `https://www.bilibili.com/video/${bvid}`;
+  const page = Number(args.page || 0);
+  return page > 1 ? `https://www.bilibili.com/video/${bvid}?p=${Math.floor(page)}` : `https://www.bilibili.com/video/${bvid}`;
 }
 
 function extractBvid(value) {

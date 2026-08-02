@@ -1,6 +1,6 @@
 # 星藏家 Design
 
-Version: `1.1.2`
+Version: `1.4.0`
 
 ## 1. Product Goal
 
@@ -194,7 +194,7 @@ Restoration always uses immutable `collectionId`; collection rename cannot redir
 
 ## 11. Read-Only Knowledge API
 
-The server binds only to `127.0.0.1`. Protocol `3.0` exposes:
+The server binds only to `127.0.0.1`. Protocol `3.1` exposes:
 
 ```text
 GET /api/manifest
@@ -314,15 +314,23 @@ The Bilibili WebView partition is derived from the normalized absolute project r
 
 The two current models support local ZIP import. The accepted asset name is generated only from `dependencyReleaseVersion`; the selected file must exactly match that name and the official Release SHA-256. Archive inspection rejects links, traversal, foreign runtime paths, the wrong model directory and missing probes before maintenance mode or target replacement. Import cancels and joins an in-flight automatic download for the same model, removes its `.partial`, archive, staging, backup and transaction residue, then copies the selected file into a managed temporary location. Existing healthy model files remain untouched until verified staging commits atomically, and remain available after validation failure. Package-name links and error dialogs point to the exact dependency Release. The v1.0.0 medium asset remains untouched for older applications.
 
-Version `1.1.2` keeps runtime and ASR dependencies pinned to baseline `1.0.0`. The current dependency manager exposes `large-v3-turbo` as the required default and `small` as an optional alternate. The historical `medium` package remains untouched in the v1.0.0 Release for older applications and is not exposed by the current model registry. The published Turbo asset contract is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; packaging can build it with `npm run package:model:turbo`.
+Version `1.4.0` keeps runtime and ASR dependencies pinned to baseline `1.0.0`. The current dependency manager exposes `large-v3-turbo` as the required default and `small` as an optional alternate. The historical `medium` package remains untouched in the v1.0.0 Release for older applications and is not exposed by the current model registry. The published Turbo asset contract is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; packaging can build it with `npm run package:model:turbo`. The shared-document uploader additionally requires the project-local Portable Git under `runtime/git`; it never falls back to a system Git installation or global Git configuration.
 
 Media tool subprocesses never resolve `node` through the system `PATH`. Normal source tests use `process.execPath`; the desktop application launches its bundled Electron executable with `ELECTRON_RUN_AS_NODE=1`. Python processes receive `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`, and streamed stdout/stderr use incremental UTF-8 decoders so a multibyte Chinese character split across chunks is not replaced.
 
 ## 18. Supported Video Boundary
 
-The stable workflow accepts ordinary Bilibili BV videos with exactly one page. Metadata inspection is mandatory before media download: more than one `pages` entry produces `UNSUPPORTED_VIDEO_TYPE`, cleans the current attempt, disables the task and records a skipped rather than failed Agent outcome. Inputs under Bilibili bangumi (`ep/ss/md`), cheese, festival, audio and live routes are rejected before URL-to-BV resolution. Favorite entries without a BV are retained as disabled inventory records with a visible reason. A future multi-part implementation must be developed on a separate Git branch and may merge only after per-part download, ASR, frame, cache, rollback and `?p=<page>&t=<seconds>` link tests pass.
+The ordinary single-video and batch Agent workflows accept ordinary Bilibili BV videos with exactly one page. Metadata inspection is mandatory before media download: more than one `pages` entry produces `UNSUPPORTED_VIDEO_TYPE`, cleans the current attempt, disables the task and records a skipped rather than failed Agent outcome. Inputs under Bilibili bangumi (`ep/ss/md`), cheese, festival, audio and live routes are rejected before URL-to-BV resolution. Favorite entries without a BV are retained as disabled inventory records with a visible reason. The independent “B站多P视频总结” tool now handles one standard multi-part BV parent at a time: it persists CID-based P children, limits internal concurrency, writes a deterministic parent index, supports stop/continue, refresh/append and parent deletion, and keeps completed P outputs after interruption. Multi-part and special pages remain rejected by the single-video and batch Agent entry points.
 
-## 19. Security and Reliability
+## 19. GitHub Shared Bilibili Knowledge
+
+Only completed Bilibili summary artifacts can be shared. A single-video artifact uses a stable contributor/source-collection/BVID identity; a multi-part artifact is shared as one complete parent package containing the index, P child summaries, metadata and permitted raster resources. The remote path is rooted at the contributor GitHub numeric ID and a stable source namespace, so Bilibili account and collection display-name changes do not misroute updates.
+
+The uploader validates the local task and artifact, opens GitHub in the default browser for authorization, creates or reuses the contributor Fork, creates a branch and Pull Request, and writes through the project-local Git runtime. The runtime uses an empty project-local Git config, isolated HOME and a controlled PATH. The downloader reads only the repository main branch, displays per-document freshness/status, and mounts selected documents or a complete remote collection into the local `共享` user. Mounts keep remote identity metadata, update atomically, mark remote deletions without deleting local knowledge, and remain outside task dispatch.
+
+Shared and multi-part tasks enter the existing knowledge API and RAG as read-only completed documents. RAG sees the multi-part parent/index metadata and can retrieve P children by `parentDocumentId` plus `partId`/`cid`; it must not collapse same-BVID documents from different contributors or source collections.
+
+## 20. Security and Reliability
 
 - Electron main and WebView run with sandbox boundaries and strict navigation policies.
 - Credentials require safeStorage; cookies remain local plaintext only where tools require it.
@@ -332,9 +340,9 @@ The stable workflow accepts ordinary Bilibili BV videos with exactly one page. M
 - Application shutdown and restart recovery abort active video attempts rather than resuming partial state.
 - SQLite and dependency installation use recoverable writes.
 
-## 20. Verification
+## 21. Verification
 
-`npm run verify:release` checks package/lock versions, machine-specific paths, JavaScript/Python syntax, all integration tests including local media/document tools and runtime isolation, both ASR models and npm audit. `test:runtime-node` deliberately removes the global `PATH` and verifies that the bundled Electron Node mode still executes the video tool; `test:runtime-isolation` checks controlled PATH/environment handling and project-owned child-process boundaries.
+`npm run verify:release` checks package/lock versions, machine-specific paths, JavaScript/Python syntax, all integration tests including local media/document tools, multi-part/shared knowledge, Git/Node/Python runtime isolation, both ASR models and npm audit. `test:runtime-node` deliberately removes the global `PATH` and verifies that the bundled Electron Node mode still executes the video tool; `test:runtime-isolation` checks controlled PATH/environment handling and project-owned child-process boundaries; `test:git-runtime` verifies that global Git config and external Git paths are rejected.
 
 Protocol and lifecycle gates include:
 

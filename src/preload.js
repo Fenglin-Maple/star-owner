@@ -85,6 +85,22 @@ contextBridge.exposeInMainWorld('orchestrator', {
   localDocumentStart: (payload) => ipcRenderer.invoke('local-tools:document-start', payload),
   localToolCancel: (jobId) => ipcRenderer.invoke('local-tools:cancel', jobId),
   localToolOpenOutput: (jobId) => ipcRenderer.invoke('local-tools:open-output', jobId),
+  multiPartState: () => ipcRenderer.invoke('multipart:state'),
+  multiPartInspect: (payload) => ipcRenderer.invoke('multipart:inspect', payload),
+  multiPartCreate: (payload) => ipcRenderer.invoke('multipart:create', payload),
+  multiPartRefresh: (parentId) => ipcRenderer.invoke('multipart:refresh', parentId),
+  multiPartStart: (payload) => ipcRenderer.invoke('multipart:start', payload),
+  multiPartStop: (parentId) => ipcRenderer.invoke('multipart:stop', parentId),
+  multiPartDelete: (parentId) => ipcRenderer.invoke('multipart:delete', parentId),
+  sharedState: () => ipcRenderer.invoke('shared:state'),
+  sharedOpenLogin: () => ipcRenderer.invoke('shared:open-login'),
+  sharedSetToken: (token) => ipcRenderer.invoke('shared:set-token', token),
+  sharedLogout: () => ipcRenderer.invoke('shared:logout'),
+  sharedCatalog: () => ipcRenderer.invoke('shared:catalog'),
+  sharedUpload: (payload) => ipcRenderer.invoke('shared:upload', payload),
+  sharedMount: (payload) => ipcRenderer.invoke('shared:mount', payload),
+  sharedSyncMount: (mountId) => ipcRenderer.invoke('shared:sync-mount', mountId),
+  sharedUnmount: (mountId) => ipcRenderer.invoke('shared:unmount', mountId),
   dependencyState: () => ipcRenderer.invoke('dependencies:state'),
   dependencyAcknowledge: (payload) => ipcRenderer.invoke('dependencies:acknowledge', payload),
   dependencyDownload: (packageId) => ipcRenderer.invoke('dependencies:download', packageId),
@@ -147,5 +163,15 @@ contextBridge.exposeInMainWorld('orchestrator', {
     };
     ipcRenderer.on('app:event', listener);
     return () => ipcRenderer.removeListener('app:event', listener);
+  },
+  onMultipartEvent: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on('multipart:event', listener);
+    return () => ipcRenderer.removeListener('multipart:event', listener);
+  },
+  onSharedEvent: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on('shared:event', listener);
+    return () => ipcRenderer.removeListener('shared:event', listener);
   }
 });

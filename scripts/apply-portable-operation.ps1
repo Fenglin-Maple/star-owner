@@ -92,8 +92,8 @@ function Restore-Path([string]$Relative) {
 function Apply-CoreUpdate {
   $stage = Assert-UnderRoot $StagedRoot 'Staged package'
   if (-not (Test-Path -LiteralPath (Join-Path $stage 'package.json'))) { throw 'Staged package.json is missing.' }
-  $coreDirectories = @('assets', 'src', 'templates', 'scripts', 'tools', 'packaging', 'node_modules')
-  $coreFiles = @('package.json', 'package-lock.json', 'Start-StarOwner.cmd', 'portable-manifest.json', 'README.md', 'DESIGN.md', 'DEPLOYMENT.md', 'AGENTS.md', 'CODE_REVIEW.md', 'THIRD_PARTY_NOTICES.md', 'SECURITY.md', 'runtime-requirements.txt', 'LICENSE')
+  $coreDirectories = @('assets', 'src', 'templates', 'scripts', 'tools', 'packaging', 'node_modules', 'runtime\git')
+  $coreFiles = @('package.json', 'package-lock.json', 'Start-StarOwner.cmd', 'portable-manifest.json', 'README.md', 'DESIGN.md', 'DESIGN_SHARED_KNOWLEDGE.md', 'DEPLOYMENT.md', 'AGENTS.md', 'CODE_REVIEW.md', 'THIRD_PARTY_NOTICES.md', 'SECURITY.md', 'runtime-requirements.txt', 'LICENSE')
   foreach ($item in ($coreDirectories + $coreFiles)) { Backup-Path $item }
   foreach ($item in $coreDirectories) {
     $target = Join-Path $root $item
@@ -142,7 +142,7 @@ try {
   Write-Journal 'rolling-back' $_.Exception.Message
   try {
     if ($Mode -eq 'update') {
-      foreach ($item in @('assets', 'src', 'templates', 'scripts', 'tools', 'packaging', 'node_modules', 'package.json', 'package-lock.json', 'Start-StarOwner.cmd', 'portable-manifest.json', 'README.md', 'DESIGN.md', 'DEPLOYMENT.md', 'AGENTS.md', 'CODE_REVIEW.md', 'THIRD_PARTY_NOTICES.md', 'SECURITY.md', 'runtime-requirements.txt', 'LICENSE')) { Restore-Path $item }
+      foreach ($item in @('assets', 'src', 'templates', 'scripts', 'tools', 'packaging', 'node_modules', 'runtime\git', 'package.json', 'package-lock.json', 'Start-StarOwner.cmd', 'portable-manifest.json', 'README.md', 'DESIGN.md', 'DESIGN_SHARED_KNOWLEDGE.md', 'DEPLOYMENT.md', 'AGENTS.md', 'CODE_REVIEW.md', 'THIRD_PARTY_NOTICES.md', 'SECURITY.md', 'runtime-requirements.txt', 'LICENSE')) { Restore-Path $item }
     } else { Restore-Path 'workspace' }
     Write-Result 'rolled-back' $_.Exception.Message @{ backup = $backup }
   } catch {

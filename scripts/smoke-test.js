@@ -399,7 +399,7 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   try {
     const manifestResponse = await fetch(api.url() + '/api/manifest');
     const manifest = await manifestResponse.json();
-    if (!manifestResponse.ok || manifest.protocolVersion !== '3.0' || manifest.mode !== 'knowledge-read-only' || manifest.access?.videoWorkflowApi !== false || !Array.isArray(manifest.endpoints)) throw new Error('read-only knowledge manifest failed');
+    if (!manifestResponse.ok || manifest.protocolVersion !== '3.1' || manifest.mode !== 'knowledge-read-only' || manifest.access?.videoWorkflowApi !== false || !Array.isArray(manifest.endpoints)) throw new Error('read-only knowledge manifest failed');
 
     const catalogResponse = await fetch(api.url() + '/api/knowledge/catalog');
     const catalog = await catalogResponse.json();
