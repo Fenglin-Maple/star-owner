@@ -290,7 +290,9 @@ const documents = walk(root).map((file) => {
   return {
     documentId: String(metadata.documentId || ''), documentType: String(metadata.documentType || ''), bvid: String(metadata.bvid || ''),
     title: String(metadata.title || ''), owner: String(metadata.owner || ''), collectionName: String(metadata.collectionName || ''),
-    contributorGithubId: String(metadata.contributorGithubId || metadataPath.split('/')[0] || ''),
+    userName: String(metadata.userName || ''), bilibiliUid: String(metadata.bilibiliUid || ''), remoteCollectionId: String(metadata.remoteCollectionId || ''),
+    sourceCollectionKind: String(metadata.sourceCollectionKind || ''), contributorGithubId: String(metadata.contributorGithubId || metadataPath.split('/')[0] || ''),
+    contributorGithubLogin: String(metadata.contributorGithubLogin || ''),
     updatedAt: String(metadata.updatedAt || metadata.uploadedAt || ''), metadataPath,
     documentRoot: metadataPath.slice(0, -metadataName.length)
   };

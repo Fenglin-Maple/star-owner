@@ -795,16 +795,20 @@
                   </div>
                   <div class="shared-repository-card">
                     <div class="shared-auth-intro"><strong>当前共享仓库</strong><span id="sharedRepositoryStatus">正在读取仓库配置...</span></div>
-                    <div class="shared-repository-switch"><input id="sharedRepositoryInput" placeholder="owner/repository 或完整 GitHub 链接" /><button id="sharedRepositorySave" class="secondary-button" type="button">切换并保存</button><button id="sharedRepositoryOpen" class="secondary-button compact-button" type="button">打开仓库</button></div>
+                    <div class="shared-repository-switch"><label><span>已验证并连接的仓库</span><select id="sharedRepositorySelect"><option value="">正在读取...</option></select></label><button id="sharedRepositoryOpen" class="secondary-button compact-button" type="button">打开仓库</button></div>
+                    <div class="shared-repository-connect"><input id="sharedRepositoryInput" placeholder="输入 GitHub 仓库链接或 owner/repository" /><button id="sharedRepositorySave" class="secondary-button" type="button">检测并连接</button></div>
                     <details class="shared-repository-create"><summary>创建我自己的共享文档仓库</summary><div><label><span>公开仓库名称</span><input id="sharedRepositoryCreateName" value="star-owner-shared-knowledge" /></label><button id="sharedRepositoryCreate" class="primary-button" type="button">一键创建并初始化</button><small>将创建公开仓库，并预置 README、贡献规范、目录校验与目录索引 GitHub Actions。</small></div></details>
                   </div>
+                  <div id="sharedOperationProgress" class="shared-operation-progress" hidden aria-live="polite"><div class="shared-operation-head"><strong id="sharedOperationMessage">正在执行共享操作...</strong><span id="sharedOperationCount"></span></div><div class="local-progress"><span id="sharedOperationBar"></span></div><div id="sharedOperationPercent" class="shared-operation-percent">0%</div></div>
                   <div class="outside-split-layout shared-layout">
                     <div class="outside-pane shared-download-pane">
                       <div class="outside-pane-title"><span>01 · 下载与挂载</span><small>远程目录 → 本地共享用户</small></div>
-                      <div class="shared-toolbar"><button id="sharedCatalog" class="secondary-button" type="button">读取远程目录</button><input id="sharedFilter" placeholder="按标题、作者、BV、收藏夹筛选" /><select id="sharedRemotePrefix"><option value="">选择远程收藏夹目录（可选）</option></select></div>
+                      <div class="shared-catalog-actions"><button id="sharedCatalog" class="secondary-button" type="button">读取远程目录</button><button id="sharedMountFiltered" class="primary-button" type="button">挂载筛选结果</button><span id="sharedCatalogResultCount">尚未读取目录</span></div>
+                      <div class="shared-catalog-filter-grid"><label><span>GitHub 用户</span><input id="sharedGithubFilter" list="sharedGithubOptions" placeholder="全部贡献者，可输入搜索" /><datalist id="sharedGithubOptions"></datalist></label><label><span>哔哩哔哩用户</span><input id="sharedBilibiliFilter" list="sharedBilibiliOptions" placeholder="全部B站用户，可输入搜索" /><datalist id="sharedBilibiliOptions"></datalist></label><label><span>视频名称</span><input id="sharedVideoFilter" list="sharedVideoOptions" placeholder="全部视频，可输入搜索" /><datalist id="sharedVideoOptions"></datalist></label></div>
                       <div id="sharedCatalogList" class="shared-catalog-list"><div class="empty-state">尚未读取远程目录。</div></div>
-                      <div class="shared-mount-row"><label><span>挂载到共享收藏夹</span><select id="sharedCollection"></select></label><label><span>新收藏夹名称</span><input id="sharedCollectionName" placeholder="例如：公开课程" /></label><button id="sharedMount" class="primary-button" type="button">挂载选中</button></div>
-                      <div class="outside-subpanel-title"><strong>本地共享挂载</strong><button id="sharedSyncAll" class="secondary-button compact-button" type="button">同步全部</button></div>
+                      <div class="shared-catalog-resize-note">拖动列表右下角可调整目录高度。勾选文档后，可挂载到下方指定的“共享”收藏夹。</div>
+                      <div class="shared-mount-row"><label><span>挂载到共享收藏夹</span><select id="sharedCollection"></select></label><label><span>新收藏夹名称</span><input id="sharedCollectionName" placeholder="例如：公开课程" /></label><button id="sharedMount" class="primary-button" type="button">挂载勾选文档</button></div>
+                      <div class="outside-subpanel-title shared-local-mount-title"><strong>本地共享挂载</strong><div><button id="sharedMountSelectAll" class="secondary-button compact-button" type="button">全选挂载</button><button id="sharedSyncSelected" class="secondary-button compact-button" type="button">同步选中</button></div></div>
                       <div id="sharedMountList" class="outside-record-list"><div class="empty-state">还没有共享挂载。</div></div>
                     </div>
                     <div class="outside-pane shared-upload-pane">

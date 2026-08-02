@@ -35,9 +35,12 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
 
   const requests = [];
   const puts = [];
+  const sharedEvents = [];
   const remoteRoot = '123456/bilibili-远程用户/远程收藏夹/remote-document';
   const remoteMeta = { schemaVersion: 2, documentId: 'remote-document', sourceType: 'bilibili-video-summary', bvid: 'BVREMOTE001', title: '远程共享视频', owner: '远程作者', collectionName: '远程收藏夹', parentDocumentId: '', partId: '', uploadedAt: '2026-08-01T00:00:00.000Z', completedAt: '2026-07-31T00:00:00.000Z' };
+  const repositoryMarker = (repository = 'Fenglin-Maple/Blibili-Markdowns', defaultBranch = 'main') => Buffer.from(`${JSON.stringify({ schemaVersion: 1, type: 'star-owner-shared-knowledge', repository, defaultBranch, capabilities: ['bilibili-summary', 'single-video-summary', 'multipart-summary', 'catalog-v1'] }, null, 2)}\n`, 'utf8');
   const remoteFiles = new Map([
+    ['_star-owner-repository.json', repositoryMarker()],
     [`${remoteRoot}/${DOCUMENT_META_FILE}`, Buffer.from(`${JSON.stringify(remoteMeta)}\n`, 'utf8')],
     [`${remoteRoot}/summary.md`, Buffer.from('# 远程共享视频\n', 'utf8')],
     [`${remoteRoot}/cover.png`, Buffer.from('89504e470d0a1a0a', 'hex')]
@@ -70,7 +73,8 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
     encryptSecret: (value) => ({ mode: 'test', value }),
     decryptSecret: (secret) => secret.value,
     openExternal: async () => {},
-    request
+    request,
+    emit: (event) => sharedEvents.push(event)
   });
 
   await manager.setToken('test-token');
@@ -124,6 +128,8 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   assert(puts.some((item) => item.remotePath.endsWith('summary.md')), '共享上传缺少 Markdown');
   const uploadedSummary = puts.find((item) => item.remotePath.endsWith('summary.md'));
   assert(Buffer.from(uploadedSummary.body.content, 'base64').toString('utf8').includes('最终总结'), '共享上传把过程草稿当成了最终正文');
+  const uploadedMetadata = puts.find((item) => item.remotePath.endsWith(DOCUMENT_META_FILE));
+  assert.strictEqual(JSON.parse(Buffer.from(uploadedMetadata.body.content, 'base64').toString('utf8')).contributorGithubLogin, 'alice', '共享元数据没有保存可读的 GitHub 用户名');
   assert(!puts.some((item) => item.remotePath.endsWith('video.mp4')), '共享上传错误包含原始视频');
   assert(!puts.some((item) => /agent-draft|\/asr\/|\/subtitles\/|\/comments\//i.test(item.remotePath)), '共享上传错误包含过程缓存');
   assert(puts.every((item) => /^123456\/(?:bilibili|single|multipart)\/col-[a-f0-9]+\//.test(item.remotePath)), '共享目录没有使用稳定来源收藏夹命名空间');
@@ -134,7 +140,11 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
     if (endpoint.includes('/git/ref/heads/')) return { object: { sha: 'owner-base-sha' } };
     if (options.method === 'POST' && endpoint.endsWith('/git/refs')) return { ref: options.body.ref };
     if (options.method === 'PUT' && endpoint.includes('/contents/')) return { content: { path: decodeContentPath(endpoint) } };
-    if (endpoint.includes('/contents/')) { const error = new Error('not found'); error.status = 404; throw error; }
+    if (endpoint.includes('/contents/')) {
+      const remotePath = decodeContentPath(endpoint);
+      if (remotePath === '_star-owner-repository.json') return { content: repositoryMarker().toString('base64'), encoding: 'base64', sha: 'owner-marker' };
+      const error = new Error('not found'); error.status = 404; throw error;
+    }
     if (options.method === 'POST' && endpoint.endsWith('/pulls')) { ownerPullRequest = options.body; return { number: 8, html_url: 'https://github.com/Fenglin-Maple/Blibili-Markdowns/pull/8' }; }
     throw new Error(`unhandled owner endpoint: ${endpoint}`);
   };
@@ -167,6 +177,8 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
 
   const repositoryStore = await Store.open(path.join(root, 'repository-settings.sqlite'));
   const initializedFiles = [];
+  const initializedContents = new Map();
+  const repositoryEvents = [];
   const repositoryManager = new SharedKnowledgeManager({
     store: repositoryStore,
     encryptSecret: (value) => ({ mode: 'test', value }),
@@ -174,21 +186,37 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
     request: async (endpoint, options = {}) => {
       if (endpoint === '/user') return { login: 'repo-owner', id: 778899 };
       if (endpoint === '/repos/example/shared-docs') return { name: 'shared-docs', default_branch: 'trunk', private: false, html_url: 'https://github.com/example/shared-docs', owner: { login: 'example', id: 112233 } };
+      if (endpoint === '/repos/example/not-star-owner') return { name: 'not-star-owner', default_branch: 'main', private: false, html_url: 'https://github.com/example/not-star-owner', owner: { login: 'example', id: 112233 } };
       if (endpoint === '/user/repos' && options.method === 'POST') return { name: options.body.name, default_branch: 'main', private: false, html_url: `https://github.com/repo-owner/${options.body.name}`, owner: { login: 'repo-owner', id: 778899 } };
+      if (endpoint.includes('/repos/example/shared-docs/contents/')) {
+        const remotePath = decodeContentPath(endpoint);
+        if (remotePath === '_star-owner-repository.json') return { content: repositoryMarker('example/shared-docs', 'trunk').toString('base64'), encoding: 'base64', sha: 'example-marker' };
+        const error = new Error('not found'); error.status = 404; throw error;
+      }
+      if (endpoint.includes('/repos/example/not-star-owner/contents/')) { const error = new Error('not found'); error.status = 404; throw error; }
       if (endpoint.includes('/repos/repo-owner/star-owner-shared/contents/')) {
-        if (options.method === 'PUT') { initializedFiles.push(decodeContentPath(endpoint)); return { content: { path: decodeContentPath(endpoint) } }; }
+        const remotePath = decodeContentPath(endpoint);
+        if (options.method === 'PUT') { initializedFiles.push(remotePath); initializedContents.set(remotePath, Buffer.from(options.body.content, 'base64')); return { content: { path: remotePath } }; }
+        if (initializedContents.has(remotePath)) return { content: initializedContents.get(remotePath).toString('base64'), encoding: 'base64', sha: `initialized-${remotePath}` };
         const error = new Error('not found'); error.status = 404; throw error;
       }
       throw new Error(`unexpected repository endpoint: ${endpoint}`);
     },
-    gitRuntime: { state: () => ({ available: true, isolated: true, path: 'test-git' }) }
+    gitRuntime: { state: () => ({ available: true, isolated: true, path: 'test-git' }) },
+    emit: (event) => repositoryEvents.push(event)
   });
   const switched = await repositoryManager.setRepository({ repository: 'https://github.com/example/shared-docs' });
   assert.strictEqual(switched.repository.branch, 'trunk', '切换共享仓库没有读取远程默认分支');
+  await assert.rejects(() => repositoryManager.setRepository({ repository: 'example/not-star-owner' }), /不是星藏家共享文档仓库/);
+  assert.strictEqual(repositoryManager.repository.name, 'shared-docs', '非规范仓库校验失败后仍覆盖了当前共享仓库');
+  assert(!repositoryManager.state().repositories.some((item) => item.name === 'not-star-owner'), '非规范仓库被写入已验证仓库下拉注册表');
   await repositoryManager.setToken('repo-token');
   const createdRepository = await repositoryManager.createRepository({ name: 'star-owner-shared' });
   assert.strictEqual(createdRepository.repository.ownerId, '778899', '个人共享仓库没有绑定当前 GitHub 数字 ID');
   assert(initializedFiles.includes('README.md') && initializedFiles.includes('.github/workflows/validate-shared-docs.yml') && initializedFiles.includes('scripts/build-catalog.mjs'), '个人共享仓库缺少 README、GitHub Action 或目录脚本');
+  assert(repositoryManager.state().repositories.some((item) => item.owner === 'repo-owner' && item.name === 'star-owner-shared' && item.verified), '验证通过的共享仓库没有加入仓库下拉注册表');
+  assert(repositoryEvents.some((event) => event.type === 'shared-operation-progress' && event.operation?.type === 'repository-create' && event.operation.progress > 0), '一键建仓没有发出可显示的进度事件');
+  assert(repositoryEvents.some((event) => event.type === 'shared-operation-finished' && event.operation?.status === 'completed'), '共享仓库操作没有发出完成事件');
   const templateRoot = path.join(root, 'template-check');
   for (const file of sharedRepositoryTemplate({ owner: 'repo-owner', name: 'star-owner-shared' })) {
     const target = path.join(templateRoot, file.relative);
@@ -237,6 +265,7 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
       }
       if (endpoint.includes('/contents/')) {
         privateContentAuthorized = options.token === 'private-token';
+        if (decodeContentPath(endpoint) === '_star-owner-repository.json') return { content: repositoryMarker('private-user/private-shared').toString('base64'), encoding: 'base64', sha: 'private-marker' };
         return { content: Buffer.from(`${JSON.stringify(privateMetadata)}\n`, 'utf8').toString('base64'), encoding: 'base64', sha: 'private-meta' };
       }
       throw new Error(`unexpected private repository endpoint: ${endpoint}`);
@@ -275,6 +304,9 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   const secondDocument = { ...secondMeta, path: `${secondRoot}/${DOCUMENT_META_FILE}`, metadataPath: `${secondRoot}/${DOCUMENT_META_FILE}`, remoteSha: 'sha-second' };
   await manager.syncMount(exactMount.id, { documents: [catalog.documents[0], secondDocument] });
   assert.strictEqual(store.listTasks({ collectionId: exactMount.collectionId }).filter((item) => item.sourceType === 'shared-bilibili').length, 1, 'single-document mount expanded to a sibling document');
+  const batchSync = await manager.syncMounts([exactMount.id]);
+  assert.strictEqual(batchSync.synced, 1, '选中挂载批量同步没有返回正确数量');
+  assert(sharedEvents.some((event) => event.type === 'shared-operation-progress' && event.operation?.type === 'mount-sync-batch'), '选中挂载批量同步没有发出进度事件');
 
   const multiRoot = '123456/multipart/doc-multi';
   const multiMeta = {

@@ -78,7 +78,7 @@ let backendReady = false;
 let toolHealth = [];
 let pathSafety = null;
 let bootstrapStarted = false;
-const VOLATILE_ACTIVITY_TYPES = new Set(['collection-sync-progress', 'asr-progress', 'asr-service-log', 'video-cache-job-updated', 'video-cache-queue-updated', 'local-toolbox-job-created', 'local-toolbox-job-updated', 'local-toolbox-queue-updated', 'shared-upload-progress']);
+const VOLATILE_ACTIVITY_TYPES = new Set(['collection-sync-progress', 'asr-progress', 'asr-service-log', 'video-cache-job-updated', 'video-cache-queue-updated', 'local-toolbox-job-created', 'local-toolbox-job-updated', 'local-toolbox-queue-updated', 'shared-upload-progress', 'shared-operation-progress']);
 const pendingRagApprovals = new Map();
 const taskDisplayCoverCache = new Map();
 let bootstrapState = {
@@ -749,6 +749,11 @@ ipcMain.handle('shared:state', async () => {
   return sharedKnowledgeManager.state();
 });
 
+ipcMain.handle('shared:operation-state', async () => {
+  assertBackendReady();
+  return sharedKnowledgeManager.operationState();
+});
+
 ipcMain.handle('shared:open-login', async () => {
   assertBackendReady();
   return sharedKnowledgeManager.openLogin();
@@ -774,14 +779,19 @@ ipcMain.handle('shared:set-repository', async (_event, payload = {}) => {
   return sharedKnowledgeManager.setRepository(payload);
 });
 
+ipcMain.handle('shared:check-repository', async () => {
+  assertBackendReady();
+  return sharedKnowledgeManager.checkRepository();
+});
+
 ipcMain.handle('shared:create-repository', async (_event, payload = {}) => {
   assertBackendReady();
   return sharedKnowledgeManager.createRepository(payload);
 });
 
-ipcMain.handle('shared:catalog', async () => {
+ipcMain.handle('shared:catalog', async (_event, payload = {}) => {
   assertBackendReady();
-  return sharedKnowledgeManager.remoteCatalog();
+  return sharedKnowledgeManager.remoteCatalog(null, payload);
 });
 
 ipcMain.handle('shared:upload', async (_event, payload = {}) => {
@@ -802,6 +812,11 @@ ipcMain.handle('shared:mount', async (_event, payload = {}) => {
 ipcMain.handle('shared:sync-mount', async (_event, mountId) => {
   assertBackendReady();
   return sharedKnowledgeManager.syncMount(mountId);
+});
+
+ipcMain.handle('shared:sync-mounts', async (_event, mountIds = []) => {
+  assertBackendReady();
+  return sharedKnowledgeManager.syncMounts(mountIds);
 });
 
 ipcMain.handle('shared:unmount', async (_event, mountId) => {

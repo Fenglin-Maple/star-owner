@@ -16,6 +16,10 @@ const MAX_SHARED_DOCUMENT_BYTES = 100 * 1024 * 1024;
 const MAX_SHARED_PR_DOCUMENTS = 1000;
 const MAX_SHARED_PR_BYTES = 1024 * 1024 * 1024;
 const MAX_REMOTE_METADATA_BYTES = 512 * 1024;
+const REPOSITORY_MARKER_FILE = '_star-owner-repository.json';
+const REPOSITORY_SCHEMA_VERSION = 1;
+const REQUIRED_REPOSITORY_CAPABILITIES = Object.freeze(['bilibili-summary', 'single-video-summary', 'multipart-summary', 'catalog-v1']);
+const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;
 const APPLICATION_VERSION = require('../../package.json').version;
 
 class SharedKnowledgeManager {
@@ -29,8 +33,13 @@ class SharedKnowledgeManager {
     this.requestOverride = request;
     this.gitRuntime = gitRuntime || new GitRuntime({ projectRoot: path.join(__dirname, '..', '..') });
     this.activeUpload = null;
+    this.activeOperation = null;
     this.lastUploadEmission = 0;
+    this.lastOperationEmission = 0;
+    this.catalogCache = new Map();
+    this.githubLoginCache = new Map();
     this.ensureSharedUser();
+    this.ensureRepositoryRegistry();
   }
 
   get repository() {
@@ -43,6 +52,8 @@ class SharedKnowledgeManager {
     const settings = this.store.get('settings', 'sharedGithub') || {};
     return {
       repository: { ...this.repository },
+      repositories: this.registeredRepositories(),
+      repositoryHealth: this.repositoryHealth(this.repository),
       authenticated: Boolean(settings.encryptedToken || process.env.STAR_OWNER_GITHUB_TOKEN),
       login: String(settings.login || ''),
       userId: String(settings.userId || ''),
@@ -52,57 +63,107 @@ class SharedKnowledgeManager {
       documents: this.store.list('tasks').filter((task) => task.sourceType === 'shared-bilibili' || task.sourceType === 'shared-bilibili-multipart-summary').map(publicSharedTask),
       git: this.gitRuntime.state(),
       upload: this.activeUpload ? publicUpload(this.activeUpload) : null,
+      operation: this.activeOperation ? publicOperation(this.activeOperation) : null,
       limits: { maxUploadDocuments: MAX_SHARED_PR_DOCUMENTS, maxUploadBytes: MAX_SHARED_PR_BYTES }
     };
   }
 
+  operationState() { return this.activeOperation ? publicOperation(this.activeOperation) : null; }
+
   async setRepository(input = {}) {
-    this.assertRepositoryChangeAllowed();
-    const requested = parseRepositoryInput(input.repository || input.url || input.fullName || input, input.branch);
-    const token = this.optionalAuthToken();
-    const inspected = await this.inspectRepository(requested, token);
-    this.saveRepository(inspected);
-    this.emitState('shared-repository-changed', { repository: inspected });
-    return { repository: inspected, role: this.repositoryRole(inspected, this.state()) };
+    return this.runOperation({ type: 'repository-link', message: '正在检查 GitHub 仓库...' }, async () => {
+      this.assertRepositoryChangeAllowed();
+      const requested = parseRepositoryInput(input.repository || input.url || input.fullName || input, input.branch);
+      const token = this.optionalAuthToken();
+      this.reportOperation({ stage: 'repository', progress: 0.18, message: `正在确认仓库 ${requested.owner}/${requested.name} 是否存在...` }, true);
+      let inspected;
+      try {
+        inspected = await this.inspectRepository(requested, token);
+        this.reportOperation({ stage: 'contract', progress: 0.58, message: `正在验证 ${REPOSITORY_MARKER_FILE} 和共享能力...` }, true);
+        const contract = await this.validateRepositoryContract(inspected, token);
+        this.saveVerifiedRepository(inspected, contract);
+        this.catalogCache.delete(repositoryIdentity(inspected));
+        this.reportOperation({ stage: 'saved', progress: 0.96, message: '仓库符合星藏家共享规范，正在保存连接...' }, true);
+        this.emitState('shared-repository-changed', { repository: inspected });
+        return { repository: inspected, contract, role: this.repositoryRole(inspected, this.state()) };
+      } catch (error) {
+        this.updateRepositoryHealth(inspected || requested, 'unavailable', error);
+        throw error;
+      }
+    });
+  }
+
+  async checkRepository() {
+    return this.runOperation({ type: 'repository-check', message: '正在检查已连接的共享仓库...' }, async () => {
+      const requested = this.repository;
+      const token = this.optionalAuthToken();
+      let inspected;
+      try {
+        this.reportOperation({ stage: 'repository', progress: 0.22, message: `正在检查 ${requested.owner}/${requested.name} 是否存在...` }, true);
+        inspected = await this.inspectRepository(requested, token);
+        this.reportOperation({ stage: 'contract', progress: 0.62, message: '正在核对共享仓库规范标记...' }, true);
+        const contract = await this.validateRepositoryContract(inspected, token);
+        this.saveVerifiedRepository(inspected, contract);
+        this.reportOperation({ stage: 'available', progress: 0.96, message: '共享仓库连接正常。' }, true);
+        return { available: true, repository: inspected, contract };
+      } catch (error) {
+        this.updateRepositoryHealth(inspected || requested, 'unavailable', error);
+        throw error;
+      }
+    });
   }
 
   async createRepository(input = {}) {
-    this.assertRepositoryChangeAllowed();
-    const auth = await this.requireAuth();
-    const name = validateRepositoryName(input.name || 'star-owner-shared-knowledge');
-    const description = String(input.description || '由星藏家管理的 B站视频总结共享文档仓库').trim().slice(0, 350);
-    let created;
-    try {
-      created = await this.githubRequest('/user/repos', {
-        token: auth.token,
-        method: 'POST',
-        body: { name, description, private: false, auto_init: true, has_issues: true, has_projects: false, has_wiki: false }
-      });
-    } catch (error) {
-      if (error.status === 422) throw new Error(`GitHub 账户中可能已经存在名为 ${name} 的仓库，请换一个名称，或在“切换共享仓库”中直接保存该仓库。`);
-      throw error;
-    }
-    const repository = repositoryFromApi(created, { owner: auth.user.login, name, branch: 'main' });
-    if (String(repository.ownerId || '') !== String(auth.user.id || '')) throw new Error('GitHub 返回的仓库主人与当前授权账户不一致，已停止初始化。');
-    const files = sharedRepositoryTemplate(repository);
-    try {
-      for (let index = 0; index < files.length; index += 1) {
-        const file = files[index];
-        const existing = await this.findRepositoryFile(repository, file.relative, auth.token);
-        const body = {
-          message: `chore: initialize Star Owner sharing (${index + 1}/${files.length})`,
-          content: file.buffer.toString('base64'),
-          branch: repository.branch
-        };
-        if (existing?.sha) body.sha = existing.sha;
-        await this.githubRequest(`/repos/${repository.owner}/${repository.name}/contents/${encodePath(file.relative)}`, { token: auth.token, method: 'PUT', body });
+    return this.runOperation({ type: 'repository-create', message: '正在创建 GitHub 共享仓库...' }, async () => {
+      this.assertRepositoryChangeAllowed();
+      const auth = await this.requireAuth();
+      const name = validateRepositoryName(input.name || 'star-owner-shared-knowledge');
+      const description = String(input.description || '由星藏家管理的 B站视频总结共享文档仓库').trim().slice(0, 350);
+      let created;
+      this.reportOperation({ stage: 'creating', progress: 0.05, message: `正在创建公开仓库 ${auth.user.login}/${name}...` }, true);
+      try {
+        created = await this.githubRequest('/user/repos', {
+          token: auth.token,
+          method: 'POST',
+          body: { name, description, private: false, auto_init: true, has_issues: true, has_projects: false, has_wiki: false }
+        });
+      } catch (error) {
+        if (error.status === 422) throw new Error(`GitHub 账户中可能已经存在名为 ${name} 的仓库，请换一个名称，或在“连接共享仓库”中验证该仓库。`);
+        throw error;
       }
-    } catch (error) {
-      throw new Error(`GitHub 仓库已创建，但预置配置未能全部写入：${error.message || String(error)}。仓库地址：${repository.htmlUrl}`);
-    }
-    this.saveRepository(repository);
-    this.emitState('shared-repository-created', { repository });
-    return { repository, created: true, initializedFiles: files.length };
+      const repository = repositoryFromApi(created, { owner: auth.user.login, name, branch: 'main' });
+      if (String(repository.ownerId || '') !== String(auth.user.id || '')) throw new Error('GitHub 返回的仓库主人与当前授权账户不一致，已停止初始化。');
+      const files = sharedRepositoryTemplate(repository);
+      try {
+        for (let index = 0; index < files.length; index += 1) {
+          const file = files[index];
+          this.reportOperation({
+            stage: 'initializing',
+            progress: 0.12 + (index / Math.max(1, files.length)) * 0.72,
+            current: index,
+            total: files.length,
+            message: `正在写入初始化文件 ${index + 1} / ${files.length}：${file.relative}`
+          });
+          const existing = await this.findRepositoryFile(repository, file.relative, auth.token);
+          const body = {
+            message: `chore: initialize Star Owner sharing (${index + 1}/${files.length})`,
+            content: file.buffer.toString('base64'),
+            branch: repository.branch
+          };
+          if (existing?.sha) body.sha = existing.sha;
+          await this.githubRequest(`/repos/${repository.owner}/${repository.name}/contents/${encodePath(file.relative)}`, { token: auth.token, method: 'PUT', body });
+        }
+      } catch (error) {
+        throw new Error(`GitHub 仓库已创建，但预置配置未能全部写入：${error.message || String(error)}。仓库地址：${repository.htmlUrl}`);
+      }
+      this.reportOperation({ stage: 'validating', progress: 0.88, current: files.length, total: files.length, message: '初始化完成，正在复核共享仓库规范...' }, true);
+      const contract = await this.validateRepositoryContract(repository, auth.token);
+      this.saveVerifiedRepository(repository, contract);
+      this.catalogCache.delete(repositoryIdentity(repository));
+      this.reportOperation({ stage: 'ready', progress: 0.97, message: '仓库已创建并通过规范校验。' }, true);
+      this.emitState('shared-repository-created', { repository });
+      return { repository, contract, created: true, initializedFiles: files.length };
+    });
   }
 
   cancelUpload() {
@@ -158,20 +219,48 @@ class SharedKnowledgeManager {
     return { authenticated: false, cleared: true, scope: 'application-only', gitCredential, message: '已清除星藏家应用数据库与内置 Git 私有存储中的 GitHub 授权，不会修改系统 Git、系统凭据库或用户全局 Git 配置。' };
   }
 
-  async remoteCatalog(repositoryInput = null) {
+  async remoteCatalog(repositoryInput = null, options = {}) {
     const repository = normalizeRepository(repositoryInput || this.repository);
+    return this.runOperation({ type: 'catalog-read', message: `正在读取 ${repository.owner}/${repository.name} 的远程目录...` }, async () => (
+      this.readRemoteCatalog(repository, { force: options.force !== false, progressStart: 0.03, progressEnd: 0.97 })
+    ));
+  }
+
+  async readRemoteCatalog(repositoryInput = null, options = {}) {
+    const repository = normalizeRepository(repositoryInput || this.repository);
+    this.assertVerifiedRepository(repository);
+    const cacheKey = repositoryIdentity(repository);
+    const cached = this.catalogCache.get(cacheKey);
+    if (!options.force && cached && Date.now() - cached.cachedAt < CATALOG_CACHE_TTL_MS) {
+      this.reportOperation({ stage: 'catalog-cache', progress: progressWithin(options, 0.96), message: `正在使用刚刚读取的远程目录（${cached.value.total} 篇）...` }, true);
+      return cached.value;
+    }
     const token = this.optionalAuthToken();
+    this.reportOperation({ stage: 'catalog-tree', progress: progressWithin(options, 0.08), message: '正在读取 GitHub 仓库文件树...' }, true);
     let tree;
     try {
       tree = await this.githubRequest(`/repos/${repository.owner}/${repository.name}/git/trees/${encodeURIComponent(repository.branch)}?recursive=1`, { token });
     } catch (error) {
-      if (error.status === 409) return { repository: { ...repository }, branchSha: '', total: 0, documents: [], empty: true };
+      if (error.status === 409) {
+        const empty = { repository: { ...repository }, branchSha: '', total: 0, documents: [], empty: true };
+        this.catalogCache.set(cacheKey, { cachedAt: Date.now(), value: empty });
+        return empty;
+      }
       throw error;
     }
     if (tree.truncated) throw new Error('共享仓库目录过大，GitHub 返回了不完整目录；请先缩小仓库后再读取。');
     const entries = Array.isArray(tree.tree) ? tree.tree : [];
+    const metadataEntries = entries.filter((item) => item.type === 'blob' && item.path.endsWith(`/${DOCUMENT_META_FILE}`));
     const result = [];
-    for (const entry of entries.filter((item) => item.type === 'blob' && item.path.endsWith(`/${DOCUMENT_META_FILE}`))) {
+    for (let index = 0; index < metadataEntries.length; index += 1) {
+      const entry = metadataEntries[index];
+      this.reportOperation({
+        stage: 'catalog-metadata',
+        progress: progressWithin(options, 0.14 + ((index + 1) / Math.max(1, metadataEntries.length)) * 0.66),
+        current: index + 1,
+        total: metadataEntries.length,
+        message: `正在读取远程文档信息 ${index + 1} / ${metadataEntries.length}...`
+      });
       try {
         assertRemotePath(entry.path);
         const metadata = await this.readRemoteFile(entry.path, MAX_REMOTE_METADATA_BYTES, repository, token);
@@ -181,8 +270,13 @@ class SharedKnowledgeManager {
         result.push({ path: entry.path, metadataPath: entry.path, remoteSha: entry.sha, invalid: true, error: error.message || String(error) });
       }
     }
+    this.reportOperation({ stage: 'catalog-users', progress: progressWithin(options, 0.84), message: '正在整理贡献者与收藏夹目录...' }, true);
+    await this.resolveCatalogGithubLogins(result, token);
     result.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')) || String(a.path).localeCompare(String(b.path)));
-    return { repository: { ...repository }, branchSha: tree.sha || '', total: result.length, documents: result };
+    const value = { repository: { ...repository }, branchSha: tree.sha || '', total: result.length, documents: result };
+    this.catalogCache.set(cacheKey, { cachedAt: Date.now(), value });
+    this.reportOperation({ stage: 'catalog-ready', progress: progressWithin(options, 0.98), current: result.length, total: result.length, message: `远程目录读取完成，共 ${result.length} 篇文档。` }, true);
+    return value;
   }
 
   async upload(input = {}) {
@@ -219,7 +313,7 @@ class SharedKnowledgeManager {
       let totalBytes = 0;
       for (let index = 0; index < tasks.length; index += 1) {
         throwIfAborted(controller.signal);
-        const document = this.prepareDocument({ ...tasks[index], githubUserId });
+        const document = this.prepareDocument({ ...tasks[index], githubUserId, githubUserLogin: auth.user.login });
         if (documentIds.has(document.documentId)) throw new Error(`选中的文档存在重复共享身份：${document.documentId}。请保留同一来源的一条记录。`);
         documentIds.add(document.documentId);
         documents.push(document);
@@ -229,6 +323,7 @@ class SharedKnowledgeManager {
       }
 
       const repository = await this.inspectRepository(this.repository, auth.token, controller.signal);
+      await this.validateRepositoryContract(repository, auth.token, controller.signal);
       const ownerMode = String(repository.ownerId || '') === String(auth.user.id || '');
       this.reportUpload({ stage: 'repository', progress: 0.27, current: tasks.length, message: ownerMode ? '已确认当前账户是仓库主人，正在创建临时分支...' : '已确认目标为他人仓库，正在准备 Fork 和 Pull Request...' }, true);
       const base = await this.githubRequest(`/repos/${repository.owner}/${repository.name}/git/ref/heads/${encodeURIComponent(repository.branch)}`, { token: auth.token, signal: controller.signal });
@@ -310,9 +405,13 @@ class SharedKnowledgeManager {
   }
 
   async mount(input = {}) {
+    return this.runOperation({ type: 'mount', message: '正在准备挂载远程共享文档...' }, async () => this.performMount(input));
+  }
+
+  async performMount(input = {}) {
     // The renderer may only submit paths/prefixes. Re-read the authoritative catalog
     // here so stale or forged renderer metadata cannot make the app fetch arbitrary files.
-    const catalog = await this.remoteCatalog();
+    const catalog = await this.readRemoteCatalog(this.repository, { force: false, progressStart: 0.03, progressEnd: 0.25 });
     const repository = normalizeRepository(catalog.repository || this.repository);
     const prefix = normalizeRemotePrefix(input.remotePrefix || '');
     const requested = !prefix && Array.isArray(input.paths) && input.paths.length
@@ -331,7 +430,7 @@ class SharedKnowledgeManager {
         && sameRepository(item.repository || DEFAULT_REPOSITORY, repository)
         && String(item.remotePrefix || '') === prefix);
       if (existing) {
-        await this.syncMount(existing.id, catalog);
+        await this.syncMountInternal(existing.id, catalog, { progressStart: 0.26, progressEnd: 0.96 });
         return publicMount(this.store.get('sharedMounts', existing.id));
       }
     } else {
@@ -357,7 +456,7 @@ class SharedKnowledgeManager {
     this.store.set('sharedMounts', mount.id, mount);
     this.store.commit();
     try {
-      await this.syncMount(mount.id, catalog);
+      await this.syncMountInternal(mount.id, catalog, { progressStart: 0.26, progressEnd: 0.96 });
     } catch (error) {
       this.rollbackNewMount(mount, collection, createdCollection);
       throw error;
@@ -382,10 +481,48 @@ class SharedKnowledgeManager {
   }
 
   async syncMount(mountId, catalogInput = null) {
+    return this.runOperation({ type: 'mount-sync', message: '正在同步共享挂载...' }, async () => (
+      this.syncMountInternal(mountId, catalogInput, { progressStart: 0.03, progressEnd: 0.97 })
+    ));
+  }
+
+  async syncMounts(mountIds = []) {
+    const ids = [...new Set((Array.isArray(mountIds) ? mountIds : []).map(String).filter(Boolean))];
+    if (!ids.length) throw new Error('请至少选择一个需要同步的本地共享挂载。');
+    return this.runOperation({ type: 'mount-sync-batch', message: `正在同步 ${ids.length} 个共享挂载...` }, async () => {
+      const mounts = ids.map((id) => this.store.get('sharedMounts', id));
+      if (mounts.some((mount) => !mount)) throw new Error('选中的共享挂载中有记录已经不存在，请刷新列表后重试。');
+      const catalogs = new Map();
+      const repositories = [];
+      for (const mount of mounts) {
+        const repository = normalizeRepository(mount.repository || DEFAULT_REPOSITORY);
+        const key = repositoryIdentity(repository);
+        if (!repositories.some((item) => item.key === key)) repositories.push({ key, repository });
+      }
+      for (let index = 0; index < repositories.length; index += 1) {
+        const item = repositories[index];
+        const start = 0.03 + (index / Math.max(1, repositories.length)) * 0.25;
+        const end = 0.03 + ((index + 1) / Math.max(1, repositories.length)) * 0.25;
+        catalogs.set(item.key, await this.readRemoteCatalog(item.repository, { force: true, progressStart: start, progressEnd: end }));
+      }
+      const output = [];
+      for (let index = 0; index < mounts.length; index += 1) {
+        const mount = mounts[index];
+        const repository = normalizeRepository(mount.repository || DEFAULT_REPOSITORY);
+        const start = 0.3 + (index / Math.max(1, mounts.length)) * 0.66;
+        const end = 0.3 + ((index + 1) / Math.max(1, mounts.length)) * 0.66;
+        this.reportOperation({ stage: 'mount-sync', progress: start, current: index, total: mounts.length, message: `正在同步挂载 ${index + 1} / ${mounts.length}：${mount.collectionName || mount.id}` }, true);
+        output.push(await this.syncMountInternal(mount.id, catalogs.get(repositoryIdentity(repository)), { progressStart: start, progressEnd: end }));
+      }
+      return { synced: output.length, mounts: output };
+    });
+  }
+
+  async syncMountInternal(mountId, catalogInput = null, progressOptions = {}) {
     const mount = this.store.get('sharedMounts', String(mountId || ''));
     if (!mount) throw new Error('共享挂载不存在。');
     const repository = normalizeRepository(mount.repository || DEFAULT_REPOSITORY);
-    const catalog = catalogInput || await this.remoteCatalog(repository);
+    const catalog = catalogInput || await this.readRemoteCatalog(repository, { force: true, progressStart: progressOptions.progressStart || 0.03, progressEnd: Math.min(0.32, progressOptions.progressEnd || 0.32) });
     if (catalog.repository && !sameRepository(catalog.repository, repository)) throw new Error('共享挂载目录来自其它 GitHub 仓库，已拒绝交叉同步。');
     const scope = mount.scope || 'documents';
     const documents = catalog.documents.filter((document) => {
@@ -399,7 +536,19 @@ class SharedKnowledgeManager {
       const mountIds = Array.isArray(task.sharedMountIds) ? task.sharedMountIds : [task.sharedMountId];
       return mountIds.map(String).includes(String(mount.id)) && ['shared-bilibili', 'shared-bilibili-multipart-summary'].includes(task.sourceType);
     });
-    for (const document of documents) await this.importRemoteDocument(document, mount);
+    for (let index = 0; index < documents.length; index += 1) {
+      const document = documents[index];
+      const start = Number(progressOptions.progressStart || 0.08);
+      const end = Number(progressOptions.progressEnd || 0.94);
+      this.reportOperation({
+        stage: 'mount-import',
+        progress: start + ((index + 1) / Math.max(1, documents.length)) * (end - start),
+        current: index + 1,
+        total: documents.length,
+        message: `正在挂载文档 ${index + 1} / ${documents.length}：${document.title || document.bvid || document.documentId}`
+      });
+      await this.importRemoteDocument(document, mount);
+    }
     for (const task of localTasks) {
       if (task.sharedRemotePath && !currentPaths.has(task.sharedRemotePath)) {
         if (this.isSharedExcluded(mount.collectionId, task.sharedRemotePath, repository)) {
@@ -462,12 +611,13 @@ class SharedKnowledgeManager {
       : task.singleTask
         ? `single:${collection.stableId || collection.id}`
         : `bilibili:${collection.mediaId || collection.id}`;
-    const metadata = {
+      const metadata = {
       schemaVersion: 3,
       documentId,
       sourceType: 'bilibili-video-summary',
       documentType: task.multiPartRole === 'parent' ? 'multipart-parent' : 'single-video',
-      contributorGithubId: String(task.githubUserId || ''),
+        contributorGithubId: String(task.githubUserId || ''),
+        contributorGithubLogin: String(task.githubUserLogin || ''),
       bilibiliUid: sourceBilibiliUid,
       remoteCollectionId,
       bvid: task.bvid || '',
@@ -698,6 +848,128 @@ class SharedKnowledgeManager {
 
   ensureSharedUser() { this.store.upsertUser({ id: SHARED_USER_ID, mid: SHARED_USER_ID, name: SHARED_USER_NAME, internal: true, shared: true }); }
 
+  ensureRepositoryRegistry() {
+    const current = this.repository;
+    const settings = this.store.get('settings', 'sharedRepositories') || {};
+    const repositories = Array.isArray(settings.repositories) ? [...settings.repositories] : [];
+    let changed = false;
+    const add = (repository, builtIn) => {
+      if (repositories.some((item) => sameRepository(item, repository))) return;
+      repositories.push({
+        ...repository,
+        verified: builtIn,
+        builtIn,
+        health: 'unchecked',
+        verifiedAt: builtIn ? 'built-in' : '',
+        lastCheckedAt: '',
+        addedAt: new Date().toISOString()
+      });
+      changed = true;
+    };
+    add(this.defaultRepository, true);
+    add(current, sameRepository(current, this.defaultRepository));
+    if (!changed) return;
+    this.store.set('settings', 'sharedRepositories', { id: 'sharedRepositories', repositories });
+    this.store.save();
+  }
+
+  registeredRepositories() {
+    const settings = this.store.get('settings', 'sharedRepositories') || {};
+    const repositories = Array.isArray(settings.repositories) ? settings.repositories : [];
+    return repositories.map((item) => {
+      let repository;
+      try { repository = normalizeRepository(item); }
+      catch { return null; }
+      return {
+        ...repository,
+        verified: item.verified === true,
+        builtIn: item.builtIn === true,
+        health: String(item.health || 'unchecked'),
+        verifiedAt: String(item.verifiedAt || ''),
+        lastCheckedAt: String(item.lastCheckedAt || ''),
+        error: String(item.error || '')
+      };
+    }).filter(Boolean).sort((left, right) => {
+      if (sameRepository(left, this.repository)) return -1;
+      if (sameRepository(right, this.repository)) return 1;
+      return `${left.owner}/${left.name}`.localeCompare(`${right.owner}/${right.name}`, 'en');
+    });
+  }
+
+  repositoryHealth(repositoryInput = this.repository) {
+    let repository;
+    try { repository = normalizeRepository(repositoryInput); }
+    catch { return { status: 'invalid', checkedAt: '', error: '共享仓库配置无效。' }; }
+    const entry = this.registeredRepositories().find((item) => sameRepository(item, repository));
+    return {
+      status: entry?.health || 'unchecked',
+      checkedAt: entry?.lastCheckedAt || '',
+      verified: entry?.verified === true,
+      error: entry?.error || ''
+    };
+  }
+
+  assertVerifiedRepository(repositoryInput = this.repository) {
+    const repository = normalizeRepository(repositoryInput);
+    const entry = this.registeredRepositories().find((item) => sameRepository(item, repository));
+    if (!entry?.verified) throw new Error(`共享仓库 ${repository.owner}/${repository.name} 尚未通过星藏家规范校验，请先点击“检测并连接”。`);
+    return repository;
+  }
+
+  saveVerifiedRepository(repositoryInput, contract) {
+    const repository = normalizeRepository(repositoryInput);
+    const settings = this.store.get('settings', 'sharedRepositories') || {};
+    const repositories = Array.isArray(settings.repositories) ? [...settings.repositories] : [];
+    const index = repositories.findIndex((item) => {
+      try { return sameRepository(item, repository); } catch { return false; }
+    });
+    const previous = index >= 0 ? repositories[index] : {};
+    const now = new Date().toISOString();
+    const record = {
+      ...previous,
+      ...repository,
+      verified: true,
+      builtIn: previous.builtIn === true || sameRepository(repository, this.defaultRepository),
+      health: 'available',
+      verifiedAt: previous.verifiedAt && previous.verifiedAt !== 'built-in' ? previous.verifiedAt : now,
+      lastCheckedAt: now,
+      addedAt: previous.addedAt || now,
+      error: '',
+      contract: {
+        schemaVersion: Number(contract?.schemaVersion || 0),
+        type: String(contract?.type || ''),
+        capabilities: [...(contract?.capabilities || [])]
+      }
+    };
+    if (index >= 0) repositories[index] = record;
+    else repositories.push(record);
+    this.store.set('settings', 'sharedRepositories', { id: 'sharedRepositories', repositories });
+    this.saveRepository(repository);
+    this.store.save();
+    return record;
+  }
+
+  updateRepositoryHealth(repositoryInput, health, error = null) {
+    let repository;
+    try { repository = normalizeRepository(repositoryInput); }
+    catch { return; }
+    const settings = this.store.get('settings', 'sharedRepositories') || {};
+    const repositories = Array.isArray(settings.repositories) ? [...settings.repositories] : [];
+    const index = repositories.findIndex((item) => {
+      try { return sameRepository(item, repository); } catch { return false; }
+    });
+    if (index < 0) return;
+    repositories[index] = {
+      ...repositories[index],
+      ...repository,
+      health: String(health || 'unchecked'),
+      lastCheckedAt: new Date().toISOString(),
+      error: error ? String(error.message || error).slice(0, 500) : ''
+    };
+    this.store.set('settings', 'sharedRepositories', { id: 'sharedRepositories', repositories });
+    this.store.save();
+  }
+
   assertRepositoryChangeAllowed() {
     if (this.activeUpload) throw new Error('共享文档正在上传，不能切换或创建仓库。请等待完成或先中止上传。');
   }
@@ -724,10 +996,107 @@ class SharedKnowledgeManager {
     return repository;
   }
 
+  async validateRepositoryContract(repositoryInput, token = '', signal = null) {
+    const repository = normalizeRepository(repositoryInput);
+    let marker;
+    try {
+      marker = await this.readRemoteFile(REPOSITORY_MARKER_FILE, MAX_REMOTE_METADATA_BYTES, repository, token, signal);
+    } catch (error) {
+      if (error.status === 404 || /not found|404/i.test(String(error.message || error))) {
+        throw new Error(`该仓库不是星藏家共享文档仓库：缺少 ${REPOSITORY_MARKER_FILE}。请连接由星藏家创建或按共享规范初始化的仓库。`);
+      }
+      throw error;
+    }
+    if (!marker || typeof marker !== 'object' || Array.isArray(marker)) throw new Error(`${REPOSITORY_MARKER_FILE} 不是有效的共享仓库配置。`);
+    if (Number(marker.schemaVersion || 0) !== REPOSITORY_SCHEMA_VERSION) throw new Error(`共享仓库规范版本不兼容：需要 schemaVersion ${REPOSITORY_SCHEMA_VERSION}。`);
+    if (String(marker.type || '') !== 'star-owner-shared-knowledge') throw new Error('仓库标记类型不正确，不允许作为星藏家共享仓库连接。');
+    const markerRepository = String(marker.repository || '').toLowerCase();
+    const expectedRepository = `${repository.owner}/${repository.name}`.toLowerCase();
+    if (markerRepository !== expectedRepository) throw new Error(`${REPOSITORY_MARKER_FILE} 声明的仓库为 ${marker.repository || '空'}，与当前仓库 ${repository.owner}/${repository.name} 不一致。`);
+    if (String(marker.defaultBranch || '') !== String(repository.branch || 'main')) throw new Error(`共享仓库标记的默认分支与 GitHub 实际默认分支不一致（${marker.defaultBranch || '空'} / ${repository.branch}）。`);
+    const capabilities = new Set(Array.isArray(marker.capabilities) ? marker.capabilities.map(String) : []);
+    const missing = REQUIRED_REPOSITORY_CAPABILITIES.filter((item) => !capabilities.has(item));
+    if (missing.length) throw new Error(`共享仓库缺少应用需要的能力标记：${missing.join('、')}。`);
+    return {
+      schemaVersion: REPOSITORY_SCHEMA_VERSION,
+      type: 'star-owner-shared-knowledge',
+      repository: `${repository.owner}/${repository.name}`,
+      defaultBranch: repository.branch,
+      capabilities: [...capabilities]
+    };
+  }
+
+  async resolveCatalogGithubLogins(documents, token = '') {
+    const pending = new Map();
+    for (const document of documents) {
+      if (document.invalid) continue;
+      const contributorId = String(document.contributorGithubId || String(document.path || '').split('/')[0] || '').trim();
+      document.contributorGithubId = contributorId;
+      const declaredLogin = String(document.contributorGithubLogin || '').trim();
+      if (declaredLogin) {
+        document.contributorGithubLogin = declaredLogin;
+        if (contributorId) this.githubLoginCache.set(contributorId, declaredLogin);
+        continue;
+      }
+      if (!/^\d+$/.test(contributorId)) continue;
+      if (this.githubLoginCache.has(contributorId)) document.contributorGithubLogin = this.githubLoginCache.get(contributorId);
+      else pending.set(contributorId, null);
+    }
+    for (const contributorId of pending.keys()) {
+      let login = '';
+      try {
+        const profile = await this.githubRequest(`/user/${encodeURIComponent(contributorId)}`, { token });
+        login = String(profile?.login || '').trim();
+      } catch {}
+      this.githubLoginCache.set(contributorId, login);
+      for (const document of documents) if (String(document.contributorGithubId || '') === contributorId && !document.contributorGithubLogin) document.contributorGithubLogin = login;
+    }
+  }
+
   repositoryRole(repository = this.repository, authState = this.state()) {
     const sameId = repository.ownerId && authState.userId && String(repository.ownerId) === String(authState.userId);
     const sameLogin = repository.owner && authState.login && String(repository.owner).toLowerCase() === String(authState.login).toLowerCase();
     return sameId || (!repository.ownerId && sameLogin) ? 'owner' : 'contributor';
+  }
+
+  async runOperation(seed, callback) {
+    if (this.activeOperation) throw new Error(`共享工具正在执行“${this.activeOperation.message || this.activeOperation.type}”，请等待当前操作完成。`);
+    this.activeOperation = {
+      id: `shared-operation:${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`,
+      type: String(seed?.type || 'operation'),
+      status: 'running',
+      stage: 'starting',
+      progress: 0,
+      current: 0,
+      total: 0,
+      message: String(seed?.message || '正在执行共享工具操作...'),
+      startedAt: new Date().toISOString()
+    };
+    this.reportOperation({}, true);
+    let finished;
+    try {
+      const result = await callback(this.activeOperation);
+      this.reportOperation({ status: 'completed', stage: 'completed', progress: 1, message: operationCompletedMessage(this.activeOperation.type) }, true);
+      finished = publicOperation(this.activeOperation);
+      return result;
+    } catch (error) {
+      this.reportOperation({ status: 'failed', stage: 'failed', message: error.message || String(error) }, true);
+      finished = publicOperation(this.activeOperation);
+      throw error;
+    } finally {
+      this.activeOperation = null;
+      this.emit({ type: 'shared-operation-finished', operation: finished, sharedKnowledge: this.state() });
+    }
+  }
+
+  reportOperation(patch = {}, force = false) {
+    if (!this.activeOperation) return;
+    Object.assign(this.activeOperation, patch, { updatedAt: new Date().toISOString() });
+    this.activeOperation.progress = Math.max(0, Math.min(1, Number(this.activeOperation.progress || 0)));
+    const now = Date.now();
+    if (!force && now - this.lastOperationEmission < 80) return;
+    this.lastOperationEmission = now;
+    this.emitState('shared-operation-progress', { operation: publicOperation(this.activeOperation) });
   }
 
   reportUpload(patch = {}, force = false) {
@@ -809,14 +1178,14 @@ class SharedKnowledgeManager {
     catch (error) { if (error.status === 404) return null; throw error; }
   }
 
-  async readRemoteFile(pathName, maxBytes = MAX_SHARED_FILE_BYTES, repository = this.repository, token = this.optionalAuthToken()) { return JSON.parse((await this.readRemoteFileBytes(pathName, maxBytes, '', repository, token)).toString('utf8')); }
-  async readRemoteFileBytes(pathName, maxBytes = MAX_SHARED_FILE_BYTES, blobSha = '', repositoryInput = this.repository, token = this.optionalAuthToken()) {
+  async readRemoteFile(pathName, maxBytes = MAX_SHARED_FILE_BYTES, repository = this.repository, token = this.optionalAuthToken(), signal = null) { return JSON.parse((await this.readRemoteFileBytes(pathName, maxBytes, '', repository, token, signal)).toString('utf8')); }
+  async readRemoteFileBytes(pathName, maxBytes = MAX_SHARED_FILE_BYTES, blobSha = '', repositoryInput = this.repository, token = this.optionalAuthToken(), signal = null) {
     assertRemotePath(pathName);
     const repository = normalizeRepository(repositoryInput);
     const endpoint = blobSha && !this.requestOverride
       ? `/repos/${repository.owner}/${repository.name}/git/blobs/${encodeURIComponent(blobSha)}`
       : `/repos/${repository.owner}/${repository.name}/contents/${encodePath(pathName)}?ref=${encodeURIComponent(repository.branch)}`;
-    const payload = await this.githubRequest(endpoint, { token });
+    const payload = await this.githubRequest(endpoint, { token, signal });
     if (!payload.content) throw new Error(`远程文件不是可读取内容：${pathName}`);
     const value = Buffer.from(String(payload.content).replace(/\s+/g, ''), 'base64');
     if (value.length > maxBytes) throw new Error(`远程共享文件过大（上限 ${formatMiB(maxBytes)}）：${pathName}`);
@@ -1127,6 +1496,26 @@ function sameRepository(left, right) {
 function publicUpload(upload) {
   const { controller, ...safe } = upload || {};
   return { ...safe };
+}
+
+function publicOperation(operation) { return operation ? { ...operation } : null; }
+
+function operationCompletedMessage(type) {
+  return ({
+    'repository-link': '共享仓库已验证并连接。',
+    'repository-check': '共享仓库检查完成。',
+    'repository-create': '共享仓库创建和初始化完成。',
+    'catalog-read': '远程目录读取完成。',
+    mount: '远程文档挂载完成。',
+    'mount-sync': '共享挂载同步完成。',
+    'mount-sync-batch': '选中的共享挂载已同步。'
+  })[type] || '共享工具操作已完成。';
+}
+
+function progressWithin(options = {}, ratio = 0) {
+  const start = Number.isFinite(Number(options.progressStart)) ? Number(options.progressStart) : 0;
+  const end = Number.isFinite(Number(options.progressEnd)) ? Number(options.progressEnd) : 1;
+  return start + Math.max(0, Math.min(1, Number(ratio || 0))) * Math.max(0, end - start);
 }
 
 function uploadFileSize(file = {}) {

@@ -58,19 +58,32 @@
     sharedLogout: $('#sharedLogout'),
     sharedAuthStatus: $('#sharedAuthStatus'),
     sharedRepositoryStatus: $('#sharedRepositoryStatus'),
+    sharedRepositorySelect: $('#sharedRepositorySelect'),
     sharedRepositoryInput: $('#sharedRepositoryInput'),
     sharedRepositorySave: $('#sharedRepositorySave'),
     sharedRepositoryOpen: $('#sharedRepositoryOpen'),
     sharedRepositoryCreateName: $('#sharedRepositoryCreateName'),
     sharedRepositoryCreate: $('#sharedRepositoryCreate'),
+    sharedOperationProgress: $('#sharedOperationProgress'),
+    sharedOperationMessage: $('#sharedOperationMessage'),
+    sharedOperationCount: $('#sharedOperationCount'),
+    sharedOperationBar: $('#sharedOperationBar'),
+    sharedOperationPercent: $('#sharedOperationPercent'),
     sharedCatalog: $('#sharedCatalog'),
-    sharedFilter: $('#sharedFilter'),
-    sharedRemotePrefix: $('#sharedRemotePrefix'),
+    sharedGithubFilter: $('#sharedGithubFilter'),
+    sharedGithubOptions: $('#sharedGithubOptions'),
+    sharedBilibiliFilter: $('#sharedBilibiliFilter'),
+    sharedBilibiliOptions: $('#sharedBilibiliOptions'),
+    sharedVideoFilter: $('#sharedVideoFilter'),
+    sharedVideoOptions: $('#sharedVideoOptions'),
+    sharedCatalogResultCount: $('#sharedCatalogResultCount'),
+    sharedMountFiltered: $('#sharedMountFiltered'),
     sharedCatalogList: $('#sharedCatalogList'),
     sharedCollection: $('#sharedCollection'),
     sharedCollectionName: $('#sharedCollectionName'),
     sharedMount: $('#sharedMount'),
-    sharedSyncAll: $('#sharedSyncAll'),
+    sharedMountSelectAll: $('#sharedMountSelectAll'),
+    sharedSyncSelected: $('#sharedSyncSelected'),
     sharedMountList: $('#sharedMountList'),
     sharedUpload: $('#sharedUpload'),
     sharedUploadSelectAll: $('#sharedUploadSelectAll'),
@@ -120,8 +133,18 @@
   let outsideBackendReady = false;
   let readyRefreshStarted = false;
   let sharedUploadInvocationActive = false;
+  let sharedOperationView = null;
+  let sharedOperationHideTimer = null;
+  let sharedOperationPollTimer = null;
+  let sharedOperationPollGeneration = 0;
+  let sharedOperationPollInFlight = false;
+  let sharedRepositoryCheckPromise = null;
+  let sharedRepositoryCheckedForEntry = false;
+  let sharedCatalogLoadedKey = '';
   const selectedUploadTaskIds = new Set();
   const selectedPreparedTaskIds = new Set();
+  const selectedRemotePaths = new Set();
+  const selectedMountIds = new Set();
   const toolCards = new Map();
   const toolBodies = new Map();
 
@@ -152,6 +175,10 @@
     elements.toolDetail.hidden = false;
     elements.page.scrollTop = 0;
     elements.toolBack.focus();
+    if (activeToolId === 'shared') {
+      sharedRepositoryCheckedForEntry = false;
+      if (outsideBackendReady) ensureSharedRepositoryReady().catch(() => {});
+    }
   }
 
   function closeOutsideTool({ focus = true } = {}) {
@@ -160,6 +187,7 @@
     const card = toolCards.get(id);
     const body = toolBodies.get(id);
     activeToolId = '';
+    if (id === 'shared') sharedRepositoryCheckedForEntry = false;
     if (body) {
       body.hidden = true;
       card?.appendChild(body);
@@ -421,28 +449,65 @@
   function renderSharedRepository() {
     const repository = sharedData.repository || {};
     const fullName = sharedRepositoryFullName(repository);
+    const health = sharedData.repositoryHealth || {};
+    const healthLabel = health.status === 'available' ? '连接正常' : health.status === 'unavailable' ? '连接异常' : '待检查';
     const role = !sharedData.authenticated ? '未授权时可读取公开目录' : sharedRepositoryOwnerMode(repository) ? '当前账户是仓库主人，将直接创建分支 / PR' : '当前账户不是仓库主人，将使用 Fork / PR';
-    elements.sharedRepositoryStatus.textContent = fullName ? `${fullName} · ${repository.branch || 'main'} · ${role}` : '尚未配置共享仓库。';
-    if (document.activeElement !== elements.sharedRepositoryInput && elements.sharedRepositoryInput.dataset.currentRepository !== fullName) {
-      elements.sharedRepositoryInput.value = fullName;
-      elements.sharedRepositoryInput.dataset.currentRepository = fullName;
-    }
+    elements.sharedRepositoryStatus.textContent = fullName ? `${fullName} · ${repository.branch || 'main'} · ${healthLabel} · ${role}` : '尚未配置共享仓库。';
+    const repositories = (sharedData.repositories || []).filter((item) => item.verified === true);
+    const current = elements.sharedRepositorySelect.value;
+    elements.sharedRepositorySelect.innerHTML = repositories.length
+      ? repositories.map((item) => {
+        const value = sharedRepositoryFullName(item);
+        const suffix = item.health === 'unavailable' ? ' · 连接异常' : item.builtIn ? ' · 内置默认' : '';
+        return `<option value="${escAttr(value)}">${esc(value)}${esc(suffix)}</option>`;
+      }).join('')
+      : '<option value="">尚无已验证仓库</option>';
+    elements.sharedRepositorySelect.value = repositories.some((item) => sharedRepositoryFullName(item) === fullName)
+      ? fullName
+      : (repositories.some((item) => sharedRepositoryFullName(item) === current) ? current : (repositories[0] ? sharedRepositoryFullName(repositories[0]) : ''));
+    elements.sharedRepositorySelect.disabled = !repositories.length;
     elements.sharedRepositoryOpen.disabled = !repository.htmlUrl && !fullName;
   }
 
   async function saveSharedRepository() {
     const repository = elements.sharedRepositoryInput.value.trim();
-    if (!repository) return notify('切换共享仓库失败', '请填写 owner/repository 或完整 GitHub 仓库链接。');
+    if (!repository) return notify('连接共享仓库失败', '请填写 owner/repository 或完整 GitHub 仓库链接。');
     setBusy(elements.sharedRepositorySave, true, '验证中');
     try {
-      const result = await window.orchestrator.sharedSetRepository({ repository });
+      const result = await runSharedUiOperation({ type: 'repository-link', message: '正在检测并连接共享仓库...' }, () => (
+        window.orchestrator.sharedSetRepository({ repository })
+      ));
       sharedCatalogData = { repository: result.repository, documents: [] };
+      sharedCatalogLoadedKey = '';
+      selectedRemotePaths.clear();
       selectedUploadTaskIds.clear();
       selectedPreparedTaskIds.clear();
+      elements.sharedRepositoryInput.value = '';
       await refresh();
-      notify('共享仓库已切换', `${result.repository.owner}/${result.repository.name} · ${result.repository.branch}`, 'success');
-    } catch (error) { notify('切换共享仓库失败', error); }
-    finally { setBusy(elements.sharedRepositorySave, false, '切换并保存'); }
+      await loadSharedCatalog({ force: true, quiet: true });
+      notify('共享仓库已验证并连接', `${result.repository.owner}/${result.repository.name} · ${result.repository.branch}`, 'success');
+    } catch (error) { notify('连接共享仓库失败', error); }
+    finally { setBusy(elements.sharedRepositorySave, false, '检测并连接'); }
+  }
+
+  async function selectSharedRepository() {
+    const repository = elements.sharedRepositorySelect.value;
+    if (!repository || repository === sharedRepositoryFullName()) return;
+    elements.sharedRepositorySelect.disabled = true;
+    try {
+      const result = await runSharedUiOperation({ type: 'repository-link', message: '正在检查并切换共享仓库...' }, () => (
+        window.orchestrator.sharedSetRepository({ repository })
+      ));
+      sharedCatalogData = { repository: result.repository, documents: [] };
+      sharedCatalogLoadedKey = '';
+      selectedRemotePaths.clear();
+      selectedMountIds.clear();
+      await refresh();
+      await loadSharedCatalog({ force: true, quiet: true });
+    } catch (error) {
+      notify('切换共享仓库失败', error);
+      await refresh();
+    } finally { elements.sharedRepositorySelect.disabled = false; }
   }
 
   async function createSharedRepository() {
@@ -451,11 +516,16 @@
     if (!window.confirm(`将在当前授权的 GitHub 账户下创建公开仓库“${name}”，并写入 README、配置文件和 GitHub Actions。是否继续？`)) return;
     setBusy(elements.sharedRepositoryCreate, true, '创建中');
     try {
-      const result = await window.orchestrator.sharedCreateRepository({ name });
+      const result = await runSharedUiOperation({ type: 'repository-create', message: '正在创建并初始化共享仓库...' }, () => (
+        window.orchestrator.sharedCreateRepository({ name })
+      ));
       sharedCatalogData = { repository: result.repository, documents: [] };
+      sharedCatalogLoadedKey = '';
+      selectedRemotePaths.clear();
       selectedUploadTaskIds.clear();
       selectedPreparedTaskIds.clear();
       await refresh();
+      await loadSharedCatalog({ force: true, quiet: true });
       notify('个人共享仓库已创建', `已初始化 ${result.initializedFiles} 个配置文件，并切换到 ${result.repository.owner}/${result.repository.name}。`, 'success');
     } catch (error) { notify('创建共享仓库失败', error); }
     finally { setBusy(elements.sharedRepositoryCreate, false, '一键创建并初始化'); }
@@ -465,6 +535,114 @@
     const repository = sharedData.repository || {};
     const url = repository.htmlUrl || (sharedRepositoryFullName(repository) ? `https://github.com/${sharedRepositoryFullName(repository)}` : '');
     if (url) await window.orchestrator.openExternal(url);
+  }
+
+  function updateSharedOperation(operation) {
+    if (sharedOperationHideTimer) clearTimeout(sharedOperationHideTimer);
+    sharedOperationView = operation || null;
+    renderSharedOperation();
+    if (operation && ['completed', 'failed'].includes(operation.status)) {
+      sharedOperationHideTimer = setTimeout(() => {
+        sharedOperationView = null;
+        renderSharedOperation();
+      }, operation.status === 'failed' ? 3200 : 1200);
+    }
+  }
+
+  function stopSharedOperationPolling() {
+    sharedOperationPollGeneration += 1;
+    sharedOperationPollInFlight = false;
+    if (sharedOperationPollTimer) clearInterval(sharedOperationPollTimer);
+    sharedOperationPollTimer = null;
+  }
+
+  function beginSharedOperationPolling(seed = {}) {
+    stopSharedOperationPolling();
+    const generation = sharedOperationPollGeneration;
+    sharedData.operation = null;
+    updateSharedOperation({
+      id: `renderer:${Date.now()}`,
+      type: String(seed.type || 'operation'),
+      status: 'running',
+      stage: 'starting',
+      progress: 0.01,
+      current: 0,
+      total: 0,
+      message: String(seed.message || '正在执行共享工具操作...')
+    });
+    sharedOperationPollTimer = setInterval(async () => {
+      if (sharedOperationPollInFlight || generation !== sharedOperationPollGeneration) return;
+      sharedOperationPollInFlight = true;
+      try {
+        const operation = await window.orchestrator.sharedOperationState();
+        if (generation !== sharedOperationPollGeneration || !operation) return;
+        updateSharedOperation(operation);
+      } catch {}
+      finally { if (generation === sharedOperationPollGeneration) sharedOperationPollInFlight = false; }
+    }, 240);
+  }
+
+  async function runSharedUiOperation(seed, callback) {
+    beginSharedOperationPolling(seed);
+    try {
+      const result = await callback();
+      const current = sharedOperationView || sharedData.operation || {};
+      sharedData.operation = null;
+      updateSharedOperation({ ...current, type: seed.type, status: 'completed', stage: 'completed', progress: 1, message: sharedOperationCompletedMessage(seed.type) });
+      return result;
+    } catch (error) {
+      const current = sharedOperationView || sharedData.operation || {};
+      sharedData.operation = null;
+      updateSharedOperation({ ...current, type: seed.type, status: 'failed', stage: 'failed', message: error?.message || String(error) });
+      throw error;
+    } finally {
+      stopSharedOperationPolling();
+    }
+  }
+
+  function sharedOperationCompletedMessage(type) {
+    return ({
+      'repository-link': '共享仓库已验证并连接。',
+      'repository-check': '共享仓库检查完成。',
+      'repository-create': '共享仓库创建和初始化完成。',
+      'catalog-read': '远程目录读取完成。',
+      mount: '远程文档挂载完成。',
+      'mount-sync': '共享挂载同步完成。',
+      'mount-sync-batch': '选中的共享挂载已同步。'
+    })[type] || '共享工具操作已完成。';
+  }
+
+  function renderSharedOperation() {
+    const operation = sharedOperationView || sharedData.operation;
+    const visible = Boolean(operation);
+    elements.sharedOperationProgress.hidden = !visible;
+    if (!visible) return;
+    const progress = Math.max(0, Math.min(1, Number(operation.progress || 0)));
+    elements.sharedOperationProgress.classList.toggle('is-failed', operation.status === 'failed');
+    elements.sharedOperationProgress.classList.toggle('is-complete', operation.status === 'completed');
+    elements.sharedOperationMessage.textContent = operation.message || '正在执行共享工具操作...';
+    elements.sharedOperationCount.textContent = Number(operation.total || 0) > 0 ? `${Number(operation.current || 0)} / ${Number(operation.total)} 项` : '';
+    elements.sharedOperationBar.style.width = `${Math.round(progress * 100)}%`;
+    elements.sharedOperationPercent.textContent = `${Math.round(progress * 100)}%`;
+  }
+
+  async function ensureSharedRepositoryReady() {
+    if (!outsideBackendReady || sharedRepositoryCheckedForEntry || sharedRepositoryCheckPromise) return sharedRepositoryCheckPromise;
+    sharedRepositoryCheckedForEntry = true;
+    sharedRepositoryCheckPromise = (async () => {
+      try {
+        const result = await runSharedUiOperation({ type: 'repository-check', message: '正在检查已连接的共享仓库...' }, () => (
+          window.orchestrator.sharedCheckRepository()
+        ));
+        await refresh();
+        const key = sharedRepositoryFullName(result.repository);
+        if (sharedCatalogLoadedKey !== key) await loadSharedCatalog({ force: true, quiet: true });
+      } catch (error) {
+        await refresh().catch(() => {});
+        notify('共享仓库连接检查失败', error);
+      } finally { sharedRepositoryCheckPromise = null; }
+    })();
+    return sharedRepositoryCheckPromise;
   }
 
   function renderSharedUploadProgress(upload = sharedData.upload) {
@@ -493,17 +671,42 @@
     renderSharedCatalog();
     renderSharedMounts();
     renderSharedUploads();
+    renderSharedOperation();
     renderSharedUploadProgress();
   }
 
   function filteredSharedDocuments() {
-    const query = elements.sharedFilter.value.trim().toLocaleLowerCase();
-    const prefix = elements.sharedRemotePrefix.value;
+    const githubQuery = elements.sharedGithubFilter.value.trim().toLocaleLowerCase();
+    const bilibiliQuery = elements.sharedBilibiliFilter.value.trim().toLocaleLowerCase();
+    const videoQuery = elements.sharedVideoFilter.value.trim().toLocaleLowerCase();
     return (sharedCatalogData.documents || []).filter((document) => {
-      const matchesPrefix = !prefix || sharedDocumentRoot(document).startsWith(`${prefix}/`) || sharedDocumentRoot(document) === prefix;
-      const matchesQuery = !query || [document.title, document.owner, document.bvid, document.collectionName, document.userName, document.documentId, document.path].some((value) => String(value || '').toLocaleLowerCase().includes(query));
-      return matchesPrefix && matchesQuery;
+      const githubName = sharedGithubName(document).toLocaleLowerCase();
+      const bilibiliName = sharedBilibiliName(document).toLocaleLowerCase();
+      const videoText = [document.title, document.owner, document.bvid].map((value) => String(value || '').toLocaleLowerCase()).join(' ');
+      return (!githubQuery || githubName.includes(githubQuery))
+        && (!bilibiliQuery || bilibiliName.includes(bilibiliQuery))
+        && (!videoQuery || videoText.includes(videoQuery));
     });
+  }
+
+  function sharedGithubName(document) {
+    return String(document?.contributorGithubLogin || '').trim() || (document?.contributorGithubId ? '未公开名称的 GitHub 贡献者' : '未知 GitHub 贡献者');
+  }
+
+  function sharedBilibiliName(document) {
+    const value = String(document?.userName || '').trim();
+    if (value && value !== '内置用户') return value;
+    if (document?.documentType === 'multipart-parent' || document?.sourceCollectionKind === 'bilibili-multipart') return '内置来源 · B站多P视频';
+    if (String(document?.sourceCollectionKind || '').startsWith('single') || String(document?.remoteCollectionId || '').startsWith('single:')) return '内置来源 · B站单视频';
+    return value || '未知哔哩哔哩用户';
+  }
+
+  function sharedCollectionName(document) {
+    return String(document?.collectionName || '').trim() || (document?.documentType === 'multipart-parent' ? 'B站多P视频总结' : '未命名收藏夹');
+  }
+
+  function sharedCollectionKey(document) {
+    return String(document?.remoteCollectionId || sharedCollectionPrefix(document) || document?.collectionName || '').trim();
   }
 
   function sharedDocumentLocalStatus(document) {
@@ -528,21 +731,71 @@
 
   function renderSharedCatalog() {
     const documents = filteredSharedDocuments();
-    const prefixes = [...new Set((sharedCatalogData.documents || []).map(sharedCollectionPrefix).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-    const currentPrefix = elements.sharedRemotePrefix.value;
-    elements.sharedRemotePrefix.innerHTML = `<option value="">选择远程收藏夹目录（可选）</option>${prefixes.map((prefix) => `<option value="${escAttr(prefix)}">${esc(prefix)}</option>`).join('')}`;
-    if (prefixes.includes(currentPrefix)) elements.sharedRemotePrefix.value = currentPrefix;
-    elements.sharedCatalogList.innerHTML = documents.length ? documents.map((document) => {
-      const status = sharedDocumentLocalStatus(document);
-      const updated = document.updatedAt || document.uploadedAt || '时间未知';
-      return `<label class="shared-catalog-row shared-state-${escAttr(status.code)}"><input class="app-checkbox" type="checkbox" data-shared-path="${escAttr(document.path)}" ${document.invalid ? 'disabled' : ''} /><span class="shared-catalog-main"><strong>${esc(document.title || document.documentId || document.path)}</strong><small>${esc(document.bvid || '无 BV')} · ${esc(document.owner || '')} · ${esc(document.collectionName || '')} · ${esc(status.label)}</small></span><span class="shared-catalog-status"><strong>${esc(status.label)}</strong><br>${esc(updated)}<br>${esc(document.path)}</span></label>`;
-    }).join('') : '<div class="empty-state">没有匹配的远程共享文档。</div>';
+    const validDocuments = documents.filter((document) => !document.invalid);
+    const allDocuments = sharedCatalogData.documents || [];
+    const knownPaths = new Set(allDocuments.filter((document) => !document.invalid).map((document) => String(document.path)));
+    for (const pathName of [...selectedRemotePaths]) if (!knownPaths.has(pathName)) selectedRemotePaths.delete(pathName);
+    const githubNames = [...new Set(allDocuments.filter((item) => !item.invalid).map(sharedGithubName))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+    const bilibiliNames = [...new Set(allDocuments.filter((item) => !item.invalid).map(sharedBilibiliName))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+    const videoNames = [...new Set(allDocuments.filter((item) => !item.invalid).map((item) => String(item.title || item.bvid || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+    elements.sharedGithubOptions.innerHTML = githubNames.map((value) => `<option value="${escAttr(value)}"></option>`).join('');
+    elements.sharedBilibiliOptions.innerHTML = bilibiliNames.map((value) => `<option value="${escAttr(value)}"></option>`).join('');
+    elements.sharedVideoOptions.innerHTML = videoNames.map((value) => `<option value="${escAttr(value)}"></option>`).join('');
+    elements.sharedCatalogResultCount.textContent = sharedCatalogLoadedKey ? `显示 ${validDocuments.length} / ${allDocuments.length} 篇 · 已勾选 ${selectedRemotePaths.size} 篇` : '尚未读取目录';
+    elements.sharedMountFiltered.disabled = !validDocuments.length;
+    elements.sharedMount.disabled = !selectedRemotePaths.size;
+    if (!documents.length) {
+      elements.sharedCatalogList.innerHTML = `<div class="empty-state">${sharedCatalogLoadedKey ? '当前筛选条件下没有远程共享文档。' : '尚未读取远程目录。'}</div>`;
+      return;
+    }
+    const githubGroups = new Map();
+    for (const document of validDocuments) {
+      const githubName = sharedGithubName(document);
+      const githubKey = `${githubName}|${document.contributorGithubId || ''}`;
+      if (!githubGroups.has(githubKey)) githubGroups.set(githubKey, { name: githubName, items: new Map() });
+      const github = githubGroups.get(githubKey);
+      const bilibiliName = sharedBilibiliName(document);
+      const bilibiliKey = `${bilibiliName}|${document.bilibiliUid || document.userId || document.sourceCollectionKind || ''}`;
+      if (!github.items.has(bilibiliKey)) github.items.set(bilibiliKey, { name: bilibiliName, collections: new Map() });
+      const bilibili = github.items.get(bilibiliKey).collections;
+      const collectionKey = sharedCollectionKey(document);
+      if (!bilibili.has(collectionKey)) bilibili.set(collectionKey, { name: sharedCollectionName(document), prefix: sharedCollectionPrefix(document), documents: [] });
+      bilibili.get(collectionKey).documents.push(document);
+    }
+    const tree = [...githubGroups.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')).map((github, githubIndex) => {
+      const githubCount = [...github.items.values()].flatMap((group) => [...group.collections.values()].flatMap((collection) => collection.documents)).length;
+      const bilibiliHtml = [...github.items.values()].sort((left, right) => left.name.localeCompare(right.name, 'zh-CN')).map(({ name: bilibiliName, collections }) => {
+        const bilibiliCount = [...collections.values()].reduce((sum, collection) => sum + collection.documents.length, 0);
+        const collectionsHtml = [...collections.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')).map((collection) => {
+          const rows = [...collection.documents].sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))).map((document) => {
+            const status = sharedDocumentLocalStatus(document);
+            const updated = document.updatedAt || document.uploadedAt || '时间未知';
+            return `<div class="shared-catalog-row shared-state-${escAttr(status.code)}"><input class="app-checkbox" type="checkbox" data-shared-path="${escAttr(document.path)}" ${selectedRemotePaths.has(String(document.path)) ? 'checked' : ''}/><span class="shared-catalog-main"><strong title="${escAttr(document.title || document.bvid || '')}">${esc(document.title || document.bvid || '未命名视频')}</strong><small>${esc(document.bvid || '无 BV')} · ${esc(document.owner || '未知UP主')} · ${esc(updated)}</small></span><span class="shared-catalog-status"><strong>${esc(status.label)}</strong><small>${esc(sharedGithubName(document))}</small></span><button class="secondary-button compact-button" type="button" data-shared-mount-path="${escAttr(document.path)}">挂载此文档</button></div>`;
+          }).join('');
+          return `<details class="shared-tree-node shared-tree-collection"><summary><span class="shared-tree-marker">COL</span><span><strong title="${escAttr(collection.name)}">${esc(collection.name)}</strong><small>${collection.documents.length} 篇视频总结</small></span><em>${collection.documents.length}</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><div class="shared-tree-collection-body"><div class="shared-tree-collection-tools"><span>可挂载整个远程收藏夹，后续同步会自动带入新增文档。</span><button class="secondary-button compact-button" type="button" data-shared-mount-prefix="${escAttr(collection.prefix)}">挂载此收藏夹</button></div>${rows}</div></details>`;
+        }).join('');
+        return `<details class="shared-tree-node shared-tree-bilibili" ${github.items.size === 1 ? 'open' : ''}><summary><span class="shared-tree-marker">BILI</span><span><strong title="${escAttr(bilibiliName)}">${esc(bilibiliName)}</strong><small>${collections.size} 个收藏夹 · ${bilibiliCount} 篇</small></span><em>${bilibiliCount}</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><div class="shared-tree-children">${collectionsHtml}</div></details>`;
+      }).join('');
+      return `<details class="shared-tree-node shared-tree-github" ${githubGroups.size === 1 || githubIndex === 0 ? 'open' : ''}><summary><span class="shared-tree-marker">GH</span><span><strong title="${escAttr(github.name)}">${esc(github.name)}</strong><small>${github.items.size} 个哔哩哔哩用户 · ${githubCount} 篇</small></span><em>${githubCount}</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><div class="shared-tree-children">${bilibiliHtml}</div></details>`;
+    }).join('');
+    const invalid = documents.filter((document) => document.invalid);
+    const invalidHtml = invalid.length ? `<details class="shared-tree-node shared-tree-invalid"><summary><span class="shared-tree-marker">ERR</span><span><strong>无法识别的远程条目</strong><small>元数据不符合共享规范，无法挂载</small></span><em>${invalid.length}</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><div class="shared-tree-invalid-list">${invalid.map((document) => `<div><strong>${esc(document.error || '远程元数据无效')}</strong></div>`).join('')}</div></details>` : '';
+    elements.sharedCatalogList.innerHTML = tree + invalidHtml;
   }
 
-  async function loadSharedCatalog() {
+  async function loadSharedCatalog({ force = true, quiet = false } = {}) {
     setBusy(elements.sharedCatalog, true, '读取中');
-    try { sharedCatalogData = await window.orchestrator.sharedCatalog(); renderSharedCatalog(); }
-    catch (error) { notify('读取 GitHub 共享目录失败', error); }
+    try {
+      sharedCatalogData = await runSharedUiOperation({ type: 'catalog-read', message: '正在读取远程共享目录...' }, () => (
+        window.orchestrator.sharedCatalog({ force })
+      ));
+      sharedCatalogLoadedKey = sharedRepositoryFullName(sharedCatalogData.repository || sharedData.repository || {});
+      selectedRemotePaths.clear();
+      renderSharedCatalog();
+      if (!quiet) notify('远程共享目录已读取', `共读取 ${Number(sharedCatalogData.total || 0)} 篇文档。`, 'success');
+      return true;
+    }
+    catch (error) { notify('读取 GitHub 共享目录失败', error); return false; }
     finally { setBusy(elements.sharedCatalog, false, '读取远程目录'); }
   }
 
@@ -573,17 +826,35 @@
     } catch (error) { notify('清除 GitHub 授权失败', error); }
   }
 
-  async function mountShared() {
-    const paths = [...elements.sharedCatalogList.querySelectorAll('[data-shared-path]:checked')].map((input) => input.dataset.sharedPath);
-    const remotePrefix = elements.sharedRemotePrefix.value;
-    if (!paths.length && !remotePrefix) return notify('无法挂载共享文档', '请选择文档，或选择一个远程收藏夹目录。');
-    try { await window.orchestrator.sharedMount({ paths, remotePrefix, ...sharedCollectionPayload() }); await refresh(); }
+  async function mountShared({ paths = null, remotePrefix = '', button = null } = {}) {
+    const selectedPaths = paths || [...selectedRemotePaths];
+    if (!selectedPaths.length && !remotePrefix) return notify('无法挂载共享文档', '请勾选文档、使用“挂载筛选结果”，或点击收藏夹/文档旁的挂载按钮。');
+    if (button) setBusy(button, true, '挂载中');
+    try {
+      await runSharedUiOperation({ type: 'mount', message: '正在挂载远程共享文档...' }, () => (
+        window.orchestrator.sharedMount({ paths: selectedPaths, remotePrefix, ...sharedCollectionPayload() })
+      ));
+      for (const pathName of selectedPaths) selectedRemotePaths.delete(String(pathName));
+      await refresh();
+      renderSharedCatalog();
+      notify('共享文档挂载完成', remotePrefix ? '远程收藏夹已挂载，后续同步会自动加入新增文档。' : `已挂载 ${selectedPaths.length} 篇远程文档。`, 'success');
+    }
     catch (error) { notify('挂载共享文档失败', error); }
+    finally { if (button) setBusy(button, false, button === elements.sharedMountFiltered ? '挂载筛选结果' : button === elements.sharedMount ? '挂载勾选文档' : button.dataset.sharedMountPrefix ? '挂载此收藏夹' : '挂载此文档'); }
   }
 
   function renderSharedMounts() {
     const mounts = sharedData.mounts || [];
-    elements.sharedMountList.innerHTML = mounts.length ? mounts.map((mount) => `<div class="shared-mount-row-item"><div><strong>${esc(mount.collectionName || mount.collectionId)}</strong><small>${esc(sharedRepositoryFullName(mount.repository || {}))} · ${esc(mount.remotePrefix || '')} · ${Number(mount.remoteDocumentCount || 0)} 篇 · ${mount.lastSyncedAt ? `上次同步 ${esc(mount.lastSyncedAt)}` : '尚未同步'}</small></div><div class="shared-mount-actions"><button class="secondary-button compact-button" type="button" data-shared-action="sync" data-mount-id="${escAttr(mount.id)}">同步</button><button class="secondary-button compact-button danger-button" type="button" data-shared-action="unmount" data-mount-id="${escAttr(mount.id)}">解除挂载</button></div></div>`).join('') : '<div class="empty-state">还没有共享挂载。</div>';
+    const validIds = new Set(mounts.map((mount) => String(mount.id)));
+    for (const id of [...selectedMountIds]) if (!validIds.has(id)) selectedMountIds.delete(id);
+    elements.sharedMountSelectAll.disabled = !mounts.length;
+    elements.sharedMountSelectAll.textContent = mounts.length && selectedMountIds.size === mounts.length ? '取消全选' : '全选挂载';
+    elements.sharedSyncSelected.disabled = !selectedMountIds.size;
+    elements.sharedSyncSelected.textContent = selectedMountIds.size ? `同步选中（${selectedMountIds.size}）` : '同步选中';
+    elements.sharedMountList.innerHTML = mounts.length ? mounts.map((mount) => {
+      const scope = mount.scope === 'collection' ? '远程收藏夹挂载' : '指定文档挂载';
+      return `<div class="shared-mount-row-item"><input class="app-checkbox" type="checkbox" data-shared-mount-select="${escAttr(mount.id)}" ${selectedMountIds.has(String(mount.id)) ? 'checked' : ''}/><div><strong>${esc(mount.collectionName || mount.collectionId)}</strong><small>${esc(sharedRepositoryFullName(mount.repository || {}))} · ${scope} · ${Number(mount.remoteDocumentCount || 0)} 篇 · ${mount.lastSyncedAt ? `上次同步 ${esc(formatUploadDate(mount.lastSyncedAt))}` : '尚未同步'}</small></div><div class="shared-mount-actions"><button class="secondary-button compact-button" type="button" data-shared-action="sync" data-mount-id="${escAttr(mount.id)}">同步</button><button class="secondary-button compact-button danger-button" type="button" data-shared-action="unmount" data-mount-id="${escAttr(mount.id)}">解除挂载</button></div></div>`;
+    }).join('') : '<div class="empty-state">还没有共享挂载。</div>';
   }
 
   function shareableUploadItems() {
@@ -768,11 +1039,32 @@
   async function handleSharedAction(event) {
     const button = event.target.closest('[data-shared-action]');
     if (!button) return;
+    const original = button.dataset.sharedAction === 'sync' ? '同步' : '解除挂载';
+    setBusy(button, true, button.dataset.sharedAction === 'sync' ? '同步中' : '处理中');
     try {
-      if (button.dataset.sharedAction === 'sync') await window.orchestrator.sharedSyncMount(button.dataset.mountId);
+      if (button.dataset.sharedAction === 'sync') {
+        await runSharedUiOperation({ type: 'mount-sync', message: '正在同步共享挂载...' }, () => (
+          window.orchestrator.sharedSyncMount(button.dataset.mountId)
+        ));
+      }
       else if (button.dataset.sharedAction === 'unmount') await window.orchestrator.sharedUnmount(button.dataset.mountId);
       await refresh();
     } catch (error) { notify('共享挂载操作失败', error); }
+    finally { setBusy(button, false, original); }
+  }
+
+  async function syncSelectedSharedMounts() {
+    const mountIds = [...selectedMountIds];
+    if (!mountIds.length) return notify('无法同步共享挂载', '请先勾选至少一个本地共享挂载。');
+    setBusy(elements.sharedSyncSelected, true, '同步中');
+    try {
+      const result = await runSharedUiOperation({ type: 'mount-sync-batch', message: `正在同步 ${mountIds.length} 个共享挂载...` }, () => (
+        window.orchestrator.sharedSyncMounts(mountIds)
+      ));
+      await refresh();
+      notify('共享挂载同步完成', `已同步 ${Number(result.synced || mountIds.length)} 个挂载。`, 'success');
+    } catch (error) { notify('同步选中的共享挂载失败', error); }
+    finally { setBusy(elements.sharedSyncSelected, false, `同步选中（${selectedMountIds.size}）`); }
   }
 
   function cssEscape(value) { return String(value || '').replace(/[^a-zA-Z0-9_-]/g, '\\$&'); }
@@ -1058,17 +1350,35 @@
   elements.sharedSetToken.addEventListener('click', setSharedToken);
   elements.sharedLogout.addEventListener('click', clearSharedAuthorization);
   elements.sharedRepositorySave.addEventListener('click', saveSharedRepository);
+  elements.sharedRepositorySelect.addEventListener('change', selectSharedRepository);
   elements.sharedRepositoryOpen.addEventListener('click', () => openSharedRepository().catch((error) => notify('打开共享仓库失败', error)));
   elements.sharedRepositoryCreate.addEventListener('click', createSharedRepository);
-  elements.sharedCatalog.addEventListener('click', loadSharedCatalog);
-  elements.sharedFilter.addEventListener('input', renderSharedCatalog);
-  elements.sharedRemotePrefix.addEventListener('change', renderSharedCatalog);
+  elements.sharedCatalog.addEventListener('click', () => loadSharedCatalog({ force: true }));
+  for (const control of [elements.sharedGithubFilter, elements.sharedBilibiliFilter, elements.sharedVideoFilter]) control.addEventListener('input', renderSharedCatalog);
   elements.sharedCollection.addEventListener('change', renderSharedCatalog);
-  elements.sharedMount.addEventListener('click', mountShared);
-  elements.sharedSyncAll.addEventListener('click', async () => {
-    try { for (const mount of sharedData.mounts || []) await window.orchestrator.sharedSyncMount(mount.id); await refresh(); }
-    catch (error) { notify('同步共享挂载失败', error); }
+  elements.sharedMount.addEventListener('click', () => mountShared({ button: elements.sharedMount }));
+  elements.sharedMountFiltered.addEventListener('click', () => mountShared({ paths: filteredSharedDocuments().filter((item) => !item.invalid).map((item) => item.path), button: elements.sharedMountFiltered }));
+  elements.sharedCatalogList.addEventListener('change', (event) => {
+    const input = event.target.closest('[data-shared-path]');
+    if (!input) return;
+    if (input.checked) selectedRemotePaths.add(String(input.dataset.sharedPath));
+    else selectedRemotePaths.delete(String(input.dataset.sharedPath));
+    elements.sharedCatalogResultCount.textContent = `显示 ${filteredSharedDocuments().filter((item) => !item.invalid).length} / ${(sharedCatalogData.documents || []).length} 篇 · 已勾选 ${selectedRemotePaths.size} 篇`;
+    elements.sharedMount.disabled = !selectedRemotePaths.size;
   });
+  elements.sharedCatalogList.addEventListener('click', (event) => {
+    const collectionButton = event.target.closest('[data-shared-mount-prefix]');
+    const documentButton = event.target.closest('[data-shared-mount-path]');
+    if (collectionButton) mountShared({ remotePrefix: collectionButton.dataset.sharedMountPrefix, button: collectionButton });
+    else if (documentButton) mountShared({ paths: [documentButton.dataset.sharedMountPath], button: documentButton });
+  });
+  elements.sharedMountSelectAll.addEventListener('click', () => {
+    const mounts = sharedData.mounts || [];
+    if (mounts.length && selectedMountIds.size === mounts.length) selectedMountIds.clear();
+    else for (const mount of mounts) selectedMountIds.add(String(mount.id));
+    renderSharedMounts();
+  });
+  elements.sharedSyncSelected.addEventListener('click', syncSelectedSharedMounts);
   elements.sharedUpload.addEventListener('click', uploadShared);
   elements.sharedUploadCancel.addEventListener('click', cancelSharedUpload);
   elements.sharedUploadSelectAll.addEventListener('click', () => {
@@ -1122,6 +1432,13 @@
     selectedPreparedTaskIds.delete(id);
     renderSharedUploads();
   });
+  elements.sharedMountList.addEventListener('change', (event) => {
+    const input = event.target.closest('[data-shared-mount-select]');
+    if (!input) return;
+    if (input.checked) selectedMountIds.add(String(input.dataset.sharedMountSelect));
+    else selectedMountIds.delete(String(input.dataset.sharedMountSelect));
+    renderSharedMounts();
+  });
   elements.sharedMountList.addEventListener('click', handleSharedAction);
   $('#localVideoImportClose').addEventListener('click', () => closeImportModal('video'));
   $('#localVideoImportCancel').addEventListener('click', () => closeImportModal('video'));
@@ -1153,21 +1470,29 @@
     else refresh().catch(() => {});
   });
   window.orchestrator.onSharedEvent((event) => {
-    if (event.sharedKnowledge) { sharedData = event.sharedKnowledge; renderShared(); renderOutsideCards(); }
+    if (event.operation) updateSharedOperation(event.operation);
+    if (event.sharedKnowledge) {
+      sharedData = event.sharedKnowledge;
+      if (event.type === 'shared-operation-progress') renderSharedOperation();
+      else { renderShared(); renderOutsideCards(); }
+    }
     else refresh().catch(() => {});
   });
   window.orchestrator.onRuntime((data) => {
     if (!data?.backendReady) return;
     outsideBackendReady = true;
     scheduleInitialReadyRefresh();
+    if (activeToolId === 'shared') ensureSharedRepositoryReady().catch(() => {});
   });
   window.orchestrator.onBootstrap((data) => {
     if (data?.phase !== 'ready') return;
     outsideBackendReady = true;
     scheduleInitialReadyRefresh();
+    if (activeToolId === 'shared') ensureSharedRepositoryReady().catch(() => {});
   });
   window.orchestrator.getRuntime().then((data) => {
     outsideBackendReady = Boolean(data?.backendReady);
     scheduleInitialReadyRefresh();
+    if (outsideBackendReady && activeToolId === 'shared') ensureSharedRepositoryReady().catch(() => {});
   }).catch(() => {});
 })();

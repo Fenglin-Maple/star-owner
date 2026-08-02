@@ -690,16 +690,25 @@ function verifyRendererContracts() {
   if (!index.includes('id="sharedRepositoryInput"') || !index.includes('id="sharedRepositoryCreate"') || !index.includes('id="sharedUploadPrepareFilter"') || !index.includes('id="sharedUploadPrepareRemove"') || !index.includes('id="sharedUploadProgressModal"')) {
     throw new Error('共享仓库切换/创建、准备列表二次筛选或独占上传进度界面缺失');
   }
+  if (!index.includes('id="sharedRepositorySelect"') || !index.includes('id="sharedOperationProgress"') || !index.includes('id="sharedGithubFilter"') || !index.includes('id="sharedBilibiliFilter"') || !index.includes('id="sharedVideoFilter"') || !index.includes('id="sharedMountFiltered"') || !index.includes('id="sharedSyncSelected"')) {
+    throw new Error('共享仓库注册表、通用进度、名称筛选、筛选挂载或选中同步界面缺失');
+  }
   if (!outside.includes('selectedUploadTaskIds') || !outside.includes('filteredSharedUploadItems') || !outside.includes('clearSharedAuthorization') || !outside.includes('sharedUploadSelectAll')) {
     throw new Error('共享上传选择状态、筛选、全选或应用授权清理逻辑缺失');
   }
   if (!outside.includes('scheduleInitialReadyRefresh') || !outside.includes('window.orchestrator.onBootstrap') || !outside.includes('sharedCancelUpload') || !outside.includes('sharedUploadPrepareSelectAll')) {
     throw new Error('B站之外工具仍可能在后端就绪前请求服务，或共享上传中止/准备列表批量操作未接线');
   }
-  if (!outsideStyles.includes('.outside-tool-detail') || !outsideStyles.includes('.outside-tool-card-stats') || !outsideStyles.includes('.shared-auth-more') || !outsideStyles.includes('.shared-upload-prep-group')) {
+  if (!outside.includes('ensureSharedRepositoryReady') || !outside.includes('selectedRemotePaths') || !outside.includes('selectedMountIds') || !outside.includes('data-shared-mount-prefix') || !outside.includes('syncSelectedSharedMounts')) {
+    throw new Error('共享仓库进入检查、远程树分层挂载或本地挂载多选同步逻辑缺失');
+  }
+  if (!outside.includes('async function runSharedUiOperation') || !outside.includes('beginSharedOperationPolling(seed)') || !outside.includes('window.orchestrator.sharedOperationState()') || !outside.includes('sharedOperationPollGeneration') || !outside.includes('stopSharedOperationPolling()')) {
+    throw new Error('共享仓库自动化操作缺少即时可见进度或后端进度轮询保护');
+  }
+  if (!outsideStyles.includes('.outside-tool-detail') || !outsideStyles.includes('.outside-tool-card-stats') || !outsideStyles.includes('.shared-auth-more') || !outsideStyles.includes('.shared-upload-prep-group') || !outsideStyles.includes('resize: vertical') || !outsideStyles.includes('.shared-operation-progress')) {
     throw new Error('B站之外工具独立视图、入口数据、更多授权或准备上传列表样式缺失');
   }
-  if (!preload.includes('sharedBrowserLogin') || !preload.includes('sharedSetRepository') || !preload.includes('sharedCreateRepository') || !preload.includes('sharedCancelUpload')) {
+  if (!preload.includes('sharedBrowserLogin') || !preload.includes('sharedOperationState') || !preload.includes('sharedSetRepository') || !preload.includes('sharedCheckRepository') || !preload.includes('sharedCreateRepository') || !preload.includes('sharedCancelUpload') || !preload.includes('sharedSyncMounts')) {
     throw new Error('GitHub 浏览器授权、仓库管理或上传中止没有暴露到 Renderer');
   }
 }
