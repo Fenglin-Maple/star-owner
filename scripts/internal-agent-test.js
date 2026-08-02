@@ -96,6 +96,17 @@ function assert(condition, message) {
   let currentUser = null;
   const cookieFixture = path.join(root, 'login-cookies.txt');
   const manager = new InternalAgentManager({ store, toolRunner, ragAssistant: rag, bili: { exportCookies: async () => { fs.writeFileSync(cookieFixture, 'cookie'); return cookieFixture; } }, getCurrentUser: () => currentUser, emit: (event) => events.push(event) });
+  const sharedCollection = store.upsertCollection({ id: 'shared-agent-test', userId: 'shared-user', userName: '共享', name: '共享知识测试', internal: true, collectionKind: 'shared', workspaceId: workspace.id, workspaceRoot: workspace.root, collectionRoot: path.join(workspace.root, '共享', '共享知识测试') });
+  assert(!manager.state().collections.some((item) => item.id === sharedCollection.id), '共享收藏夹仍出现在 Agent 工作流收藏夹列表');
+  assert(!manager.listInternalCollections().some((item) => item.id === sharedCollection.id), '共享收藏夹仍出现在单视频总结收藏夹列表');
+  let sharedSessionRejected = false;
+  try { manager.createSession({ title: '不应创建', collectionId: sharedCollection.id, providerId: 'provider-test', modelId: 'model-test' }); }
+  catch (error) { sharedSessionRejected = /共享收藏夹.*不能/.test(error.message); }
+  assert(sharedSessionRejected, 'Agent 后端允许共享收藏夹创建视频总结工作流');
+  let sharedSingleRejected = false;
+  try { await manager.inspectSingleTask({ video: 'BVSHARED0001', collectionId: sharedCollection.id }); }
+  catch (error) { sharedSingleRejected = /共享知识库|普通内置收藏夹/.test(error.message); }
+  assert(sharedSingleRejected, '单视频总结后端允许共享收藏夹接收任务');
   const retainedArtifact = path.join(root, 'retained-artifact');
   fs.mkdirSync(path.join(retainedArtifact, 'asr'), { recursive: true });
   fs.mkdirSync(path.join(retainedArtifact, 'subtitles'), { recursive: true });

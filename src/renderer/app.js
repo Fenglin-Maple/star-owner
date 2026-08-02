@@ -1923,7 +1923,7 @@ function renderActiveCollection(viewedCollection) {
 
 function syncTaskSelectors() {
   if (!taskUserSelect || !taskCollectionSelect) return;
-  const collections = lastSnapshot.collections || [];
+  const collections = (lastSnapshot.collections || []).filter((collection) => collection.collectionKind !== 'shared');
   const users = new Map();
   for (const collection of collections) users.set(String(collection.userId || collection.userName), collection.userName || collection.userId || '-');
   const previousUser = taskUserSelect.value;

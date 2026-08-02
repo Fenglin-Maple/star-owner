@@ -69,6 +69,51 @@ class GitRuntime {
     return { stdout: String(result.stdout || ''), stderr: String(result.stderr || '') };
   }
 
+  async withReadOnlyCheckout({ repository, token = '', signal = null, onProgress = null } = {}, callback) {
+    if (typeof callback !== 'function') throw new Error('只读 Git 快照缺少处理回调。');
+    const owner = String(repository?.owner || '').trim();
+    const name = String(repository?.name || '').trim();
+    const branch = String(repository?.branch || 'main').trim();
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(owner) || !/^[A-Za-z0-9._-]{1,100}$/.test(name)) throw new Error('GitHub 共享仓库信息不完整，无法下载只读快照。');
+    if (!branch || branch.length > 120 || /(?:\.\.|[~^:?*\[\\\s]|^\/|\/$|\.lock$|\/\.)/.test(branch)) throw new Error('共享仓库分支名称不安全。');
+    const report = (stage, progress, message) => { if (typeof onProgress === 'function') onProgress({ stage, progress, message }); };
+    let checkout = '';
+    let checkoutReady = false;
+    try {
+      await this.assertAvailable();
+      throwIfAborted(signal);
+      const workRoot = ensureDir(path.join(this.projectRoot, '.cache', 'shared-git'));
+      checkout = fs.mkdtempSync(path.join(workRoot, 'download-'));
+      const remoteUrl = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(name)}.git`;
+      const gitEnv = String(token || '').trim()
+        ? { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'http.extraHeader', GIT_CONFIG_VALUE_0: gitAuthorizationHeader(token) }
+        : {};
+      report('git-download', 0.04, `正在一次性下载 ${owner}/${name} 的最新只读快照...`);
+      await this.run(['-c', 'core.longpaths=true', 'clone', '--depth', '1', '--single-branch', '--no-tags', '--branch', branch, remoteUrl, checkout], {
+        cwd: workRoot,
+        env: gitEnv,
+        signal,
+        timeoutMs: 30 * 60 * 1000
+      });
+      checkoutReady = true;
+      report('git-ready', 1, '共享仓库只读快照已下载，正在从本地批量导入所需文档...');
+      return await callback({ root: checkout, repository: { owner, name, branch } });
+    } catch (error) {
+      if (isAbortError(error) || signal?.aborted) {
+        const canceled = new Error('项目内置 Git 下载已中止。');
+        canceled.name = 'AbortError';
+        canceled.code = 'ABORT_ERR';
+        throw canceled;
+      }
+      if (checkoutReady) throw error;
+      const wrapped = new Error(`项目内置 Git 下载共享仓库失败：${sanitizeGitError(error)}`);
+      wrapped.code = 'SHARED_GIT_CHECKOUT_FAILED';
+      throw wrapped;
+    } finally {
+      if (checkout) await removeCheckout(checkout);
+    }
+  }
+
   async commitAndPush({ upstream, fork, baseBranch = 'main', branch, token, files, replaceRoots = [], message, author = null, signal = null, onProgress = null }) {
     await this.assertAvailable();
     if (!upstream?.owner || !upstream?.name || !fork?.owner || !fork?.name) throw new Error('GitHub 共享仓库信息不完整，无法提交。');

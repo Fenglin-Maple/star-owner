@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.4.6`
+Version: `1.4.7`
 
 ## 1. Portable Release for Users
 
@@ -21,7 +21,7 @@ On first launch:
 9. Verified archives extract into staging and commit atomically below `runtime/`. Successful installation deletes the archive, refreshes ASR and tool health immediately, and an interrupted installation rolls back on next startup.
 10. Users may instead download a model ZIP manually and choose `设置 -> 应用设置 -> 项目依赖包 -> 从本地导入`. The application cancels the same model's automatic download, validates the exact baseline filename, official SHA-256 and archive layout, then uses the same atomic installer. Do not extract the ZIP manually.
 11. Shared-document upload uses `runtime/git/cmd/git.exe` from the same portable package. It does not use a global Git, SSH configuration, HOME, credential helper or user Git config. The primary GitHub authorization button opens the default browser through the bundled Git Credential Manager and forces credential storage into the application's private DPAPI directory; pasted Fine-grained Token remains available as a fallback. Clearing authorization deletes only this private store and the encrypted application record, never Windows Credential Manager or global Git data.
-12. The shared target repository is persisted independently of local mounts only after its `_star-owner-repository.json`, identity, default branch and capabilities pass validation. Verified repositories appear in the application registry and the active repository is health-checked when the tool opens. Users can connect an accessible public or private compliant repository, or create a public repository in the authenticated account with README, policy files, PR template and validation/catalog Actions. Repository creation/validation, catalog reads, mounts and synchronization expose visible progress. An upload is limited to 1000 documents and 1 GiB, locks the application behind a progress modal, and can be cancelled; cancellation terminates GitHub/Git work and cleans recognizable temporary branches and checkout directories.
+12. The shared target repository is persisted independently of local mounts only after its `_star-owner-repository.json`, identity, default branch and capabilities pass validation. Verified repositories appear in the application registry and the active repository is health-checked when the tool opens. Users can connect an accessible public or private compliant repository, or create a public repository in the authenticated account with README, policy files, PR template and validation/catalog Actions. Remote browsing reads the Action-maintained root `catalog.json` in one request when available. A changed mount uses one shallow checkout through bundled Git and imports only the required document directories; unchanged mounts do not download again, while clone failure falls back to a single reused GitHub tree. Repository creation/validation, catalog reads, mounts and synchronization expose visible progress. An upload is limited to 1000 documents and 1 GiB, locks the application behind a progress modal, and can be cancelled; cancellation terminates GitHub/Git work and cleans recognizable temporary branches and checkout directories.
 
 Release dependency assets:
 
@@ -34,7 +34,7 @@ Star-Owner-v<dependency-version>-model-large-v3-turbo.zip
 Star-Owner-v<dependency-version>-model-large-v3-turbo.zip.sha256
 ```
 
-The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.4.6` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.4.7` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads and read-only mount snapshots.
 
 ### Updating and migrating an existing installation
 
@@ -210,7 +210,7 @@ The aggregate verifier also runs scheduler, RAG, task rollback, video cache, ima
 
 ### Automatic ASR model download is slow
 
-Open the dependency Release linked by a model name in Settings. For version `1.4.6`, the required published package is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; `Star-Owner-v1.0.0-model-small.zip` is the optional alternate. Keep the ZIP intact and click `从本地导入` on the matching row. The historical medium filename is only for older releases. The application stops an active automatic download for that model and removes its managed cache. A downloading model can be paused from the same row; pausing preserves the `.partial` file for a later ranged resume. Importing while downloading or paused first cancels the automatic transfer and removes its managed partial/install residue, but never removes the source ZIP selected by the user. A wrong version, wrong model, damaged file, modified archive or unexpected layout is rejected with the correct Release URL; an already healthy model remains installed.
+Open the dependency Release linked by a model name in Settings. For version `1.4.7`, the required published package is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; `Star-Owner-v1.0.0-model-small.zip` is the optional alternate. Keep the ZIP intact and click `从本地导入` on the matching row. The historical medium filename is only for older releases. The application stops an active automatic download for that model and removes its managed cache. A downloading model can be paused from the same row; pausing preserves the `.partial` file for a later ranged resume. Importing while downloading or paused first cancels the automatic transfer and removes its managed partial/install residue, but never removes the source ZIP selected by the user. A wrong version, wrong model, damaged file, modified archive or unexpected layout is rejected with the correct Release URL; an already healthy model remains installed.
 
 ### Windows reports a path-too-long risk
 

@@ -16,6 +16,8 @@ const MAX_SHARED_DOCUMENT_BYTES = 100 * 1024 * 1024;
 const MAX_SHARED_PR_DOCUMENTS = 1000;
 const MAX_SHARED_PR_BYTES = 1024 * 1024 * 1024;
 const MAX_REMOTE_METADATA_BYTES = 512 * 1024;
+const MAX_REMOTE_CATALOG_BYTES = 32 * 1024 * 1024;
+const MAX_REMOTE_CATALOG_DOCUMENTS = 100000;
 const REPOSITORY_MARKER_FILE = '_star-owner-repository.json';
 const REPOSITORY_SCHEMA_VERSION = 1;
 const REQUIRED_REPOSITORY_CAPABILITIES = Object.freeze(['bilibili-summary', 'single-video-summary', 'multipart-summary', 'catalog-v1']);
@@ -40,6 +42,7 @@ class SharedKnowledgeManager {
     this.githubLoginCache = new Map();
     this.ensureSharedUser();
     this.ensureRepositoryRegistry();
+    this.normalizeSharedMountRecords();
   }
 
   get repository() {
@@ -236,7 +239,67 @@ class SharedKnowledgeManager {
       return cached.value;
     }
     const token = this.optionalAuthToken();
-    this.reportOperation({ stage: 'catalog-tree', progress: progressWithin(options, 0.08), message: '正在读取 GitHub 仓库文件树...' }, true);
+    this.reportOperation({ stage: 'catalog-index', progress: progressWithin(options, 0.08), message: '正在一次性读取远程目录索引 catalog.json...' }, true);
+    try {
+      const indexed = await this.readRemoteCatalogIndex(repository, token, options);
+      this.catalogCache.set(cacheKey, { cachedAt: Date.now(), value: indexed });
+      return indexed;
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      this.reportOperation({
+        stage: 'catalog-fallback',
+        progress: progressWithin(options, 0.12),
+        message: `目录索引不可用，正在兼容读取仓库文件树：${String(error.message || error).slice(0, 160)}`
+      }, true);
+    }
+    return this.readRemoteCatalogFromTree(repository, token, options, cacheKey);
+  }
+
+  async readRemoteCatalogIndex(repository, token, options = {}) {
+    const record = await this.readRemoteJsonRecord('catalog.json', MAX_REMOTE_CATALOG_BYTES, repository, token);
+    const catalog = record.value;
+    if (!catalog || typeof catalog !== 'object' || Array.isArray(catalog)) throw new Error('catalog.json 不是有效对象。');
+    if (Number(catalog.schemaVersion || 0) !== 1) throw new Error(`catalog.json 版本不兼容：${catalog.schemaVersion || '空'}。`);
+    if (!Array.isArray(catalog.documents)) throw new Error('catalog.json 缺少 documents 列表。');
+    if (catalog.documents.length > MAX_REMOTE_CATALOG_DOCUMENTS) throw new Error(`catalog.json 文档数量超过 ${MAX_REMOTE_CATALOG_DOCUMENTS} 篇安全上限。`);
+    if (Number(catalog.total) !== catalog.documents.length) throw new Error('catalog.json 的 total 与 documents 数量不一致。');
+    const seen = new Set();
+    const documents = catalog.documents.map((entry) => {
+      const metadataPath = String(entry?.metadataPath || '').replace(/\\/g, '/');
+      assertRemotePath(metadataPath);
+      if (!metadataPath.endsWith(`/${DOCUMENT_META_FILE}`)) throw new Error(`catalog.json 包含无效元数据路径：${metadataPath}`);
+      if (seen.has(metadataPath)) throw new Error(`catalog.json 包含重复文档路径：${metadataPath}`);
+      seen.add(metadataPath);
+      const document = {
+        ...entry,
+        sourceType: entry.sourceType || 'bilibili-video-summary',
+        documentType: entry.documentType || 'single-video',
+        path: metadataPath,
+        metadataPath,
+        remoteSha: String(entry.remoteSha || entry.metadataSha || ''),
+        updatedAt: entry.updatedAt || entry.uploadedAt || ''
+      };
+      validateRemoteMetadata(document, metadataPath);
+      return document;
+    });
+    this.reportOperation({ stage: 'catalog-users', progress: progressWithin(options, 0.72), current: documents.length, total: documents.length, message: `目录索引已读取，共 ${documents.length} 篇；正在整理贡献者名称...` }, true);
+    await this.resolveCatalogGithubLogins(documents, token);
+    documents.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')) || String(a.path).localeCompare(String(b.path)));
+    const value = {
+      repository: { ...repository },
+      branchSha: '',
+      catalogSha: String(record.sha || ''),
+      generatedAt: String(catalog.generatedAt || ''),
+      catalogSource: 'index',
+      total: documents.length,
+      documents
+    };
+    this.reportOperation({ stage: 'catalog-ready', progress: progressWithin(options, 0.98), current: documents.length, total: documents.length, message: `远程目录索引读取完成，共 ${documents.length} 篇文档。` }, true);
+    return value;
+  }
+
+  async readRemoteCatalogFromTree(repository, token, options = {}, cacheKey = repositoryIdentity(repository)) {
+    this.reportOperation({ stage: 'catalog-tree', progress: progressWithin(options, 0.14), message: '正在读取 GitHub 仓库文件树...' }, true);
     let tree;
     try {
       tree = await this.githubRequest(`/repos/${repository.owner}/${repository.name}/git/trees/${encodeURIComponent(repository.branch)}?recursive=1`, { token });
@@ -273,7 +336,7 @@ class SharedKnowledgeManager {
     this.reportOperation({ stage: 'catalog-users', progress: progressWithin(options, 0.84), message: '正在整理贡献者与收藏夹目录...' }, true);
     await this.resolveCatalogGithubLogins(result, token);
     result.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')) || String(a.path).localeCompare(String(b.path)));
-    const value = { repository: { ...repository }, branchSha: tree.sha || '', total: result.length, documents: result };
+    const value = { repository: { ...repository }, branchSha: tree.sha || '', catalogSha: '', generatedAt: '', catalogSource: 'tree', total: result.length, documents: result };
     this.catalogCache.set(cacheKey, { cachedAt: Date.now(), value });
     this.reportOperation({ stage: 'catalog-ready', progress: progressWithin(options, 0.98), current: result.length, total: result.length, message: `远程目录读取完成，共 ${result.length} 篇文档。` }, true);
     return value;
@@ -428,18 +491,14 @@ class SharedKnowledgeManager {
       const existing = this.store.list('sharedMounts').find((item) => item.collectionId === collection.id
         && item.scope === 'collection'
         && sameRepository(item.repository || DEFAULT_REPOSITORY, repository)
-        && String(item.remotePrefix || '') === prefix);
+        && documents.every((document) => mountCoversPath(item, document.path)));
       if (existing) {
-        await this.syncMountInternal(existing.id, catalog, { progressStart: 0.26, progressEnd: 0.96 });
-        return publicMount(this.store.get('sharedMounts', existing.id));
+        return this.syncMountInternal(existing.id, catalog, { progressStart: 0.26, progressEnd: 0.96 });
       }
     } else {
-      const covered = this.store.list('sharedMounts')
-        .filter((item) => item.collectionId === collection.id && sameRepository(item.repository || DEFAULT_REPOSITORY, repository))
-        .map((item) => item.remotePaths || [])
-        .flat();
-      const coveredPaths = new Set(covered.map(String));
-      documents = documents.filter((item) => !coveredPaths.has(String(item.path)));
+      const existingMounts = this.store.list('sharedMounts')
+        .filter((item) => item.collectionId === collection.id && sameRepository(item.repository || DEFAULT_REPOSITORY, repository));
+      documents = documents.filter((document) => !existingMounts.some((mount) => mountCoversPath(mount, document.path)));
       if (!documents.length) throw new Error('选中的远程文档已经挂载到当前共享收藏夹，无需重复挂载。');
     }
     const mount = {
@@ -455,19 +514,30 @@ class SharedKnowledgeManager {
     };
     this.store.set('sharedMounts', mount.id, mount);
     this.store.commit();
+    let result;
     try {
-      await this.syncMountInternal(mount.id, catalog, { progressStart: 0.26, progressEnd: 0.96 });
+      result = await this.syncMountInternal(mount.id, catalog, { progressStart: 0.26, progressEnd: 0.96 });
     } catch (error) {
       this.rollbackNewMount(mount, collection, createdCollection);
       throw error;
     }
-    this.emitState('shared-mount-created', { mountId: mount.id, collectionId: collection.id });
-    return publicMount(this.store.get('sharedMounts', mount.id));
+    const normalizedMountId = this.normalizeSharedMountRecords(mount.id) || mount.id;
+    this.emitState('shared-mount-created', { mountId: normalizedMountId, collectionId: collection.id });
+    return { ...publicMount(this.store.get('sharedMounts', normalizedMountId) || mount), unchanged: Boolean(result?.unchanged) };
   }
 
   rollbackNewMount(mount, collection, createdCollection) {
-    const tasks = this.store.listTasks({ collectionId: mount.collectionId }).filter((task) => task.sharedMountId === mount.id);
+    const tasks = this.store.listTasks({ collectionId: mount.collectionId }).filter((task) => {
+      const mountIds = Array.isArray(task.sharedMountIds) ? task.sharedMountIds : [task.sharedMountId];
+      return mountIds.map(String).includes(String(mount.id));
+    });
     for (const task of tasks) {
+      const remaining = (Array.isArray(task.sharedMountIds) ? task.sharedMountIds : [task.sharedMountId])
+        .filter((id) => id && String(id) !== String(mount.id));
+      if (remaining.length) {
+        this.store.set('tasks', task.id, { ...task, sharedMountIds: remaining, sharedMountId: remaining.at(-1), updatedAt: new Date().toISOString() });
+        continue;
+      }
       if (task.artifactDir) fs.rmSync(task.artifactDir, { recursive: true, force: true });
       this.store.delete('tasks', task.id);
       this.store.delete('videos', task.id);
@@ -514,7 +584,12 @@ class SharedKnowledgeManager {
         this.reportOperation({ stage: 'mount-sync', progress: start, current: index, total: mounts.length, message: `正在同步挂载 ${index + 1} / ${mounts.length}：${mount.collectionName || mount.id}` }, true);
         output.push(await this.syncMountInternal(mount.id, catalogs.get(repositoryIdentity(repository)), { progressStart: start, progressEnd: end }));
       }
-      return { synced: output.length, mounts: output };
+      return {
+        synced: output.length,
+        unchanged: output.filter((mount) => mount.unchanged).length,
+        downloaded: output.reduce((sum, mount) => sum + Number(mount.downloaded || 0), 0),
+        mounts: output
+      };
     });
   }
 
@@ -536,35 +611,149 @@ class SharedKnowledgeManager {
       const mountIds = Array.isArray(task.sharedMountIds) ? task.sharedMountIds : [task.sharedMountId];
       return mountIds.map(String).includes(String(mount.id)) && ['shared-bilibili', 'shared-bilibili-multipart-summary'].includes(task.sourceType);
     });
-    for (let index = 0; index < documents.length; index += 1) {
-      const document = documents[index];
-      const start = Number(progressOptions.progressStart || 0.08);
-      const end = Number(progressOptions.progressEnd || 0.94);
-      this.reportOperation({
-        stage: 'mount-import',
-        progress: start + ((index + 1) / Math.max(1, documents.length)) * (end - start),
-        current: index + 1,
-        total: documents.length,
-        message: `正在挂载文档 ${index + 1} / ${documents.length}：${document.title || document.bvid || document.documentId}`
-      });
-      await this.importRemoteDocument(document, mount);
+    const pendingImports = [];
+    let reusedDocuments = 0;
+    for (const document of documents) {
+      const existing = this.findMountedDocumentTask(mount, document, repository);
+      if (existing && this.remoteDocumentMatchesLocal(document, existing)) {
+        this.attachDocumentToMount(existing, mount, document, repository);
+        reusedDocuments += 1;
+      } else {
+        pendingImports.push(document);
+      }
     }
+    if (pendingImports.length) await this.importMountDocuments(pendingImports, mount, repository, progressOptions);
+    let remoteStateChanged = false;
     for (const task of localTasks) {
       if (task.sharedRemotePath && !currentPaths.has(task.sharedRemotePath)) {
         if (this.isSharedExcluded(mount.collectionId, task.sharedRemotePath, repository)) {
-          this.store.set('tasks', task.id, { ...task, remoteState: 'local-deleted', updatedAt: new Date().toISOString() });
+          if (task.remoteState !== 'local-deleted') {
+            this.store.set('tasks', task.id, { ...task, remoteState: 'local-deleted', updatedAt: new Date().toISOString() });
+            remoteStateChanged = true;
+          }
         } else if (!this.isCoveredByAnotherMount(mount, task.sharedRemotePath)) {
-          this.store.set('tasks', task.id, { ...task, remoteState: 'remote-deleted', remoteDeletedAt: task.remoteDeletedAt || new Date().toISOString(), updatedAt: new Date().toISOString() });
+          if (task.remoteState !== 'remote-deleted') {
+            this.store.set('tasks', task.id, { ...task, remoteState: 'remote-deleted', remoteDeletedAt: task.remoteDeletedAt || new Date().toISOString(), updatedAt: new Date().toISOString() });
+            remoteStateChanged = true;
+          }
         }
       }
     }
-    mount.remotePaths = [...new Set([...mount.remotePaths || [], ...documents.map((item) => item.path)])];
-    mount.lastSyncedAt = new Date().toISOString();
-    mount.updatedAt = mount.lastSyncedAt;
+    const now = new Date().toISOString();
+    mount.remotePaths = scope === 'collection'
+      ? documents.map((item) => item.path)
+      : [...new Set([...mount.remotePaths || [], ...documents.map((item) => item.path)])];
+    mount.remoteFingerprint = sharedDocumentsFingerprint(documents);
+    mount.lastCheckedAt = now;
+    const unchanged = pendingImports.length === 0 && !remoteStateChanged;
+    if (!unchanged || !mount.lastSyncedAt) mount.lastSyncedAt = now;
+    mount.updatedAt = unchanged ? (mount.updatedAt || now) : now;
     this.store.set('sharedMounts', mount.id, mount);
     this.store.commit();
-    this.emitState('shared-mount-synced', { mountId: mount.id, collectionId: mount.collectionId });
-    return publicMount(mount);
+    this.emitState('shared-mount-synced', { mountId: mount.id, collectionId: mount.collectionId, unchanged });
+    return { ...publicMount(mount), unchanged, downloaded: pendingImports.length, reused: reusedDocuments };
+  }
+
+  findMountedDocumentTask(mount, document, repository) {
+    const documentId = String(document.documentId || '');
+    return this.store.listTasks({ collectionId: mount.collectionId }).find((task) => task.multiPartRole !== 'part'
+      && ['shared-bilibili', 'shared-bilibili-multipart-summary'].includes(task.sourceType)
+      && String(task.sharedRemotePath || '') === String(document.path || '')
+      && (!documentId || String(task.sharedDocumentId || '') === documentId)
+      && sameRepository(task.sharedRepository || DEFAULT_REPOSITORY, repository));
+  }
+
+  remoteDocumentMatchesLocal(document, task) {
+    if (!task?.artifactDir || !task.outputMarkdown || !task.metadataFile) return false;
+    if (!fs.existsSync(task.artifactDir) || !fs.existsSync(task.outputMarkdown) || !fs.existsSync(task.metadataFile)) return false;
+    const metadata = readJsonFile(task.metadataFile);
+    if (!metadata || String(metadata.documentId || '') !== String(document.documentId || '')) return false;
+    const isMultipartParent = metadata.multiPartRole === 'parent' || metadata.documentType === 'multipart-parent';
+    if (localSharedDocumentModified(task.artifactDir, metadata, isMultipartParent)) return false;
+    let compared = false;
+    if (document.contentSha256) {
+      compared = true;
+      if (String(metadata.contentSha256 || '') !== String(document.contentSha256)) return false;
+    }
+    if (document.remoteSha && task.sharedRemoteSha) {
+      compared = true;
+      if (String(document.remoteSha) !== String(task.sharedRemoteSha)) return false;
+    }
+    const remoteUpdatedAt = String(document.updatedAt || document.uploadedAt || '');
+    if (remoteUpdatedAt && task.remoteUpdatedAt) {
+      compared = true;
+      if (remoteUpdatedAt !== String(task.remoteUpdatedAt)) return false;
+    }
+    return compared;
+  }
+
+  attachDocumentToMount(task, mount, document, repository) {
+    const related = this.store.listTasks({ collectionId: mount.collectionId }).filter((item) => item.id === task.id
+      || (item.multiPartParentId && item.multiPartParentId === task.id));
+    const now = new Date().toISOString();
+    for (const item of related) {
+      const mountIds = [...new Set([...(Array.isArray(item.sharedMountIds) ? item.sharedMountIds : [item.sharedMountId]), mount.id].filter(Boolean).map(String))];
+      const next = {
+        ...item,
+        sharedMountId: mount.id,
+        sharedMountIds: mountIds,
+        sharedRepository: repository,
+        sharedRemoteSha: document.remoteSha || item.sharedRemoteSha || '',
+        remoteUpdatedAt: document.updatedAt || document.uploadedAt || item.remoteUpdatedAt || '',
+        remoteState: 'active'
+      };
+      const changed = JSON.stringify([item.sharedMountId, item.sharedMountIds, item.sharedRemoteSha, item.remoteUpdatedAt, item.remoteState])
+        !== JSON.stringify([next.sharedMountId, next.sharedMountIds, next.sharedRemoteSha, next.remoteUpdatedAt, next.remoteState]);
+      if (changed) this.store.set('tasks', item.id, { ...next, updatedAt: now });
+    }
+  }
+
+  async importMountDocuments(documents, mount, repository, progressOptions = {}) {
+    const token = this.optionalAuthToken();
+    const start = Number(progressOptions.progressStart || 0.08);
+    const end = Number(progressOptions.progressEnd || 0.94);
+    const importFrom = async ({ checkoutRoot = '', remoteTree = null, progressStart = start } = {}) => {
+      for (let index = 0; index < documents.length; index += 1) {
+        const document = documents[index];
+        this.reportOperation({
+          stage: checkoutRoot ? 'mount-copy' : 'mount-download',
+          progress: progressStart + ((index + 1) / Math.max(1, documents.length)) * (end - progressStart),
+          current: index + 1,
+          total: documents.length,
+          message: `${checkoutRoot ? '正在从本地快照导入' : '正在下载并挂载'}文档 ${index + 1} / ${documents.length}：${document.title || document.bvid || document.documentId}`
+        });
+        await this.importRemoteDocument(document, mount, { checkoutRoot, remoteTree });
+      }
+    };
+    const canUseCheckout = typeof this.gitRuntime?.withReadOnlyCheckout === 'function'
+      && (!this.requestOverride || this.gitRuntime.allowCheckoutWithRequestOverride === true);
+    if (canUseCheckout) {
+      try {
+        await this.gitRuntime.withReadOnlyCheckout({
+          repository,
+          token,
+          onProgress: (event) => this.reportOperation({
+            stage: event.stage || 'git-download',
+            progress: start + Number(event.progress || 0) * (end - start) * 0.24,
+            current: 0,
+            total: documents.length,
+            message: event.message || '正在一次性下载共享仓库快照...'
+          }, true)
+        }, async ({ root }) => importFrom({ checkoutRoot: root, progressStart: start + (end - start) * 0.24 }));
+        return;
+      } catch (error) {
+        if (isAbortError(error) || error?.code !== 'SHARED_GIT_CHECKOUT_FAILED') throw error;
+        this.reportOperation({ stage: 'mount-api-fallback', progress: start + (end - start) * 0.08, message: `内置 Git 快照不可用，正在切换 GitHub API 兼容下载：${String(error.message || error).slice(0, 180)}` }, true);
+      }
+    }
+    const remoteTree = await this.readRepositoryTree(repository, token);
+    await importFrom({ remoteTree, progressStart: start + (end - start) * 0.12 });
+  }
+
+  async readRepositoryTree(repository, token) {
+    const tree = await this.githubRequest(`/repos/${repository.owner}/${repository.name}/git/trees/${encodeURIComponent(repository.branch)}?recursive=1`, { token });
+    if (tree.truncated) throw new Error('共享仓库目录过大，GitHub 返回了不完整目录；无法安全导入文档。');
+    return tree;
   }
 
   async unmount(mountId) {
@@ -653,9 +842,9 @@ class SharedKnowledgeManager {
     return { task, documentId, remoteRoot, files, metadata, totalBytes: metadata.totalBytes };
   }
 
-  async importRemoteDocument(document, mount) {
+  async importRemoteDocument(document, mount, { checkoutRoot = '', remoteTree = null } = {}) {
     if (document.invalid) return null;
-    const metadata = document;
+    let metadata = document;
     const collection = this.store.getCollectionById(mount.collectionId);
     if (!collection) throw new Error('共享收藏夹不存在。');
     const repository = normalizeRepository(mount.repository || DEFAULT_REPOSITORY);
@@ -675,31 +864,49 @@ class SharedKnowledgeManager {
     let installed = false;
     try {
       const token = this.optionalAuthToken();
-      const tree = await this.githubRequest(`/repos/${repository.owner}/${repository.name}/git/trees/${encodeURIComponent(repository.branch)}?recursive=1`, { token });
-      if (tree.truncated) throw new Error('共享仓库目录过大，GitHub 返回了不完整目录；无法安全导入该文档。');
-      const files = (tree.tree || []).filter((entry) => entry.type === 'blob' && (entry.path === document.path || entry.path.startsWith(`${remoteRoot}/`)));
-      validateRemoteTree(files, remoteRoot);
       let downloadedBytes = 0;
-      for (const entry of files) {
-        const relative = entry.path === document.path ? DOCUMENT_META_FILE : entry.path.slice(remoteRoot.length + 1);
-        if (!isShareableRelative(relative)) continue;
-        const destination = assertInside(temp, path.join(temp, relative));
-        ensureDir(path.dirname(destination));
-        const body = await this.readRemoteFileBytes(entry.path, MAX_SHARED_FILE_BYTES, entry.sha, repository, token);
-        downloadedBytes += body.length;
-        if (downloadedBytes > MAX_SHARED_DOCUMENT_BYTES) throw new Error(`远程共享文档总大小不能超过 ${formatMiB(MAX_SHARED_DOCUMENT_BYTES)}。`);
-        fs.writeFileSync(destination, body);
+      if (checkoutRoot) {
+        const files = collectCheckoutDocumentFiles(checkoutRoot, remoteRoot);
+        validateRemoteTree(files.map((file) => ({ type: 'blob', path: `${remoteRoot}/${file.relative}`, size: file.size })), remoteRoot);
+        for (const file of files) {
+          const destination = assertInside(temp, path.join(temp, file.relative));
+          ensureDir(path.dirname(destination));
+          fs.copyFileSync(file.sourcePath, destination);
+          downloadedBytes += file.size;
+        }
+      } else {
+        const tree = remoteTree || await this.readRepositoryTree(repository, token);
+        const files = (tree.tree || []).filter((entry) => entry.type === 'blob' && (entry.path === document.path || entry.path.startsWith(`${remoteRoot}/`)));
+        validateRemoteTree(files, remoteRoot);
+        for (const entry of files) {
+          const relative = entry.path === document.path ? DOCUMENT_META_FILE : entry.path.slice(remoteRoot.length + 1);
+          if (!isShareableRelative(relative)) continue;
+          const destination = assertInside(temp, path.join(temp, relative));
+          ensureDir(path.dirname(destination));
+          const body = await this.readRemoteFileBytes(entry.path, MAX_SHARED_FILE_BYTES, entry.sha, repository, token);
+          downloadedBytes += body.length;
+          if (downloadedBytes > MAX_SHARED_DOCUMENT_BYTES) throw new Error(`远程共享文档总大小不能超过 ${formatMiB(MAX_SHARED_DOCUMENT_BYTES)}。`);
+          fs.writeFileSync(destination, body);
+        }
       }
+      if (downloadedBytes > MAX_SHARED_DOCUMENT_BYTES) throw new Error(`远程共享文档总大小不能超过 ${formatMiB(MAX_SHARED_DOCUMENT_BYTES)}。`);
       if (!fs.existsSync(path.join(temp, DOCUMENT_META_FILE))) throw new Error(`远程文档元数据缺失：${document.path}`);
       let incomingMetadata;
       try { incomingMetadata = JSON.parse(fs.readFileSync(path.join(temp, DOCUMENT_META_FILE), 'utf8')); }
       catch { throw new Error(`远程文档元数据不是有效 JSON：${document.path}`); }
       validateRemoteMetadata(incomingMetadata, document.path);
       if (String(incomingMetadata.documentId) !== documentId) throw new Error(`远程文档 ID 与目录不一致：${document.path}`);
+      metadata = { ...document, ...incomingMetadata, path: document.path, metadataPath: document.metadataPath || document.path, remoteSha: document.remoteSha || '' };
       const isMultipartParent = metadata.multiPartRole === 'parent' || metadata.documentType === 'multipart-parent';
-      const remoteChanged = Boolean(existing?.sharedRemoteSha && document.remoteSha && document.remoteSha !== existing.sharedRemoteSha);
+      const existingMetadata = existing?.metadataFile ? readJsonFile(existing.metadataFile) : null;
+      const incomingUpdatedAt = String(incomingMetadata.updatedAt || incomingMetadata.uploadedAt || '');
+      const remoteChanged = Boolean(existing && (
+        (document.remoteSha && String(document.remoteSha) !== String(existing.sharedRemoteSha || ''))
+        || (incomingMetadata.contentSha256 && String(incomingMetadata.contentSha256) !== String(existingMetadata?.contentSha256 || ''))
+        || (incomingUpdatedAt && incomingUpdatedAt !== String(existing.remoteUpdatedAt || ''))
+      ));
       const localModified = existing?.artifactDir && fs.existsSync(existing.artifactDir)
-        ? localSharedDocumentModified(existing.artifactDir, existing.metadataFile ? readJsonFile(existing.metadataFile) : null, isMultipartParent)
+        ? localSharedDocumentModified(existing.artifactDir, existingMetadata, isMultipartParent)
         : false;
       const mountIds = [...new Set([...(Array.isArray(existing?.sharedMountIds) ? existing.sharedMountIds : [existing?.sharedMountId]), mount.id].filter(Boolean).map(String))];
       if (existing && localModified) {
@@ -1121,6 +1328,102 @@ class SharedKnowledgeManager {
     }
   }
 
+  normalizeSharedMountRecords(preferredMountId = '') {
+    const mounts = this.store.list('sharedMounts');
+    if (!mounts.length) return '';
+    const groups = new Map();
+    const redirects = new Map();
+    const survivors = new Map();
+    let changed = false;
+    for (const mount of mounts) {
+      let repository;
+      try { repository = normalizeRepository(mount.repository || DEFAULT_REPOSITORY); }
+      catch { repository = { ...DEFAULT_REPOSITORY }; }
+      const key = `${String(mount.collectionId || '')}|${repositoryIdentity(repository)}`;
+      if (!groups.has(key)) groups.set(key, { repository, mounts: [] });
+      groups.get(key).mounts.push({ ...mount, repository });
+    }
+    const byCreated = (left, right) => String(left.createdAt || '').localeCompare(String(right.createdAt || '')) || String(left.id).localeCompare(String(right.id));
+    for (const group of groups.values()) {
+      const collectionMounts = group.mounts.filter((mount) => mount.scope === 'collection').sort((left, right) => {
+        const depth = String(left.remotePrefix || '').split('/').filter(Boolean).length - String(right.remotePrefix || '').split('/').filter(Boolean).length;
+        return depth || byCreated(left, right);
+      });
+      const keptCollections = [];
+      for (const mount of collectionMounts) {
+        const prefix = String(mount.remotePrefix || '');
+        const covering = keptCollections.find((item) => remotePrefixCovers(item.remotePrefix, prefix));
+        if (!covering) {
+          keptCollections.push(mount);
+          continue;
+        }
+        covering.remotePaths = [...new Set([...(covering.remotePaths || []), ...(mount.remotePaths || [])].map(String))];
+        covering.lastSyncedAt = latestIso(covering.lastSyncedAt, mount.lastSyncedAt);
+        covering.lastCheckedAt = latestIso(covering.lastCheckedAt, mount.lastCheckedAt);
+        covering.updatedAt = latestIso(covering.updatedAt, mount.updatedAt);
+        covering.remoteFingerprint = '';
+        redirects.set(String(mount.id), String(covering.id));
+        changed = true;
+      }
+      for (const mount of keptCollections) survivors.set(String(mount.id), mount);
+
+      const documentMounts = group.mounts.filter((mount) => mount.scope !== 'collection').sort(byCreated);
+      const remainingPaths = [...new Set(documentMounts.flatMap((mount) => mount.remotePaths || []).map(String))]
+        .filter((remotePath) => !keptCollections.some((mount) => mountCoversPath(mount, remotePath)));
+      if (remainingPaths.length && documentMounts.length) {
+        const canonical = documentMounts[0];
+        const previousPaths = [...new Set((canonical.remotePaths || []).map(String))].sort();
+        canonical.remotePaths = remainingPaths.sort();
+        canonical.remotePrefix = commonPrefix(canonical.remotePaths);
+        canonical.remoteFingerprint = documentMounts.length === 1 && previousPaths.join('\n') === canonical.remotePaths.join('\n') ? canonical.remoteFingerprint : '';
+        canonical.lastSyncedAt = documentMounts.reduce((value, mount) => latestIso(value, mount.lastSyncedAt), canonical.lastSyncedAt || '');
+        canonical.lastCheckedAt = documentMounts.reduce((value, mount) => latestIso(value, mount.lastCheckedAt), canonical.lastCheckedAt || '');
+        canonical.updatedAt = documentMounts.reduce((value, mount) => latestIso(value, mount.updatedAt), canonical.updatedAt || '');
+        survivors.set(String(canonical.id), canonical);
+        for (const mount of documentMounts.slice(1)) redirects.set(String(mount.id), String(canonical.id));
+        if (documentMounts.length > 1 || previousPaths.join('\n') !== canonical.remotePaths.join('\n')) changed = true;
+      } else if (documentMounts.length) {
+        for (const mount of documentMounts) {
+          const covering = keptCollections.find((candidate) => (mount.remotePaths || []).every((remotePath) => mountCoversPath(candidate, remotePath)));
+          if (covering) redirects.set(String(mount.id), String(covering.id));
+        }
+        changed = true;
+      }
+    }
+
+    for (const mount of mounts) {
+      if (!survivors.has(String(mount.id))) {
+        this.store.delete('sharedMounts', mount.id);
+        changed = true;
+      }
+    }
+    for (const mount of survivors.values()) {
+      const original = mounts.find((item) => String(item.id) === String(mount.id));
+      if (!original || JSON.stringify(original) !== JSON.stringify(mount)) {
+        this.store.set('sharedMounts', mount.id, mount);
+        changed = true;
+      }
+    }
+    const survivingMounts = [...survivors.values()];
+    for (const task of this.store.list('tasks').filter((item) => ['shared-bilibili', 'shared-bilibili-multipart-summary'].includes(item.sourceType))) {
+      const matching = survivingMounts.filter((mount) => String(mount.collectionId) === String(task.collectionId)
+        && sameRepository(mount.repository || DEFAULT_REPOSITORY, task.sharedRepository || DEFAULT_REPOSITORY)
+        && mountCoversPath(mount, task.sharedRemotePath));
+      const mountIds = matching.map((mount) => String(mount.id));
+      const primary = mountIds.includes(String(preferredMountId || '')) ? String(preferredMountId) : (mountIds.at(-1) || '');
+      const currentIds = [...new Set((Array.isArray(task.sharedMountIds) ? task.sharedMountIds : [task.sharedMountId]).filter(Boolean).map(String))];
+      if (currentIds.join('\n') !== mountIds.join('\n') || String(task.sharedMountId || '') !== primary) {
+        this.store.set('tasks', task.id, { ...task, sharedMountIds: mountIds, sharedMountId: primary, updatedAt: new Date().toISOString() });
+        changed = true;
+      }
+    }
+    if (changed) this.store.save();
+    const preferred = String(preferredMountId || '');
+    if (preferred && survivors.has(preferred)) return preferred;
+    if (preferred && redirects.has(preferred)) return redirects.get(preferred);
+    return preferred;
+  }
+
   isCoveredByAnotherMount(currentMount, remotePath) {
     return this.store.list('sharedMounts').some((mount) => String(mount.id) !== String(currentMount.id)
       && String(mount.collectionId) === String(currentMount.collectionId)
@@ -1176,6 +1479,25 @@ class SharedKnowledgeManager {
     const repository = normalizeRepository(repositoryInput);
     try { return await this.githubRequest(`/repos/${repository.owner}/${repository.name}/contents/${encodePath(pathName)}?ref=${encodeURIComponent(repository.branch)}`, { token, signal }); }
     catch (error) { if (error.status === 404) return null; throw error; }
+  }
+
+  async readRemoteJsonRecord(pathName, maxBytes, repositoryInput = this.repository, token = this.optionalAuthToken(), signal = null) {
+    assertRemotePath(pathName);
+    const repository = normalizeRepository(repositoryInput);
+    const endpoint = `/repos/${repository.owner}/${repository.name}/contents/${encodePath(pathName)}?ref=${encodeURIComponent(repository.branch)}`;
+    const payload = await this.githubRequest(endpoint, { token, signal });
+    let encoded = String(payload.content || '');
+    if (!encoded && payload.sha && !this.requestOverride) {
+      const blob = await this.githubRequest(`/repos/${repository.owner}/${repository.name}/git/blobs/${encodeURIComponent(payload.sha)}`, { token, signal });
+      encoded = String(blob.content || '');
+    }
+    if (!encoded) throw new Error(`远程 JSON 文件不可读取：${pathName}`);
+    const body = Buffer.from(encoded.replace(/\s+/g, ''), 'base64');
+    if (body.length > maxBytes) throw new Error(`远程 JSON 文件过大（上限 ${formatMiB(maxBytes)}）：${pathName}`);
+    let value;
+    try { value = JSON.parse(body.toString('utf8')); }
+    catch { throw new Error(`远程 JSON 文件格式无效：${pathName}`); }
+    return { value, sha: String(payload.sha || ''), size: body.length };
   }
 
   async readRemoteFile(pathName, maxBytes = MAX_SHARED_FILE_BYTES, repository = this.repository, token = this.optionalAuthToken(), signal = null) { return JSON.parse((await this.readRemoteFileBytes(pathName, maxBytes, '', repository, token, signal)).toString('utf8')); }
@@ -1242,6 +1564,15 @@ function mountCoversPath(mount = {}, remotePath = '') {
   if (mount.scope === 'collection') return pathName.startsWith(`${String(mount.remotePrefix || '')}/`) || pathName === String(mount.remotePrefix || '');
   return (mount.remotePaths || []).map(String).includes(pathName);
 }
+function remotePrefixCovers(parent, child) {
+  const parentPrefix = String(parent || '').replace(/\/+$/, '');
+  const childPrefix = String(child || '').replace(/\/+$/, '');
+  if (!parentPrefix || !childPrefix) return parentPrefix === childPrefix;
+  return childPrefix === parentPrefix || childPrefix.startsWith(`${parentPrefix}/`);
+}
+function latestIso(left, right) {
+  return String(left || '').localeCompare(String(right || '')) >= 0 ? String(left || '') : String(right || '');
+}
 function collectShareableFiles(root) {
   const result = [];
   const visit = (directory) => {
@@ -1255,6 +1586,31 @@ function collectShareableFiles(root) {
   };
   visit(root);
   return result;
+}
+function collectCheckoutDocumentFiles(checkoutRoot, remoteRoot) {
+  const checkout = path.resolve(checkoutRoot);
+  const sourceRoot = assertInside(checkout, path.join(checkout, ...String(remoteRoot || '').split('/')));
+  if (!fs.existsSync(sourceRoot)) throw new Error(`共享仓库快照缺少远程文档目录：${remoteRoot}`);
+  const rootStat = fs.lstatSync(sourceRoot);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error(`共享仓库快照包含无效文档目录：${remoteRoot}`);
+  const files = [];
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const sourcePath = assertInside(sourceRoot, path.join(directory, entry.name));
+      if (entry.isSymbolicLink()) throw new Error(`远程共享文档不允许符号链接：${path.relative(sourceRoot, sourcePath)}`);
+      if (entry.isDirectory()) {
+        visit(sourcePath);
+        continue;
+      }
+      if (!entry.isFile()) throw new Error(`远程共享文档包含非常规文件：${path.relative(sourceRoot, sourcePath)}`);
+      const relative = path.relative(sourceRoot, sourcePath).split(path.sep).join('/');
+      const stat = fs.lstatSync(sourcePath);
+      files.push({ sourcePath, relative, size: stat.size });
+      if (files.length > MAX_SHARED_DOCUMENT_FILES) throw new Error(`远程共享文档文件数量超过 ${MAX_SHARED_DOCUMENT_FILES} 个。`);
+    }
+  };
+  visit(sourceRoot);
+  return files;
 }
 function buildSharedDocumentFiles(task, sourceRoot, multipartParts = []) {
   const root = path.resolve(sourceRoot);
@@ -1322,6 +1678,13 @@ function commonPrefix(paths) {
     else break;
   }
   return output.join('/');
+}
+function sharedDocumentsFingerprint(documents = []) {
+  const records = (documents || []).map((document) => [
+    String(document.path || ''),
+    String(document.contentSha256 || document.remoteSha || document.updatedAt || document.uploadedAt || '')
+  ]).sort((left, right) => left[0].localeCompare(right[0]));
+  return sha256(Buffer.from(JSON.stringify(records), 'utf8'));
 }
 function safeBranch(value) { return safeName(value || 'user', 'user', 50).replace(/[^a-zA-Z0-9._-]+/g, '-'); }
 function encodePath(value) { return String(value || '').split('/').map(encodeURIComponent).join('/'); }

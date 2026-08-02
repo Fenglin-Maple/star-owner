@@ -831,13 +831,15 @@
     if (!selectedPaths.length && !remotePrefix) return notify('无法挂载共享文档', '请勾选文档、使用“挂载筛选结果”，或点击收藏夹/文档旁的挂载按钮。');
     if (button) setBusy(button, true, '挂载中');
     try {
-      await runSharedUiOperation({ type: 'mount', message: '正在挂载远程共享文档...' }, () => (
+      const result = await runSharedUiOperation({ type: 'mount', message: '正在挂载远程共享文档...' }, () => (
         window.orchestrator.sharedMount({ paths: selectedPaths, remotePrefix, ...sharedCollectionPayload() })
       ));
       for (const pathName of selectedPaths) selectedRemotePaths.delete(String(pathName));
       await refresh();
       renderSharedCatalog();
-      notify('共享文档挂载完成', remotePrefix ? '远程收藏夹已挂载，后续同步会自动加入新增文档。' : `已挂载 ${selectedPaths.length} 篇远程文档。`, 'success');
+      notify(result?.unchanged ? '远程内容没有变化' : '共享文档挂载完成', result?.unchanged
+        ? '本地文档完整且远程收藏夹版本未变化，本次无需重复下载。'
+        : remotePrefix ? '远程收藏夹已挂载，后续同步会自动加入新增文档。' : `已挂载 ${selectedPaths.length} 篇远程文档。`, 'success');
     }
     catch (error) { notify('挂载共享文档失败', error); }
     finally { if (button) setBusy(button, false, button === elements.sharedMountFiltered ? '挂载筛选结果' : button === elements.sharedMount ? '挂载勾选文档' : button.dataset.sharedMountPrefix ? '挂载此收藏夹' : '挂载此文档'); }
@@ -1043,9 +1045,12 @@
     setBusy(button, true, button.dataset.sharedAction === 'sync' ? '同步中' : '处理中');
     try {
       if (button.dataset.sharedAction === 'sync') {
-        await runSharedUiOperation({ type: 'mount-sync', message: '正在同步共享挂载...' }, () => (
+        const result = await runSharedUiOperation({ type: 'mount-sync', message: '正在同步共享挂载...' }, () => (
           window.orchestrator.sharedSyncMount(button.dataset.mountId)
         ));
+        notify(result?.unchanged ? '远程内容没有变化' : '共享挂载同步完成', result?.unchanged
+          ? '本地文档完整且远程版本未变化，无需重复下载。'
+          : `已下载或更新 ${Number(result?.downloaded || 0)} 篇文档。`, 'success');
       }
       else if (button.dataset.sharedAction === 'unmount') await window.orchestrator.sharedUnmount(button.dataset.mountId);
       await refresh();
@@ -1062,7 +1067,8 @@
         window.orchestrator.sharedSyncMounts(mountIds)
       ));
       await refresh();
-      notify('共享挂载同步完成', `已同步 ${Number(result.synced || mountIds.length)} 个挂载。`, 'success');
+      const unchanged = Number(result.unchanged || 0);
+      notify(unchanged === Number(result.synced || mountIds.length) ? '远程内容没有变化' : '共享挂载同步完成', `检查 ${Number(result.synced || mountIds.length)} 个挂载；${unchanged} 个无需更新，下载或更新 ${Number(result.downloaded || 0)} 篇文档。`, 'success');
     } catch (error) { notify('同步选中的共享挂载失败', error); }
     finally { setBusy(elements.sharedSyncSelected, false, `同步选中（${selectedMountIds.size}）`); }
   }
@@ -1294,7 +1300,7 @@
 
   function notify(title, detail, type = 'error') {
     const message = detail?.message || String(detail || '');
-    if (typeof window.showToast === 'function') window.showToast(title, message, type);
+    if (typeof window.notify === 'function') window.notify(title, message, type);
     else console.error(title, message);
   }
 

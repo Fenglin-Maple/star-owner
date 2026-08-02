@@ -46,6 +46,30 @@ const { GitRuntime, gitAuthorizationHeader, normalizeGitAuthor, normalizeGitRemo
     const cleared = runtime.clearCredentialStore();
     assert.strictEqual(cleared.scope, 'application-dpapi', '凭据清理越过了应用私有范围');
     assert(!fs.existsSync(runtime.credentialStorePath), '应用私有 GitHub 凭据目录没有被清理');
+    const originalRun = runtime.run.bind(runtime);
+    const originalAssertAvailable = runtime.assertAvailable.bind(runtime);
+    let clonedCheckout = '';
+    const checkoutProgress = [];
+    runtime.assertAvailable = async () => ({ available: true });
+    runtime.run = async (args) => {
+      assert(args.includes('core.longpaths=true'), '只读共享仓库快照没有开启 Windows 长路径支持');
+      clonedCheckout = args.at(-1);
+      fs.mkdirSync(path.join(clonedCheckout, '123', 'bilibili', 'col-test', 'doc-test'), { recursive: true });
+      fs.writeFileSync(path.join(clonedCheckout, '123', 'bilibili', 'col-test', 'doc-test', 'summary.md'), '# snapshot\n', 'utf8');
+      return { stdout: '', stderr: '' };
+    };
+    const snapshotValue = await runtime.withReadOnlyCheckout({ repository: { owner: 'owner', name: 'repository', branch: 'main' }, onProgress: (event) => checkoutProgress.push(event) }, async ({ root: checkout }) => {
+      assert(fs.existsSync(path.join(checkout, '123', 'bilibili', 'col-test', 'doc-test', 'summary.md')), '只读 Git 快照回调无法读取下载文件');
+      return 'snapshot-ok';
+    });
+    assert.strictEqual(snapshotValue, 'snapshot-ok', '只读 Git 快照没有返回回调结果');
+    assert(checkoutProgress.some((event) => event.stage === 'git-download') && checkoutProgress.some((event) => event.stage === 'git-ready'), '只读 Git 快照没有报告下载进度');
+    assert(clonedCheckout && !fs.existsSync(clonedCheckout), '只读 Git 快照完成后没有清理临时目录');
+    runtime.run = async (args) => { clonedCheckout = args.at(-1); throw new Error('simulated clone failure'); };
+    await assert.rejects(() => runtime.withReadOnlyCheckout({ repository: { owner: 'owner', name: 'repository', branch: 'main' } }, async () => {}), (error) => error.code === 'SHARED_GIT_CHECKOUT_FAILED');
+    assert(clonedCheckout && !fs.existsSync(clonedCheckout), '只读 Git 快照失败后没有清理临时目录');
+    runtime.run = originalRun;
+    runtime.assertAvailable = originalAssertAvailable;
     assert.throws(() => new GitRuntime({ projectRoot: root, gitPath: path.join(root, 'node_modules', '.bin', 'git.exe') }), /runtime\\git|外部 Git/);
     console.log('git runtime isolation test passed');
   } finally {

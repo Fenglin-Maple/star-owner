@@ -702,8 +702,14 @@ function verifyRendererContracts() {
   if (!outside.includes('ensureSharedRepositoryReady') || !outside.includes('selectedRemotePaths') || !outside.includes('selectedMountIds') || !outside.includes('data-shared-mount-prefix') || !outside.includes('syncSelectedSharedMounts')) {
     throw new Error('共享仓库进入检查、远程树分层挂载或本地挂载多选同步逻辑缺失');
   }
+  if (!app.includes("filter((collection) => collection.collectionKind !== 'shared')")) {
+    throw new Error('任务总览没有排除只读共享知识收藏夹');
+  }
   if (!outside.includes('async function runSharedUiOperation') || !outside.includes('beginSharedOperationPolling(seed)') || !outside.includes('window.orchestrator.sharedOperationState()') || !outside.includes('sharedOperationPollGeneration') || !outside.includes('stopSharedOperationPolling()')) {
     throw new Error('共享仓库自动化操作缺少即时可见进度或后端进度轮询保护');
+  }
+  if (!outside.includes("typeof window.notify === 'function'") || outside.includes('window.showToast(')) {
+    throw new Error('B站之外工具没有接入应用统一 Toast，操作结果会静默丢失');
   }
   if (!outsideStyles.includes('.outside-tool-detail') || !outsideStyles.includes('.outside-tool-card-stats') || !outsideStyles.includes('.shared-auth-more') || !outsideStyles.includes('.shared-upload-prep-group') || !outsideStyles.includes('resize: vertical') || !outsideStyles.includes('.shared-operation-progress')) {
     throw new Error('B站之外工具独立视图、入口数据、更多授权或准备上传列表样式缺失');

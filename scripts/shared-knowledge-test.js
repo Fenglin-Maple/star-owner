@@ -1,5 +1,7 @@
 const assert = require('assert');
+const crypto = require('crypto');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { Store } = require('../src/core/store');
@@ -37,13 +39,15 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   const puts = [];
   const sharedEvents = [];
   const remoteRoot = '123456/bilibili-远程用户/远程收藏夹/remote-document';
-  const remoteMeta = { schemaVersion: 2, documentId: 'remote-document', sourceType: 'bilibili-video-summary', bvid: 'BVREMOTE001', title: '远程共享视频', owner: '远程作者', collectionName: '远程收藏夹', parentDocumentId: '', partId: '', uploadedAt: '2026-08-01T00:00:00.000Z', completedAt: '2026-07-31T00:00:00.000Z' };
+  const remoteSummary = Buffer.from('# 远程共享视频\n', 'utf8');
+  const remoteCover = Buffer.from('89504e470d0a1a0a', 'hex');
+  const remoteMeta = { schemaVersion: 3, documentId: 'remote-document', sourceType: 'bilibili-video-summary', documentType: 'single-video', bvid: 'BVREMOTE001', title: '远程共享视频', owner: '远程作者', collectionName: '远程收藏夹', parentDocumentId: '', partId: '', entryMarkdown: 'summary.md', contentSha256: sha256(remoteSummary), assetSha256: { 'cover.png': sha256(remoteCover) }, uploadedAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z', completedAt: '2026-07-31T00:00:00.000Z' };
   const repositoryMarker = (repository = 'Fenglin-Maple/Blibili-Markdowns', defaultBranch = 'main') => Buffer.from(`${JSON.stringify({ schemaVersion: 1, type: 'star-owner-shared-knowledge', repository, defaultBranch, capabilities: ['bilibili-summary', 'single-video-summary', 'multipart-summary', 'catalog-v1'] }, null, 2)}\n`, 'utf8');
   const remoteFiles = new Map([
     ['_star-owner-repository.json', repositoryMarker()],
     [`${remoteRoot}/${DOCUMENT_META_FILE}`, Buffer.from(`${JSON.stringify(remoteMeta)}\n`, 'utf8')],
-    [`${remoteRoot}/summary.md`, Buffer.from('# 远程共享视频\n', 'utf8')],
-    [`${remoteRoot}/cover.png`, Buffer.from('89504e470d0a1a0a', 'hex')]
+    [`${remoteRoot}/summary.md`, remoteSummary],
+    [`${remoteRoot}/cover.png`, remoteCover]
   ]);
   const request = async (endpoint, options = {}) => {
     requests.push({ endpoint, options });
@@ -62,7 +66,7 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
     if (endpoint.includes('/git/trees/')) return { sha: 'tree-sha', tree: [...remoteFiles.keys()].map((item) => ({ type: 'blob', path: item, sha: `sha-${item}` })) };
     if (endpoint.includes('/contents/')) {
       const remotePath = decodeContentPath(endpoint);
-      const body = remoteFiles.get(remotePath);
+      const body = remotePath === 'catalog.json' ? buildCatalog(remoteFiles) : remoteFiles.get(remotePath);
       if (!body) { const error = new Error('not found'); error.status = 404; throw error; }
       return { content: body.toString('base64'), encoding: 'base64', sha: `sha-${remotePath}` };
     }
@@ -250,6 +254,7 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   const privateStore = await Store.open(path.join(root, 'private-repository.sqlite'));
   let privateTreeAuthorized = false;
   let privateContentAuthorized = false;
+  let privateCatalogAuthorized = false;
   const privateRemoteRoot = '778899/bilibili/col-aaaaaaaaaaaaaaaaaaaaaaaa/doc-bbbbbbbbbbbbbbbbbbbbbbbb';
   const privateMetadata = { ...remoteMeta, documentId: 'doc-bbbbbbbbbbbbbbbbbbbbbbbb', contributorGithubId: '778899' };
   const privateManager = new SharedKnowledgeManager({
@@ -265,7 +270,13 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
       }
       if (endpoint.includes('/contents/')) {
         privateContentAuthorized = options.token === 'private-token';
-        if (decodeContentPath(endpoint) === '_star-owner-repository.json') return { content: repositoryMarker('private-user/private-shared').toString('base64'), encoding: 'base64', sha: 'private-marker' };
+        const remotePath = decodeContentPath(endpoint);
+        if (remotePath === '_star-owner-repository.json') return { content: repositoryMarker('private-user/private-shared').toString('base64'), encoding: 'base64', sha: 'private-marker' };
+        if (remotePath === 'catalog.json') {
+          privateCatalogAuthorized = options.token === 'private-token';
+          const privateFiles = new Map([[`${privateRemoteRoot}/${DOCUMENT_META_FILE}`, Buffer.from(`${JSON.stringify(privateMetadata)}\n`, 'utf8')]]);
+          return { content: buildCatalog(privateFiles).toString('base64'), encoding: 'base64', sha: 'private-catalog' };
+        }
         return { content: Buffer.from(`${JSON.stringify(privateMetadata)}\n`, 'utf8').toString('base64'), encoding: 'base64', sha: 'private-meta' };
       }
       throw new Error(`unexpected private repository endpoint: ${endpoint}`);
@@ -276,7 +287,7 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   await privateManager.setRepository({ repository: 'private-user/private-shared' });
   const privateCatalog = await privateManager.remoteCatalog();
   assert.strictEqual(privateCatalog.total, 1, '已授权私有共享仓库目录无法读取');
-  assert(privateTreeAuthorized && privateContentAuthorized, '私有共享仓库读取没有使用星藏家私有授权');
+  assert(!privateTreeAuthorized && privateCatalogAuthorized && privateContentAuthorized, '私有共享仓库目录索引没有使用星藏家私有授权');
 
   manager.requestOverride = request;
   await manager.setToken('test-token');
@@ -286,13 +297,25 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   await assert.rejects(() => canceledUpload, /已由用户中止/);
   assert.strictEqual(manager.state().upload, null, '中止共享上传后仍残留活动事务');
 
+  let snapshotDownloads = 0;
+  manager.gitRuntime = createSnapshotRuntime(remoteFiles, () => { snapshotDownloads += 1; });
+
+  requests.length = 0;
   const catalog = await manager.remoteCatalog();
+  assert.strictEqual(catalog.catalogSource, 'index', '远程目录没有优先使用 Action 生成的 catalog.json');
+  assert(!requests.some((item) => item.endpoint.includes('/git/trees/')), 'catalog.json 可用时仍读取了完整 Git tree');
+  assert.strictEqual(requests.filter((item) => item.endpoint.includes('/contents/catalog.json')).length, 1, '远程目录索引没有保持为单次读取');
   const secondRoot = remoteRoot.replace('remote-document', 'remote-document-2');
-  const secondMeta = { ...remoteMeta, documentId: 'remote-document-2', title: 'remote second document' };
+  const secondSummary = Buffer.from('# remote second document\n', 'utf8');
+  const secondMeta = { ...remoteMeta, documentId: 'remote-document-2', title: 'remote second document', contentSha256: sha256(secondSummary), assetSha256: {} };
   remoteFiles.set(`${secondRoot}/${DOCUMENT_META_FILE}`, Buffer.from(`${JSON.stringify(secondMeta)}\n`, 'utf8'));
-  remoteFiles.set(`${secondRoot}/summary.md`, Buffer.from('# remote second document\n', 'utf8'));
+  remoteFiles.set(`${secondRoot}/summary.md`, secondSummary);
   assert.strictEqual(catalog.total, 1, '远程目录没有读取元数据文件');
+  const snapshotsBeforeFirstMount = snapshotDownloads;
+  requests.length = 0;
   const mounted = await manager.mount({ documents: [{ path: 'renderer-forged/path/_star-owner-document.json' }], remotePrefix: remoteRoot, collectionName: '远程挂载' });
+  assert.strictEqual(snapshotDownloads, snapshotsBeforeFirstMount + 1, '一批共享文档没有使用一次性 Git 快照');
+  assert(!requests.some((item) => item.endpoint.includes('/git/trees/')), 'Git 快照挂载仍重复读取 GitHub 文件树');
   assert.strictEqual(mounted.remoteDocumentCount, 1, '共享挂载没有记录远程文档');
   const sharedTask = store.listTasks({ collectionId: mounted.collectionId }).find((item) => item.sourceType === 'shared-bilibili');
   assert(sharedTask?.status === 'done' && fs.existsSync(sharedTask.outputMarkdown), '远程文档没有挂载为本地完成文档');
@@ -307,6 +330,32 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   const batchSync = await manager.syncMounts([exactMount.id]);
   assert.strictEqual(batchSync.synced, 1, '选中挂载批量同步没有返回正确数量');
   assert(sharedEvents.some((event) => event.type === 'shared-operation-progress' && event.operation?.type === 'mount-sync-batch'), '选中挂载批量同步没有发出进度事件');
+  const expandedCatalog = await manager.remoteCatalog();
+  const collectionPrefix = remoteRoot.split('/').slice(0, 3).join('/');
+  const snapshotsBeforeExpandedMount = snapshotDownloads;
+  const expandedMount = await manager.mount({ remotePrefix: collectionPrefix, collectionId: exactMount.collectionId });
+  const expandedMounts = store.list('sharedMounts').filter((item) => item.collectionId === exactMount.collectionId);
+  assert.strictEqual(expandedMounts.length, 1, '单篇挂载升级为整收藏夹后仍保留重复挂载记录');
+  assert.strictEqual(expandedMounts[0].scope, 'collection', '单篇挂载升级后没有归并为收藏夹挂载');
+  assert.strictEqual(store.listTasks({ collectionId: exactMount.collectionId }).filter((item) => item.sourceType === 'shared-bilibili').length, 2, '整收藏夹挂载没有补入远程新增文档');
+  assert.strictEqual(snapshotDownloads, snapshotsBeforeExpandedMount + 1, '整收藏夹增量挂载没有将待下载文档合并到一次 Git 快照');
+  const snapshotsBeforeNoChange = snapshotDownloads;
+  const unchangedMount = await manager.mount({ remotePrefix: collectionPrefix, collectionId: exactMount.collectionId });
+  assert.strictEqual(unchangedMount.id, expandedMount.id, '重复挂载同一远程收藏夹没有复用规范化后的挂载');
+  assert.strictEqual(unchangedMount.unchanged, true, '远程收藏夹无变化时没有返回无需更新状态');
+  assert.strictEqual(snapshotDownloads, snapshotsBeforeNoChange, '远程收藏夹无变化时仍重复下载仓库快照');
+  assert.strictEqual(expandedCatalog.total, 2, '扩展收藏夹测试目录没有包含新增文档');
+  const updatedSecondSummary = Buffer.from('# remote second document v2\n', 'utf8');
+  const updatedSecondMeta = { ...secondMeta, updatedAt: '2026-08-02T00:00:00.000Z', contentSha256: sha256(updatedSecondSummary) };
+  remoteFiles.set(`${secondRoot}/${DOCUMENT_META_FILE}`, Buffer.from(`${JSON.stringify(updatedSecondMeta)}\n`, 'utf8'));
+  remoteFiles.set(`${secondRoot}/summary.md`, updatedSecondSummary);
+  const changedCatalog = await manager.remoteCatalog();
+  const snapshotsBeforeChangedSync = snapshotDownloads;
+  const changedSync = await manager.syncMount(expandedMount.id, changedCatalog);
+  const changedTask = store.listTasks({ collectionId: exactMount.collectionId }).find((item) => item.sharedRemotePath === `${secondRoot}/${DOCUMENT_META_FILE}`);
+  assert.strictEqual(changedSync.downloaded, 1, '远程收藏夹单篇更新没有保持增量导入');
+  assert.strictEqual(snapshotDownloads, snapshotsBeforeChangedSync + 1, '远程内容更新没有通过单次 Git 快照下载');
+  assert(changedTask && fs.readFileSync(changedTask.outputMarkdown, 'utf8').includes('v2'), '目录索引缺少 blob SHA 时远程更新没有覆盖本地旧文档');
 
   const multiRoot = '123456/multipart/doc-multi';
   const multiMeta = {
@@ -317,6 +366,9 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
     multiPartRole: 'parent',
     parentDocumentId: 'doc-multi',
     partId: '',
+    entryMarkdown: 'index.md',
+    contentSha256: sha256(Buffer.from('# 远程多P父任务\n', 'utf8')),
+    assetSha256: {},
     parts: [
       { cid: '201', page: 1, part: '第一 P', title: '远程多P父任务 P1', completedAt: '2026-08-01T00:00:00.000Z' },
       { cid: '202', page: 2, part: '第二 P', title: '远程多P父任务 P2', completedAt: '2026-08-01T00:00:00.000Z' }
@@ -399,6 +451,7 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
     request: async (endpoint) => {
       rollbackCalls += 1;
       if (endpoint.includes('/git/trees/')) return { sha: 'rollback-tree', tree: [{ type: 'blob', path: `${remoteRoot}/${DOCUMENT_META_FILE}`, sha: 'bad-meta' }] };
+      if (endpoint.includes('/contents/') && decodeContentPath(endpoint) === 'catalog.json') { const error = new Error('not found'); error.status = 404; throw error; }
       if (endpoint.includes('/contents/') && !rollbackMetadataRead) {
         rollbackMetadataRead = true;
         return { content: Buffer.from(`${JSON.stringify(remoteMeta)}\n`, 'utf8').toString('base64'), encoding: 'base64', sha: 'bad-meta' };
@@ -421,4 +474,57 @@ function decodeContentPath(endpoint) {
   const start = endpoint.indexOf(marker) + marker.length;
   const raw = endpoint.slice(start).split('?')[0];
   return raw.split('/').map((part) => decodeURIComponent(part)).join('/');
+}
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function buildCatalog(files) {
+  const documents = [];
+  for (const [metadataPath, body] of files.entries()) {
+    if (!metadataPath.endsWith(`/${DOCUMENT_META_FILE}`)) continue;
+    const metadata = JSON.parse(body.toString('utf8'));
+    documents.push({
+      documentId: String(metadata.documentId || ''),
+      documentType: String(metadata.documentType || 'single-video'),
+      sourceType: String(metadata.sourceType || ''),
+      bvid: String(metadata.bvid || ''),
+      title: String(metadata.title || ''),
+      owner: String(metadata.owner || ''),
+      collectionName: String(metadata.collectionName || ''),
+      entryMarkdown: String(metadata.entryMarkdown || ''),
+      contentSha256: String(metadata.contentSha256 || ''),
+      contributorGithubId: String(metadata.contributorGithubId || metadataPath.split('/')[0] || ''),
+      updatedAt: String(metadata.updatedAt || metadata.uploadedAt || ''),
+      uploadedAt: String(metadata.uploadedAt || ''),
+      metadataPath,
+      documentRoot: metadataPath.slice(0, -DOCUMENT_META_FILE.length)
+    });
+  }
+  documents.sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)) || left.metadataPath.localeCompare(right.metadataPath));
+  return Buffer.from(`${JSON.stringify({ schemaVersion: 1, generatedAt: documents[0]?.updatedAt || '', total: documents.length, documents }, null, 2)}\n`, 'utf8');
+}
+
+function createSnapshotRuntime(files, onDownload) {
+  return {
+    allowCheckoutWithRequestOverride: true,
+    state: () => ({ available: true, isolated: true, path: 'test-git' }),
+    withReadOnlyCheckout: async ({ onProgress }, callback) => {
+      const checkout = fs.mkdtempSync(path.join(os.tmpdir(), 'star-owner-shared-checkout-'));
+      onDownload();
+      try {
+        onProgress?.({ stage: 'git-download', progress: 0.1, message: 'test snapshot download' });
+        for (const [relative, body] of files.entries()) {
+          const destination = path.join(checkout, ...relative.split('/'));
+          fs.mkdirSync(path.dirname(destination), { recursive: true });
+          fs.writeFileSync(destination, body);
+        }
+        onProgress?.({ stage: 'git-ready', progress: 1, message: 'test snapshot ready' });
+        return await callback({ root: checkout });
+      } finally {
+        fs.rmSync(checkout, { recursive: true, force: true });
+      }
+    }
+  };
 }

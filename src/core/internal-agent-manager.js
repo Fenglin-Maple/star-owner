@@ -50,7 +50,7 @@ class InternalAgentManager {
     return {
       providers: this.ragAssistant.listProviders(),
       sessions: this.listSessions().map((session) => this.publicSession(session)),
-      collections: this.store.listCollections().map((collection) => {
+      collections: this.store.listCollections().filter((collection) => collection.collectionKind !== 'shared').map((collection) => {
         const unavailableReason = agentCollectionBlockReason(collection);
         return {
           id: collection.id,
@@ -80,7 +80,7 @@ class InternalAgentManager {
 
   listInternalCollections() {
     return this.store.listCollections().filter((collection) => (collection.userId === INTERNAL_USER_ID || collection.internal === true)
-      && !['video-cache', 'document-archive', 'multimodal-document', 'bilibili-multipart'].includes(collection.collectionKind));
+      && !['video-cache', 'document-archive', 'multimodal-document', 'bilibili-multipart', 'shared'].includes(collection.collectionKind));
   }
 
   createInternalCollection(name) {
@@ -177,7 +177,7 @@ class InternalAgentManager {
     if (!bvid) throw new Error('请输入有效的 BV 号或 Bilibili 视频链接。');
     const collection = this.store.getCollectionById(String(input.collectionId || ''));
     if (!collection || !(collection.userId === INTERNAL_USER_ID || collection.internal === true)) throw new Error('请选择内置用户下的内置收藏夹。');
-    if (['video-cache', 'document-archive', 'multimodal-document'].includes(collection.collectionKind)) throw new Error('请选择普通内置收藏夹，不能把单视频任务写入缓存库或文档归档库。');
+    if (['video-cache', 'document-archive', 'multimodal-document', 'bilibili-multipart', 'shared'].includes(collection.collectionKind)) throw new Error('请选择普通内置收藏夹，不能把单视频任务写入缓存库、文档归档库、多P库或共享知识库。');
     this.reclaimExpired(collection.id);
     const sessions = this.listSessions().filter((session) => session.mode === 'single');
     const candidates = this.store.listTasks({ collectionId: collection.id })
@@ -362,7 +362,7 @@ class InternalAgentManager {
 
   collectionOutputDirectory(collectionId) {
     const collection = this.store.getCollectionById(String(collectionId || ''));
-    if (!collection || !(collection.userId === INTERNAL_USER_ID || collection.internal === true) || collection.collectionKind === 'video-cache') {
+    if (!collection || !(collection.userId === INTERNAL_USER_ID || collection.internal === true) || ['video-cache', 'document-archive', 'multimodal-document', 'bilibili-multipart', 'shared'].includes(collection.collectionKind)) {
       throw new Error('请选择内置用户下的内置收藏夹。');
     }
     return this.collectionDirectories(collection).root;
@@ -1512,6 +1512,7 @@ function collectMaterials(artifactDir) {
 }
 
 function agentCollectionBlockReason(collection) {
+  if (collection?.collectionKind === 'shared') return '共享收藏夹只用于文档库与 RAG 检索，不能启用或派发视频总结任务。';
   if (['document-archive', 'multimodal-document'].includes(collection?.collectionKind)) return '该收藏夹仅保留知识库文档，不能派发视频总结任务。';
   return collectionBlockReason(collection);
 }

@@ -152,9 +152,11 @@ class Store {
   updateTasksEnabled(ids, enabled) {
     const changed = [];
     const now = new Date().toISOString();
-    for (const id of [...new Set((ids || []).map(String))]) {
-      const task = this.getTask(id);
-      if (!task) continue;
+    const tasks = [...new Set((ids || []).map(String))].map((id) => this.getTask(id)).filter(Boolean);
+    if (enabled && tasks.some((task) => this.getCollectionById(task.collectionId)?.collectionKind === 'shared')) {
+      throw new Error('共享收藏夹只用于文档库与 RAG 检索，不能启用视频总结任务。');
+    }
+    for (const task of tasks) {
       if (enabled && task.unsupportedVideo) continue;
       task.enabled = Boolean(enabled);
       task.updatedAt = now;
@@ -172,6 +174,7 @@ class Store {
     if (!collection) throw new Error('收藏夹不存在，无法更新任务范围。');
     const tasks = this.listTasks({ collectionId: id });
     const wanted = new Set([...new Set((enabledTaskIds || []).map(String))]);
+    if (collection.collectionKind === 'shared' && wanted.size) throw new Error('共享收藏夹只用于文档库与 RAG 检索，不能启用视频总结任务。');
     const taskIds = new Set(tasks.map((task) => String(task.id)));
     const foreign = [...wanted].filter((taskId) => !taskIds.has(taskId));
     if (foreign.length) throw new Error('筛选任务属于其它收藏夹，已拒绝更新任务范围。');

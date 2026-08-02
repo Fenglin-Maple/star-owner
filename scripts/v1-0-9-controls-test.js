@@ -54,6 +54,12 @@ const { compareVersions, parseChecksumText, validateArchiveEntries } = require('
     assert.strictEqual(store.getTask('filter-c1:a').enabled, true);
     assert.strictEqual(store.getTask('filter-c1:b').enabled, false);
     assert.throws(() => store.replaceCollectionEnabledTasks('filter-c1', ['foreign-task']));
+    store.upsertCollection({ id: 'shared-c1', name: 'Shared knowledge', userId: 'shared-user', userName: '共享', collectionKind: 'shared', internal: true });
+    store.upsertTask({ id: 'shared-c1:doc', collectionId: 'shared-c1', sourceType: 'shared-bilibili', status: 'done', enabled: false });
+    store.commit();
+    assert.throws(() => store.updateTasksEnabled(['shared-c1:doc'], true), /共享收藏夹.*不能启用/);
+    assert.throws(() => store.replaceCollectionEnabledTasks('shared-c1', ['shared-c1:doc']), /共享收藏夹.*不能启用/);
+    assert.strictEqual(store.getTask('shared-c1:doc').enabled, false, '共享知识文档被任务开关错误启用');
     store.db.close();
   } finally {
     fs.rmSync(dbFile, { force: true });
