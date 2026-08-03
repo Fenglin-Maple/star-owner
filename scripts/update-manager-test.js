@@ -2,8 +2,8 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
-const { UpdateManager, validateArchiveEntries } = require('../src/core/update-manager');
+const { spawn, spawnSync } = require('child_process');
+const { UpdateManager, cleanupManagedUpdateArtifacts, commandLineContainsProjectRoot, findRunningProjectProcesses, validateArchiveEntries } = require('../src/core/update-manager');
 
 function runPowerShell(script, args) {
   const result = runPowerShellResult(script, args);
@@ -37,6 +37,17 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
 }
 
+function touch(file, timestamp) {
+  fs.utimesSync(file, timestamp, timestamp);
+}
+
+function waitForSpawn(child) {
+  return new Promise((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+}
+
 (async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'star-owner-update-test-'));
   const projectRoot = path.join(root, 'project');
@@ -68,6 +79,35 @@ function readJson(file) {
 
   assert.strictEqual(validateArchiveEntries(['Star-Owner/package.json', 'Star-Owner/templates/video-summary-template.md']).prefix, 'Star-Owner');
   assert.throws(() => validateArchiveEntries(['Star-Owner/package.json', '../outside.txt']), /不安全|unsafe|路径/);
+  assert(commandLineContainsProjectRoot('"D:\\Old Star Owner\\node_modules\\electron\\dist\\electron.exe" "D:\\Old Star Owner"', 'D:\\Old Star Owner'), 'project process command line was not recognized');
+  assert(!commandLineContainsProjectRoot('"D:\\Old Star Owner 2\\electron.exe"', 'D:\\Old Star Owner'), 'a sibling project command line was treated as the migration source');
+
+  const cleanupRoot = path.join(root, 'cleanup-project', '.updates');
+  const cleanupDownloads = path.join(cleanupRoot, 'downloads');
+  fs.mkdirSync(cleanupDownloads, { recursive: true });
+  const oldTime = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
+  for (let index = 1; index <= 3; index += 1) {
+    const backup = path.join(cleanupRoot, `operation-backup-fixture-${index}`);
+    fs.mkdirSync(backup, { recursive: true });
+    fs.writeFileSync(path.join(backup, 'marker.txt'), String(index));
+    touch(backup, new Date(Date.now() - index * 1000));
+    const archive = path.join(cleanupDownloads, `Star-Owner-v9.9.${index}-win-x64-core.zip`);
+    fs.writeFileSync(archive, String(index));
+    touch(archive, new Date(Date.now() - index * 1000));
+  }
+  for (let index = 1; index <= 2; index += 1) {
+    const partialArchive = path.join(cleanupDownloads, `Star-Owner-v8.8.${index}-win-x64-core.zip.partial`);
+    fs.writeFileSync(partialArchive, String(index));
+    touch(partialArchive, index === 1 ? new Date() : oldTime);
+  }
+  fs.mkdirSync(path.join(cleanupRoot, 'staging-v9.9.9'), { recursive: true });
+  fs.writeFileSync(path.join(cleanupRoot, 'user-note.txt'), 'not managed');
+  const cleanup = cleanupManagedUpdateArtifacts(cleanupRoot);
+  assert(cleanup.removed.some((item) => item.endsWith('staging-v9.9.9')), 'stale update staging directory was retained');
+  assert.strictEqual(fs.readdirSync(cleanupRoot).filter((name) => name.startsWith('operation-backup-')).length, 2, 'operation backup retention did not keep exactly two recent backups');
+  assert.strictEqual(fs.readdirSync(cleanupDownloads).filter((name) => CORE_ZIP(name)).length, 2, 'core archive retention did not keep two recent archives');
+  assert.strictEqual(fs.readdirSync(cleanupDownloads).filter((name) => name.endsWith('.partial')).length, 1, 'partial archive retention did not keep one resumable download');
+  assert(fs.existsSync(path.join(cleanupRoot, 'user-note.txt')), 'update cleanup removed an unrecognized user file');
 
   const helper = path.join(__dirname, 'apply-portable-operation.ps1');
   const stage = path.join(projectRoot, '.updates', 'stage');
@@ -130,10 +170,30 @@ function readJson(file) {
   const launcher = fs.readFileSync(path.join(__dirname, '..', 'packaging', 'Start-StarOwner.cmd'), 'utf8');
   assert(launcher.includes('recover-portable-operation.ps1') && launcher.indexOf('recover-portable-operation.ps1') < launcher.indexOf('electron.exe'), 'portable launcher does not recover interrupted operations before Electron starts');
 
-  const source = path.join(root, 'old-project');
+  const source = path.join(root, 'old project');
   fs.mkdirSync(path.join(source, 'workspace'), { recursive: true });
   fs.writeFileSync(path.join(source, 'package.json'), JSON.stringify({ version: '1.0.3' }));
   fs.writeFileSync(path.join(source, 'workspace', 'orchestrator.sqlite'), Buffer.concat([Buffer.from('SQLite format 3\0'), Buffer.alloc(80)]));
+  if (process.platform === 'win32') {
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)', source], { windowsHide: true, stdio: 'ignore' });
+    await waitForSpawn(sleeper);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const running = findRunningProjectProcesses(source, { platform: 'win32' });
+      assert(running.some((item) => item.pid === sleeper.pid), 'running source application process was not detected');
+      assert.throws(() => manager.inspectMigrationSource(source), /仍在运行/, 'migration inspection accepted a running source application');
+      const blockedRoot = path.join(root, 'blocked-migration-project');
+      fs.mkdirSync(path.join(blockedRoot, 'workspace'), { recursive: true });
+      fs.writeFileSync(path.join(blockedRoot, 'workspace', 'target-marker.txt'), 'keep target workspace');
+      const blocked = runPowerShellResult(helper, helperArgs('migrate', blockedRoot, { sourceWorkspace: path.join(source, 'workspace'), targetVersion: '9.9.9', operationId: 'running-source-fixture' }));
+      assert.notStrictEqual(blocked.status, 0, 'migration helper copied a workspace while its source application was running');
+      assert.strictEqual(fs.readFileSync(path.join(blockedRoot, 'workspace', 'target-marker.txt'), 'utf8'), 'keep target workspace', 'blocked migration changed the target workspace');
+      assert.strictEqual(readJson(path.join(blockedRoot, '.updates', 'operation-result.json')).status, 'rolled-back', 'blocked migration did not record a safe rollback result');
+    } finally {
+      sleeper.kill();
+      await new Promise((resolve) => sleeper.once('exit', resolve));
+    }
+  }
   runPowerShell(helper, helperArgs('migrate', projectRoot, { sourceWorkspace: path.join(source, 'workspace'), targetVersion: '9.9.9', operationId: 'migration-fixture' }));
   assert(fs.existsSync(path.join(projectRoot, 'workspace', 'orchestrator.sqlite')), 'portable migration helper did not copy the old workspace');
   assert.strictEqual(readJson(path.join(projectRoot, '.updates', 'operation-result.json')).status, 'succeeded', 'portable migration helper did not write a success result');
@@ -144,3 +204,7 @@ function readJson(file) {
   console.error(error);
   process.exit(1);
 });
+
+function CORE_ZIP(name) {
+  return /^Star-Owner-v\d+\.\d+\.\d+-win-x64-core\.zip$/i.test(String(name || ''));
+}

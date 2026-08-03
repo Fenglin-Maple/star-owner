@@ -23,6 +23,7 @@ const { AUDIO_EXTENSIONS, VIDEO_EXTENSIONS } = require('./core/local-media-runti
 const { promoteMindMap, wrapMarkdownTables } = require('./core/markdown');
 const { MultiPartManager } = require('./core/multipart-manager');
 const { isPrivateNetworkHost } = require('./core/network-policy');
+const { startPinnedDnsProxy } = require('./core/pinned-dns-proxy');
 const { repairPortablePythonHome } = require('./core/portable-runtime');
 const { RagAssistant } = require('./core/rag-assistant');
 const { SharedKnowledgeManager } = require('./core/shared-knowledge-manager');
@@ -1306,36 +1307,39 @@ async function browseHidden(value, options = {}) {
     resolve
   };
   const url = await assertHiddenBrowserUrl(value, policy);
-  installHiddenBrowserRequestGuard(isolatedSession.webRequest, policy);
-  isolatedSession.setPermissionCheckHandler(() => false);
-  isolatedSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
-  isolatedSession.on('will-download', (event) => event.preventDefault());
-  const browser = new BrowserWindow({
-    show: false,
-    width: 1180,
-    height: 820,
-    webPreferences: {
-      partition,
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      images: false
-    }
-  });
-  browser.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  const blockPrivateNavigation = (event, details) => {
-    try {
-      const target = typeof details === 'string' ? details : details?.url;
-      const candidate = new URL(target || event?.url || '');
-      if (!options.allowPrivate && isPrivateNetworkHost(candidate.hostname)) event.preventDefault();
-    } catch {
-      event.preventDefault();
-    }
-  };
-  browser.webContents.on('will-navigate', blockPrivateNavigation);
-  browser.webContents.on('will-redirect', blockPrivateNavigation);
+  const pinnedProxy = await startPinnedDnsProxy(policy);
+  let browser = null;
   let timeout = null;
   try {
+    await isolatedSession.setProxy({ mode: 'fixed_servers', proxyRules: pinnedProxy.proxyRules, proxyBypassRules: '<-loopback>' });
+    installHiddenBrowserRequestGuard(isolatedSession.webRequest, policy);
+    isolatedSession.setPermissionCheckHandler(() => false);
+    isolatedSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+    isolatedSession.on('will-download', (event) => event.preventDefault());
+    browser = new BrowserWindow({
+      show: false,
+      width: 1180,
+      height: 820,
+      webPreferences: {
+        partition,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        images: false
+      }
+    });
+    browser.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    const blockPrivateNavigation = (event, details) => {
+      try {
+        const target = typeof details === 'string' ? details : details?.url;
+        const candidate = new URL(target || event?.url || '');
+        if (!options.allowPrivate && isPrivateNetworkHost(candidate.hostname)) event.preventDefault();
+      } catch {
+        event.preventDefault();
+      }
+    };
+    browser.webContents.on('will-navigate', blockPrivateNavigation);
+    browser.webContents.on('will-redirect', blockPrivateNavigation);
     await Promise.race([
       browser.loadURL(url.toString()),
       new Promise((_, reject) => {
@@ -1351,7 +1355,8 @@ async function browseHidden(value, options = {}) {
     return JSON.stringify(result, null, 2);
   } finally {
     if (timeout) clearTimeout(timeout);
-    if (!browser.isDestroyed()) browser.destroy();
+    if (browser && !browser.isDestroyed()) browser.destroy();
+    await pinnedProxy.close();
   }
 }
 

@@ -1,14 +1,35 @@
 const fs = require('fs');
+const http = require('http');
 const path = require('path');
 const { ApiServer } = require('../src/core/api-server');
 const { isAllowedBilibiliNavigation, isBilibiliVideoNavigation } = require('../src/core/desktop-security');
 const { assertHiddenBrowserUrl } = require('../src/core/hidden-browser-policy');
 const { assertBilibiliUrl, isAllowedApiOrigin, isPrivateNetworkHost } = require('../src/core/network-policy');
+const { startPinnedDnsProxy } = require('../src/core/pinned-dns-proxy');
 const { MAX_MARKDOWN_BYTES, validateSubmission } = require('../src/core/validation');
 const { normalizeVideoUrl } = require('../tools/video-tool');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+function listen(server) {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve(server.address()));
+  });
+}
+
+function requestThroughProxy(proxy, target) {
+  return new Promise((resolve, reject) => {
+    const request = http.request({ host: proxy.host, port: proxy.port, path: target, method: 'GET', agent: false }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+      response.on('end', () => resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
+    });
+    request.once('error', reject);
+    request.end();
+  });
 }
 
 (async () => {
@@ -40,6 +61,25 @@ function assert(condition, message) {
   let unrelatedPrivateRejected = false;
   try { await assertHiddenBrowserUrl('http://other.internal/page', { allowPrivate: true, allowedPrivateHosts: ['approved.internal'], resolve: async () => ['192.168.1.6'] }); } catch { unrelatedPrivateRejected = true; }
   assert(unrelatedPrivateRejected, 'approval for one private host opened unrelated private hosts');
+  let originHits = 0;
+  const origin = http.createServer((_request, response) => { originHits += 1; response.end('pinned proxy ok'); });
+  const originAddress = await listen(origin);
+  const approvedProxy = await startPinnedDnsProxy({ allowPrivate: true, allowedPrivateHosts: ['approved.internal'], resolve: async () => [{ address: '127.0.0.1', family: 4 }] });
+  try {
+    const approvedResponse = await requestThroughProxy(approvedProxy, `http://approved.internal:${originAddress.port}/page`);
+    assert(approvedResponse.status === 200 && approvedResponse.body === 'pinned proxy ok', 'approved pinned proxy request did not reach its exact resolved endpoint');
+  } finally {
+    await approvedProxy.close();
+  }
+  const blockedProxy = await startPinnedDnsProxy({ resolve: async () => [{ address: '127.0.0.1', family: 4 }] });
+  try {
+    const blockedResponse = await requestThroughProxy(blockedProxy, `http://rebinding.example:${originAddress.port}/private`);
+    assert(blockedResponse.status === 502, 'DNS rebinding to a private address was not blocked by the connection proxy');
+    assert(originHits === 1, 'blocked DNS rebinding request reached the private origin');
+  } finally {
+    await blockedProxy.close();
+    await new Promise((resolve) => origin.close(resolve));
+  }
   assert(isAllowedApiOrigin('', 'http://127.0.0.1:17391'), 'origin-less Agent request was rejected');
   assert(!isAllowedApiOrigin('https://example.com', 'http://127.0.0.1:17391'), 'cross-origin browser request was accepted');
 

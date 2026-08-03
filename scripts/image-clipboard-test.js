@@ -50,6 +50,12 @@ async function expectReject(promise, pattern, message) {
       fetchImpl: async () => new Response(png, { status: 200, headers: { 'content-type': 'image/jpeg' } })
     }), /声明格式/, 'remote image with a mismatched MIME type was accepted');
     await expectReject(loadClipboardImage('http://127.0.0.1/private.png', { lookup: publicLookup, fetchImpl: async () => new Response(png) }), /私有网络/, 'private-network image was accepted');
+    let reboundFetches = 0;
+    await expectReject(loadClipboardImage('https://rebind.example.test/private.png', {
+      lookup: async () => [{ address: '93.184.216.34', family: 4 }, { address: '127.0.0.1', family: 4 }],
+      fetchImpl: async () => { reboundFetches += 1; return new Response(png); }
+    }), /私有网络/, 'mixed public/private DNS image response was accepted');
+    assert(reboundFetches === 0, 'remote image request started before every DNS answer was validated');
     await expectReject(loadClipboardImage('https://images.example.test/huge.png', {
       lookup: publicLookup,
       fetchImpl: async () => new Response(png, { status: 200, headers: { 'content-type': 'image/png', 'content-length': String(MAX_CLIPBOARD_IMAGE_BYTES + 1) } })

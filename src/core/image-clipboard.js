@@ -1,8 +1,11 @@
 const dns = require('dns');
 const fs = require('fs');
+const http = require('http');
+const https = require('https');
 const path = require('path');
 const { fileURLToPath } = require('url');
-const { isPrivateNetworkHost, parseHttpUrl } = require('./network-policy');
+const { parseHttpUrl } = require('./network-policy');
+const { resolveConnectionTarget } = require('./pinned-dns-proxy');
 
 const MAX_CLIPBOARD_IMAGE_BYTES = 15 * 1024 * 1024;
 const MAX_REDIRECTS = 4;
@@ -38,16 +41,20 @@ function loadLocalImage(source, trustedRoots = [], maxBytes = MAX_CLIPBOARD_IMAG
 
 async function loadRemoteImage(source, options = {}) {
   const maxBytes = Number(options.maxBytes || MAX_CLIPBOARD_IMAGE_BYTES);
-  const fetchImpl = options.fetchImpl || globalThis.fetch;
   const lookup = options.lookup || dns.promises.lookup;
   let url = parseHttpUrl(source, '只支持 HTTP(S) 图片地址。');
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
-    await assertPublicRemote(url, lookup);
-    const response = await fetchImpl(url, {
-      redirect: 'manual',
-      headers: { accept: 'image/*', 'user-agent': 'StarOwner/desktop-image-copy' },
-      signal: AbortSignal.timeout(15000)
-    });
+    if (url.username || url.password) throw new Error('图片地址不能包含账号凭据。');
+    let target;
+    try {
+      target = await resolveConnectionTarget(url.hostname, { resolve: (hostname) => lookup(hostname, { all: true, verbatim: true }) });
+    } catch (error) {
+      if (/private-network|private network|local/i.test(error.message || String(error))) throw new Error('拒绝从本机或私有网络复制图片。');
+      throw error;
+    }
+    const response = options.fetchImpl
+      ? await options.fetchImpl(url, { redirect: 'manual', headers: imageRequestHeaders(), signal: AbortSignal.timeout(15000) })
+      : await requestPinnedImage(url, target, options);
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get('location');
       if (!location || redirect === MAX_REDIRECTS) throw new Error('远程图片重定向次数过多。');
@@ -64,16 +71,54 @@ async function loadRemoteImage(source, options = {}) {
   throw new Error('远程图片读取失败。');
 }
 
-async function assertPublicRemote(url, lookup) {
-  if (url.username || url.password) throw new Error('图片地址不能包含账号凭据。');
-  if (isPrivateNetworkHost(url.hostname)) throw new Error('拒绝从本机或私有网络复制图片。');
-  const addresses = await lookup(url.hostname, { all: true, verbatim: true });
-  if (!addresses.length || addresses.some((item) => isPrivateNetworkHost(item.address))) {
-    throw new Error('拒绝从本机或私有网络复制图片。');
-  }
+function requestPinnedImage(url, target, options = {}) {
+  const requestModule = url.protocol === 'https:' ? https : http;
+  return new Promise((resolve, reject) => {
+    const request = requestModule.request(url, {
+      method: 'GET',
+      headers: imageRequestHeaders(),
+      agent: false,
+      family: target.family,
+      lookup: (_hostname, lookupOptions, callback) => {
+        if (lookupOptions?.all) callback(null, [{ address: target.address, family: target.family }]);
+        else callback(null, target.address, target.family);
+      },
+      signal: options.signal || AbortSignal.timeout(15000)
+    }, (response) => resolve({
+      status: Number(response.statusCode || 0),
+      ok: Number(response.statusCode || 0) >= 200 && Number(response.statusCode || 0) < 300,
+      headers: { get: (name) => headerValue(response.headers, name) },
+      body: response
+    }));
+    request.once('error', reject);
+    request.end();
+  });
+}
+
+function imageRequestHeaders() {
+  return { accept: 'image/*', 'user-agent': 'StarOwner/desktop-image-copy' };
+}
+
+function headerValue(headers, name) {
+  const value = headers[String(name || '').toLowerCase()];
+  return Array.isArray(value) ? value.join(', ') : String(value || '');
 }
 
 async function readLimitedBody(response, maxBytes) {
+  if (response.body?.[Symbol.asyncIterator]) {
+    const chunks = [];
+    let total = 0;
+    for await (const value of response.body) {
+      const chunk = Buffer.from(value);
+      total += chunk.length;
+      if (total > maxBytes) {
+        response.body.destroy?.();
+        assertImageSize(total, maxBytes);
+      }
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks, total);
+  }
   if (!response.body?.getReader) {
     const buffer = Buffer.from(await response.arrayBuffer());
     assertImageSize(buffer.length, maxBytes);

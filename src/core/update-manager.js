@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 const { resolveSystemExecutable } = require('./child-process-io');
@@ -12,6 +12,8 @@ const REPOSITORY = 'Fenglin-Maple/star-owner';
 const RELEASES_URL = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
 const CORE_ASSET = /^Star-Owner-v([0-9]+\.[0-9]+\.[0-9]+)-win-x64-core\.zip$/i;
 const MIN_MIGRATION_VERSION = '1.0.3';
+const UPDATE_BACKUP_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+const UPDATE_DOWNLOAD_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 class UpdateManager {
   constructor({ projectRoot, version, emit, fetchImpl = global.fetch, platform = process.platform } = {}) {
@@ -35,6 +37,7 @@ class UpdateManager {
     };
     this.prepared = null;
     this.restoreOperationResult();
+    this.cleanupArtifacts();
   }
 
   isPortable() {
@@ -60,6 +63,7 @@ class UpdateManager {
   }
 
   async check() {
+    this.cleanupArtifacts();
     this.publish({ status: 'checking', progress: 0.02, message: '正在查询 GitHub 最新稳定 Release' });
     try {
       const release = await this.fetchJson(RELEASES_URL);
@@ -90,6 +94,7 @@ class UpdateManager {
   }
 
   async prepareInternal() {
+    this.cleanupArtifacts();
     if (!this.stateData.release || compareVersions(this.stateData.release.version, this.version) <= 0) await this.check();
     const release = this.stateData.release;
     if (!release || compareVersions(release.version, this.version) <= 0) return this.state();
@@ -119,6 +124,7 @@ class UpdateManager {
     const packageRoot = locatePackageRoot(stagingRoot, inspection.prefix);
     validateStagedPackage(packageRoot, release.version);
     this.prepared = { archive, stagingRoot, packageRoot, release };
+    this.cleanupArtifacts();
     this.publish({ status: 'ready', progress: 1, prepared: true, message: `v${release.version} 已下载并校验通过，等待重启安装` });
     return this.state();
   }
@@ -145,6 +151,8 @@ class UpdateManager {
     const oldVersion = String(metadata.version || metadata.appVersion || '');
     if (oldVersion && compareVersions(oldVersion, MIN_MIGRATION_VERSION) < 0) throw new Error(`仅支持从 v${MIN_MIGRATION_VERSION} 或更高版本迁移，检测到 v${oldVersion}。`);
     if (isInside(source, this.projectRoot) || isInside(this.projectRoot, source)) throw new Error('旧版本目录不能是当前目录的子目录或父目录。');
+    const running = findRunningProjectProcesses(source, { platform: this.platform });
+    if (running.length) throw new Error(`检测到旧版应用仍在运行（PID ${running.map((item) => item.pid).join(', ')}）。请先停止旧版中的所有任务并完全退出旧应用，再重新迁移。`);
     return { sourceRoot: source, sourceWorkspace, database, oldVersion: oldVersion || '未知', portable: fs.existsSync(path.join(source, 'portable-manifest.json')) };
   }
 
@@ -273,6 +281,10 @@ class UpdateManager {
       this.stateData.lastOperation = result;
     }
   }
+
+  cleanupArtifacts() {
+    return cleanupManagedUpdateArtifacts(this.updateRoot, { prepared: this.prepared });
+  }
 }
 
 function resolveCoreRelease(release) {
@@ -364,6 +376,136 @@ function isInside(root, target) {
   return Boolean(normalized) && !normalized.startsWith('..') && !path.isAbsolute(relative);
 }
 
+function findRunningProjectProcesses(projectRoot, options = {}) {
+  if ((options.platform || process.platform) !== 'win32') return [];
+  const powershell = options.powershell || resolveSystemExecutable('powershell.exe');
+  if (!powershell) throw new Error('无法确认旧版应用是否仍在运行：Windows PowerShell 不可用。');
+  const script = [
+    '[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)',
+    "$names = @('electron.exe', 'node.exe')",
+    'Get-CimInstance Win32_Process | Where-Object { $names -contains ([string]$_.Name).ToLowerInvariant() } | ForEach-Object {',
+    '  if ($_.CommandLine) { "{0}`t{1}`t{2}" -f $_.ProcessId, $_.Name, ($_.CommandLine -replace "`r|`n", " ") }',
+    '}'
+  ].join('; ');
+  const runner = options.spawnSyncImpl || spawnSync;
+  const result = runner(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 10000,
+    maxBuffer: 4 * 1024 * 1024
+  });
+  if (result.error || result.status !== 0) {
+    const detail = result.error?.message || String(result.stderr || result.stdout || '').trim() || `exit ${result.status}`;
+    throw new Error(`无法确认旧版应用是否仍在运行：${detail}`);
+  }
+  const currentPid = Number(options.currentPid || process.pid);
+  return String(result.stdout || '').split(/\r?\n/).map((line) => {
+    const [pid, name, ...command] = line.split('\t');
+    return { pid: Number(pid), name: String(name || ''), commandLine: command.join('\t') };
+  }).filter((item) => Number.isInteger(item.pid) && item.pid > 0 && item.pid !== currentPid && commandLineContainsProjectRoot(item.commandLine, projectRoot));
+}
+
+function commandLineContainsProjectRoot(commandLine, projectRoot) {
+  const command = normalizeWindowsText(commandLine);
+  const root = normalizeWindowsText(path.resolve(projectRoot)).replace(/\\+$/, '');
+  if (!command || !root) return false;
+  let offset = command.indexOf(root);
+  while (offset >= 0) {
+    const before = offset > 0 ? command[offset - 1] : '';
+    const after = command[offset + root.length] || '';
+    const leftBoundary = !before || /[\s"'=]/.test(before);
+    const rightBoundary = !after || /[\\/"']/.test(after) || (!/["']/.test(before) && /\s/.test(after));
+    if (leftBoundary && rightBoundary) return true;
+    offset = command.indexOf(root, offset + 1);
+  }
+  return false;
+}
+
+function normalizeWindowsText(value) {
+  return String(value || '').trim().toLowerCase().replaceAll('/', '\\');
+}
+
+function cleanupManagedUpdateArtifacts(updateRoot, options = {}) {
+  const root = path.resolve(updateRoot);
+  ensureDir(root);
+  const now = Number(options.now || Date.now());
+  const journal = readJsonIfPresent(path.join(root, 'operation-journal.json'));
+  const request = readJsonIfPresent(path.join(root, 'operation-request.json'));
+  const result = readJsonIfPresent(path.join(root, 'operation-result.json'));
+  const requestActive = Boolean(request && (!result || String(result.operationId || '') !== String(request.operationId || '')));
+  const protectedPaths = new Set();
+  const protect = (candidate) => {
+    if (!candidate) return;
+    const resolved = path.resolve(String(candidate));
+    if (isInside(root, resolved)) protectedPaths.add(pathKey(resolved));
+  };
+  protect(journal?.backup);
+  protect(journal?.stagedRoot);
+  if (requestActive) {
+    protect(request?.stagedRoot);
+    protect(request?.helperSource);
+  }
+  if (['rollback-failed', 'recovery-failed'].includes(String(result?.status || ''))) protect(result?.backup);
+  protect(options.prepared?.archive);
+  protect(options.prepared?.stagingRoot);
+  protect(options.prepared?.packageRoot);
+
+  const removed = [];
+  const directEntries = fs.readdirSync(root, { withFileTypes: true }).map((entry) => managedEntry(root, entry.name)).filter(Boolean);
+  const staging = directEntries.filter((entry) => /^staging-v\d+\.\d+\.\d+$/i.test(entry.name));
+  for (const entry of staging) {
+    if (!protectedPaths.has(pathKey(entry.path)) && !journal && !requestActive) removeManagedEntry(root, entry, removed);
+  }
+
+  const backups = directEntries.filter((entry) => /^operation-backup-[a-z0-9._-]+$/i.test(entry.name)).sort((a, b) => b.mtimeMs - a.mtimeMs);
+  let retainedBackups = 0;
+  for (const entry of backups) {
+    if (protectedPaths.has(pathKey(entry.path))) continue;
+    const retain = retainedBackups < 2 && now - entry.mtimeMs <= UPDATE_BACKUP_RETENTION_MS;
+    if (retain) retainedBackups += 1;
+    else removeManagedEntry(root, entry, removed);
+  }
+
+  const downloads = ensureDir(path.join(root, 'downloads'));
+  const downloadEntries = fs.readdirSync(downloads, { withFileTypes: true }).map((entry) => managedEntry(downloads, entry.name)).filter(Boolean);
+  cleanupDownloadGroup(downloads, downloadEntries.filter((entry) => CORE_ASSET.test(entry.name)), 2, UPDATE_DOWNLOAD_RETENTION_MS, now, protectedPaths, removed);
+  cleanupDownloadGroup(downloads, downloadEntries.filter((entry) => CORE_ASSET.test(entry.name.replace(/\.partial$/i, '')) && /\.partial$/i.test(entry.name)), 1, UPDATE_DOWNLOAD_RETENTION_MS, now, protectedPaths, removed);
+  return { removed, retainedBackups, activeOperation: Boolean(journal || requestActive) };
+}
+
+function cleanupDownloadGroup(root, entries, maximum, maximumAge, now, protectedPaths, removed) {
+  let retained = 0;
+  for (const entry of entries.sort((a, b) => b.mtimeMs - a.mtimeMs)) {
+    if (protectedPaths.has(pathKey(entry.path))) continue;
+    const keep = retained < maximum && now - entry.mtimeMs <= maximumAge;
+    if (keep) retained += 1;
+    else removeManagedEntry(root, entry, removed);
+  }
+}
+
+function managedEntry(root, name) {
+  const candidate = path.resolve(root, String(name || ''));
+  if (path.dirname(candidate) !== path.resolve(root)) return null;
+  try {
+    const stat = fs.lstatSync(candidate);
+    return { name: path.basename(candidate), path: candidate, mtimeMs: stat.mtimeMs, isLink: stat.isSymbolicLink() };
+  } catch {
+    return null;
+  }
+}
+
+function removeManagedEntry(root, entry, removed) {
+  if (!entry || path.dirname(path.resolve(entry.path)) !== path.resolve(root)) throw new Error('拒绝清理不属于更新缓存根目录的路径。');
+  if (entry.isLink) fs.unlinkSync(entry.path);
+  else fs.rmSync(entry.path, { recursive: true, force: true });
+  removed.push(entry.path);
+}
+
+function pathKey(value) {
+  const resolved = path.resolve(value);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
 function sha256(file) {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
@@ -396,4 +538,17 @@ function formatBytes(value) {
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }
 
-module.exports = { CORE_ASSET, MIN_MIGRATION_VERSION, REPOSITORY, UpdateManager, compareVersions, parseChecksumText, resolveCoreRelease, validateArchiveEntries, validateStagedPackage };
+module.exports = {
+  CORE_ASSET,
+  MIN_MIGRATION_VERSION,
+  REPOSITORY,
+  UpdateManager,
+  cleanupManagedUpdateArtifacts,
+  commandLineContainsProjectRoot,
+  compareVersions,
+  findRunningProjectProcesses,
+  parseChecksumText,
+  resolveCoreRelease,
+  validateArchiveEntries,
+  validateStagedPackage
+};

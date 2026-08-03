@@ -39,6 +39,9 @@ function assert(condition, message) {
   });
   portable.set('videoCaches', 'portable-cache', { id: 'portable-cache', videoFile: path.join(managedArtifact, 'merged.mp4') });
   portable.set('ragSessions', 'portable-rag', { id: 'portable-rag', sandboxDir: path.join(oldWorkspace, '.star-note', 'rag-sandboxes', 'session') });
+  const pathLookingText = `请原样保留示例路径 ${path.join(oldWorkspace, '用户', '不要改写.txt')}`;
+  portable.set('ragMessages', 'portable-message', { id: 'portable-message', role: 'user', content: pathLookingText });
+  portable.set('ragProviders', 'portable-provider', { id: 'portable-provider', systemPrompt: pathLookingText, endpoint: 'https://example.invalid/v1' });
   portable.set('workspaces', 'external', { id: 'external', name: 'External', root: externalRoot, isDefault: false });
   portable.set('tasks', 'external-task', { id: 'external-task', artifactDir: path.join(externalRoot, 'keep-me') });
   portable.save();
@@ -54,6 +57,8 @@ function assert(condition, message) {
   assert(moved.get('tasks', 'portable-task').nested.logFile.startsWith(newWorkspace), 'nested tool log path was not relocated');
   assert(moved.get('videoCaches', 'portable-cache').videoFile.startsWith(newWorkspace), 'video cache path was not relocated');
   assert(moved.get('ragSessions', 'portable-rag').sandboxDir.startsWith(newWorkspace), 'RAG sandbox path was not relocated');
+  assert(moved.get('ragMessages', 'portable-message').content === pathLookingText, 'portable relocation rewrote path-looking chat text');
+  assert(moved.get('ragProviders', 'portable-provider').systemPrompt === pathLookingText, 'portable relocation rewrote a provider prompt');
   assert(path.resolve(moved.get('tasks', 'external-task').artifactDir) === path.resolve(path.join(externalRoot, 'keep-me')), 'external workspace path was incorrectly relocated');
   moved.db.close();
   fs.rmSync(root, { recursive: true, force: true });

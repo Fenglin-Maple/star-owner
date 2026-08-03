@@ -7,6 +7,73 @@ const { DEFAULT_FILENAME_METADATA, WORKSPACE_ROOT, ensureDir, normalizeFilenameM
 
 const DB_FILE = path.join(WORKSPACE_ROOT, 'orchestrator.sqlite');
 
+// Only fields whose application schema defines them as filesystem paths may be
+// rewritten when a portable installation moves. User prompts and chat text can
+// legitimately contain path-looking strings and must remain byte-for-byte stable.
+const PORTABLE_PATH_FIELDS = new Set([
+  'allowedRoot',
+  'artifactDir',
+  'artifactRoot',
+  'attachmentFile',
+  'audioFile',
+  'backupDir',
+  'cacheRoot',
+  'cachedVideoFile',
+  'collectionRoot',
+  'commentsDir',
+  'cookieFile',
+  'coverFile',
+  'cwd',
+  'documentRoot',
+  'exportDir',
+  'exportFile',
+  'filePath',
+  'finalDir',
+  'framesDir',
+  'indexFile',
+  'lastOutput',
+  'logFile',
+  'managedRoot',
+  'manifestFile',
+  'markdownFile',
+  'mediaRoot',
+  'metadataFile',
+  'multipartRoot',
+  'originalFile',
+  'outputDir',
+  'outputDirectory',
+  'outputMarkdown',
+  'outputRoot',
+  'path',
+  'projectRoot',
+  'root',
+  'sandboxDir',
+  'sourceDir',
+  'sourceFile',
+  'sourcePath',
+  'sourceWorkspace',
+  'stagingRoot',
+  'stagedRoot',
+  'subtitlesDir',
+  'targetDir',
+  'targetFile',
+  'tempRoot',
+  'thumbnailFile',
+  'videoFile',
+  'videosDir',
+  'workingDirectory',
+  'workspaceRoot'
+]);
+
+const PORTABLE_SCOPED_PATH_FIELDS = new Map([
+  ['activities', new Set(['deleted', 'directory'])],
+  ['attemptCleanupQueue', new Set(['deleted'])],
+  ['localToolJobs', new Set(['output', 'outputDirectories', 'outputs'])],
+  ['taskEvents', new Set(['deleted'])],
+  ['toolRuns', new Set(['json', 'srt', 'text'])],
+  ['unavailableTasks', new Set(['deleted'])]
+]);
+
 class Store {
   constructor(SQL, file = DB_FILE) {
     this.SQL = SQL;
@@ -500,7 +567,7 @@ class Store {
     let updatedRecords = 0;
     for (const row of rows) {
       const value = JSON.parse(row.data);
-      const relocated = relocatePortableValue(value, oldRoot, newRoot);
+      const relocated = relocatePortableValue(value, oldRoot, newRoot, '', row.scope);
       if (!relocated.changed) continue;
       this.set(row.scope, row.id, relocated.value);
       updatedRecords += 1;
@@ -616,16 +683,16 @@ function portableWorkspaceRootForDatabase(file) {
     : WORKSPACE_ROOT;
 }
 
-function relocatePortableValue(value, oldRoot, newRoot) {
+function relocatePortableValue(value, oldRoot, newRoot, fieldName = '', scope = '') {
   if (typeof value === 'string') {
-    if (!path.isAbsolute(value) || !isPathInside(oldRoot, value)) return { value, changed: false };
+    if (!isPortablePathField(scope, fieldName) || !path.isAbsolute(value) || !isPathInside(oldRoot, value)) return { value, changed: false };
     const relative = path.relative(oldRoot, path.resolve(value));
     return { value: path.join(newRoot, relative), changed: true };
   }
   if (Array.isArray(value)) {
     let changed = false;
     const next = value.map((item) => {
-      const relocated = relocatePortableValue(item, oldRoot, newRoot);
+      const relocated = relocatePortableValue(item, oldRoot, newRoot, fieldName, scope);
       changed ||= relocated.changed;
       return relocated.value;
     });
@@ -635,13 +702,17 @@ function relocatePortableValue(value, oldRoot, newRoot) {
     let changed = false;
     const next = {};
     for (const [key, item] of Object.entries(value)) {
-      const relocated = relocatePortableValue(item, oldRoot, newRoot);
+      const relocated = relocatePortableValue(item, oldRoot, newRoot, key, scope);
       changed ||= relocated.changed;
       next[key] = relocated.value;
     }
     return { value: changed ? next : value, changed };
   }
   return { value, changed: false };
+}
+
+function isPortablePathField(scope, fieldName) {
+  return PORTABLE_PATH_FIELDS.has(fieldName) || Boolean(PORTABLE_SCOPED_PATH_FIELDS.get(String(scope || ''))?.has(fieldName));
 }
 
 function sameFilesystemPath(left, right) {
@@ -772,4 +843,4 @@ function defaultTools() {
   ];
 }
 
-module.exports = { Store, defaultTools };
+module.exports = { PORTABLE_PATH_FIELDS, PORTABLE_SCOPED_PATH_FIELDS, Store, defaultTools, relocatePortableValue };

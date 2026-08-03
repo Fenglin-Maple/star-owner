@@ -86,6 +86,22 @@ function Wait-ForApplicationExit {
   throw "The application process did not exit in time."
 }
 
+function Assert-SourceApplicationStopped([string]$WorkspacePath) {
+  $sourceProject = [IO.Path]::GetFullPath((Split-Path -Parent $WorkspacePath)).TrimEnd('\')
+  $running = @(Get-CimInstance Win32_Process | Where-Object {
+    $command = if ($_.CommandLine) { ([string]$_.CommandLine).Replace('/', '\').ToLowerInvariant() } else { '' }
+    $source = $sourceProject.Replace('/', '\').ToLowerInvariant()
+    $_.ProcessId -ne $PID -and
+    ([string]$_.Name).ToLowerInvariant() -in @('electron.exe', 'node.exe') -and
+    $command -and
+    ($command.Contains('"' + $source + '"') -or $command.Contains("'" + $source + "'") -or $command.Contains($source + '\'))
+  })
+  if ($running.Count -gt 0) {
+    $processIds = ($running | ForEach-Object { [string]$_.ProcessId }) -join ', '
+    throw "The source application is still running (PID $processIds). Close it before migration."
+  }
+}
+
 function Backup-Path([string]$Relative) {
   $source = Join-Path $script:root $Relative
   $script:operationContext = @{ phase = 'backup'; item = $Relative; source = $source; backup = $script:backup }
@@ -141,6 +157,7 @@ function Apply-CoreUpdate {
 function Apply-WorkspaceMigration {
   $source = [IO.Path]::GetFullPath($SourceWorkspace)
   if (-not (Test-Path -LiteralPath $source -PathType Container)) { throw 'Source workspace does not exist.' }
+  Assert-SourceApplicationStopped $source
   $target = Join-Path $script:root 'workspace'
   if ($source.ToLowerInvariant() -eq $target.ToLowerInvariant()) { throw 'Source workspace is the current workspace.' }
   $database = Join-Path $source 'orchestrator.sqlite'
