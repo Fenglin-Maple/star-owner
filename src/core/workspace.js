@@ -245,6 +245,66 @@ function assertInside(parent, candidate) {
   return resolvedCandidate;
 }
 
+function removePathInside(parent, candidate, { allowRoot = false } = {}) {
+  const resolvedParent = path.resolve(parent);
+  const resolvedCandidate = assertInside(resolvedParent, candidate);
+  if (!allowRoot && sameFilesystemPath(resolvedCandidate, resolvedParent)) {
+    throw new Error(`Refusing to remove the managed root itself: ${resolvedCandidate}`);
+  }
+  if (!fs.existsSync(resolvedCandidate)) return false;
+  assertNoLinkedParent(resolvedParent, resolvedCandidate);
+  const realParent = fs.realpathSync.native(resolvedParent);
+  removeWithoutFollowingLinks(resolvedCandidate, realParent);
+  return true;
+}
+
+function assertNoLinkedParent(parent, candidate) {
+  const segments = path.relative(parent, candidate).split(path.sep).filter(Boolean);
+  let current = parent;
+  for (const segment of segments.slice(0, -1)) {
+    current = path.join(current, segment);
+    if (!fs.existsSync(current)) return;
+    if (fs.lstatSync(current).isSymbolicLink()) {
+      throw new Error(`Refusing to traverse a linked directory during removal: ${current}`);
+    }
+  }
+}
+
+function removeWithoutFollowingLinks(target, realParent) {
+  const stat = fs.lstatSync(target);
+  if (stat.isSymbolicLink()) {
+    fs.unlinkSync(target);
+    return;
+  }
+  assertInside(realParent, fs.realpathSync.native(target));
+  if (!stat.isDirectory()) {
+    fs.rmSync(target, { force: true, maxRetries: 8, retryDelay: 150 });
+    return;
+  }
+  for (const name of fs.readdirSync(target)) removeWithoutFollowingLinks(path.join(target, name), realParent);
+  removeEmptyDirectory(target);
+}
+
+function removeEmptyDirectory(target) {
+  let lastError;
+  for (let attempt = 0; attempt < 9; attempt += 1) {
+    try {
+      fs.rmdirSync(target);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(error.code) || attempt === 8) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150 * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
+
+function sameFilesystemPath(left, right) {
+  const normalize = (value) => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+  return normalize(left) === normalize(right);
+}
+
 function initWorkspace() {
   ensureDir(WORKSPACE_ROOT);
   ensureDir(path.join(WORKSPACE_ROOT, 'users'));
@@ -272,6 +332,7 @@ module.exports = {
   libraryUserRoot,
   normalizeFilenameMetadata,
   normalizeTags,
+  removePathInside,
   safeName,
   timestampForFile,
   userCookiesDir,

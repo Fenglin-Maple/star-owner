@@ -6,14 +6,18 @@ const { spawnSync } = require('child_process');
 const { UpdateManager, validateArchiveEntries } = require('../src/core/update-manager');
 
 function runPowerShell(script, args) {
-  const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args], {
+  const result = runPowerShellResult(script, args);
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`PowerShell helper failed (${result.status}): ${result.stdout}\n${result.stderr}`);
+  return result;
+}
+
+function runPowerShellResult(script, args) {
+  return spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args], {
     encoding: 'utf8',
     windowsHide: true,
     timeout: 120000
   });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`PowerShell helper failed (${result.status}): ${result.stdout}\n${result.stderr}`);
-  return result;
 }
 
 function helperArgs(mode, root, extra = {}) {
@@ -86,6 +90,45 @@ function readJson(file) {
   assert.strictEqual(fs.readFileSync(path.join(projectRoot, 'DESIGN_SHARED_KNOWLEDGE.md'), 'utf8'), 'new-shared-design', 'portable update did not replace shared design documentation');
   assert.strictEqual(fs.readFileSync(path.join(projectRoot, 'runtime', 'git', 'cmd', 'git.exe'), 'utf8'), 'new-portable-git', 'portable update did not install the project-local Git runtime');
   assert.strictEqual(readJson(path.join(projectRoot, '.updates', 'operation-result.json')).status, 'succeeded', 'portable update helper did not write a success result');
+
+  const failedRoot = path.join(root, 'backup-failure-project');
+  const failedStage = path.join(failedRoot, '.updates', 'stage');
+  const failedOperationId = 'backup-failure-fixture';
+  fs.mkdirSync(path.join(failedRoot, 'assets'), { recursive: true });
+  fs.mkdirSync(path.join(failedStage, 'node_modules', 'electron', 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(failedRoot, 'assets', 'original.txt'), 'must survive backup failure');
+  fs.writeFileSync(path.join(failedStage, 'package.json'), JSON.stringify({ version: '9.9.9' }));
+  fs.writeFileSync(path.join(failedStage, 'node_modules', 'electron', 'dist', 'electron.exe'), 'electron');
+  const blockedBackup = path.join(failedRoot, '.updates', `operation-backup-${failedOperationId}`);
+  fs.writeFileSync(blockedBackup, 'block backup directory creation');
+  const failed = runPowerShellResult(helper, helperArgs('update', failedRoot, { stagedRoot: failedStage, targetVersion: '9.9.9', operationId: failedOperationId }));
+  assert.notStrictEqual(failed.status, 0, 'backup failure fixture unexpectedly succeeded');
+  assert.strictEqual(fs.readFileSync(path.join(failedRoot, 'assets', 'original.txt'), 'utf8'), 'must survive backup failure', 'rollback deleted an original path that was never backed up');
+  assert.strictEqual(readJson(path.join(failedRoot, '.updates', 'operation-result.json')).status, 'rolled-back', 'safe no-op rollback did not record its result');
+
+  const recoveryScript = path.join(__dirname, 'recover-portable-operation.ps1');
+  const recoveryRoot = path.join(root, 'startup-recovery-project');
+  const recoveryUpdates = path.join(recoveryRoot, '.updates');
+  const recoveryBackup = path.join(recoveryUpdates, 'operation-backup-recovery-fixture');
+  fs.mkdirSync(path.join(recoveryRoot, 'src'), { recursive: true });
+  fs.mkdirSync(path.join(recoveryBackup, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(recoveryRoot, 'src', 'state.txt'), 'partially-updated');
+  fs.writeFileSync(path.join(recoveryBackup, 'src', 'state.txt'), 'known-good');
+  fs.writeFileSync(path.join(recoveryUpdates, 'operation-journal.json'), JSON.stringify({
+    operationId: 'recovery-fixture',
+    mode: 'update',
+    status: 'applying',
+    projectRoot: recoveryRoot,
+    backup: recoveryBackup,
+    backedUpPaths: ['src'],
+    absentPaths: []
+  }));
+  runPowerShell(recoveryScript, ['-ProjectRoot', recoveryRoot]);
+  assert.strictEqual(fs.readFileSync(path.join(recoveryRoot, 'src', 'state.txt'), 'utf8'), 'known-good', 'pre-launch recovery did not restore the backed-up application path');
+  assert(!fs.existsSync(path.join(recoveryUpdates, 'operation-journal.json')), 'pre-launch recovery left the completed journal behind');
+  assert.strictEqual(readJson(path.join(recoveryUpdates, 'operation-result.json')).status, 'rolled-back', 'pre-launch recovery did not record a rolled-back result');
+  const launcher = fs.readFileSync(path.join(__dirname, '..', 'packaging', 'Start-StarOwner.cmd'), 'utf8');
+  assert(launcher.includes('recover-portable-operation.ps1') && launcher.indexOf('recover-portable-operation.ps1') < launcher.indexOf('electron.exe'), 'portable launcher does not recover interrupted operations before Electron starts');
 
   const source = path.join(root, 'old-project');
   fs.mkdirSync(path.join(source, 'workspace'), { recursive: true });

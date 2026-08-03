@@ -13,7 +13,7 @@ const { CollectionSyncService } = require('./core/collection-sync-service');
 const { DependencyManager } = require('./core/dependency-manager');
 const { isAsrModelPackage } = require('./core/asr-models');
 const { isAllowedBilibiliNavigation, secureMainWindow } = require('./core/desktop-security');
-const { deleteCompletedDocument } = require('./core/document-lifecycle');
+const { deleteCompletedDocument, recoverPendingDocumentDeletions } = require('./core/document-lifecycle');
 const { ensurePortableDesktopShortcut } = require('./core/desktop-shortcut');
 const { assertHiddenBrowserUrl, installHiddenBrowserRequestGuard } = require('./core/hidden-browser-policy');
 const { InternalAgentManager } = require('./core/internal-agent-manager');
@@ -31,6 +31,7 @@ const { StartupFolderProbe } = require('./core/startup-folder-probe');
 const { recoverPendingSubmissionFinalizations } = require('./core/submission-artifacts');
 const { ToolRunner } = require('./core/tool-runner');
 const { UpdateManager } = require('./core/update-manager');
+const { recoverPendingUnavailableRemovals } = require('./core/unavailable-task');
 const { VideoCacheManager } = require('./core/video-cache-manager');
 const { assertSafeWindowsPath, ensureDir, evaluateWorkspacePathSafety, fitArtifactName, initWorkspace, safeName, timestampForFile, videoArtifactName, WORKSPACE_ROOT } = require('./core/workspace');
 
@@ -190,6 +191,11 @@ async function bootstrap() {
   initWorkspace();
   emitBootstrap('正在打开本地数据…', 0.32);
   store = await Store.open();
+  const recoveredDocumentDeletes = recoverPendingDocumentDeletions(store);
+  const recoveredUnavailableRemovals = recoverPendingUnavailableRemovals({ store });
+  for (const result of [...recoveredDocumentDeletes, ...recoveredUnavailableRemovals]) {
+    if (!result.ok) console.warn(`[destructive-operation-recovery] ${result.taskId || result.operationId}: ${result.error}`);
+  }
   const biliPartitionMigration = await migrateLegacyBiliPartition({ sessionModule: session, targetPartition: BILI_SESSION, store, legacyPartition: LEGACY_BILI_SESSION });
   if (biliPartitionMigration.copied || biliPartitionMigration.errors) {
     console.info(`[bili-session] migrated ${biliPartitionMigration.copied} legacy cookies${biliPartitionMigration.errors ? `, ${biliPartitionMigration.errors} failed` : ''}`);

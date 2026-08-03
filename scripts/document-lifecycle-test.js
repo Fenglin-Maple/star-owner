@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
-const { deleteCompletedDocument } = require('../src/core/document-lifecycle');
+const { deleteCompletedDocument, recoverPendingDocumentDeletions } = require('../src/core/document-lifecycle');
+const { recoverPendingUnavailableRemovals, removeUnavailableTask } = require('../src/core/unavailable-task');
 const { Store } = require('../src/core/store');
 
 function assert(condition, message) {
@@ -58,6 +59,35 @@ function assert(condition, message) {
   store.commit();
   const localResult = deleteCompletedDocument({ store, taskId: local.id });
   assert(localResult.removed && localResult.reason === 'local-task-deleted' && !store.getTask(local.id), 'ordinary local document was incorrectly restored to pending');
+
+  const interrupted = completedTask(activeCollection, 'interrupted-delete', 'BVINTERRUPT1');
+  writeArtifact(interrupted);
+  store.upsertTask(interrupted);
+  store.commit();
+  const transaction = store.transaction.bind(store);
+  store.transaction = () => { throw new Error('simulated database commit interruption'); };
+  let documentInterrupted = false;
+  try { deleteCompletedDocument({ store, taskId: interrupted.id }); } catch (error) { documentInterrupted = /simulated database/.test(error.message || String(error)); }
+  assert(documentInterrupted, 'document deletion did not expose the simulated database interruption');
+  store.transaction = transaction;
+  assert(!fs.existsSync(interrupted.artifactDir) && store.getTask(interrupted.id)?.status === 'done' && store.list('destructiveOperations').some((item) => item.type === 'document-delete'), 'document crash fixture did not retain a recoverable operation');
+  const recoveredDeletes = recoverPendingDocumentDeletions(store);
+  assert(recoveredDeletes.some((item) => item.ok && item.taskId === interrupted.id) && store.getTask(interrupted.id)?.status === 'pending', 'startup recovery did not finish the interrupted document deletion');
+
+  const unavailableArtifact = path.join(activeCollection.collectionRoot, 'unavailable-interrupted');
+  fs.mkdirSync(unavailableArtifact, { recursive: true });
+  fs.writeFileSync(path.join(unavailableArtifact, 'partial.txt'), 'partial');
+  const unavailable = { id: 'unavailable-interrupted', collectionId: activeCollection.id, bvid: 'BVUNAVAILABLE', title: 'Unavailable', status: 'claimed', artifactDir: unavailableArtifact, allowedRoot: activeCollection.collectionRoot, createdAt: new Date().toISOString() };
+  store.upsertTask(unavailable);
+  store.commit();
+  store.transaction = () => { throw new Error('simulated unavailable database interruption'); };
+  let unavailableInterrupted = false;
+  try { removeUnavailableTask({ store, taskId: unavailable.id, reason: 'video unavailable', source: 'test' }); } catch (error) { unavailableInterrupted = /simulated unavailable/.test(error.message || String(error)); }
+  assert(unavailableInterrupted, 'unavailable-task removal did not expose the simulated database interruption');
+  store.transaction = transaction;
+  assert(!fs.existsSync(unavailableArtifact) && store.getTask(unavailable.id) && store.list('destructiveOperations').some((item) => item.type === 'unavailable-remove'), 'unavailable-task crash fixture did not retain a recoverable operation');
+  const recoveredUnavailable = recoverPendingUnavailableRemovals({ store });
+  assert(recoveredUnavailable.some((item) => item.ok && item.tombstone.taskId === unavailable.id) && !store.getTask(unavailable.id) && store.get('unavailableTasks', unavailable.id), 'startup recovery did not finish the interrupted unavailable-task removal');
 
   fs.rmSync(root, { recursive: true, force: true });
   console.log('document lifecycle test passed');

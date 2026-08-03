@@ -5,7 +5,7 @@ const { pathToFileURL } = require('url');
 const { isLoginRequiredMessage, isVideoUnavailableMessage, unsupportedVideoError } = require('./media-errors');
 const { assertBilibiliUrl } = require('./network-policy');
 const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('./video-support');
-const { assertInside, collectionDirs, ensureDir, normalizeTags, safeName } = require('./workspace');
+const { assertInside, collectionDirs, ensureDir, normalizeTags, removePathInside, safeName } = require('./workspace');
 
 const CACHE_USER_ID = 'builtin-agent-user';
 const CACHE_USER_NAME = '内置用户';
@@ -271,7 +271,7 @@ class VideoCacheManager {
     }
     if (collection.cacheRoot && fs.existsSync(collection.cacheRoot)) {
       const root = assertInside(collection.collectionRoot, collection.cacheRoot);
-      if (root !== path.resolve(collection.collectionRoot)) fs.rmSync(root, { recursive: true, force: true });
+      if (root !== path.resolve(collection.collectionRoot)) removePathInside(collection.collectionRoot, root);
     }
     this.store.deleteVideoCacheCollection(collection.id);
     this.ensureDefaultCollection();
@@ -483,7 +483,7 @@ class VideoCacheManager {
     const root = path.resolve(record.allowedRoot || path.dirname(record.artifactDir));
     const artifact = assertInside(root, record.artifactDir);
     if (artifact === root) throw new Error('拒绝删除缓存根目录本身。');
-    fs.rmSync(artifact, { recursive: true, force: true });
+    removePathInside(root, artifact);
   }
 
   safeRemoveTaskArtifact(task, collection) {
@@ -491,7 +491,7 @@ class VideoCacheManager {
     const root = path.resolve(task.allowedRoot || collection.cacheRoot || collection.collectionRoot || path.dirname(task.artifactDir));
     const artifact = assertInside(root, task.artifactDir);
     if (artifact === root) throw new Error('Refusing to delete the cache collection root itself.');
-    fs.rmSync(artifact, { recursive: true, force: true });
+    removePathInside(root, artifact);
   }
 
   removeCachedVideoOnly(record) {
@@ -500,10 +500,10 @@ class VideoCacheManager {
     const artifactRoot = assertInside(allowedRoot, record.artifactDir);
     if (record.videoFile && fs.existsSync(record.videoFile)) {
       const video = assertInside(artifactRoot, record.videoFile);
-      if (video !== artifactRoot) fs.rmSync(video, { force: true });
+      if (video !== artifactRoot) removePathInside(artifactRoot, video);
     }
     const cacheRecord = path.join(artifactRoot, 'cache-record.json');
-    if (fs.existsSync(cacheRecord)) fs.rmSync(cacheRecord, { force: true });
+    if (fs.existsSync(cacheRecord)) removePathInside(artifactRoot, cacheRecord);
   }
 
   uniqueArchivedCollectionName(baseName, currentId) {

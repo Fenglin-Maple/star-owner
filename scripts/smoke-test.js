@@ -277,9 +277,13 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   const portableRoot = path.join(archiveSource, 'Star-Owner-v0.3.0-win-x64-core');
   fs.mkdirSync(path.join(portableRoot, 'runtime', 'python', 'cpython-3.12.13-windows-x86_64-none'), { recursive: true });
   fs.mkdirSync(path.join(portableRoot, 'runtime', 'faster-whisper', 'Lib', 'site-packages', 'faster_whisper'), { recursive: true });
+  fs.mkdirSync(path.join(portableRoot, 'runtime', 'faster-whisper', 'Lib', 'site-packages', 'yt_dlp'), { recursive: true });
+  fs.mkdirSync(path.join(dependencyRoot, 'runtime', 'vc-runtime'), { recursive: true });
   fs.mkdirSync(path.join(portableRoot, 'src'), { recursive: true });
   fs.writeFileSync(path.join(portableRoot, 'runtime', 'python', 'cpython-3.12.13-windows-x86_64-none', 'python.exe'), 'test runtime');
   fs.writeFileSync(path.join(portableRoot, 'runtime', 'faster-whisper', 'Lib', 'site-packages', 'faster_whisper', '__init__.py'), 'test runtime');
+  fs.writeFileSync(path.join(portableRoot, 'runtime', 'faster-whisper', 'Lib', 'site-packages', 'yt_dlp', '__init__.py'), 'test runtime');
+  fs.writeFileSync(path.join(dependencyRoot, 'runtime', 'vc-runtime', 'msvcp140.dll'), 'test runtime');
   fs.writeFileSync(path.join(portableRoot, 'src', 'must-not-extract.txt'), 'application source');
   const legacyArchive = path.join(dependencyRoot, 'legacy-core.zip');
   createArchive(legacyArchive, archiveSource, path.basename(portableRoot));
@@ -305,6 +309,29 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   new DependencyManager({ store, projectRoot: dependencyRoot, version: '9.9.9' });
   if (fs.readFileSync(path.join(interruptedTarget, 'model.bin'), 'utf8') !== 'known-good-old-model' || fs.existsSync(path.join(dependencyRoot, 'runtime', '.install-transaction.json'))) {
     throw new Error('interrupted dependency installation did not roll back to the previous runtime');
+  }
+  const committedBackupRoot = path.join(dependencyRoot, 'runtime', '.install-backup-runtime-base-committed');
+  const committedEntries = ['python-committed', 'whisper-committed', 'vc-committed'].map((name, index) => {
+    const target = path.join(dependencyRoot, 'runtime', name);
+    const backup = path.join(committedBackupRoot, name);
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, 'version.txt'), `new-${index}`);
+    if (index < 2) {
+      fs.mkdirSync(backup, { recursive: true });
+      fs.writeFileSync(path.join(backup, 'version.txt'), `old-${index}`);
+    }
+    return { relative: `runtime/${name}`, target, backup, hadOriginal: true, status: 'installed' };
+  });
+  fs.writeFileSync(path.join(dependencyRoot, 'runtime', '.install-transaction.json'), JSON.stringify({
+    id: 'runtime-base',
+    phase: 'committed',
+    backupRoot: committedBackupRoot,
+    stagingRoot: path.join(dependencyRoot, 'runtime', '.install-staging-runtime-base-committed'),
+    entries: committedEntries
+  }));
+  const committedRecovery = new DependencyManager({ store, projectRoot: dependencyRoot, version: '9.9.9' });
+  if (committedRecovery.state().recovery?.action !== 'finalized-committed-install' || committedEntries.some((entry, index) => fs.readFileSync(path.join(entry.target, 'version.txt'), 'utf8') !== `new-${index}`)) {
+    throw new Error('committed dependency recovery rolled back only part of the runtime and produced mixed versions');
   }
   const corruptJournal = path.join(dependencyRoot, 'runtime', '.install-transaction.json');
   fs.writeFileSync(corruptJournal, '{not valid json', 'utf8');

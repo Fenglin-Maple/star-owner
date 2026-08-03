@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { collectionDirs, ensureDir, safeName, assertInside } = require('./workspace');
+const { collectionDirs, ensureDir, safeName, assertInside, removePathInside } = require('./workspace');
 const { unsupportedBilibiliUrlReason } = require('./video-support');
 
 const MULTIPART_KIND = 'bilibili-multipart';
@@ -192,19 +192,20 @@ class MultiPartManager {
   async delete(parentId) {
     const parent = this.requireParent(parentId);
     if (this.activeSessions(parent.id).length) throw new Error('请先停止正在运行的多P父任务。');
+    const collection = this.store.getCollectionById(parent.collectionId);
+    if (!collection?.collectionRoot) throw new Error('多P父任务所属收藏夹不存在，无法安全删除产物。');
     for (const session of this.internalAgentManager.listSessions().filter((item) => item.multiPartParentId === parent.id)) {
       try { this.internalAgentManager.deleteSession(session.id); } catch {}
     }
     const taskIds = [parent.id, ...this.partTasks(parent.id).map((task) => task.id)];
     for (const taskId of taskIds) {
       const task = this.store.getTask(taskId);
-      if (task?.artifactDir) fs.rmSync(task.artifactDir, { recursive: true, force: true });
+      if (task?.artifactDir && fs.existsSync(task.artifactDir)) removePathInside(task.allowedRoot || parent.parentRoot, task.artifactDir);
       this.store.delete('tasks', taskId);
       this.store.delete('videos', taskId);
     }
-    fs.rmSync(parent.parentRoot, { recursive: true, force: true });
+    if (fs.existsSync(parent.parentRoot)) removePathInside(collection.collectionRoot, parent.parentRoot);
     this.store.delete('multiPartParents', parent.id);
-    const collection = this.store.getCollectionById(parent.collectionId);
     if (collection) this.store.set('collections', collection.id, { ...collection, videoCount: this.store.listTasks({ collectionId: collection.id }).length, updatedAt: new Date().toISOString() });
     this.store.save();
     this.emitState('multipart-parent-deleted', parent.id);

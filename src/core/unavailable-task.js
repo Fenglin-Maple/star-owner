@@ -1,5 +1,8 @@
+const crypto = require('crypto');
 const { cleanupAttemptFiles, cleanupTaskSnapshot, queueAttemptCleanup } = require('./task-attempt');
 const { isSubmissionValidationMessage } = require('./media-errors');
+
+const OPERATION_SCOPE = 'destructiveOperations';
 
 function removeUnavailableTask({ store, toolRunner = null, taskId, reason, source = 'video-unavailable', excludeRunId = '' }) {
   const id = String(taskId || '');
@@ -8,9 +11,26 @@ function removeUnavailableTask({ store, toolRunner = null, taskId, reason, sourc
   if (!task) return { removed: false, tombstone: existingTombstone || null, cleanup: null };
   if (task.status === 'done') return { removed: false, tombstone: null, cleanup: null };
 
+  const operation = {
+    id: `unavailable-remove-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+    type: 'unavailable-remove',
+    task,
+    reason: String(reason || 'Bilibili video is unavailable.').slice(0, 2000),
+    source,
+    excludeRunId,
+    createdAt: new Date().toISOString()
+  };
+  store.set(OPERATION_SCOPE, operation.id, operation);
+  store.commit();
+  return executeUnavailableRemoval({ store, toolRunner, operation });
+}
+
+function executeUnavailableRemoval({ store, toolRunner = null, operation, recovery = false }) {
+  const task = operation.task;
+
   const cancelledRuns = [];
   for (const run of store.listToolRuns({ taskId: task.id })) {
-    if (run.id === excludeRunId || !['queued', 'running'].includes(run.status)) continue;
+    if (run.id === operation.excludeRunId || !['queued', 'running'].includes(run.status)) continue;
     try {
       if (toolRunner?.cancel) toolRunner.cancel(run.id);
       else store.updateToolRun(run.id, { status: 'cancelled', stage: 'cancelled', signal: 'VIDEO_UNAVAILABLE', finishedAt: new Date().toISOString() });
@@ -21,10 +41,13 @@ function removeUnavailableTask({ store, toolRunner = null, taskId, reason, sourc
   }
 
   let cleanup = null;
-  try { cleanup = cleanupAttemptFiles(store, task); }
+  try {
+    cleanup = cleanupAttemptFiles(store, task);
+    store.delete('attemptCleanupQueue', task.id);
+  }
   catch (error) {
     cleanup = { mode: 'cleanup-failed', error: error.message || String(error), deleted: [], preserved: [] };
-    queueAttemptCleanup(store, cleanupTaskSnapshot(task), cleanup.error, source);
+    queueAttemptCleanup(store, cleanupTaskSnapshot(task), cleanup.error, operation.source);
     toolRunner?.scheduleCleanupRecovery?.();
   }
 
@@ -36,8 +59,8 @@ function removeUnavailableTask({ store, toolRunner = null, taskId, reason, sourc
     bvid: task.bvid,
     title: task.title,
     owner: task.owner || '',
-    reason: String(reason || 'Bilibili video is unavailable.').slice(0, 2000),
-    source,
+    reason: operation.reason,
+    source: operation.source,
     removedAt: now,
     workId: task.workId || '',
     claimedBy: task.claimedBy || '',
@@ -45,26 +68,42 @@ function removeUnavailableTask({ store, toolRunner = null, taskId, reason, sourc
     cancelledRuns,
     cleanup
   };
-  store.set('unavailableTasks', task.id, tombstone);
-  store.delete('tasks', task.id);
-  store.delete('videos', task.id);
-  const collection = store.getCollectionById(task.collectionId);
-  if (collection) {
-    collection.videoCount = store.listTasks({ collectionId: collection.id }).length;
-    collection.updatedAt = now;
-    store.set('collections', collection.id, collection);
-  }
-  store.save();
-  store.recordTaskEvent(task.id, 'video-unavailable', {
+  store.transaction(() => {
+    store.set('unavailableTasks', task.id, tombstone);
+    store.delete('tasks', task.id);
+    store.delete('videos', task.id);
+    const collection = store.getCollectionById(task.collectionId);
+    if (collection) {
+      collection.videoCount = store.listTasks({ collectionId: collection.id }).length;
+      collection.updatedAt = now;
+      store.set('collections', collection.id, collection);
+    }
+    store.delete(OPERATION_SCOPE, operation.id);
+  });
+  store.recordTaskEvent(task.id, recovery ? 'video-unavailable-recovered' : 'video-unavailable', {
     collectionId: task.collectionId,
     workerId: task.claimedBy || '',
     workId: task.workId || '',
     reason: tombstone.reason,
-    source,
+    source: operation.source,
     cancelledRuns,
     cleanup
   });
-  return { removed: true, tombstone, cleanup, cancelledRuns };
+  return { removed: true, tombstone, cleanup, cancelledRuns, recovered: recovery };
+}
+
+function recoverPendingUnavailableRemovals({ store, onEvent = () => {} }) {
+  const results = [];
+  for (const operation of store.list(OPERATION_SCOPE).filter((item) => item.type === 'unavailable-remove')) {
+    try {
+      const result = executeUnavailableRemoval({ store, operation, recovery: true });
+      results.push({ ok: true, ...result });
+      onEvent({ type: 'video-unavailable-recovered', taskId: operation.task?.id || '', collectionId: operation.task?.collectionId || '' });
+    } catch (error) {
+      results.push({ ok: false, operationId: operation.id, taskId: operation.task?.id || '', error: error.message || String(error) });
+    }
+  }
+  return results;
 }
 
 function recoverMisclassifiedUnavailableTasks({ store, onEvent = () => {} }) {
@@ -145,4 +184,4 @@ function isUnavailableTask(store, taskId) {
   return Boolean(store.get('unavailableTasks', String(taskId || '')));
 }
 
-module.exports = { isUnavailableTask, recoverMisclassifiedUnavailableTasks, removeUnavailableTask };
+module.exports = { isUnavailableTask, recoverMisclassifiedUnavailableTasks, recoverPendingUnavailableRemovals, removeUnavailableTask };

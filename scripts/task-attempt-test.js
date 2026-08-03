@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { Store } = require('../src/core/store');
 const { ToolRunner } = require('../src/core/tool-runner');
-const { abortTaskAttempt } = require('../src/core/task-attempt');
+const { abortTaskAttempt, cleanupAttemptFiles } = require('../src/core/task-attempt');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -46,6 +46,25 @@ function assert(condition, message) {
   assert(cached.task.status === 'pending' && cached.task.artifactDir === cacheArtifact && cached.task.cachedVideoFile === videoFile, 'cached task source references were not preserved');
   for (const file of [videoFile, metadataFile, coverFile, path.join(cacheArtifact, 'cache-record.json')]) assert(fs.existsSync(file), `cached source was deleted: ${file}`);
   for (const file of [path.join(cacheArtifact, 'audio'), path.join(cacheArtifact, 'frames'), path.join(cacheArtifact, 'tool-runs'), path.join(cacheArtifact, 'agent-draft-1.md'), path.join(cacheArtifact, 'manifest.json')]) assert(!fs.existsSync(file), `cached attempt artifact survived: ${file}`);
+
+  const linkedRoot = path.join(root, 'linked-root');
+  const outsideRoot = path.join(root, 'junction-outside');
+  const linkedParent = path.join(linkedRoot, 'linked-parent');
+  fs.mkdirSync(path.join(outsideRoot, 'attempt'), { recursive: true });
+  fs.mkdirSync(linkedRoot, { recursive: true });
+  fs.writeFileSync(path.join(outsideRoot, 'attempt', 'must-survive.txt'), 'external data');
+  try {
+    fs.symlinkSync(outsideRoot, linkedParent, process.platform === 'win32' ? 'junction' : 'dir');
+    let traversalRejected = false;
+    try { cleanupAttemptFiles(store, { id: 'junction-traversal', artifactDir: path.join(linkedParent, 'attempt'), allowedRoot: linkedRoot }); }
+    catch (error) { traversalRejected = /linked directory|outside/i.test(error.message || String(error)); }
+    assert(traversalRejected, 'cleanup accepted a task path that traversed a linked directory');
+    assert(fs.existsSync(path.join(outsideRoot, 'attempt', 'must-survive.txt')), 'cleanup followed a linked parent and deleted external data');
+    cleanupAttemptFiles(store, { id: 'junction-link', artifactDir: linkedParent, allowedRoot: linkedRoot });
+    assert(!fs.existsSync(linkedParent) && fs.existsSync(path.join(outsideRoot, 'attempt', 'must-survive.txt')), 'cleanup did not safely unlink the junction itself');
+  } catch (error) {
+    if (!['EPERM', 'EACCES', 'UNKNOWN'].includes(error.code)) throw error;
+  }
 
   const restartRoot = path.join(root, 'restart-root');
   const restartArtifact = path.join(restartRoot, 'attempt');

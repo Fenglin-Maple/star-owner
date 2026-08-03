@@ -543,7 +543,10 @@ class DependencyManager {
       try {
         const journal = JSON.parse(fs.readFileSync(this.installJournal, 'utf8'));
         validateInstallJournal(journal);
-        if (journal.id === id) this.rollbackInstall(journal);
+        if (journal.id === id) {
+          if (journal.phase === 'committed') this.finalizeCommittedInstall(journal);
+          else this.rollbackInstall(journal);
+        }
       } catch { /* startup recovery owns malformed journals */ }
     }
     if (fs.existsSync(this.downloadRoot)) {
@@ -589,25 +592,39 @@ class DependencyManager {
       backup: path.join(backupRoot, relative),
       hadOriginal: fs.existsSync(path.join(this.projectRoot, relative))
     }));
-    const journal = { id: definition.id, stagingRoot, backupRoot, entries, createdAt: new Date().toISOString() };
-    writeFileRecoverable(this.installJournal, Buffer.from(`${JSON.stringify(journal, null, 2)}\n`, 'utf8'));
+    for (const entry of entries) entry.status = 'pending';
+    const journal = { id: definition.id, phase: 'installing', stagingRoot, backupRoot, entries, createdAt: new Date().toISOString() };
+    this.writeInstallJournal(journal);
     try {
       for (const entry of entries) {
         ensureDir(path.dirname(entry.target));
         if (entry.hadOriginal) {
           ensureDir(path.dirname(entry.backup));
           movePath(entry.target, entry.backup);
+          entry.status = 'backed-up';
+          this.writeInstallJournal(journal);
         }
         movePath(entry.source, entry.target);
+        entry.status = 'installed';
+        this.writeInstallJournal(journal);
       }
-      if (fs.existsSync(backupRoot)) fs.rmSync(backupRoot, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
-      fs.rmSync(this.installJournal, { force: true });
-      fs.rmSync(`${this.installJournal}.bak`, { force: true });
-      fs.rmSync(`${this.installJournal}.tmp`, { force: true });
+      const missing = definition.probes.filter((probe) => !fs.existsSync(path.join(this.projectRoot, probe)));
+      if (missing.length) throw new Error(`依赖安装后缺少必需文件：${missing.join(', ')}`);
+      journal.phase = 'committed';
+      journal.committedAt = new Date().toISOString();
+      this.writeInstallJournal(journal);
+      this.finalizeCommittedInstall(journal);
     } catch (error) {
-      this.rollbackInstall(journal);
+      if (journal.phase !== 'committed') {
+        try { this.rollbackInstall(journal); }
+        catch (rollbackError) { throw new Error(`${error.message || String(error)}；依赖回滚未完成：${rollbackError.message || String(rollbackError)}`); }
+      }
       throw error;
     }
+  }
+
+  writeInstallJournal(journal) {
+    writeFileRecoverable(this.installJournal, Buffer.from(`${JSON.stringify(journal, null, 2)}\n`, 'utf8'));
   }
 
   recoverInterruptedInstall() {
@@ -625,8 +642,20 @@ class DependencyManager {
         quarantined
       };
     }
-    this.rollbackInstall(journal);
-    return { recovered: true, packageId: journal.id || '' };
+    try {
+      if (journal.phase === 'committed') {
+        this.finalizeCommittedInstall(journal);
+        return { recovered: true, packageId: journal.id || '', action: 'finalized-committed-install' };
+      }
+      this.rollbackInstall(journal);
+      return { recovered: true, packageId: journal.id || '', action: 'rolled-back-interrupted-install' };
+    } catch (error) {
+      return {
+        recovered: false,
+        packageId: journal.id || '',
+        warning: `依赖安装未能自动恢复，已保留恢复记录：${error.message || String(error)}`
+      };
+    }
   }
 
   quarantineInstallJournal() {
@@ -649,10 +678,28 @@ class DependencyManager {
           if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
           ensureDir(path.dirname(target));
           movePath(backup, target);
+        } else if (['backed-up', 'installed'].includes(entry.status)) {
+          throw new Error(`旧依赖备份缺失，拒绝生成混合 runtime：${entry.relative || entry.target}`);
         }
       } else if (fs.existsSync(target)) {
         fs.rmSync(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
       }
+    }
+    for (const directory of [journal.backupRoot, journal.stagingRoot]) {
+      if (!directory) continue;
+      const safe = assertInstallPath(this.projectRoot, directory);
+      if (fs.existsSync(safe)) fs.rmSync(safe, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
+    }
+    fs.rmSync(this.installJournal, { force: true });
+    fs.rmSync(`${this.installJournal}.bak`, { force: true });
+    fs.rmSync(`${this.installJournal}.tmp`, { force: true });
+  }
+
+  finalizeCommittedInstall(journal = {}) {
+    if (journal.phase !== 'committed') throw new Error('Refusing to finalize an uncommitted dependency installation.');
+    for (const entry of journal.entries || []) {
+      const target = assertInstallPath(this.projectRoot, entry.target);
+      if (!fs.existsSync(target)) throw new Error(`已提交依赖的安装目标缺失：${entry.relative || target}`);
     }
     for (const directory of [journal.backupRoot, journal.stagingRoot]) {
       if (!directory) continue;
@@ -707,7 +754,9 @@ function validateInstallJournal(journal) {
   if (!Array.isArray(journal.entries) || !journal.entries.length) throw new Error('journal entries are missing');
   for (const entry of journal.entries) {
     if (!entry || typeof entry !== 'object' || !entry.target || !entry.backup) throw new Error('journal contains an invalid install entry');
+    if (entry.status && !['pending', 'backed-up', 'installed'].includes(entry.status)) throw new Error('journal contains an invalid install entry status');
   }
+  if (journal.phase && !['installing', 'committed'].includes(journal.phase)) throw new Error('journal contains an invalid install phase');
 }
 
 function assertInstallPath(projectRoot, value) {

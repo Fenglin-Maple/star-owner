@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { assertInside } = require('./workspace');
+const { assertInside, removePathInside } = require('./workspace');
 
 const ACTIVE_RUNS = new Set(['queued', 'running']);
 
@@ -158,7 +158,7 @@ function cleanupAttemptFiles(store, task) {
   if (artifact === allowedRoot) throw new Error('Refusing to clean a task whose artifact directory is the allowed root itself.');
 
   if (!task.cachedVideoId) {
-    removePath(artifact);
+    removePathInside(allowedRoot, artifact);
     return { mode: 'remove-attempt-directory', deleted: [artifact], preserved: [] };
   }
 
@@ -180,7 +180,7 @@ function cleanupAttemptFiles(store, task) {
       preserved.push(target);
       continue;
     }
-    removePath(target);
+    removePathInside(artifact, target);
     deleted.push(target);
   }
   return { mode: 'preserve-cache-source', deleted, preserved: [...keep] };
@@ -202,10 +202,6 @@ function shouldPreserve(target, keep) {
     if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) return true;
   }
   return false;
-}
-
-function removePath(target) {
-  fs.rmSync(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
 }
 
 module.exports = { abortTaskAttempt, cleanupAttemptFiles, cleanupTaskSnapshot, createWorkId, queueAttemptCleanup, recoverPendingAttemptCleanups };

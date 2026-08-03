@@ -1,6 +1,9 @@
+const crypto = require('crypto');
 const { collectionStorageName, isBiliCollection, taskSourceTitle } = require('./collection-state');
 const { sharedExclusionId } = require('./shared-knowledge-manager');
-const { cleanupAttemptFiles, cleanupTaskSnapshot } = require('./task-attempt');
+const { cleanupAttemptFiles, cleanupTaskSnapshot, queueAttemptCleanup } = require('./task-attempt');
+
+const OPERATION_SCOPE = 'destructiveOperations';
 
 function deleteCompletedDocument({ store, taskId, source = 'document-library' }) {
   const task = store.getTask(String(taskId || ''));
@@ -13,22 +16,41 @@ function deleteCompletedDocument({ store, taskId, source = 'document-library' })
     : task.singleTask === true
       ? store.listTasks({ collectionId: task.collectionId }).filter((item) => item.singleTask === true && item.bvid === task.bvid)
       : [task];
-  const cleanups = documentFamily.map((item) => ({ taskId: item.id, cleanupTask: cleanupTaskSnapshot(item), cleanup: cleanupAttemptFiles(store, item) }));
-  const cleanupTask = cleanupTaskSnapshot(task);
-  const cleanup = cleanups.find((item) => item.taskId === task.id)?.cleanup || { mode: 'none', deleted: [], preserved: [] };
   const remoteMembershipGone = isBiliCollection(collection) && (
     collection.biliDeleted
     || task.removedFromFavorites
     || ['removed', 'collection-deleted'].includes(task.favoriteState)
   );
-  const restoreToPending = isBiliCollection(collection) && !remoteMembershipGone && task.singleTask !== true;
+  const operation = {
+    id: `document-delete-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+    type: 'document-delete',
+    source,
+    task,
+    collectionId: collection.id,
+    documentFamily,
+    cleanupTasks: documentFamily.map(cleanupTaskSnapshot),
+    remoteMembershipGone,
+    restoreToPending: isBiliCollection(collection) && !remoteMembershipGone && task.singleTask !== true,
+    createdAt: new Date().toISOString()
+  };
+  store.set(OPERATION_SCOPE, operation.id, operation);
+  store.commit();
+  return executeDocumentDeletion(store, operation);
+}
+
+function executeDocumentDeletion(store, operation, { recovery = false } = {}) {
+  const task = operation.task;
+  const collection = store.getCollectionById(operation.collectionId);
+  const cleanups = operation.cleanupTasks.map((cleanupTask) => cleanupWithRetry(store, cleanupTask, operation.source));
+  const cleanupTask = cleanupTaskSnapshot(task);
+  const cleanup = cleanups.find((item) => item.taskId === task.id)?.cleanup || { mode: 'none', deleted: [], preserved: [] };
   const now = new Date().toISOString();
   let restored = false;
   let removed = false;
 
   store.transaction(() => {
-    if (!restoreToPending) {
-      if (collection.collectionKind === 'shared' && task.sharedRemotePath) {
+    if (!operation.restoreToPending) {
+      if (collection?.collectionKind === 'shared' && task.sharedRemotePath) {
         const exclusionId = sharedExclusionId(collection.id, task.sharedRemotePath, task.sharedRepository);
         store.set('sharedExclusions', exclusionId, {
           id: exclusionId,
@@ -40,7 +62,7 @@ function deleteCompletedDocument({ store, taskId, source = 'document-library' })
           reason: '用户从文档库删除共享文档。'
         });
       }
-      for (const removedTask of documentFamily) {
+      for (const removedTask of operation.documentFamily) {
         store.delete('tasks', removedTask.id);
         store.delete('videos', removedTask.id);
         for (const session of store.list('internalAgentSessions').filter((item) => item.singleTaskId === removedTask.id)) {
@@ -49,7 +71,7 @@ function deleteCompletedDocument({ store, taskId, source = 'document-library' })
           if (worker) store.set('workers', worker.id, { ...worker, status: 'paused', pauseReason: '对应的单视频总结产物已被用户删除。', pausedAt: worker.pausedAt || now, updatedAt: now });
         }
       }
-      if (remoteMembershipGone) {
+      if (operation.remoteMembershipGone) {
         store.set('removedFavoriteTasks', task.id, {
           ...(store.get('removedFavoriteTasks', task.id) || {}),
           id: task.id,
@@ -57,11 +79,11 @@ function deleteCompletedDocument({ store, taskId, source = 'document-library' })
           collectionId: task.collectionId,
           bvid: task.bvid,
           title: taskSourceTitle(task),
-          reason: collection.biliDeleted
+          reason: collection?.biliDeleted
             ? 'B站收藏夹已删除，文档被用户删除后不恢复总结任务。'
             : '视频已移出B站收藏夹，文档被用户删除后不恢复总结任务。',
           removedAt: now,
-          cleanupPending: false,
+          cleanupPending: cleanups.some((item) => item.cleanup.mode === 'cleanup-failed'),
           cleanupTask
         });
       }
@@ -100,7 +122,7 @@ function deleteCompletedDocument({ store, taskId, source = 'document-library' })
       restored = true;
     }
 
-    const latestCollection = store.getCollectionById(collection.id);
+    const latestCollection = collection && store.getCollectionById(collection.id);
     if (latestCollection) {
       const tasks = store.listTasks({ collectionId: collection.id });
       const archivedDocumentCount = tasks.filter((item) => item.status === 'done' && item.outputMarkdown && (item.removedFromFavorites || item.favoriteState === 'collection-deleted')).length;
@@ -112,12 +134,13 @@ function deleteCompletedDocument({ store, taskId, source = 'document-library' })
         updatedAt: now
       });
     }
+    store.delete(OPERATION_SCOPE, operation.id);
   });
 
-  store.recordTaskEvent(task.id, 'document-deleted', {
+  store.recordTaskEvent(task.id, recovery ? 'document-delete-recovered' : 'document-deleted', {
     collectionId: task.collectionId,
     bvid: task.bvid,
-    source,
+    source: operation.source,
     restored,
     removed,
     cleanup,
@@ -126,16 +149,38 @@ function deleteCompletedDocument({ store, taskId, source = 'document-library' })
   return {
     taskId: task.id,
     collectionId: task.collectionId,
-    collectionName: collection.name,
+    collectionName: collection?.name || '',
     bvid: task.bvid,
     restored,
     removed,
+    recovered: recovery,
     reason: removed
-      ? (task.singleTask ? 'single-task-deleted' : remoteMembershipGone ? (collection.biliDeleted ? 'collection-deleted' : 'removed-from-favorites') : 'local-task-deleted')
+      ? (task.singleTask ? 'single-task-deleted' : operation.remoteMembershipGone ? (collection?.biliDeleted ? 'collection-deleted' : 'removed-from-favorites') : 'local-task-deleted')
       : 'pending',
     cleanup,
     cleanups
   };
 }
 
-module.exports = { deleteCompletedDocument };
+function cleanupWithRetry(store, cleanupTask, source) {
+  try {
+    const cleanup = cleanupAttemptFiles(store, cleanupTask);
+    store.delete('attemptCleanupQueue', cleanupTask.id);
+    return { taskId: cleanupTask.id, cleanupTask, cleanup };
+  } catch (error) {
+    const cleanup = { mode: 'cleanup-failed', error: error.message || String(error), deleted: [], preserved: [] };
+    queueAttemptCleanup(store, cleanupTask, cleanup.error, source);
+    return { taskId: cleanupTask.id, cleanupTask, cleanup };
+  }
+}
+
+function recoverPendingDocumentDeletions(store) {
+  const results = [];
+  for (const operation of store.list(OPERATION_SCOPE).filter((item) => item.type === 'document-delete')) {
+    try { results.push({ ok: true, ...executeDocumentDeletion(store, operation, { recovery: true }) }); }
+    catch (error) { results.push({ ok: false, operationId: operation.id, taskId: operation.task?.id || '', error: error.message || String(error) }); }
+  }
+  return results;
+}
+
+module.exports = { deleteCompletedDocument, recoverPendingDocumentDeletions };

@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { collectionDirs, ensureDir, safeName, assertInside } = require('./workspace');
+const { collectionDirs, ensureDir, safeName, assertInside, removePathInside } = require('./workspace');
 const { GitRuntime } = require('./git-runtime');
 const { sharedRepositoryTemplate } = require('./shared-repository-template');
 
@@ -524,7 +524,7 @@ class SharedKnowledgeManager {
     } catch (error) {
       for (const mount of [...createdMounts].reverse()) this.rollbackNewMount(mount, collection, false);
       if (createdCollection && !this.store.listTasks({ collectionId: collection.id }).length) {
-        fs.rmSync(collection.collectionRoot, { recursive: true, force: true });
+        removePathInside(collection.workspaceRoot || path.dirname(collection.collectionRoot), collection.collectionRoot);
         this.store.delete('collections', collection.id);
         this.store.save();
       }
@@ -554,13 +554,13 @@ class SharedKnowledgeManager {
         this.store.set('tasks', task.id, { ...task, sharedMountIds: remaining, sharedMountId: remaining.at(-1), updatedAt: new Date().toISOString() });
         continue;
       }
-      if (task.artifactDir) fs.rmSync(task.artifactDir, { recursive: true, force: true });
+      if (task.artifactDir) removePathInside(collection.collectionRoot, task.artifactDir);
       this.store.delete('tasks', task.id);
       this.store.delete('videos', task.id);
     }
     this.store.delete('sharedMounts', mount.id);
     if (createdCollection && !this.store.listTasks({ collectionId: collection.id }).length) {
-      fs.rmSync(collection.collectionRoot, { recursive: true, force: true });
+      removePathInside(collection.workspaceRoot || path.dirname(collection.collectionRoot), collection.collectionRoot);
       this.store.delete('collections', collection.id);
     }
     this.store.save();
