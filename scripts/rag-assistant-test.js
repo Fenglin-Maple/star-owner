@@ -86,6 +86,15 @@ async function startFakeProvider() {
       sse(response, [{ choices: [{ delta: { content: '无温度参数兼容成功。' } }] }]);
       return;
     }
+    if (userText.includes('HTTP_200_JSON_ERROR')) {
+      response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      response.end(JSON.stringify({ error: { message: 'resource pool exhausted' } }));
+      return;
+    }
+    if (userText.includes('HTTP_200_SSE_ERROR')) {
+      sse(response, [{ error: { message: 'no concurrency slot available' } }]);
+      return;
+    }
     if (body.stream === false) {
       if (userText.includes('COMPACT_DELAY')) await new Promise((resolve) => setTimeout(resolve, 60));
       response.writeHead(200, { 'content-type': 'application/json' });
@@ -383,6 +392,14 @@ async function startFakeProvider() {
     try { await assistant.send(providerFailureSession.id, { content: 'PROVIDER_FAILURE' }); }
     catch (error) { providerFailure = error; }
     assert(providerFailure?.code === 'MODEL_PROVIDER_FAILURE' && providerFailure.failureKind === 'infrastructure' && Array.isArray(providerFailure.possibleCauses), 'provider request failure was not classified as infrastructure');
+
+    for (const marker of ['HTTP_200_JSON_ERROR', 'HTTP_200_SSE_ERROR']) {
+      const payloadErrorSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: `${marker} classification` });
+      let payloadError = null;
+      try { await assistant.send(payloadErrorSession.id, { content: marker }); }
+      catch (error) { payloadError = error; }
+      assert(payloadError?.code === 'MODEL_PROVIDER_FAILURE' && payloadError.failureKind === 'infrastructure' && payloadError.explicitProviderError === true, `${marker} was treated as an empty successful response`);
+    }
 
     await assistant.send(session.id, { content: '再补一轮测试。' });
     const compacted = await assistant.compact(session.id);

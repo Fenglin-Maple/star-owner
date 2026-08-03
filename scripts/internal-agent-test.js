@@ -46,15 +46,37 @@ function assert(condition, message) {
 
   const completionBodies = [];
   let forceContextLimitOnce = false;
+  let emptyGenerationResponses = 0;
+  let emptyGenerationFinishReason = '';
+  let invalidGenerationResponses = 0;
+  let forceExplicitProviderError = false;
   const rag = {
     listProviders: () => [{ id: 'provider-test', name: 'Test provider', type: 'openai', baseUrl: 'http://127.0.0.1:1/v1', enabledModels: [{ id: 'model-test', name: 'model-test' }] }],
     rawProvider: () => store.get('ragProviders', 'provider-test'),
     sessionModel: () => ({ id: 'model-test', contextWindow: 128000, maxOutputTokens: 8192, supportsVision: false }),
     streamCompletion: async (_provider, body, _signal, onDelta) => {
       completionBodies.push(body);
+      if (forceExplicitProviderError) {
+        const error = new Error('模型供应商明确返回错误：resource pool exhausted');
+        error.code = 'MODEL_PROVIDER_FAILURE';
+        error.failureKind = 'infrastructure';
+        error.explicitProviderError = true;
+        error.possibleCauses = ['模型供应商资源池当前不可用'];
+        throw error;
+      }
       if (forceContextLimitOnce) {
         forceContextLimitOnce = false;
         throw new Error('maximum context length exceeded');
+      }
+      if (emptyGenerationResponses > 0) {
+        emptyGenerationResponses -= 1;
+        return { content: '', reasoning: '', finishReason: emptyGenerationFinishReason, usage: { input: 40, output: 0, total: 40 } };
+      }
+      if (invalidGenerationResponses > 0) {
+        invalidGenerationResponses -= 1;
+        const incomplete = '# 不完整但非空的模型正文';
+        onDelta({ content: incomplete });
+        return { content: incomplete, reasoning: '', usage: { input: 40, output: 8, total: 48 } };
       }
       const bvid = body.messages?.at(-1)?.content?.match(/"bvid"\s*:\s*"([^"]+)"/)?.[1] || 'BV1234567890';
       const markdown = validMarkdown(bvid);
@@ -95,7 +117,7 @@ function assert(condition, message) {
   const events = [];
   let currentUser = null;
   const cookieFixture = path.join(root, 'login-cookies.txt');
-  const manager = new InternalAgentManager({ store, toolRunner, ragAssistant: rag, bili: { exportCookies: async () => { fs.writeFileSync(cookieFixture, 'cookie'); return cookieFixture; } }, getCurrentUser: () => currentUser, emit: (event) => events.push(event) });
+  const manager = new InternalAgentManager({ store, toolRunner, ragAssistant: rag, bili: { exportCookies: async () => { fs.writeFileSync(cookieFixture, 'cookie'); return cookieFixture; } }, getCurrentUser: () => currentUser, emit: (event) => events.push(event), emptyResponseRetryDelays: [0, 0, 0, 0, 0] });
   const sharedCollection = store.upsertCollection({ id: 'shared-agent-test', userId: 'shared-user', userName: '共享', name: '共享知识测试', internal: true, collectionKind: 'shared', workspaceId: workspace.id, workspaceRoot: workspace.root, collectionRoot: path.join(workspace.root, '共享', '共享知识测试') });
   assert(!manager.state().collections.some((item) => item.id === sharedCollection.id), '共享收藏夹仍出现在 Agent 工作流收藏夹列表');
   assert(!manager.listInternalCollections().some((item) => item.id === sharedCollection.id), '共享收藏夹仍出现在单视频总结收藏夹列表');
@@ -218,6 +240,46 @@ function assert(condition, message) {
   assert(contextRetried.status === 'completed' && completionBodies.length > requestsBeforeRetry + 2, 'context-limit error did not use independent compactor requests before retry');
   assert(completionBodies.slice(requestsBeforeRetry).some((body) => body.messages?.[0]?.content?.includes('上下文整理 Agent')), 'context fallback did not use the same model as a dedicated compactor role');
   assert(contextRetried.contextCompactions >= 1 && contextRetried.logs.some((item) => item.message.includes('上下文整理 Agent')), 'context retry was not reported in session state');
+
+  emptyGenerationResponses = 5;
+  const requestsBeforeEmptyRecovery = completionBodies.length;
+  const emptyRecoverySession = await manager.createSingleTask({ video: 'BVEMPTY00001', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  await manager.start(emptyRecoverySession.id);
+  const emptyRecovered = await waitForSession(manager, emptyRecoverySession.id);
+  const emptyRecoveryLogs = emptyRecovered.logs.filter((item) => item.message.includes('模型接口未返回可用正文'));
+  assert(emptyRecovered.status === 'completed' && completionBodies.length - requestsBeforeEmptyRecovery === 6, 'fifth empty-response retry did not recover on the sixth total request');
+  assert(emptyRecoveryLogs.length === 5 && emptyRecoveryLogs.at(-1).message.includes('第 5/5 次'), 'empty-response retry count was not reported through the configured limit');
+  assert(!emptyRecovered.logs.some((item) => item.message.includes('稿未通过校验')), 'empty provider responses were still reported as Markdown validation failures');
+  assert(events.some((event) => event.type === 'stream' && event.sessionId === emptyRecoverySession.id && event.replaceContent === true), 'recovered model output appended to the retry notice instead of replacing it');
+
+  emptyGenerationResponses = 6;
+  const requestsBeforeEmptyFailure = completionBodies.length;
+  const emptyFailureSession = await manager.createSingleTask({ video: 'BVEMPTY00002', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  await manager.start(emptyFailureSession.id);
+  const emptyBlocked = await waitForStatus(manager, emptyFailureSession.id, 'blocked');
+  assert(completionBodies.length - requestsBeforeEmptyFailure === 6, 'empty provider response exceeded the five-retry limit');
+  assert(emptyBlocked.content.includes('Agent 因基础设施故障停止') && emptyBlocked.content.includes('初次请求及 5 次自动重试') && emptyBlocked.content.includes('AI 模型配置'), 'exhausted empty responses did not replace the model pane with a provider-specific infrastructure error');
+  assert(!emptyBlocked.logs.some((item) => item.message.includes('稿未通过校验')) && store.getTask(emptyFailureSession.singleTaskId)?.status === 'pending', 'empty response failure entered content validation or consumed the task');
+
+  forceExplicitProviderError = true;
+  const requestsBeforeExplicitFailure = completionBodies.length;
+  const explicitFailureSession = await manager.createSingleTask({ video: 'BVEXPLICIT01', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  await manager.start(explicitFailureSession.id);
+  const explicitBlocked = await waitForStatus(manager, explicitFailureSession.id, 'blocked');
+  forceExplicitProviderError = false;
+  assert(completionBodies.length - requestsBeforeExplicitFailure === 1, 'an explicit provider error was retried');
+  assert(explicitBlocked.content.includes('resource pool exhausted') && !explicitBlocked.logs.some((item) => item.message.includes('自动重试')), 'explicit provider error was not displayed directly');
+
+  invalidGenerationResponses = 2;
+  const requestsBeforeInvalidDraft = completionBodies.length;
+  const invalidDraftSession = await manager.createSingleTask({ video: 'BVINVALID002', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  await manager.start(invalidDraftSession.id);
+  const invalidDraftFailed = await waitForStatus(manager, invalidDraftSession.id, 'error');
+  assert(completionBodies.length - requestsBeforeInvalidDraft === 2 && invalidDraftFailed.logs.filter((item) => item.message.includes('稿未通过校验')).length === 2, 'non-empty malformed Markdown did not retain the two-draft validation flow');
+  assert(!invalidDraftFailed.logs.some((item) => item.message.includes('模型接口未返回可用正文')), 'non-empty malformed Markdown was misclassified as an empty provider response');
+
+  store.updateTasksEnabled([emptyFailureSession.singleTaskId, explicitFailureSession.singleTaskId, invalidDraftSession.singleTaskId], false);
+  store.commit();
 
   const queueTaskIds = ['BVCYCLE00001', 'BVCYCLE00002'].map((bvid) => {
     const id = `${collection.id}:${bvid}:queue-test`;

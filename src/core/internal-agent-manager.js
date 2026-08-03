@@ -25,11 +25,12 @@ const TERMINAL_RUNS = new Set(['succeeded', 'failed', 'cancelled', 'timeout', 's
 const DEFAULT_AGENT_CONTEXT_WINDOW = 1_000_000;
 const DEFAULT_AGENT_OUTPUT_TOKENS = 128_000;
 const CONTEXT_COMPACTION_TRIGGER = 0.82;
+const EMPTY_RESPONSE_RETRY_DELAYS_MS = [2_000, 4_000, 8_000, 16_000, 30_000];
 const GENERATION_SYSTEM_PROMPT = '你是星藏家的内置视频知识整理 Agent。必须依据提供的真实素材生成完整、严谨、带时间轴和关键帧的中文 Markdown，不得编造未出现的信息。只返回 Markdown 正文。';
 const COMPACTOR_SYSTEM_PROMPT = '你是星藏家的上下文整理 Agent。你的任务不是写最终视频总结，而是把超长原始素材整理为无重复、可继续推理的结构化证据。必须保留时间轴、事实、步骤、参数、代码、限制、例外、字幕冲突、评论立场和不确定性；不得补充素材外事实，不得用“其余略”省略未处理内容。';
 
 class InternalAgentManager {
-  constructor({ store, toolRunner, ragAssistant, bili, getCurrentUser, emit }) {
+  constructor({ store, toolRunner, ragAssistant, bili, getCurrentUser, emit, emptyResponseRetryDelays }) {
     this.store = store;
     this.toolRunner = toolRunner;
     this.ragAssistant = ragAssistant;
@@ -40,6 +41,7 @@ class InternalAgentManager {
     this.running = new Map();
     this.startLocks = new Map();
     this.forcedStops = new Map();
+    this.emptyResponseRetryDelays = normalizeRetryDelays(emptyResponseRetryDelays);
     this.ensureInternalUser();
     this.recoverInterruptedSessions();
     this.purgeKnownUnavailableTasks();
@@ -154,6 +156,7 @@ class InternalAgentManager {
       progress: 0,
       reasoning: '',
       content: '',
+      contentIsNotice: false,
       logs: [],
       completed: 0,
       failed: 0,
@@ -720,6 +723,10 @@ class InternalAgentManager {
         }
         if (error.code === 'ASR_INFRASTRUCTURE_FAILURE' || error.failureKind === 'infrastructure') {
           const possibleCauses = Array.isArray(error.possibleCauses) ? error.possibleCauses : [];
+          const modelInfrastructure = String(error.code || '').startsWith('MODEL_PROVIDER_');
+          const handlingAdvice = modelInfrastructure
+            ? '等待供应商恢复资源池/并发，或检查“AI 模型配置”中的额度、Base URL、API Key、模型名与上下文设置，再手动恢复此 Agent。当前视频任务已退回待领取，不会继续领取其它视频。'
+            : '检查“Agent 工具状态”和设置中的依赖状态，修复或重新下载对应依赖后，再手动恢复此 Agent。当前视频任务已退回待领取，不会继续领取其它视频。';
           const report = [
             '## Agent 因基础设施故障停止',
             '',
@@ -730,7 +737,7 @@ class InternalAgentManager {
             '**可能原因**：',
             ...(possibleCauses.length ? possibleCauses.map((item) => `- ${item}`) : ['- 应用工具、模型或本地运行时当前不可用']),
             '',
-            '**处理建议**：检查“Agent 工具状态”和设置中的依赖状态，修复或重新下载对应依赖后，再手动恢复此 Agent。当前视频任务已退回待领取，不会继续领取其它视频。'
+            `**处理建议**：${handlingAdvice}`
           ].join('\n');
           latest.acceptNewTasks = false;
           latest.status = 'blocked';
@@ -738,6 +745,7 @@ class InternalAgentManager {
           latest.lastError = error.message || String(error);
           latest.reasoning = '';
           latest.content = report;
+          latest.contentIsNotice = false;
           latest.currentTaskId = '';
           latest.currentRunId = '';
           this.abortAttempt(task.id, latest.workerId, latest.lastError, 'infrastructure-failure');
@@ -837,6 +845,7 @@ class InternalAgentManager {
     session.progress = 0.05;
     session.reasoning = '';
     session.content = '';
+    session.contentIsNotice = false;
     session.lastError = '';
     session.contextCycle = Number(session.contextCycle || 0) + 1;
     session.contextPercent = 0;
@@ -1027,16 +1036,8 @@ class InternalAgentManager {
         const userContent = frames.length
           ? [{ type: 'text', text: plan.prompt }, ...frames.map((file) => ({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${fs.readFileSync(path.join(task.artifactDir, file)).toString('base64')}` } }))]
           : plan.prompt;
-        const latest = this.requireSession(session.id);
-        latest.reasoning = '';
-        latest.content = '';
-        latest.contextPercent = plan.contextPercent;
-        latest.contextInputTokens = plan.inputTokens;
-        latest.contextOutputLimit = plan.maxTokens;
-        this.saveSession(latest);
-        Object.assign(session, latest);
         try {
-          result = await this.ragAssistant.streamCompletion(provider, {
+          result = await this.requestGenerationWithEmptyRetry(session, provider, {
             model: session.modelId,
             messages: [
               { role: 'system', content: GENERATION_SYSTEM_PROMPT },
@@ -1044,7 +1045,7 @@ class InternalAgentManager {
             ],
             temperature: provider.temperature,
             max_tokens: plan.maxTokens
-          }, signal, (delta) => this.streamDelta(session.id, delta));
+          }, signal, { attempt, errors, plan });
           break;
         } catch (error) {
           if (!isContextLimitError(error.message)) throw error;
@@ -1061,7 +1062,6 @@ class InternalAgentManager {
         }
       }
       if (!result) throw new Error('模型上下文重试未返回结果。');
-      this.addUsage(session, result.usage || {});
       previous = normalizeGeneratedMarkdown(injectFrameGallery(stripMarkdownFence(result.content || ''), originalMaterials.frames), task, originalMaterials);
       const draft = path.join(task.artifactDir, `agent-draft-${attempt + 1}.md`);
       fs.writeFileSync(draft, `${previous.trim()}\n`, 'utf8');
@@ -1071,6 +1071,64 @@ class InternalAgentManager {
       this.log(session, `第 ${attempt + 1} 稿未通过校验：${errors.join('；')}`);
     }
     throw new Error(`模型生成的 Markdown 未通过校验：${errors.join('；')}`);
+  }
+
+  async requestGenerationWithEmptyRetry(session, provider, body, signal, { attempt, errors, plan }) {
+    const retryLimit = this.emptyResponseRetryDelays.length;
+    for (let retryIndex = 0; retryIndex <= retryLimit; retryIndex += 1) {
+      const latest = this.requireSession(session.id);
+      latest.reasoning = '';
+      if (retryIndex === 0) {
+        latest.content = attempt > 0 ? draftValidationNotice(attempt, errors) : '';
+        latest.contentIsNotice = attempt > 0;
+      } else {
+        latest.content = activeEmptyResponseRetryNotice(retryIndex, retryLimit);
+        latest.contentIsNotice = true;
+      }
+      latest.phase = retryIndex > 0
+        ? `模型空响应，正在进行第 ${retryIndex}/${retryLimit} 次自动重试`
+        : (attempt > 0 ? `第 ${attempt} 稿校验失败，正在重新生成` : '模型正在撰写');
+      latest.contextPercent = plan.contextPercent;
+      latest.contextInputTokens = plan.inputTokens;
+      latest.contextOutputLimit = plan.maxTokens;
+      this.saveSession(latest);
+      Object.assign(session, latest);
+
+      const result = await this.ragAssistant.streamCompletion(provider, body, signal, (delta) => this.streamDelta(session.id, delta));
+      this.addUsage(session, result.usage || {});
+      if (hasUsableGeneratedContent(result.content)) {
+        const completed = this.requireSession(session.id);
+        if (completed.contentIsNotice || !hasUsableGeneratedContent(completed.content)) {
+          completed.content = String(result.content || '');
+          completed.contentIsNotice = false;
+          this.saveSession(completed);
+          Object.assign(session, completed);
+        }
+        return result;
+      }
+
+      const finishReason = String(result.finishReason || '').trim();
+      const reasoningOnly = Boolean(String(result.reasoning || '').trim());
+      if (isTerminalEmptyFinishReason(finishReason)) {
+        throw emptyModelResponseError({ retryLimit, retryCount: retryIndex, finishReason, reasoningOnly, explicit: true });
+      }
+      if (retryIndex >= retryLimit) {
+        throw emptyModelResponseError({ retryLimit, retryCount: retryIndex, finishReason, reasoningOnly });
+      }
+
+      const retryNumber = retryIndex + 1;
+      const retryDelay = retryDelayWithJitter(this.emptyResponseRetryDelays[retryIndex]);
+      const waiting = this.requireSession(session.id);
+      waiting.reasoning = '';
+      waiting.content = emptyResponseRetryNotice(retryNumber, retryLimit, retryDelay, finishReason);
+      waiting.contentIsNotice = true;
+      waiting.phase = `模型接口未返回正文，等待第 ${retryNumber}/${retryLimit} 次自动重试`;
+      this.saveSession(waiting);
+      Object.assign(session, waiting);
+      this.log(session, `模型接口未返回可用正文，可能是供应商资源池或并发已满；${formatRetryDelay(retryDelay)}后进行第 ${retryNumber}/${retryLimit} 次自动重试。`);
+      await delay(retryDelay, signal);
+    }
+    throw emptyModelResponseError({ retryLimit, retryCount: retryLimit });
   }
 
   async compactTaskMaterials(session, task, collection, materials, provider, model, signal) {
@@ -1261,14 +1319,21 @@ class InternalAgentManager {
 
   streamDelta(sessionId, delta) {
     const session = this.requireSession(sessionId);
-    if (delta.content) session.content = `${session.content || ''}${delta.content}`;
+    let replaceContent = false;
+    if (delta.content) {
+      replaceContent = Boolean(session.contentIsNotice);
+      session.content = replaceContent ? String(delta.content) : `${session.content || ''}${delta.content}`;
+      session.contentIsNotice = false;
+    }
     if (delta.reasoning) session.reasoning = `${session.reasoning || ''}${delta.reasoning}`;
-    session.phase = delta.reasoning && !session.content ? '模型正在思考' : '模型正在撰写';
+    const hasModelContent = Boolean(session.content && !session.contentIsNotice);
+    session.phase = delta.reasoning && !hasModelContent ? '模型正在思考' : '模型正在撰写';
     const baseProgress = Number(session.contextCompactions || 0) > 0 ? 0.7 : 0.58;
-    session.progress = Math.min(0.86, baseProgress + Math.log10(1 + String(session.content || '').length) * 0.045);
+    const modelContentLength = session.contentIsNotice ? 0 : String(session.content || '').length;
+    session.progress = Math.min(0.86, baseProgress + Math.log10(1 + modelContentLength) * 0.045);
     session.updatedAt = new Date().toISOString();
     this.store.set('internalAgentSessions', session.id, session);
-    this.emit({ type: 'stream', sessionId, delta, phase: session.phase, progress: session.progress });
+    this.emit({ type: 'stream', sessionId, delta, replaceContent, phase: session.phase, progress: session.progress });
   }
 
   addUsage(session, usage) {
@@ -1852,6 +1917,82 @@ function describeToolRun(run = {}) {
     if (quietSeconds >= 5) return `${run.toolName || run.toolId} · ${run.stage || '处理中'}（已运行 ${quietSeconds} 秒）`;
   }
   return `${run.toolName || run.toolId} · ${run.stage || run.status}`;
+}
+
+function normalizeRetryDelays(value) {
+  const configured = Array.isArray(value) && value.length ? value : EMPTY_RESPONSE_RETRY_DELAYS_MS;
+  return configured.slice(0, 5).map((item) => Math.max(0, Math.min(120_000, Number(item) || 0)));
+}
+
+function retryDelayWithJitter(value) {
+  const delayMs = Math.max(0, Number(value) || 0);
+  if (!delayMs) return 0;
+  return delayMs + Math.floor(Math.random() * Math.max(250, delayMs * 0.2));
+}
+
+function formatRetryDelay(value) {
+  const seconds = Math.max(0, Number(value) || 0) / 1000;
+  return seconds >= 10 ? `约 ${Math.round(seconds)} 秒` : `约 ${Math.round(seconds * 10) / 10} 秒`;
+}
+
+function hasUsableGeneratedContent(value) {
+  return stripMarkdownFence(String(value || '').replace(/[\u200b-\u200d\u2060\ufeff]/gi, '')).trim().length > 0;
+}
+
+function isTerminalEmptyFinishReason(value) {
+  return /^(?:content[_ -]?filter|safety|blocked|refusal|error|failed|cancelled)$/i.test(String(value || '').trim());
+}
+
+function draftValidationNotice(attempt, errors) {
+  return [
+    `## 第 ${attempt} 稿未通过结构校验`,
+    '',
+    '应用正在请求模型重新生成完整 Markdown，上一稿不再显示。',
+    '',
+    ...(errors || []).slice(0, 8).map((item) => `- ${item}`)
+  ].join('\n');
+}
+
+function emptyResponseRetryNotice(retryNumber, retryLimit, retryDelay, finishReason) {
+  return [
+    '## 模型接口未返回可用正文',
+    '',
+    '本次请求已结束，但供应商没有返回可用于视频总结的正文，因此不会进入 Markdown 校验。',
+    '',
+    `**自动重试**：${retryNumber}/${retryLimit}，${formatRetryDelay(retryDelay)}后继续。`,
+    finishReason ? `**供应商结束原因**：${finishReason}` : '',
+    '',
+    '可能是供应商资源池或账户并发已满，也可能是流式接口暂时未返回正文。'
+  ].filter(Boolean).join('\n');
+}
+
+function activeEmptyResponseRetryNotice(retryNumber, retryLimit) {
+  return [
+    '## 模型接口未返回可用正文',
+    '',
+    '供应商上一次请求没有返回正文，应用未将空响应送入 Markdown 校验。',
+    '',
+    `**自动重试**：正在执行 ${retryNumber}/${retryLimit}。`,
+    '',
+    '新的模型正文开始返回后，将直接替换本提示。'
+  ].join('\n');
+}
+
+function emptyModelResponseError({ retryLimit, retryCount, finishReason = '', reasoningOnly = false, explicit = false }) {
+  const detail = explicit
+    ? `模型供应商以“${finishReason || '明确终止'}”结束响应，且没有返回可用正文；应用未执行空响应重试。`
+    : `模型供应商初次请求及 ${retryLimit} 次自动重试均未返回可用正文。`;
+  const error = new Error(`${detail} 应用未将空响应送入 Markdown 校验。`);
+  error.code = explicit ? 'MODEL_PROVIDER_EMPTY_TERMINAL_RESPONSE' : 'MODEL_PROVIDER_EMPTY_RESPONSE';
+  error.failureKind = 'infrastructure';
+  error.emptyResponseRetries = Number(retryCount || 0);
+  error.finishReason = finishReason;
+  error.possibleCauses = [
+    '模型供应商资源池或账户并发已满，网关以成功状态结束了空请求',
+    '供应商网关、CDN 或 OpenAI 兼容流暂时中断，未返回 content 正文',
+    reasoningOnly ? '模型只返回了推理内容，没有给出最终正文' : '模型与供应商的流式响应格式暂不兼容'
+  ];
+  return error;
 }
 
 function clamp(value, min, max, fallback) {

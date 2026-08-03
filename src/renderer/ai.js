@@ -631,7 +631,10 @@
     if (event.type === 'stream') {
       const session = state.sessions.find((item) => item.id === event.sessionId);
       if (session) {
-        if (event.delta?.content) session.content = `${session.content || ''}${event.delta.content}`;
+        if (event.delta?.content) {
+          session.content = event.replaceContent || session.contentIsNotice ? String(event.delta.content) : `${session.content || ''}${event.delta.content}`;
+          session.contentIsNotice = false;
+        }
         if (event.delta?.reasoning) session.reasoning = `${session.reasoning || ''}${event.delta.reasoning}`;
         session.phase = event.phase || session.phase;
         session.progress = event.progress ?? session.progress;

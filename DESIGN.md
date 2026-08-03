@@ -1,6 +1,6 @@
 # 星藏家 Design
 
-Version: `1.4.12`
+Version: `1.4.13`
 
 ## 1. Product Goal
 
@@ -271,6 +271,8 @@ Accepted output requires:
 
 Before validation, deterministic normalization repairs frame filename placeholders against the real extracted frame inventory, rejects literal FFmpeg pattern files, canonicalizes decorated/numbered headings, and orders Summary, Mind Map, and Contents. A remaining validation failure returns the task to pending and cannot be reclassified as a missing video. When a workflow explicitly enables `retainProcessCache`, final validation disables only the temporary-media cleanup assertion because the cleanup tool has already been instructed to preserve the merged video, downloaded subtitles and ASR timestamp files. The normal cleanup path remains strict. Tool-run progress distinguishes queued work, downloader progress and FFmpeg stages; a stage with no stdout is reported as active processing rather than being presented as a fixed 29% completion state.
 
+Model output must contain usable non-whitespace Markdown before deterministic normalization or validation begins. An HTTP-success stream with no final body, including a reasoning-only response, displays an error notice and performs at most five jittered backoff retries. The first usable delta replaces that notice. A provider error payload or terminal safety/filter reason stops immediately without this retry loop. Exhaustion is classified as infrastructure failure: the Agent pauses, the current task returns to pending, temporary attempt files are cleaned, and no empty response is counted as a failed draft. Non-empty malformed Markdown continues through the ordinary two-draft validation flow.
+
 Finalization applies metadata naming with Windows path budgeting, move retries, copy fallback, and a recoverable journal.
 
 ## 14. Context Management
@@ -314,7 +316,7 @@ The Bilibili WebView partition is derived from the normalized absolute project r
 
 The two current models support local ZIP import. The accepted asset name is generated only from `dependencyReleaseVersion`; the selected file must exactly match that name and the official Release SHA-256. Archive inspection rejects links, traversal, foreign runtime paths, the wrong model directory and missing probes before maintenance mode or target replacement. Import cancels and joins an in-flight automatic download for the same model, removes its `.partial`, archive, staging, backup and transaction residue, then copies the selected file into a managed temporary location. Each successful installation writes a managed manifest containing schema, package ID, dependency release, logical asset name, verified archive SHA-256 and exact probes. That manifest is included in the same staging/backup journal as the payload, so rollback restores both. Existing official v1.0.0 probe-only installations receive one explicit checksum-backed adoption; an adoption marker prevents future missing or malformed manifests from being silently trusted. Existing healthy model files remain untouched until verified staging commits atomically, and remain available after validation failure. Package-name links and error dialogs point to the exact dependency Release. The v1.0.0 medium asset remains untouched for older applications.
 
-Version `1.4.12` keeps runtime and ASR dependencies pinned to baseline `1.0.0`. The current dependency manager exposes `large-v3-turbo` as the required default and `small` as an optional alternate. The historical `medium` package remains untouched in the v1.0.0 Release for older applications and is not exposed by the current model registry. The published Turbo asset contract is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; packaging can build it with `npm run package:model:turbo`. The shared-document uploader and downloader additionally require the project-local Portable Git under `runtime/git`; they never fall back to a system Git installation or global Git configuration.
+Version `1.4.13` keeps runtime and ASR dependencies pinned to baseline `1.0.0`. The current dependency manager exposes `large-v3-turbo` as the required default and `small` as an optional alternate. The historical `medium` package remains untouched in the v1.0.0 Release for older applications and is not exposed by the current model registry. The published Turbo asset contract is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; packaging can build it with `npm run package:model:turbo`. The shared-document uploader and downloader additionally require the project-local Portable Git under `runtime/git`; they never fall back to a system Git installation or global Git configuration.
 
 Media tool subprocesses never resolve `node` through the system `PATH`. Normal source tests use `process.execPath`; the desktop application launches its bundled Electron executable with `ELECTRON_RUN_AS_NODE=1`. Python processes receive `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`, and streamed stdout/stderr use incremental UTF-8 decoders so a multibyte Chinese character split across chunks is not replaced.
 

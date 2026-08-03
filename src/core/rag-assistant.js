@@ -1143,7 +1143,10 @@ class RagAssistant {
     const contentType = String(response.headers.get('content-type') || '').toLowerCase();
     if (contentType.includes('application/json')) {
       const payload = parseJson(await response.text(), 'Model provider returned invalid JSON data.');
-      const message = payload.choices?.[0]?.message || payload.choices?.[0]?.delta || {};
+      const payloadError = responsePayloadError(payload);
+      if (payloadError) throw providerPayloadError(payloadError);
+      const choice = payload.choices?.[0] || {};
+      const message = choice.message || choice.delta || {};
       const normalized = normalizeResponseMessage(message);
       if (normalized.content) onDelta?.({ content: normalized.content });
       if (normalized.reasoning) onDelta?.({ reasoning: normalized.reasoning });
@@ -1151,7 +1154,8 @@ class RagAssistant {
         content: normalized.content,
         reasoning: normalized.reasoning,
         usage: normalizeUsage(payload.usage || {}),
-        toolCalls: normalizeToolCalls(message.tool_calls || [])
+        toolCalls: normalizeToolCalls(message.tool_calls || []),
+        finishReason: String(choice.finish_reason || payload.finish_reason || '')
       };
     }
     if (!response.body) throw new Error('Model response did not include a stream.');
@@ -1161,6 +1165,7 @@ class RagAssistant {
     let content = '';
     let reasoning = '';
     let usage = null;
+    let finishReason = '';
     const toolCalls = new Map();
     const inlineReasoning = new InlineReasoningStreamParser();
     const consumeEvent = (event) => {
@@ -1169,8 +1174,11 @@ class RagAssistant {
         const data = line.slice(5).trim();
         if (!data || data === '[DONE]') continue;
         const payload = parseJson(data, 'Invalid SSE payload from model provider.');
+        const payloadError = responsePayloadError(payload);
+        if (payloadError) throw providerPayloadError(payloadError);
         if (payload.usage) usage = normalizeUsage(payload.usage);
         for (const choice of payload.choices || []) {
+          if (choice.finish_reason !== undefined && choice.finish_reason !== null) finishReason = String(choice.finish_reason);
           const delta = choice.delta || choice.message || {};
           const text = normalizeContent(delta.content);
           const thought = normalizeContent(delta.reasoning_content ?? delta.reasoning ?? delta.thinking);
@@ -1207,7 +1215,7 @@ class RagAssistant {
     const inlineTail = inlineReasoning.finish();
     if (inlineTail.content) { content += inlineTail.content; onDelta?.({ content: inlineTail.content }); }
     if (inlineTail.reasoning) { reasoning += inlineTail.reasoning; onDelta?.({ reasoning: inlineTail.reasoning }); }
-    return { content, reasoning, usage, toolCalls: [...toolCalls.values()] };
+    return { content, reasoning, usage, toolCalls: [...toolCalls.values()], finishReason };
   }
 
   async complete(provider, body, signal) {
@@ -1216,9 +1224,12 @@ class RagAssistant {
       const text = await response.text();
       if (!response.ok) throw providerHttpError(response.status, text);
       const payload = parseJson(text, 'Model provider returned non-JSON data.');
-      const message = payload.choices?.[0]?.message || {};
+      const payloadError = responsePayloadError(payload);
+      if (payloadError) throw providerPayloadError(payloadError);
+      const choice = payload.choices?.[0] || {};
+      const message = choice.message || {};
       const normalized = normalizeResponseMessage(message);
-      return { content: normalized.content, reasoning: normalized.reasoning, usage: normalizeUsage(payload.usage || {}) };
+      return { content: normalized.content, reasoning: normalized.reasoning, usage: normalizeUsage(payload.usage || {}), finishReason: String(choice.finish_reason || payload.finish_reason || '') };
     } catch (error) {
       throw normalizeProviderError(error, signal);
     }
@@ -1516,6 +1527,30 @@ function providerHttpError(status, body) {
     : status === 429
       ? ['模型供应商额度、速率或并发限制已触发', '稍后恢复 Agent，或检查供应商账户额度']
       : ['模型供应商接口不可用或接口规范不兼容', 'Base URL、模型名或模型参数配置错误'];
+  return error;
+}
+
+function responsePayloadError(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.error) return payload.error;
+  if (String(payload.type || '').toLowerCase() === 'error') return payload;
+  if (payload.success === false && (payload.message || payload.detail || payload.code)) return payload;
+  if (/^(?:error|failed)$/i.test(String(payload.status || '')) && (payload.message || payload.detail || payload.code)) return payload;
+  return null;
+}
+
+function providerPayloadError(payload) {
+  const detail = typeof payload === 'string'
+    ? payload
+    : String(payload?.message || payload?.detail || payload?.code || JSON.stringify(payload || {}));
+  const error = new Error(`模型供应商明确返回错误：${detail.slice(0, 1600)}`);
+  error.code = 'MODEL_PROVIDER_FAILURE';
+  error.failureKind = 'infrastructure';
+  error.explicitProviderError = true;
+  error.possibleCauses = [
+    '模型供应商资源池、额度或账户并发当前不可用',
+    '供应商 Base URL、API Key、模型名或请求参数不兼容'
+  ];
   return error;
 }
 
