@@ -116,6 +116,8 @@
   };
   if (!elements.page) return;
 
+  const { RequestGate } = window.StarOwnerRendererGuards;
+
   let state = { jobs: [], videoCollections: [], documentCollections: [] };
   let multipartState = { collections: [], parents: [] };
   let multipartInspection = null;
@@ -127,7 +129,8 @@
   let videoPreview = null;
   let documentSelection = null;
   let documentPreview = null;
-  let previewTimer = null;
+  let videoPreviewTimer = null;
+  let documentPreviewTimer = null;
   let activeToolId = '';
   let uploadDurationMaximum = 1;
   let outsideBackendReady = false;
@@ -147,6 +150,16 @@
   const selectedMountIds = new Set();
   const toolCards = new Map();
   const toolBodies = new Map();
+  const localRefreshGate = new RequestGate();
+  const multipartRefreshGate = new RequestGate();
+  const sharedRefreshGate = new RequestGate();
+  const snapshotRefreshGate = new RequestGate();
+  const multipartProviderGate = new RequestGate();
+  const sharedCatalogGate = new RequestGate();
+  const videoSelectionGate = new RequestGate();
+  const videoPreviewGate = new RequestGate();
+  const documentSelectionGate = new RequestGate();
+  const documentPreviewGate = new RequestGate();
 
   function setupToolNavigation() {
     for (const card of elements.toolStack.querySelectorAll('[data-outside-open]')) {
@@ -220,21 +233,47 @@
   }
 
   async function refresh() {
+    const generations = {
+      local: localRefreshGate.next(),
+      multipart: multipartRefreshGate.next(),
+      shared: sharedRefreshGate.next(),
+      snapshot: snapshotRefreshGate.next()
+    };
     const [local, multipart, shared, currentSnapshot] = await Promise.all([
       window.orchestrator.localToolboxState(),
       window.orchestrator.multiPartState(),
       window.orchestrator.sharedState(),
       window.orchestrator.snapshot()
     ]);
-    state = local;
-    multipartState = multipart;
-    sharedData = shared;
-    snapshot = currentSnapshot;
+    const accepted = {
+      local: localRefreshGate.isCurrent(generations.local),
+      multipart: multipartRefreshGate.isCurrent(generations.multipart),
+      shared: sharedRefreshGate.isCurrent(generations.shared),
+      snapshot: snapshotRefreshGate.isCurrent(generations.snapshot)
+    };
+    if (!Object.values(accepted).some(Boolean)) return state;
+    if (accepted.local) state = local;
+    if (accepted.multipart) multipartState = multipart;
+    if (accepted.shared) applySharedState(shared);
+    if (accepted.snapshot) snapshot = currentSnapshot;
     renderOutsideCards();
     renderJobs();
     renderMultipart();
     renderShared();
     return state;
+  }
+
+  function applySharedState(nextState) {
+    const previousRepository = sharedRepositoryFullName(sharedData.repository || {});
+    const nextRepository = sharedRepositoryFullName(nextState?.repository || {});
+    if (previousRepository !== nextRepository) {
+      sharedCatalogGate.next();
+      setBusy(elements.sharedCatalog, false, '读取远程目录');
+      sharedCatalogData = { repository: nextState?.repository || null, documents: [] };
+      sharedCatalogLoadedKey = '';
+      selectedRemotePaths.clear();
+    }
+    sharedData = nextState;
   }
 
   function scheduleInitialReadyRefresh() {
@@ -296,7 +335,9 @@
   }
 
   async function refreshMultipartProvidersForUi() {
+    const generation = multipartProviderGate.next();
     const agentState = await window.orchestrator.internalAgentState();
+    if (!multipartProviderGate.isCurrent(generation)) return;
     window.__starOwnerAgentProviders = agentState.providers || [];
     const current = elements.multipartProvider.value;
     const providers = (agentState.providers || []).filter((provider) => provider.enabled !== false && (provider.enabledModels || []).length);
@@ -784,19 +825,27 @@
   }
 
   async function loadSharedCatalog({ force = true, quiet = false } = {}) {
+    const generation = sharedCatalogGate.next();
     setBusy(elements.sharedCatalog, true, '读取中');
     try {
-      sharedCatalogData = await runSharedUiOperation({ type: 'catalog-read', message: '正在读取远程共享目录...' }, () => (
+      const nextCatalog = await runSharedUiOperation({ type: 'catalog-read', message: '正在读取远程共享目录...' }, () => (
         window.orchestrator.sharedCatalog({ force })
       ));
+      if (!sharedCatalogGate.isCurrent(generation)) return false;
+      sharedCatalogData = nextCatalog;
       sharedCatalogLoadedKey = sharedRepositoryFullName(sharedCatalogData.repository || sharedData.repository || {});
       selectedRemotePaths.clear();
       renderSharedCatalog();
       if (!quiet) notify('远程共享目录已读取', `共读取 ${Number(sharedCatalogData.total || 0)} 篇文档。`, 'success');
       return true;
     }
-    catch (error) { notify('读取 GitHub 共享目录失败', error); return false; }
-    finally { setBusy(elements.sharedCatalog, false, '读取远程目录'); }
+    catch (error) {
+      if (sharedCatalogGate.isCurrent(generation)) notify('读取 GitHub 共享目录失败', error);
+      return false;
+    }
+    finally {
+      if (sharedCatalogGate.isCurrent(generation)) setBusy(elements.sharedCatalog, false, '读取远程目录');
+    }
   }
 
   async function setSharedToken() {
@@ -1132,26 +1181,34 @@
 
   async function chooseVideos(mode) {
     const button = mode === 'folder' ? elements.videoChooseFolder : elements.videoChooseFiles;
+    const generation = videoSelectionGate.next();
     setBusy(button, true, '正在检查');
     try {
       const result = await (mode === 'folder' ? window.orchestrator.localVideoSelectFolder() : window.orchestrator.localVideoSelectFiles());
-      if (result.canceled) return;
+      if (!videoSelectionGate.isCurrent(generation) || result.canceled) return;
+      invalidateImportPreview('video');
       videoSelection = result.selection;
       openImportModal('video');
       await loadVideoPreview();
-    } catch (error) { notify('视频读取失败', error); }
+    } catch (error) {
+      if (videoSelectionGate.isCurrent(generation)) notify('视频读取失败', error);
+    }
     finally { setBusy(button, false, mode === 'folder' ? '选择视频/音频文件夹' : '选择视频/音频'); }
   }
 
   async function chooseDocuments() {
+    const generation = documentSelectionGate.next();
     setBusy(elements.documentChoose, true, '正在检查');
     try {
       const result = await window.orchestrator.localDocumentSelectFiles();
-      if (result.canceled) return;
+      if (!documentSelectionGate.isCurrent(generation) || result.canceled) return;
+      invalidateImportPreview('document');
       documentSelection = result.selection;
       openImportModal('document');
       await loadDocumentPreview();
-    } catch (error) { notify('文档读取失败', error); }
+    } catch (error) {
+      if (documentSelectionGate.isCurrent(generation)) notify('文档读取失败', error);
+    }
     finally { setBusy(elements.documentChoose, false, '选择文档'); }
   }
 
@@ -1166,13 +1223,15 @@
     select.value = sameName?.id || '__new__';
     nameInput.value = selection.defaultCollectionName || '';
     (video ? elements.videoModal : elements.documentModal).hidden = false;
+    (video ? elements.videoStart : elements.documentStart).disabled = true;
     updateCollectionInput(type);
   }
 
   function closeImportModal(type) {
     (type === 'video' ? elements.videoModal : elements.documentModal).hidden = true;
-    if (type === 'video') { videoSelection = null; videoPreview = null; }
-    else { documentSelection = null; documentPreview = null; }
+    invalidateImportPreview(type);
+    if (type === 'video') { videoSelectionGate.next(); videoSelection = null; }
+    else { documentSelectionGate.next(); documentSelection = null; }
   }
 
   function collectionPayload(type) {
@@ -1192,36 +1251,78 @@
   }
 
   function schedulePreview(type) {
-    if (previewTimer) clearTimeout(previewTimer);
-    previewTimer = setTimeout(() => (type === 'video' ? loadVideoPreview() : loadDocumentPreview()).catch((error) => notify('检查同名文件失败', error)), 180);
+    invalidateImportPreview(type);
+    const timer = setTimeout(() => (type === 'video' ? loadVideoPreview() : loadDocumentPreview()).catch((error) => notify('检查同名文件失败', error)), 180);
+    if (type === 'video') videoPreviewTimer = timer;
+    else documentPreviewTimer = timer;
+  }
+
+  function invalidateImportPreview(type) {
+    if (type === 'video') {
+      videoPreviewGate.next();
+      if (videoPreviewTimer) clearTimeout(videoPreviewTimer);
+      videoPreviewTimer = null;
+      videoPreview = null;
+      elements.videoStart.disabled = true;
+      return;
+    }
+    documentPreviewGate.next();
+    if (documentPreviewTimer) clearTimeout(documentPreviewTimer);
+    documentPreviewTimer = null;
+    documentPreview = null;
+    elements.documentStart.disabled = true;
   }
 
   async function loadVideoPreview() {
-    if (!videoSelection) return;
+    const selection = videoSelection;
+    if (!selection) return null;
+    const generation = videoPreviewGate.next();
     elements.videoStart.disabled = true;
     const payload = collectionPayload('video');
     if (!payload.collectionId && !payload.collectionName) {
-      elements.videoList.innerHTML = '<div class="local-selection-summary">请输入收藏夹名称。</div>';
-      return;
+      if (videoPreviewGate.isCurrent(generation) && videoSelection?.id === selection.id) {
+        elements.videoList.innerHTML = '<div class="local-selection-summary">请输入收藏夹名称。</div>';
+      }
+      return null;
     }
-    videoPreview = await window.orchestrator.localVideoPreview({ selectionId: videoSelection.id, ...payload });
-    elements.videoSummary.textContent = `读取到 ${videoPreview.files.length} 个视频或音频${videoPreview.rejected.length ? `，另有 ${videoPreview.rejected.length} 个文件不可读` : ''}`;
-    renderImportList('video', videoPreview.files);
-    elements.videoStart.disabled = false;
+    try {
+      const preview = await window.orchestrator.localVideoPreview({ selectionId: selection.id, ...payload });
+      if (!videoPreviewGate.isCurrent(generation) || videoSelection?.id !== selection.id) return null;
+      videoPreview = preview;
+      elements.videoSummary.textContent = `读取到 ${videoPreview.files.length} 个视频或音频${videoPreview.rejected.length ? `，另有 ${videoPreview.rejected.length} 个文件不可读` : ''}`;
+      renderImportList('video', videoPreview.files);
+      elements.videoStart.disabled = false;
+      return preview;
+    } catch (error) {
+      if (!videoPreviewGate.isCurrent(generation) || videoSelection?.id !== selection.id) return null;
+      throw error;
+    }
   }
 
   async function loadDocumentPreview() {
-    if (!documentSelection) return;
+    const selection = documentSelection;
+    if (!selection) return null;
+    const generation = documentPreviewGate.next();
     elements.documentStart.disabled = true;
     const payload = collectionPayload('document');
     if (!payload.collectionId && !payload.collectionName) {
-      elements.documentList.innerHTML = '<div class="local-selection-summary">请输入收藏夹名称。</div>';
-      return;
+      if (documentPreviewGate.isCurrent(generation) && documentSelection?.id === selection.id) {
+        elements.documentList.innerHTML = '<div class="local-selection-summary">请输入收藏夹名称。</div>';
+      }
+      return null;
     }
-    documentPreview = await window.orchestrator.localDocumentPreview({ selectionId: documentSelection.id, ...payload });
-    elements.documentSummary.textContent = `读取到 ${documentPreview.files.length} 个文档${documentPreview.rejected.length ? `，另有 ${documentPreview.rejected.length} 个文件不支持` : ''}`;
-    renderImportList('document', documentPreview.files);
-    elements.documentStart.disabled = false;
+    try {
+      const preview = await window.orchestrator.localDocumentPreview({ selectionId: selection.id, ...payload });
+      if (!documentPreviewGate.isCurrent(generation) || documentSelection?.id !== selection.id) return null;
+      documentPreview = preview;
+      elements.documentSummary.textContent = `读取到 ${documentPreview.files.length} 个文档${documentPreview.rejected.length ? `，另有 ${documentPreview.rejected.length} 个文件不支持` : ''}`;
+      renderImportList('document', documentPreview.files);
+      elements.documentStart.disabled = false;
+      return preview;
+    } catch (error) {
+      if (!documentPreviewGate.isCurrent(generation) || documentSelection?.id !== selection.id) return null;
+      throw error;
+    }
   }
 
   function renderImportList(type, files) {
@@ -1499,17 +1600,18 @@
     if (outsideBackendReady) refresh().catch((error) => notify('刷新本地工具失败', error));
   });
   window.orchestrator.onLocalToolboxEvent((event) => {
-    if (event.localToolbox) { state = event.localToolbox; renderJobs(); renderOutsideCards(); }
+    if (event.localToolbox) { localRefreshGate.next(); state = event.localToolbox; renderJobs(); renderOutsideCards(); }
     else refresh().catch(() => {});
   });
   window.orchestrator.onMultipartEvent((event) => {
-    if (event.multiPart) { multipartState = event.multiPart; renderMultipart(); renderOutsideCards(); }
+    if (event.multiPart) { multipartRefreshGate.next(); multipartState = event.multiPart; renderMultipart(); renderOutsideCards(); }
     else refresh().catch(() => {});
   });
   window.orchestrator.onSharedEvent((event) => {
     if (event.operation) updateSharedOperation(event.operation);
     if (event.sharedKnowledge) {
-      sharedData = event.sharedKnowledge;
+      sharedRefreshGate.next();
+      applySharedState(event.sharedKnowledge);
       if (event.type === 'shared-operation-progress') renderSharedOperation();
       else { renderShared(); renderOutsideCards(); }
     }

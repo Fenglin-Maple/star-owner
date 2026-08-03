@@ -140,6 +140,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Collection sync test failed." }
   & npm run test:bili-session
   if ($LASTEXITCODE -ne 0) { throw "Bilibili session partition test failed." }
+  & npm run test:dependency-manifest
+  if ($LASTEXITCODE -ne 0) { throw "Dependency package manifest test failed." }
   & npm run test:update-migration
   if ($LASTEXITCODE -ne 0) { throw "Update and migration test failed." }
   & npm run test:bili-client

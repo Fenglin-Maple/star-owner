@@ -319,15 +319,39 @@ async function inspectArchive(archive, cwd, tar = resolveSystemExecutable('tar.e
 
 function validateArchiveEntries(entries = []) {
   if (!entries.length) throw new Error('更新包为空。');
-  for (const entry of entries) {
-    if (path.posix.isAbsolute(entry) || entry.split('/').includes('..')) throw new Error(`更新包包含不安全路径：${entry}`);
+  const normalizedEntries = [];
+  const seen = new Set();
+  for (const rawEntry of entries) {
+    const entry = normalizeArchiveEntry(rawEntry);
+    const identity = entry.toLowerCase();
+    if (seen.has(identity)) throw new Error(`更新包包含 Windows 下会发生覆盖的重复路径：${entry}`);
+    seen.add(identity);
+    normalizedEntries.push(entry);
   }
-  const packageEntry = entries.find((entry) => /(^|\/)package\.json$/i.test(entry));
+  const packageEntry = normalizedEntries.find((entry) => /(^|\/)package\.json$/i.test(entry));
   if (!packageEntry) throw new Error('更新包缺少 package.json。');
   const prefix = packageEntry.replace(/package\.json$/i, '').replace(/\/$/, '');
   const allowedPrefix = prefix ? `${prefix}/` : '';
-  if (entries.some((entry) => allowedPrefix && entry !== prefix && !entry.startsWith(allowedPrefix))) throw new Error('更新包包含多个顶层目录，已拒绝安装。');
-  return { entries, prefix };
+  if (normalizedEntries.some((entry) => allowedPrefix && entry !== prefix && !entry.startsWith(allowedPrefix))) throw new Error('更新包包含多个顶层目录，已拒绝安装。');
+  return { entries: normalizedEntries, prefix };
+}
+
+function normalizeArchiveEntry(rawEntry) {
+  if (typeof rawEntry !== 'string' || !rawEntry) throw new Error('更新包包含空路径条目。');
+  if (/[\x00-\x1f\x7f]/.test(rawEntry)) throw new Error('更新包包含控制字符路径，已拒绝安装。');
+  const normalized = rawEntry.replaceAll('\\', '/').replace(/\/+$/, '');
+  if (!normalized || path.posix.isAbsolute(normalized) || /^[a-z]:/i.test(normalized) || normalized.startsWith('//')) {
+    throw new Error(`更新包包含 Win32 绝对路径或设备路径：${rawEntry}`);
+  }
+  const segments = normalized.split('/');
+  for (const segment of segments) {
+    if (!segment || segment === '.' || segment === '..') throw new Error(`更新包包含不安全路径段：${rawEntry}`);
+    if (segment.includes(':')) throw new Error(`更新包包含 NTFS 数据流或盘符路径：${rawEntry}`);
+    if (/[. ]$/.test(segment)) throw new Error(`更新包包含 Windows 下不稳定的尾随字符路径：${rawEntry}`);
+    const deviceName = segment.split('.')[0].toUpperCase();
+    if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(deviceName)) throw new Error(`更新包包含 Windows 保留设备名：${rawEntry}`);
+  }
+  return normalized;
 }
 
 function locatePackageRoot(stagingRoot, prefix) {

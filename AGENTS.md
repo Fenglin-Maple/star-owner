@@ -80,6 +80,7 @@ The service binds to `127.0.0.1`, accepts origin-less local process requests, re
 - Current required assets use `Star-Owner-v<dependency-version>-runtime-win-x64.zip` and `Star-Owner-v<dependency-version>-model-large-v3-turbo.zip`, with matching SHA-256 assets. `small` uses `Star-Owner-v<dependency-version>-model-small.zip` as an optional alternate. The historical medium asset remains in the v1.0.0 Release for older applications but is not exposed by the current registry.
 - Keep model IDs, compute types, package IDs and hardware thresholds centralized in `src/core/asr-models.js`; do not add model-specific ternaries back to ToolRunner or hardware detection.
 - `package.json.dependencyReleaseVersion` is the explicit compatibility contract shared by the dependency manager and portable manifest. A code-only Release keeps it pinned and uploads only the new core ZIP plus checksum.
+- Installed runtime/model payloads require a matching managed manifest under `runtime/.dependency-manifests/`; package ID, dependency release, asset name, SHA-256 and probes commit and roll back in the same dependency journal. Compatibility adoption is limited to the known official v1.0.0 checksums and may run only once.
 - Never change probes or layouts without updating dependency manager, packaging, deployment docs, and regression tests.
 - GitHub Release titles and notes are UTF-8 metadata. Keep notes in a UTF-8 Markdown file, send explicit UTF-8 bytes when using an API or PowerShell, and read the Release back after publishing to verify Chinese text and asset names. Never pipe release notes through a shell's default encoding.
 
@@ -97,6 +98,7 @@ npm run test:security
 npm run test:knowledge-api
 npm run test:hardware
 npm run test:asr-models
+npm run test:dependency-manifest
 npm run test:image-clipboard
 npm run test:persistence
 npm run test:collection-sync

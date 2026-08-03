@@ -38,6 +38,8 @@ Document Library deletion runs only in the main process. It resolves every artif
 
 Local ASR availability is treated as a capability, not inferred from the operating-system label alone. Startup checks project-local Python, faster-whisper/CTranslate2, selected model files, CUDA device count, `nvidia-smi` memory and CPU fallback requirements. Unsupported lanes are disabled and video workflow startup is blocked when no valid ASR route exists.
 
+Dependency availability requires both the exact probes and an application-managed package manifest containing the package ID, dependency release, logical asset name, verified SHA-256 and probe contract. The manifest participates in the same atomic install/rollback journal as its runtime or model payload. Only existing official v1.0.0 probe-only installations receive a one-time checksum-backed compatibility adoption; later absent, malformed or mismatched manifests are not silently trusted. Core update archives are inspected before extraction and reject links, traversal, Win32 drive/UNC/device paths, NTFS alternate streams, control characters, empty/dot segments, reserved device names, trailing dot/space aliases and case-insensitive path collisions.
+
 ## Responsible Disclosure
 
 Do not open a public issue containing cookies, passwords, SMS codes, private video links, account identifiers, logs with secrets, or personal Workspace content. Contact the repository maintainer privately using the security contact configured on the eventual GitHub repository.

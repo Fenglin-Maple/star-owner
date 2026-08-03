@@ -2,7 +2,7 @@
 
 审查日期：2026-08-04
 
-目标版本：`1.4.11`
+目标版本：`1.4.12`
 
 ## 审查范围
 
@@ -19,6 +19,15 @@
 - 依赖安装、便携打包、文档、版本、测试和发布门禁。
 
 ## 本版本修复
+
+### 1.4.12 状态竞态与依赖完整性
+
+- “B站之外”全量快照、模型供应商、共享目录、视频/文档选择与预览分别使用请求代次；输入变化、弹窗关闭和后台推送会立即作废旧请求，视频与文档不再共用预览定时器。
+- 旧 B 站 partition 的 Cookie 迁移按域名、名称和路径补齐；部分写入失败标为 `retry-needed`，下次启动只补缺失项，不覆盖目标 partition 已有 Cookie，并兼容旧版含错误计数的迁移标记。
+- runtime/model 可用性同时验证 probes 和受管安装清单；清单记录包 ID、依赖版本、逻辑资产名、SHA-256 与 probes，并与 payload 在同一 journal 中提交/回滚。现有官方 `v1.0.0` 安装仅执行一次校验值固定的兼容认领。
+- 更新 ZIP 在解压前拒绝 Win32 盘符、UNC/设备路径、NTFS 数据流、控制字符、空/点路径段、保留设备名、尾随点/空格和大小写碰撞。
+- Electron 下载链的可选 `undici` 锁定从受公告影响的 7.28.0 更新到 7.29.0，`npm audit --audit-level=high` 恢复为 0 项。
+- 新增 UI 门控、Cookie 部分失败补偿、依赖错版本/错包/缺失清单/旧版认领/崩溃回滚及危险 ZIP 条目测试；本轮不创建或上传 Release。
 
 ### 1.4.11 迁移、更新与网络安全
 
@@ -220,6 +229,7 @@
 - `npm run test:persistence`：数据库原子恢复与便携项目整体移动后的路径重定位；
 - `npm run test:runtime-node`：无全局 PATH 时使用项目内 Electron Node 执行工具；
 - `npm run test:runtime-isolation`：验证 Node、Python、FFmpeg、yt-dlp 及 CMD 子进程只使用项目受控运行环境；
+- `npm run test:dependency-manifest`：验证旧依赖一次性认领、错版本/错包拒绝及清单随安装事务回滚；
 - `npm run test:local-toolbox`：字幕生成、视频/音频压缩导入、多模态文档导入、冲突跳过、回滚、RAG 索引和媒体边界；
 - `npm run test:collection-sync`：事务回滚、部分可见快照、缺席任务保留和错误墓碑恢复；
 - `npm run smoke`：端到端只读 API 和核心应用契约。

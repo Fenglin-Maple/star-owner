@@ -10,6 +10,13 @@ const { readUtf8, resolveSystemExecutable, utf8ChildEnvironment } = require('./c
 const { ensureDir } = require('./workspace');
 
 const REPOSITORY = 'Fenglin-Maple/star-owner';
+const DEPENDENCY_MANIFEST_SCHEMA = 1;
+const LEGACY_ADOPTION_VERSION = '1.0.0';
+const OFFICIAL_DEPENDENCY_CHECKSUMS = Object.freeze({
+  'Star-Owner-v1.0.0-runtime-win-x64.zip': '18b22748781b24a5fcbe3cefe307aa436e85e1ca98a939cebf2eeab5a3244b1d',
+  'Star-Owner-v1.0.0-model-small.zip': '82792d0eccee4579b279224676e87824e8652133947cf197f480377315a8c878',
+  'Star-Owner-v1.0.0-model-large-v3-turbo.zip': '1a6681635ec0d2f023925887d646d386bf0bc180543895e3113a2548b5cc085b'
+});
 
 class DependencyManager {
   constructor({ store, projectRoot, version, dependencyVersion, emit, onInstalled, acquireInstall, retryBaseDelayMs = 1000, maxNetworkAttempts = 5 }) {
@@ -29,7 +36,10 @@ class DependencyManager {
     this.downloadControllers = new Map();
     this.queue = Promise.resolve();
     this.installJournal = path.join(this.projectRoot, 'runtime', '.install-transaction.json');
+    this.manifestRoot = ensureDir(path.join(this.projectRoot, 'runtime', '.dependency-manifests'));
+    this.manifestAdoptionMarker = path.join(this.manifestRoot, 'legacy-adoption-v1.json');
     this.recovery = this.recoverInterruptedInstall();
+    this.manifestAdoption = this.adoptLegacyDependencies();
   }
 
   definitions() {
@@ -65,16 +75,26 @@ class DependencyManager {
   state() {
     const packages = this.definitions().map((definition) => {
       const progress = this.progress.get(definition.id) || {};
-      const available = definition.probes.every((probe) => fs.existsSync(path.join(this.projectRoot, probe)));
+      const health = this.packageHealth(definition);
+      const available = health.available;
+      const staleAvailableProgress = progress.status === 'available' && !available;
+      const status = staleAvailableProgress
+        ? 'missing'
+        : (progress.status || (available ? 'available' : 'missing'));
+      const message = staleAvailableProgress
+        ? health.message
+        : (progress.message || (available ? '已安装并通过版本与路径检查' : health.message));
       return {
         ...definition,
         available,
-        status: progress.status || (available ? 'available' : 'missing'),
-        progress: Number(progress.progress || (available ? 1 : 0)),
+        status,
+        progress: Number(staleAvailableProgress ? 0 : (progress.progress || (available ? 1 : 0))),
         downloadedBytes: Number(progress.downloadedBytes || 0),
         totalBytes: Number(progress.totalBytes || 0),
-        message: progress.message || (available ? '已安装并通过路径检查' : '未检测到完整依赖'),
+        message,
         source: progress.source || '',
+        manifestStatus: health.manifestStatus,
+        manifestSource: health.manifest?.source || '',
         releaseUrl: this.releaseUrl(),
         localImport: isAsrModelPackage(definition.id)
       };
@@ -91,8 +111,119 @@ class DependencyManager {
       ready: missingRequired.length === 0,
       needsPrompt: missingRequired.length > 0 && prompt.version !== this.version,
       promptVersion: prompt.version || '',
-      recovery: this.recovery || { recovered: false }
+      recovery: this.recovery || { recovered: false },
+      manifestAdoption: this.manifestAdoption || { completed: false }
     };
+  }
+
+  packageManifestPath(definitionOrId) {
+    const id = typeof definitionOrId === 'string' ? definitionOrId : definitionOrId?.id;
+    if (!this.definitions().some((definition) => definition.id === id)) throw new Error(`未知依赖包清单：${id}`);
+    return path.join(this.manifestRoot, `${id}.json`);
+  }
+
+  readPackageManifest(definition) {
+    const file = this.packageManifestPath(definition);
+    try { recoverAtomicFile(file); }
+    catch (error) { return { manifest: null, status: 'recovery-failed', error }; }
+    if (!fs.existsSync(file)) return { manifest: null, status: 'missing' };
+    try { return { manifest: JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')), status: 'present' }; }
+    catch (error) { return { manifest: null, status: 'invalid-json', error }; }
+  }
+
+  packageHealth(definition) {
+    const missingProbes = definition.probes.filter((probe) => !fs.existsSync(path.join(this.projectRoot, probe)));
+    if (missingProbes.length) {
+      return { available: false, manifestStatus: 'probes-missing', message: `未检测到完整依赖：缺少 ${missingProbes.join(', ')}` };
+    }
+    const loaded = this.readPackageManifest(definition);
+    if (!loaded.manifest) {
+      return { available: false, manifestStatus: loaded.status, message: '依赖文件存在，但安装身份清单缺失或损坏，请重新安装正确版本。' };
+    }
+    const validation = validatePackageManifest(loaded.manifest, definition, this.dependencyVersion);
+    if (!validation.valid) {
+      return { available: false, manifest: loaded.manifest, manifestStatus: validation.status, message: `依赖文件存在，但版本或包身份不匹配：${validation.message}` };
+    }
+    return { available: true, manifest: loaded.manifest, manifestStatus: 'valid', message: '已安装并通过版本与路径检查' };
+  }
+
+  createPackageManifest(definition, metadata = {}) {
+    const checksum = String(metadata.checksum || '').toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(checksum)) throw new Error(`依赖包 ${definition.id} 缺少有效的安装校验值。`);
+    return {
+      schemaVersion: DEPENDENCY_MANIFEST_SCHEMA,
+      packageId: definition.id,
+      dependencyReleaseVersion: this.dependencyVersion,
+      assetName: definition.assetName,
+      checksum,
+      probes: [...definition.probes],
+      source: String(metadata.source || 'archive-install'),
+      sourceAssetName: String(metadata.sourceAssetName || definition.assetName),
+      sourceReleaseVersion: normalizeReleaseVersion(metadata.sourceReleaseVersion || this.dependencyVersion),
+      fallback: Boolean(metadata.fallback),
+      installedAt: metadata.installedAt || new Date().toISOString()
+    };
+  }
+
+  writePackageManifest(definition, manifest) {
+    const file = this.packageManifestPath(definition);
+    writeFileRecoverable(file, Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'));
+    return file;
+  }
+
+  stagePackageManifest(stagingRoot, definition, metadata) {
+    const manifest = this.createPackageManifest(definition, metadata);
+    const relative = dependencyManifestRelativePath(definition.id);
+    const target = path.join(stagingRoot, relative);
+    ensureDir(path.dirname(target));
+    fs.writeFileSync(target, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    return manifest;
+  }
+
+  adoptLegacyDependencies() {
+    try { recoverAtomicFile(this.manifestAdoptionMarker); }
+    catch (error) { return { completed: false, warning: `旧依赖清单迁移记录恢复失败：${error.message || String(error)}` }; }
+    if (fs.existsSync(this.manifestAdoptionMarker)) {
+      try {
+        const marker = JSON.parse(fs.readFileSync(this.manifestAdoptionMarker, 'utf8').replace(/^\uFEFF/, ''));
+        if (marker?.schemaVersion === DEPENDENCY_MANIFEST_SCHEMA && marker?.completed === true) return marker;
+        return { completed: false, warning: '旧依赖清单迁移记录无效；为避免误认版本，已停止自动认领。' };
+      } catch (error) {
+        return { completed: false, warning: `旧依赖清单迁移记录损坏；为避免误认版本，已停止自动认领：${error.message || String(error)}` };
+      }
+    }
+    const adoptedPackages = [];
+    const rejectedPackages = [];
+    const eligible = this.dependencyVersion === LEGACY_ADOPTION_VERSION;
+    for (const definition of this.definitions()) {
+      const manifestFile = this.packageManifestPath(definition);
+      if (fs.existsSync(manifestFile)) continue;
+      const probesAvailable = definition.probes.every((probe) => fs.existsSync(path.join(this.projectRoot, probe)));
+      if (!probesAvailable) continue;
+      const checksum = OFFICIAL_DEPENDENCY_CHECKSUMS[definition.assetName] || '';
+      if (!eligible || !checksum) {
+        rejectedPackages.push(definition.id);
+        continue;
+      }
+      this.writePackageManifest(definition, this.createPackageManifest(definition, {
+        checksum,
+        source: 'legacy-v1.0.0-adoption',
+        sourceAssetName: definition.assetName,
+        sourceReleaseVersion: LEGACY_ADOPTION_VERSION
+      }));
+      adoptedPackages.push(definition.id);
+    }
+    const marker = {
+      schemaVersion: DEPENDENCY_MANIFEST_SCHEMA,
+      completed: true,
+      dependencyReleaseVersion: this.dependencyVersion,
+      eligible,
+      adoptedPackages,
+      rejectedPackages,
+      completedAt: new Date().toISOString()
+    };
+    writeFileRecoverable(this.manifestAdoptionMarker, Buffer.from(`${JSON.stringify(marker, null, 2)}\n`, 'utf8'));
+    return marker;
   }
 
   releaseUrl() {
@@ -181,7 +312,7 @@ class DependencyManager {
     if (!definition) throw localImportError(`不支持从本地导入该依赖包：${id}`, this.releaseUrl());
     await this.cancelDownload(id);
     this.clearPackageArtifacts(id);
-    const available = definition.probes.every((probe) => fs.existsSync(path.join(this.projectRoot, probe)));
+    const available = this.packageHealth(definition).available;
     this.update(id, {
       status: available ? 'available' : 'missing',
       progress: available ? 1 : 0,
@@ -237,8 +368,13 @@ class DependencyManager {
         this.update(definition.id, { status: 'waiting-install', progress: 0.75, message: '本地包验证通过，正在等待 Agent 工具与 ASR 队列空闲' });
       });
       this.update(definition.id, { status: 'installing', progress: 0.8, message: '资源窗口已锁定，正在原子安装本地模型包' });
-      await this.extractArchive(managedArchive, definition, false, inspection);
-      const available = definition.probes.every((probe) => fs.existsSync(path.join(this.projectRoot, probe)));
+      await this.extractArchive(managedArchive, definition, false, inspection, {
+        checksum: expectedChecksum,
+        source: 'local-import',
+        sourceAssetName: definition.assetName,
+        sourceReleaseVersion: release.release?.tag_name || this.dependencyVersion
+      });
+      const available = this.packageHealth(definition).available;
       if (!available) throw new Error(`模型包已解压，但缺少预期文件：${definition.probes.join(', ')}`);
       const bytes = fs.statSync(managedArchive).size;
       this.update(definition.id, { status: 'available', progress: 1, message: '本地模型包导入完成', downloadedBytes: bytes, totalBytes: bytes });
@@ -249,7 +385,7 @@ class DependencyManager {
       this.clearPackageArtifacts(definition.id);
       return { id: definition.id, checksum: expectedChecksum, imported: true, state: this.state() };
     } catch (error) {
-      const installed = definition.probes.every((probe) => fs.existsSync(path.join(this.projectRoot, probe)));
+      const installed = this.packageHealth(definition).available;
       const normalized = error.releaseUrl ? error : localImportError(error.message || String(error), this.releaseUrl(), definition.assetName);
       this.update(definition.id, {
         status: installed ? 'available' : 'failed',
@@ -324,8 +460,14 @@ class DependencyManager {
         this.update(definition.id, { status: 'waiting-install', progress: 0.92, message: '下载与校验已完成，正在等待 Agent 工具与 ASR 队列空闲' });
       });
       this.update(definition.id, { status: 'installing', progress: 0.93, message: '资源窗口已锁定，正在安装' });
-      await this.extractArchive(archive, definition, release.fallback);
-      const available = definition.probes.every((probe) => fs.existsSync(path.join(this.projectRoot, probe)));
+      await this.extractArchive(archive, definition, release.fallback, null, {
+        checksum,
+        source: 'download',
+        sourceAssetName: release.asset.name,
+        sourceReleaseVersion: release.release?.tag_name || this.dependencyVersion,
+        fallback: release.fallback
+      });
+      const available = this.packageHealth(definition).available;
       if (!available) throw new Error(`依赖包已解压，但缺少预期文件：${definition.probes.join(', ')}`);
       const installedBytes = Number(release.asset.size || fs.statSync(archive).size || 0);
       this.update(definition.id, { status: 'available', progress: 1, message: '安装完成', downloadedBytes: installedBytes, totalBytes: installedBytes });
@@ -504,10 +646,13 @@ class DependencyManager {
     return { entries };
   }
 
-  async extractArchive(archive, definition, fallback = false, inspection = null) {
+  async extractArchive(archive, definition, fallback = false, inspection = null, installMetadata = {}) {
     const { entries } = inspection || await this.inspectArchive(archive, definition, fallback);
     const tar = resolveSystemExecutable('tar.exe');
     if (!tar) throw new Error('Windows 系统缺少 tar.exe，无法解压依赖包。');
+    const checksum = /^[0-9a-f]{64}$/i.test(String(installMetadata.checksum || ''))
+      ? String(installMetadata.checksum).toLowerCase()
+      : await sha256(archive);
     const stagingRoot = path.join(this.projectRoot, 'runtime', `.install-staging-${definition.id}-${crypto.randomBytes(4).toString('hex')}`);
     ensureDir(stagingRoot);
     try {
@@ -526,6 +671,12 @@ class DependencyManager {
       } else {
         await run(tar, ['-xf', archive, '-C', stagingRoot], this.projectRoot);
       }
+      this.stagePackageManifest(stagingRoot, definition, {
+        ...installMetadata,
+        checksum,
+        fallback,
+        sourceAssetName: installMetadata.sourceAssetName || path.basename(archive)
+      });
       this.installStagedRuntime(stagingRoot, definition);
     } finally {
       if (fs.existsSync(stagingRoot)) fs.rmSync(stagingRoot, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
@@ -565,12 +716,16 @@ class DependencyManager {
       assertInstallPath(this.projectRoot, target);
       fs.rmSync(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
     }
-    const available = definition.probes.every((probe) => fs.existsSync(path.join(this.projectRoot, probe)));
-    if (!available && isAsrModelPackage(id)) {
+    const probesAvailable = definition.probes.every((probe) => fs.existsSync(path.join(this.projectRoot, probe)));
+    if (!probesAvailable && isAsrModelPackage(id)) {
       for (const relative of managedRuntimePaths(id)) {
         const target = assertInstallPath(this.projectRoot, path.join(this.projectRoot, relative));
         if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
       }
+      const manifest = assertInstallPath(this.projectRoot, this.packageManifestPath(definition));
+      fs.rmSync(manifest, { force: true });
+      fs.rmSync(`${manifest}.bak`, { force: true });
+      fs.rmSync(`${manifest}.tmp`, { force: true });
     }
   }
 
@@ -582,8 +737,11 @@ class DependencyManager {
   }
 
   installStagedRuntime(stagingRoot, definition) {
-    const relativePaths = managedRuntimePaths(definition.id).filter((relative) => fs.existsSync(path.join(stagingRoot, relative)));
-    if (!relativePaths.length) throw new Error(`Dependency archive did not contain an installable payload for ${definition.id}.`);
+    const payloadPaths = managedRuntimePaths(definition.id).filter((relative) => fs.existsSync(path.join(stagingRoot, relative)));
+    if (!payloadPaths.length) throw new Error(`Dependency archive did not contain an installable payload for ${definition.id}.`);
+    const manifestRelative = dependencyManifestRelativePath(definition.id);
+    if (!fs.existsSync(path.join(stagingRoot, manifestRelative))) throw new Error(`Dependency installation manifest is missing for ${definition.id}.`);
+    const relativePaths = [...payloadPaths, manifestRelative];
     const backupRoot = path.join(this.projectRoot, 'runtime', `.install-backup-${definition.id}-${crypto.randomBytes(4).toString('hex')}`);
     const entries = relativePaths.map((relative) => ({
       relative,
@@ -710,6 +868,32 @@ class DependencyManager {
     fs.rmSync(`${this.installJournal}.bak`, { force: true });
     fs.rmSync(`${this.installJournal}.tmp`, { force: true });
   }
+}
+
+function dependencyManifestRelativePath(packageId) {
+  const id = String(packageId || '');
+  if (!/^[a-z0-9-]+$/i.test(id)) throw new Error(`依赖包清单 ID 不安全：${id}`);
+  return `runtime/.dependency-manifests/${id}.json`;
+}
+
+function validatePackageManifest(manifest, definition, dependencyVersion) {
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return { valid: false, status: 'invalid', message: '清单格式无效' };
+  if (manifest.schemaVersion !== DEPENDENCY_MANIFEST_SCHEMA) return { valid: false, status: 'schema-mismatch', message: '清单格式版本不匹配' };
+  if (manifest.packageId !== definition.id) return { valid: false, status: 'package-mismatch', message: `期望 ${definition.id}` };
+  if (String(manifest.dependencyReleaseVersion || '') !== String(dependencyVersion || '')) return { valid: false, status: 'version-mismatch', message: `期望依赖版本 v${dependencyVersion}` };
+  if (manifest.assetName !== definition.assetName) return { valid: false, status: 'asset-mismatch', message: `期望 ${definition.assetName}` };
+  const checksum = String(manifest.checksum || '').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(checksum)) return { valid: false, status: 'checksum-missing', message: '清单缺少有效 SHA-256' };
+  const officialChecksum = OFFICIAL_DEPENDENCY_CHECKSUMS[definition.assetName];
+  if (officialChecksum && checksum !== officialChecksum) return { valid: false, status: 'checksum-mismatch', message: '清单校验值与官方依赖包不一致' };
+  if (!Array.isArray(manifest.probes) || JSON.stringify(manifest.probes) !== JSON.stringify(definition.probes)) {
+    return { valid: false, status: 'probe-mismatch', message: '清单探针与当前包定义不一致' };
+  }
+  return { valid: true, status: 'valid', message: '' };
+}
+
+function normalizeReleaseVersion(value) {
+  return String(value || '').trim().replace(/^v/i, '');
 }
 
 function managedRuntimePaths(packageId) {

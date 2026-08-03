@@ -15,6 +15,20 @@ function createCookieSession(partitions, name) {
   return { cookies };
 }
 
+function createFailOnceCookieSession(partitions, name, failedCookieName) {
+  const session = createCookieSession(partitions, name);
+  const originalSet = session.cookies.set;
+  let failed = false;
+  session.cookies.set = async (cookie) => {
+    if (!failed && cookie.name === failedCookieName) {
+      failed = true;
+      throw new Error('simulated cookie write failure');
+    }
+    return originalSet(cookie);
+  };
+  return session;
+}
+
 (async () => {
   assert.notStrictEqual(projectBiliPartition('C:\\Star Owner A'), projectBiliPartition('C:\\Star Owner B'), 'different project roots shared a Bilibili partition');
   assert.strictEqual(projectBiliPartition('C:\\Star Owner A'), projectBiliPartition('c:\\star owner a'), 'partition identity was not stable across Windows path casing');
@@ -39,6 +53,38 @@ function createCookieSession(partitions, name) {
   assert.strictEqual(partitions.get(target).length, 2, 'non-Bilibili cookies were copied into the project partition');
   const repeated = await migrateLegacyBiliPartition({ sessionModule, targetPartition: target, store });
   assert.strictEqual(repeated.skipped, 'already-migrated', 'legacy partition migration did not become idempotent');
+
+  const retryPartitions = new Map(partitions);
+  const retryTarget = projectBiliPartition('C:\\Star Owner Retry');
+  retryPartitions.set(retryTarget, [{ domain: '.bilibili.com', path: '/', name: 'existing', value: 'keep-me', secure: true }]);
+  let targetSession = createFailOnceCookieSession(retryPartitions, retryTarget, 'bili_jct');
+  const retrySessionModule = {
+    fromPartition: (name) => name === retryTarget ? targetSession : createCookieSession(retryPartitions, name)
+  };
+  const retrySettings = new Map();
+  const retryStore = {
+    list: (scope) => scope === 'users' ? [{ mid: '200', name: '重试用户' }] : [],
+    get: (scope, id) => scope === 'settings' ? retrySettings.get(id) || null : null,
+    set: (scope, id, value) => { if (scope === 'settings') retrySettings.set(id, value); },
+    commit: () => {}
+  };
+  const firstRetry = await migrateLegacyBiliPartition({ sessionModule: retrySessionModule, targetPartition: retryTarget, store: retryStore });
+  assert.strictEqual(firstRetry.copied, 1, 'partial migration did not retain successful cookie writes');
+  assert.strictEqual(firstRetry.errors, 1, 'partial migration did not report the failed cookie write');
+  assert.strictEqual(retrySettings.get('biliPartitionMigration').status, 'retry-needed', 'partial migration was incorrectly marked complete');
+  assert.strictEqual(retryPartitions.get(retryTarget).find((cookie) => cookie.name === 'existing').value, 'keep-me', 'migration overwrote an existing target cookie');
+  targetSession = createCookieSession(retryPartitions, retryTarget);
+  const secondRetry = await migrateLegacyBiliPartition({ sessionModule: retrySessionModule, targetPartition: retryTarget, store: retryStore });
+  assert.strictEqual(secondRetry.copied, 1, 'migration retry did not copy only the missing cookie');
+  assert.strictEqual(secondRetry.status, 'completed', 'successful migration retry was not marked complete');
+  assert.strictEqual(retryPartitions.get(retryTarget).length, 3, 'migration retry duplicated an existing cookie');
+  const thirdRetry = await migrateLegacyBiliPartition({ sessionModule: retrySessionModule, targetPartition: retryTarget, store: retryStore });
+  assert.strictEqual(thirdRetry.skipped, 'already-migrated', 'completed migration retry was not idempotent');
+
+  retrySettings.set('biliPartitionMigration', { targetPartition: retryTarget, copied: 1, errors: 1 });
+  retryPartitions.get(retryTarget).splice(retryPartitions.get(retryTarget).findIndex((cookie) => cookie.name === 'bili_jct'), 1);
+  const legacyMarkerRetry = await migrateLegacyBiliPartition({ sessionModule: retrySessionModule, targetPartition: retryTarget, store: retryStore });
+  assert.strictEqual(legacyMarkerRetry.copied, 1, 'legacy partial-failure marker did not trigger a retry');
 
   const blankSettings = new Map();
   const blankStore = {

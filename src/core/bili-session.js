@@ -25,22 +25,40 @@ function hasStoredBilibiliUser(store) {
   return (store?.list?.('users') || []).some((user) => !user?.internal && String(user?.mid || user?.id || '').trim());
 }
 
+function cookieIdentity(cookie) {
+  return [
+    String(cookie?.name || ''),
+    String(cookie?.domain || '').replace(/^\./, '').toLowerCase(),
+    String(cookie?.path || '/')
+  ].join('\n');
+}
+
+function completedMigrationMarker(marker, targetPartition) {
+  if (marker?.targetPartition !== targetPartition) return false;
+  if (marker.status === 'completed') return true;
+  if (marker.status === 'retry-needed') return false;
+  return Number(marker.errors || 0) === 0;
+}
+
 async function migrateLegacyBiliPartition({ sessionModule, targetPartition, store, legacyPartition = LEGACY_BILI_SESSION } = {}) {
   const targetName = String(targetPartition || '');
   if (!sessionModule?.fromPartition || !targetName || targetName === legacyPartition) return { copied: 0, skipped: 'invalid-partition' };
   const markerId = 'biliPartitionMigration';
   const marker = store?.get?.('settings', markerId);
-  if (marker?.targetPartition === targetName) return { copied: 0, skipped: 'already-migrated' };
+  if (completedMigrationMarker(marker, targetName)) return { copied: 0, skipped: 'already-migrated' };
 
   const sourceSession = sessionModule.fromPartition(legacyPartition);
   const targetSession = sessionModule.fromPartition(targetName);
   const sourceCookies = (await sourceSession.cookies.get({})).filter((cookie) => isBilibiliCookieDomain(cookie.domain));
   const targetCookies = (await targetSession.cookies.get({})).filter((cookie) => isBilibiliCookieDomain(cookie.domain));
-  const shouldCopy = hasStoredBilibiliUser(store) && targetCookies.length === 0;
+  const hasUser = hasStoredBilibiliUser(store);
+  const targetCookieIds = new Set(targetCookies.map(cookieIdentity));
+  const missingCookies = sourceCookies.filter((cookie) => !targetCookieIds.has(cookieIdentity(cookie)));
+  const shouldCopy = hasUser && missingCookies.length > 0;
   let copied = 0;
   let errors = 0;
   if (shouldCopy) {
-    for (const cookie of sourceCookies) {
+    for (const cookie of missingCookies) {
       const url = cookieUrl(cookie);
       if (!url) continue;
       try {
@@ -67,14 +85,15 @@ async function migrateLegacyBiliPartition({ sessionModule, targetPartition, stor
       id: markerId,
       sourcePartition: legacyPartition,
       targetPartition: targetName,
+      status: errors > 0 ? 'retry-needed' : 'completed',
       copied,
       errors,
-      skipped: shouldCopy ? '' : (hasStoredBilibiliUser(store) ? 'target-already-has-cookies' : 'blank-project'),
+      skipped: shouldCopy ? '' : (hasUser ? 'target-already-has-cookies' : 'blank-project'),
       migratedAt: new Date().toISOString()
     });
     store.commit();
   }
-  return { copied, errors, skipped: shouldCopy ? '' : 'not-eligible' };
+  return { copied, errors, status: errors > 0 ? 'retry-needed' : 'completed', skipped: shouldCopy ? '' : 'not-eligible' };
 }
 
 module.exports = { LEGACY_BILI_SESSION, migrateLegacyBiliPartition, projectBiliPartition };

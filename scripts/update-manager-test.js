@@ -79,6 +79,21 @@ function waitForSpawn(child) {
 
   assert.strictEqual(validateArchiveEntries(['Star-Owner/package.json', 'Star-Owner/templates/video-summary-template.md']).prefix, 'Star-Owner');
   assert.throws(() => validateArchiveEntries(['Star-Owner/package.json', '../outside.txt']), /不安全|unsafe|路径/);
+  for (const unsafeEntry of [
+    'C:/escape/package.json',
+    'C:\\escape\\package.json',
+    '//server/share/package.json',
+    '\\\\?\\C:\\escape\\package.json',
+    'Star-Owner/./payload.txt',
+    'Star-Owner//payload.txt',
+    'Star-Owner/payload.txt:stream',
+    'Star-Owner/NUL.txt',
+    'Star-Owner/trailing./payload.txt',
+    `Star-Owner/control${String.fromCharCode(0)}.txt`
+  ]) {
+    assert.throws(() => validateArchiveEntries(['Star-Owner/package.json', unsafeEntry]), /不安全|路径|Win32|控制字符|数据流|保留设备名|尾随字符/);
+  }
+  assert.throws(() => validateArchiveEntries(['Star-Owner/package.json', 'star-owner/PACKAGE.JSON']), /重复路径/);
   assert(commandLineContainsProjectRoot('"D:\\Old Star Owner\\node_modules\\electron\\dist\\electron.exe" "D:\\Old Star Owner"', 'D:\\Old Star Owner'), 'project process command line was not recognized');
   assert(!commandLineContainsProjectRoot('"D:\\Old Star Owner 2\\electron.exe"', 'D:\\Old Star Owner'), 'a sibling project command line was treated as the migration source');
 
