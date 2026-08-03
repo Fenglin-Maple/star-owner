@@ -834,6 +834,7 @@ class InternalAgentManager {
       abortReason: '',
       abortSource: '',
       abortedAt: '',
+      ...(task.multiPartRole === 'part' ? { multiPartProgress: 0.05, multiPartPhase: '已领取，准备处理', multiPartStopped: false, multiPartStopReason: '', multiPartStoppedAt: '' } : {}),
       updatedAt: now.toISOString()
     });
     this.store.upsertTask(task);
@@ -1075,6 +1076,7 @@ class InternalAgentManager {
 
   async requestGenerationWithEmptyRetry(session, provider, body, signal, { attempt, errors, plan }) {
     const retryLimit = this.emptyResponseRetryDelays.length;
+    let retryMode = '';
     for (let retryIndex = 0; retryIndex <= retryLimit; retryIndex += 1) {
       const latest = this.requireSession(session.id);
       latest.reasoning = '';
@@ -1082,11 +1084,15 @@ class InternalAgentManager {
         latest.content = attempt > 0 ? draftValidationNotice(attempt, errors) : '';
         latest.contentIsNotice = attempt > 0;
       } else {
-        latest.content = activeEmptyResponseRetryNotice(retryIndex, retryLimit);
+        latest.content = retryMode === 'provider'
+          ? activeProviderConcurrencyRetryNotice(retryIndex, retryLimit)
+          : activeEmptyResponseRetryNotice(retryIndex, retryLimit);
         latest.contentIsNotice = true;
       }
       latest.phase = retryIndex > 0
-        ? `模型空响应，正在进行第 ${retryIndex}/${retryLimit} 次自动重试`
+        ? retryMode === 'provider'
+          ? `供应商并发或资源池暂时不可用，正在进行第 ${retryIndex}/${retryLimit} 次自动重试`
+          : `模型空响应，正在进行第 ${retryIndex}/${retryLimit} 次自动重试`
         : (attempt > 0 ? `第 ${attempt} 稿校验失败，正在重新生成` : '模型正在撰写');
       latest.contextPercent = plan.contextPercent;
       latest.contextInputTokens = plan.inputTokens;
@@ -1094,7 +1100,25 @@ class InternalAgentManager {
       this.saveSession(latest);
       Object.assign(session, latest);
 
-      const result = await this.ragAssistant.streamCompletion(provider, body, signal, (delta) => this.streamDelta(session.id, delta));
+      let result;
+      try {
+        result = await this.ragAssistant.streamCompletion(provider, body, signal, (delta) => this.streamDelta(session.id, delta));
+      } catch (error) {
+        if (!isRetryableProviderConcurrencyError(error) || retryIndex >= retryLimit) throw error;
+        const retryNumber = retryIndex + 1;
+        const retryDelay = retryDelayWithJitter(this.emptyResponseRetryDelays[retryIndex]);
+        retryMode = 'provider';
+        const waiting = this.requireSession(session.id);
+        waiting.reasoning = '';
+        waiting.content = providerConcurrencyRetryNotice(retryNumber, retryLimit, retryDelay, error);
+        waiting.contentIsNotice = true;
+        waiting.phase = `供应商并发或资源池暂时不可用，等待第 ${retryNumber}/${retryLimit} 次自动重试`;
+        this.saveSession(waiting);
+        Object.assign(session, waiting);
+        this.log(session, `供应商暂时拒绝本次模型请求，可能是并发/资源池达到上限；${formatRetryDelay(retryDelay)}后进行第 ${retryNumber}/${retryLimit} 次自动重试。`);
+        await delay(retryDelay, signal);
+        continue;
+      }
       this.addUsage(session, result.usage || {});
       if (hasUsableGeneratedContent(result.content)) {
         const completed = this.requireSession(session.id);
@@ -1118,6 +1142,7 @@ class InternalAgentManager {
 
       const retryNumber = retryIndex + 1;
       const retryDelay = retryDelayWithJitter(this.emptyResponseRetryDelays[retryIndex]);
+      retryMode = 'empty';
       const waiting = this.requireSession(session.id);
       waiting.reasoning = '';
       waiting.content = emptyResponseRetryNotice(retryNumber, retryLimit, retryDelay, finishReason);
@@ -1253,9 +1278,23 @@ class InternalAgentManager {
       temperature: 0,
       max_tokens: maxTokens
     };
-    const result = this.ragAssistant.complete
-      ? await this.ragAssistant.complete(provider, body, signal)
-      : await this.ragAssistant.streamCompletion(provider, body, signal, () => {});
+    let result;
+    const retryLimit = this.emptyResponseRetryDelays.length;
+    for (let retryIndex = 0; retryIndex <= retryLimit; retryIndex += 1) {
+      try {
+        result = this.ragAssistant.complete
+          ? await this.ragAssistant.complete(provider, body, signal)
+          : await this.ragAssistant.streamCompletion(provider, body, signal, () => {});
+        break;
+      } catch (error) {
+        if (!isRetryableProviderConcurrencyError(error) || retryIndex >= retryLimit) throw error;
+        const retryNumber = retryIndex + 1;
+        const retryDelay = retryDelayWithJitter(this.emptyResponseRetryDelays[retryIndex]);
+        this.setProgress(session, `上下文整理遇到供应商并发限制，等待第 ${retryNumber}/${retryLimit} 次重试`, Number(session.progress || 0.6));
+        this.log(session, `上下文整理请求遇到供应商并发/资源池限制；${formatRetryDelay(retryDelay)}后进行第 ${retryNumber}/${retryLimit} 次自动重试。`);
+        await delay(retryDelay, signal);
+      }
+    }
     this.addUsage(session, result.usage || {});
     const content = String(result.content || '').trim();
     if (!content) throw new Error('上下文整理 Agent 未返回可用内容。');
@@ -1332,6 +1371,7 @@ class InternalAgentManager {
     const modelContentLength = session.contentIsNotice ? 0 : String(session.content || '').length;
     session.progress = Math.min(0.86, baseProgress + Math.log10(1 + modelContentLength) * 0.045);
     session.updatedAt = new Date().toISOString();
+    this.syncMultipartTaskProgress(session, session.phase, session.progress);
     this.store.set('internalAgentSessions', session.id, session);
     this.emit({ type: 'stream', sessionId, delta, replaceContent, phase: session.phase, progress: session.progress });
   }
@@ -1348,11 +1388,22 @@ class InternalAgentManager {
     latest.phase = phase;
     latest.progress = Math.max(0, Math.min(1, Number(progress || 0)));
     latest.updatedAt = new Date().toISOString();
+    this.syncMultipartTaskProgress(latest, latest.phase, latest.progress);
     if (persist) this.saveSession(latest);
     else {
       this.store.set('internalAgentSessions', latest.id, latest);
       this.emit({ type: 'session-updated', session: this.publicSession(latest) });
     }
+  }
+
+  syncMultipartTaskProgress(session, phase, progress) {
+    if (!session?.currentTaskId) return;
+    const task = this.store.getTask(session.currentTaskId);
+    if (!task || task.multiPartRole !== 'part') return;
+    task.multiPartProgress = Math.max(0, Math.min(1, Number(progress || 0)));
+    task.multiPartPhase = String(phase || '处理中');
+    task.updatedAt = new Date().toISOString();
+    this.store.upsertTask(task);
   }
 
   log(session, message) {
@@ -1461,7 +1512,21 @@ class InternalAgentManager {
       fs.renameSync(markdownFile, finalMarkdown);
     }
     const metadata = readJson(metadataFile);
-    const completedTask = { ...task, status: 'done', workId: '', completedAt: now, outputMarkdown: finalMarkdown, metadataFile, validatorErrors: [], updatedAt: now };
+    const completedTask = {
+      ...task,
+      status: 'done',
+      workId: '',
+      completedAt: now,
+      outputMarkdown: finalMarkdown,
+      metadataFile,
+      validatorErrors: [],
+      multiPartProgress: 1,
+      multiPartPhase: '已完成',
+      multiPartStopped: false,
+      multiPartStopReason: '',
+      multiPartStoppedAt: '',
+      updatedAt: now
+    };
     const event = { id: `submission-completed:${task.workId || task.id}`, taskId: task.id, type: 'completed', createdAt: now, collectionId: task.collectionId, workerId: session.workerId, agentName: session.workerId, workId: task.workId || '', processingSeconds: secondsBetween(task.claimedAt, now), videoDuration: Number(task.duration || 0), internalAgent: true, multipart: true, parentDocumentId: task.parentDocumentId, partId: task.multiPartId };
     this.store.set('tasks', task.id, completedTask);
     this.store.set('taskEvents', event.id, event);
@@ -1976,6 +2041,40 @@ function activeEmptyResponseRetryNotice(retryNumber, retryLimit) {
     '',
     '新的模型正文开始返回后，将直接替换本提示。'
   ].join('\n');
+}
+
+function activeProviderConcurrencyRetryNotice(retryNumber, retryLimit) {
+  return [
+    '## 供应商暂时繁忙',
+    '',
+    '上一轮请求触发了供应商并发、限流或资源池容量限制。',
+    '',
+    `**自动重试**：正在执行第 ${retryNumber}/${retryLimit} 次。`,
+    '',
+    '新的模型正文开始返回后，将直接替换本提示。'
+  ].join('\n');
+}
+
+function isRetryableProviderConcurrencyError(error) {
+  if (!error || error.name === 'AbortError') return false;
+  const status = Number(error.status || error.httpStatus || error.statusCode || 0);
+  if ([408, 425, 429, 500, 502, 503, 504].includes(status)) return true;
+  const text = [error.message, error.providerMessage, error.providerCode, error.cause?.message].filter(Boolean).join(' ');
+  return /(?:rate[_\s-]*limit|too many requests|resource[_\s-]*(?:pool|exhausted)|concurr|capacity[_\s-]*(?:limit|exhausted|reached)|overload|overloaded|temporarily unavailable|try again|限流|并发|资源池|繁忙|过载|负载.{0,8}(?:已满|饱和)|无可用.{0,6}(?:渠道|通道)|稍后重试)/i.test(text);
+}
+
+function providerConcurrencyRetryNotice(retryNumber, retryLimit, retryDelay, error) {
+  const detail = String(error?.message || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+  return [
+    '## 供应商暂时繁忙',
+    '',
+    '模型供应商返回了可能与并发、限流或资源池容量有关的临时错误。应用不会把这次错误误判为 Markdown 校验失败。',
+    '',
+    `**自动重试**：第 ${retryNumber}/${retryLimit} 次，${formatRetryDelay(retryDelay)}后继续。`,
+    detail ? `**供应商提示**：${detail}` : '',
+    '',
+    '如果重试全部耗尽，当前视频任务会回退为待处理状态；多 P 工作流中的其它 P 不会被删除。'
+  ].filter(Boolean).join('\n');
 }
 
 function emptyModelResponseError({ retryLimit, retryCount, finishReason = '', reasoningOnly = false, explicit = false }) {

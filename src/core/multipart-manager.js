@@ -18,6 +18,7 @@ class MultiPartManager {
     this.ragAssistant = ragAssistant;
     this.emit = emit || (() => {});
     this.indexRefreshFailures = [];
+    this.stateEmitTimers = new Map();
     this.refreshStoredIndexes();
   }
 
@@ -133,6 +134,11 @@ class MultiPartManager {
     for (const part of this.partTasks(parent.id)) {
       if (part.status === 'done' || part.pageState === 'removed') continue;
       part.enabled = selectedSet.has(String(part.cid));
+      if (part.enabled) {
+        part.multiPartStopped = false;
+        part.multiPartStopReason = '';
+        part.multiPartStoppedAt = '';
+      }
       part.updatedAt = new Date().toISOString();
       this.store.upsertTask(part);
     }
@@ -146,17 +152,7 @@ class MultiPartManager {
     const concurrency = Math.max(1, Math.min(4, Number(settings.concurrency) || 2));
     try {
       for (let index = 0; index < Math.min(concurrency, tasks.length); index += 1) {
-        const session = this.internalAgentManager.createSession({
-          mode: 'multipart',
-          title: `多P · ${parent.title} · 工作流 ${index + 1}`,
-          providerId: settings.providerId,
-          modelId: settings.modelId,
-          collectionId: parent.collectionId,
-          multiPartParentId: parent.id,
-          multiPartTaskIds: tasks.map((task) => task.id),
-          taskRequirements: settings.taskRequirements,
-          taskOptions: settings.taskOptions
-        });
+        const session = this.createMultipartSession(parent, tasks, index + 1);
         sessions.push(await this.internalAgentManager.start(session.id));
       }
     } catch (error) {
@@ -173,6 +169,85 @@ class MultiPartManager {
     }
     this.emitState('multipart-parent-started', parent.id);
     return { parent: this.publicParent(this.store.get('multiPartParents', parent.id)), sessions };
+  }
+
+  async stopPart(input = {}) {
+    const parent = this.requireParent(input.parentId);
+    const cid = String(input.cid || input.partId || '').trim();
+    if (!cid) throw new Error('请选择要停止的 P。');
+    const task = this.partTasks(parent.id).find((item) => String(item.cid) === cid || String(item.id) === cid);
+    if (!task) throw new Error('指定的子 P 不存在。');
+    if (task.status === 'done') throw new Error('已完成的 P 不能停止。');
+
+    const now = new Date().toISOString();
+    const activeSessions = this.internalAgentManager.listSessions().filter((session) => session.multiPartParentId === parent.id
+      && (session.currentTaskId === task.id || (task.claimedBy && session.workerId === task.claimedBy))
+      && ['running', 'draining', 'stopping'].includes(session.status));
+    const hadActiveSession = activeSessions.length > 0;
+    const stopReason = '用户单独停止了这个 P，已回退到待继续状态。';
+
+    task.enabled = false;
+    task.multiPartStopped = true;
+    task.multiPartStopReason = stopReason;
+    task.multiPartStoppedAt = now;
+    task.multiPartProgress = 0;
+    task.multiPartPhase = '已单独停止，等待继续';
+    task.updatedAt = now;
+    this.store.upsertTask(task);
+    parent.selectedCids = (parent.selectedCids || []).map(String).filter((value) => value !== cid);
+    parent.updatedAt = now;
+    this.store.set('multiPartParents', parent.id, parent);
+    this.store.commit();
+
+    const waits = [];
+    for (const session of activeSessions) {
+      try {
+        this.internalAgentManager.stop(session.id);
+      } catch (error) {
+        throw new Error(`停止 P${task.page || ''} 失败：${error.message || String(error)}`);
+      }
+      const running = this.internalAgentManager.running?.get(session.id);
+      if (running) waits.push(running);
+    }
+    if (!activeSessions.length && task.status !== 'pending' && task.status !== 'failed') {
+      try {
+        this.internalAgentManager.abortAttempt(task.id, task.claimedBy, stopReason, 'multipart-part-stop');
+      } catch (error) {
+        throw new Error(`回退 P${task.page || ''} 失败：${error.message || String(error)}`);
+      }
+    }
+    if (waits.length) await Promise.allSettled(waits);
+
+    const refreshed = this.store.getTask(task.id);
+    if (refreshed) {
+      refreshed.enabled = false;
+      refreshed.multiPartStopped = true;
+      refreshed.multiPartStopReason = stopReason;
+      refreshed.multiPartStoppedAt = now;
+      refreshed.multiPartProgress = 0;
+      refreshed.multiPartPhase = '已单独停止，等待继续';
+      refreshed.updatedAt = new Date().toISOString();
+      this.store.upsertTask(refreshed);
+    }
+    this.store.commit();
+
+    let replacementSessions = [];
+    let replacementWarning = '';
+    if (hadActiveSession) {
+      try {
+        replacementSessions = await this.ensureReplacementSessions(parent.id);
+      } catch (error) {
+        replacementWarning = `当前 P 已停止，但补位工作流未能启动：${error.message || String(error)}。其它已运行的 P 不受影响，剩余 P 可稍后点击“继续”处理。`;
+      }
+    }
+    const current = this.store.get('multiPartParents', parent.id);
+    this.emitState('multipart-part-stopped', parent.id);
+    return {
+      parent: this.publicParent(current),
+      stoppedPart: publicPart(this.store.getTask(task.id)),
+      replacementSessions,
+      replacementWarning
+    };
   }
 
   async stop(parentId) {
@@ -213,8 +288,13 @@ class MultiPartManager {
   }
 
   handleAgentEvent(event = {}) {
-    const task = event.taskId ? this.store.getTask(event.taskId) : null;
-    const parentId = event.parentId || task?.multiPartParentId;
+    const session = event.session || (event.sessionId
+      ? this.internalAgentManager.listSessions().find((item) => item.id === event.sessionId)
+      : null);
+    const task = event.taskId
+      ? this.store.getTask(event.taskId)
+      : session?.currentTaskId ? this.store.getTask(session.currentTaskId) : null;
+    const parentId = event.parentId || session?.multiPartParentId || task?.multiPartParentId;
     if (!parentId) return;
     const parent = this.store.get('multiPartParents', parentId);
     if (!parent) return;
@@ -223,15 +303,22 @@ class MultiPartManager {
     const pending = parts.filter((item) => item.status !== 'done' && item.pageState !== 'removed').length;
     const sessionStopped = event.type === 'session-finished' && ['stopped', 'collection-unavailable', 'model-unavailable'].includes(String(event.status || ''));
     const activeSessions = this.activeSessions(parent.id).filter((session) => event.type !== 'session-finished' || session.id !== event.sessionId);
-    parent.status = sessionStopped && event.status === 'stopped'
-      ? 'stopped'
-      : activeSessions.length ? 'running' : (pending ? (done ? 'partial' : 'pending') : 'completed');
+    parent.status = activeSessions.length
+      ? 'running'
+      : sessionStopped && event.status === 'stopped'
+        ? 'stopped'
+        : (pending ? (done ? 'partial' : 'pending') : 'completed');
     parent.completedAt = parent.status === 'completed' ? (parent.completedAt || new Date().toISOString()) : '';
     parent.updatedAt = new Date().toISOString();
-    this.store.set('multiPartParents', parent.id, parent);
-    this.store.commit();
-    this.writeIndex(parent);
-    this.emitState('multipart-parent-updated', parent.id);
+    const lightweight = ['stream', 'log', 'session-updated'].includes(String(event.type || ''));
+    if (!lightweight) {
+      this.store.set('multiPartParents', parent.id, parent);
+      this.store.commit();
+      this.writeIndex(parent);
+      this.emitState('multipart-parent-updated', parent.id);
+    } else {
+      this.scheduleStateEmit(parent.id);
+    }
   }
 
   requireParent(id) {
@@ -329,6 +416,11 @@ class MultiPartManager {
       favoriteAddedAt: current?.favoriteAddedAt || now,
       enabled: current?.status === 'done' ? false : Boolean(enabled),
       status: current?.status || 'pending',
+      multiPartProgress: Number.isFinite(Number(current?.multiPartProgress)) ? Number(current.multiPartProgress) : 0,
+      multiPartPhase: String(current?.multiPartPhase || '待处理'),
+      multiPartStopped: Boolean(current?.multiPartStopped),
+      multiPartStopReason: String(current?.multiPartStopReason || ''),
+      multiPartStoppedAt: String(current?.multiPartStoppedAt || ''),
       multiPartParentId: parent.id,
       parentDocumentId: parent.parentDocumentId,
       multiPartId: cid,
@@ -434,21 +526,97 @@ class MultiPartManager {
 
   publicParent(parent) {
     const parts = this.partTasks(parent.id).sort((a, b) => Number(a.page || 0) - Number(b.page || 0));
+    const active = this.activeSessions(parent.id);
+    const sessionsByTask = new Map(active
+      .filter((session) => session.currentTaskId)
+      .map((session) => [String(session.currentTaskId), session]));
+    const publicParts = parts.map((task) => publicPart(task, sessionsByTask.get(String(task.id))));
     const completed = parts.filter((task) => task.status === 'done').length;
+    const running = parts.filter((task) => sessionsByTask.has(String(task.id))).length;
+    const stopped = parts.filter((task) => task.multiPartStopped === true).length;
+    const failed = parts.filter((task) => task.status === 'failed').length;
+    const progress = publicParts.length
+      ? publicParts.reduce((total, task) => total + clampProgress(task.progress), 0) / publicParts.length
+      : 0;
     return {
       ...parent,
       parentRoot: undefined,
-      pages: (parent.pages || []).map((page) => ({ ...page, task: publicPart(parts.find((item) => String(item.cid) === String(page.cid))) })),
-      parts: parts.map(publicPart),
+      pages: (parent.pages || []).map((page) => {
+        const task = parts.find((item) => String(item.cid) === String(page.cid));
+        return { ...page, task: publicPart(task, sessionsByTask.get(String(task?.id || ''))) };
+      }),
+      parts: publicParts,
       completed,
       total: parts.length,
-      progress: parts.length ? completed / parts.length : 0,
-      activeSessions: this.activeSessions(parent.id).map((session) => ({ id: session.id, status: session.status, title: session.title }))
+      progress,
+      running,
+      stopped,
+      failed,
+      activeSessions: active.map((session) => ({ id: session.id, status: session.status, title: session.title, currentTaskId: session.currentTaskId || '' }))
     };
   }
 
   emitState(type, parentId) {
+    const key = String(parentId || '');
+    const timer = this.stateEmitTimers.get(key);
+    if (timer) {
+      clearTimeout(timer);
+      this.stateEmitTimers.delete(key);
+    }
     this.emit({ type, parentId, multiPart: this.state() });
+  }
+
+  scheduleStateEmit(parentId) {
+    const key = String(parentId || '');
+    if (!key || this.stateEmitTimers.has(key)) return;
+    const timer = setTimeout(() => {
+      this.stateEmitTimers.delete(key);
+      this.emit({ type: 'multipart-progress', parentId: key, multiPart: this.state() });
+    }, 250);
+    timer.unref?.();
+    this.stateEmitTimers.set(key, timer);
+  }
+
+  createMultipartSession(parent, tasks, sequence = 1) {
+    const settings = parent.settings || {};
+    return this.internalAgentManager.createSession({
+      mode: 'multipart',
+      title: `多P · ${parent.title} · 工作流 ${sequence}`,
+      providerId: settings.providerId,
+      modelId: settings.modelId,
+      collectionId: parent.collectionId,
+      multiPartParentId: parent.id,
+      multiPartTaskIds: tasks.map((task) => task.id),
+      taskRequirements: settings.taskRequirements,
+      taskOptions: settings.taskOptions
+    });
+  }
+
+  async ensureReplacementSessions(parentId) {
+    const parent = this.requireParent(parentId);
+    const active = this.activeSessions(parent.id);
+    const eligible = this.partTasks(parent.id).filter((task) => task.enabled !== false && task.status !== 'done' && task.pageState !== 'removed');
+    const configured = Math.max(1, Math.min(4, Number(parent.settings?.concurrency) || 2));
+    const desired = Math.min(configured, eligible.length);
+    const sessions = [];
+    for (let index = active.length; index < desired; index += 1) {
+      const session = this.createMultipartSession(parent, eligible, active.length + sessions.length + 1);
+      try {
+        sessions.push(await this.internalAgentManager.start(session.id));
+      } catch (error) {
+        if (!this.internalAgentManager.running?.has(session.id)) {
+          try { this.internalAgentManager.deleteSession(session.id); } catch {}
+        }
+        throw error;
+      }
+    }
+    if (sessions.length) {
+      parent.status = 'running';
+      parent.updatedAt = new Date().toISOString();
+      this.store.set('multiPartParents', parent.id, parent);
+      this.store.commit();
+    }
+    return sessions;
   }
 }
 
@@ -489,13 +657,49 @@ function assertMultipartVideoSupported(input, info) {
   if (rights.arc_pay || rights.is_ugc_pay) throw new Error('当前多P工具不支持付费或特殊权限视频。');
 }
 function publicPage(page) { return { page: Number(page.page || 1), cid: String(page.cid || ''), part: String(page.part || ''), duration: Number(page.duration || 0) }; }
-function publicPart(task) {
+function publicPart(task, session = null) {
   if (!task) return null;
-  return { id: task.id, cid: task.cid, page: task.page, part: task.part, title: task.title, status: task.status, enabled: task.enabled !== false, pageState: task.pageState || 'active', outputMarkdown: task.outputMarkdown || '', completedAt: task.completedAt || '', error: task.failureReason || '', parentDocumentId: task.parentDocumentId };
+  const active = Boolean(session && session.currentTaskId === task.id);
+  const progress = task.status === 'done'
+    ? 1
+    : active
+      ? clampProgress(session.progress)
+      : clampProgress(task.multiPartProgress);
+  const displayStatus = task.status === 'done'
+    ? 'completed'
+    : task.multiPartStopped
+      ? 'stopped'
+      : active
+        ? 'running'
+        : task.status === 'failed' ? 'failed' : 'pending';
+  return {
+    id: task.id,
+    cid: task.cid,
+    page: task.page,
+    part: task.part,
+    title: task.title,
+    status: task.status,
+    displayStatus,
+    enabled: task.enabled !== false,
+    stopped: task.multiPartStopped === true,
+    pageState: task.pageState || 'active',
+    progress,
+    progressPercent: Math.round(progress * 100),
+    phase: active ? String(session.phase || '') : String(task.multiPartPhase || ''),
+    sessionId: active ? String(session.id || '') : '',
+    outputMarkdown: task.outputMarkdown || '',
+    completedAt: task.completedAt || '',
+    error: task.failureReason || task.infrastructureError || task.abortReason || task.multiPartStopReason || '',
+    parentDocumentId: task.parentDocumentId
+  };
 }
 function publicPartMetadata(task) { return publicPart(task); }
 function publicCollection(collection) { const { cookieFile, collectionRoot, videosDir, exportDir, ...safe } = collection; return safe; }
 function escapeMermaid(value) { return String(value || '').replace(/[\[\]{}()<>"']/g, '').slice(0, 80); }
+function clampProgress(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : 0;
+}
 
 function partSummaryLines(parent, task) {
   const cid = safeName(task.cid, 'part', 40);

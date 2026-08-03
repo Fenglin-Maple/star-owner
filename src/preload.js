@@ -91,6 +91,7 @@ contextBridge.exposeInMainWorld('orchestrator', {
   multiPartRefresh: (parentId) => ipcRenderer.invoke('multipart:refresh', parentId),
   multiPartStart: (payload) => ipcRenderer.invoke('multipart:start', payload),
   multiPartStop: (parentId) => ipcRenderer.invoke('multipart:stop', parentId),
+  multiPartStopPart: (payload) => ipcRenderer.invoke('multipart:stop-part', payload),
   multiPartDelete: (parentId) => ipcRenderer.invoke('multipart:delete', parentId),
   sharedState: () => ipcRenderer.invoke('shared:state'),
   sharedOperationState: () => ipcRenderer.invoke('shared:operation-state'),

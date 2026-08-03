@@ -49,6 +49,7 @@ function assert(condition, message) {
   let emptyGenerationResponses = 0;
   let emptyGenerationFinishReason = '';
   let invalidGenerationResponses = 0;
+  let transientProviderFailures = 0;
   let forceExplicitProviderError = false;
   const rag = {
     listProviders: () => [{ id: 'provider-test', name: 'Test provider', type: 'openai', baseUrl: 'http://127.0.0.1:1/v1', enabledModels: [{ id: 'model-test', name: 'model-test' }] }],
@@ -56,12 +57,22 @@ function assert(condition, message) {
     sessionModel: () => ({ id: 'model-test', contextWindow: 128000, maxOutputTokens: 8192, supportsVision: false }),
     streamCompletion: async (_provider, body, _signal, onDelta) => {
       completionBodies.push(body);
-      if (forceExplicitProviderError) {
-        const error = new Error('模型供应商明确返回错误：resource pool exhausted');
+      if (transientProviderFailures > 0) {
+        transientProviderFailures -= 1;
+        const error = new Error('模型供应商明确返回错误：resource pool exhausted; concurrency limit reached');
         error.code = 'MODEL_PROVIDER_FAILURE';
         error.failureKind = 'infrastructure';
         error.explicitProviderError = true;
+        error.providerCode = 'rate_limit_exceeded';
         error.possibleCauses = ['模型供应商资源池当前不可用'];
+        throw error;
+      }
+      if (forceExplicitProviderError) {
+        const error = new Error('模型供应商明确返回错误：invalid API key');
+        error.code = 'MODEL_PROVIDER_FAILURE';
+        error.failureKind = 'infrastructure';
+        error.explicitProviderError = true;
+        error.possibleCauses = ['模型供应商 API Key 无效'];
         throw error;
       }
       if (forceContextLimitOnce) {
@@ -261,14 +272,22 @@ function assert(condition, message) {
   assert(emptyBlocked.content.includes('Agent 因基础设施故障停止') && emptyBlocked.content.includes('初次请求及 5 次自动重试') && emptyBlocked.content.includes('AI 模型配置'), 'exhausted empty responses did not replace the model pane with a provider-specific infrastructure error');
   assert(!emptyBlocked.logs.some((item) => item.message.includes('稿未通过校验')) && store.getTask(emptyFailureSession.singleTaskId)?.status === 'pending', 'empty response failure entered content validation or consumed the task');
 
+  transientProviderFailures = 2;
+  const requestsBeforeBusyRecovery = completionBodies.length;
+  const busyRecoverySession = await manager.createSingleTask({ video: 'BVBUSY000001', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
+  await manager.start(busyRecoverySession.id);
+  const busyRecovered = await waitForSession(manager, busyRecoverySession.id);
+  assert(busyRecovered.status === 'completed' && completionBodies.length - requestsBeforeBusyRecovery === 3, 'provider concurrency exhaustion did not recover through bounded retries');
+  assert(busyRecovered.logs.filter((item) => item.message.includes('并发/资源池')).length === 2, 'provider concurrency retry count was not reported');
+
   forceExplicitProviderError = true;
   const requestsBeforeExplicitFailure = completionBodies.length;
   const explicitFailureSession = await manager.createSingleTask({ video: 'BVEXPLICIT01', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
   await manager.start(explicitFailureSession.id);
   const explicitBlocked = await waitForStatus(manager, explicitFailureSession.id, 'blocked');
   forceExplicitProviderError = false;
-  assert(completionBodies.length - requestsBeforeExplicitFailure === 1, 'an explicit provider error was retried');
-  assert(explicitBlocked.content.includes('resource pool exhausted') && !explicitBlocked.logs.some((item) => item.message.includes('自动重试')), 'explicit provider error was not displayed directly');
+  assert(completionBodies.length - requestsBeforeExplicitFailure === 1, 'a non-transient explicit provider error was retried');
+  assert(explicitBlocked.content.includes('invalid API key') && !explicitBlocked.logs.some((item) => item.message.includes('自动重试')), 'non-transient explicit provider error was not displayed directly');
 
   invalidGenerationResponses = 2;
   const requestsBeforeInvalidDraft = completionBodies.length;

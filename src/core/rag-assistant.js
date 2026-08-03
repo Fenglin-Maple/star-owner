@@ -1522,6 +1522,9 @@ function providerHttpError(status, body) {
   const error = new Error(`Model request failed (${status}): ${detail}`);
   error.code = 'MODEL_PROVIDER_FAILURE';
   error.failureKind = 'infrastructure';
+  error.status = Number(status) || 0;
+  error.explicitProviderError = true;
+  error.providerMessage = detail;
   error.possibleCauses = status === 401 || status === 403
     ? ['模型供应商 API Key 无效、过期或权限不足', '供应商 Base URL 与密钥不匹配']
     : status === 429
@@ -1547,6 +1550,8 @@ function providerPayloadError(payload) {
   error.code = 'MODEL_PROVIDER_FAILURE';
   error.failureKind = 'infrastructure';
   error.explicitProviderError = true;
+  error.providerMessage = detail;
+  error.providerCode = String(payload?.code || payload?.type || payload?.status || '');
   error.possibleCauses = [
     '模型供应商资源池、额度或账户并发当前不可用',
     '供应商 Base URL、API Key、模型名或请求参数不兼容'

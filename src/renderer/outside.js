@@ -148,6 +148,8 @@
   const selectedPreparedTaskIds = new Set();
   const selectedRemotePaths = new Set();
   const selectedMountIds = new Set();
+  const expandedMultipartParents = new Set();
+  const knownMultipartParents = new Set();
   const toolCards = new Map();
   const toolBodies = new Map();
   const localRefreshGate = new RequestGate();
@@ -395,23 +397,52 @@
 
   function renderMultipart() {
     renderMultipartCollections();
+    for (const details of elements.multipartParentList.querySelectorAll('[data-multipart-details]')) {
+      const parentId = String(details.dataset.parentId || '');
+      if (!parentId) continue;
+      if (details.open) expandedMultipartParents.add(parentId);
+      else expandedMultipartParents.delete(parentId);
+    }
     const selectedCollectionId = elements.multipartViewerCollection.value;
     const parents = (multipartState.parents || []).filter((parent) => !selectedCollectionId || String(parent.collectionId) === String(selectedCollectionId));
     elements.multipartParentList.innerHTML = !selectedCollectionId
       ? '<div class="empty-state">请选择一个 B站多P类型收藏夹。</div>'
       : parents.length ? parents.map((parent) => {
+      if (!knownMultipartParents.has(parent.id)) {
+        knownMultipartParents.add(parent.id);
+        expandedMultipartParents.add(parent.id);
+      }
       const status = parentStatusLabel(parent.status);
       const pages = (parent.pages || []).map((page) => {
         const task = page.task || {};
-        const checked = (parent.selectedCids || []).map(String).includes(String(page.cid));
-        const stateClass = task.pageState === 'removed' ? 'is-removed' : task.status === 'done' ? 'is-done' : 'is-pending';
-        return `<label class="multipart-parent-page ${stateClass}"><input class="app-checkbox" type="checkbox" data-parent-id="${escAttr(parent.id)}" data-parent-page="${escAttr(page.cid)}" ${checked ? 'checked' : ''} ${task.pageState === 'removed' || task.status === 'done' ? 'disabled' : ''}/><span>P${Number(page.page || 1)} ${esc(page.part || '')}</span><small>${task.status === 'done' ? '已完成' : task.pageState === 'removed' ? '远程已移除' : '待处理'}</small></label>`;
+        const checked = task.enabled !== false && (parent.selectedCids || []).map(String).includes(String(page.cid));
+        const displayStatus = task.pageState === 'removed' ? 'removed' : (task.displayStatus || (task.status === 'done' ? 'completed' : 'pending'));
+        const stateClass = `is-${displayStatus}`;
+        const progress = Math.max(0, Math.min(100, Number(task.progressPercent ?? (Number(task.progress || 0) * 100)) || 0));
+        const label = multipartPartStatusLabel(displayStatus);
+        const phase = String(task.phase || label);
+        const canStop = task.pageState !== 'removed' && task.status !== 'done' && task.enabled !== false && task.stopped !== true;
+        const stopLabel = task.status === 'done' ? '已完成' : task.pageState === 'removed' ? '不可用' : task.stopped ? '已停止' : '停止此 P';
+        const errorTitle = task.error ? ` title="${escAttr(task.error)}"` : '';
+        return `<div class="multipart-parent-page ${stateClass}"${errorTitle}><div class="multipart-part-main"><input class="app-checkbox" type="checkbox" aria-label="选择 P${Number(page.page || 1)}" data-parent-id="${escAttr(parent.id)}" data-parent-page="${escAttr(page.cid)}" ${checked ? 'checked' : ''} ${task.pageState === 'removed' || task.status === 'done' ? 'disabled' : ''}/><div class="multipart-part-copy"><strong>P${Number(page.page || 1)} · ${esc(page.part || '')}</strong><small>${esc(label)} · CID ${esc(page.cid)} · ${formatDuration(page.duration)}</small></div><button class="secondary-button compact-button multipart-part-stop" type="button" data-multipart-action="stop-part" data-parent-id="${escAttr(parent.id)}" data-part-id="${escAttr(page.cid)}" ${canStop ? '' : 'disabled'}>${esc(stopLabel)}</button></div><div class="multipart-part-progress"><div class="local-progress"><span style="width:${progress}%"></span></div><span>${Math.round(progress)}%</span></div><div class="multipart-part-phase">${esc(phase)}</div></div>`;
       }).join('');
-      return `<article class="multipart-parent-record" data-parent-record="${escAttr(parent.id)}"><div class="multipart-parent-head"><div><strong>${esc(parent.title)}</strong><small>${esc(parent.bvid)} · ${esc(parent.collectionName || '')} · ${status}</small></div><div class="multipart-parent-actions"><button class="secondary-button compact-button" type="button" data-multipart-action="refresh" data-parent-id="${escAttr(parent.id)}">刷新 P</button>${parent.activeSessions?.length ? `<button class="secondary-button compact-button" type="button" data-multipart-action="stop" data-parent-id="${escAttr(parent.id)}">停止</button>` : `<button class="primary-button compact-button" type="button" data-multipart-action="start" data-parent-id="${escAttr(parent.id)}">继续</button>`}<button class="secondary-button compact-button danger-button" type="button" data-multipart-action="delete" data-parent-id="${escAttr(parent.id)}">删除</button></div></div><div class="local-progress"><span style="width:${Math.round(Number(parent.progress || 0) * 100)}%"></span></div><div class="multipart-parent-summary">${parent.completed}/${parent.total} P · ${Math.round(Number(parent.progress || 0) * 100)}% · ${esc(status)}</div><div class="multipart-parent-pages">${pages}</div></article>`;
+      const progress = Math.max(0, Math.min(100, Math.round(Number(parent.progress || 0) * 100)));
+      const running = Number(parent.running || 0);
+      const stopped = Number(parent.stopped || 0);
+      const detailSummary = [`${parent.total} 个子 P`, running ? `${running} 个处理中` : '', stopped ? `${stopped} 个已停止` : ''].filter(Boolean).join(' · ');
+      return `<article class="multipart-parent-record" data-parent-record="${escAttr(parent.id)}"><div class="multipart-parent-head"><div><strong>${esc(parent.title)}</strong><small>${esc(parent.bvid)} · ${esc(parent.collectionName || '')} · ${status}</small></div><div class="multipart-parent-actions"><button class="secondary-button compact-button" type="button" data-multipart-action="refresh" data-parent-id="${escAttr(parent.id)}">刷新 P</button>${parent.activeSessions?.length ? `<button class="secondary-button compact-button" type="button" data-multipart-action="stop" data-parent-id="${escAttr(parent.id)}">停止全部</button>` : `<button class="primary-button compact-button" type="button" data-multipart-action="start" data-parent-id="${escAttr(parent.id)}">继续</button>`}<button class="secondary-button compact-button danger-button" type="button" data-multipart-action="delete" data-parent-id="${escAttr(parent.id)}">删除</button></div></div><div class="local-progress"><span style="width:${progress}%"></span></div><div class="multipart-parent-summary">${parent.completed}/${parent.total} P · ${progress}% · ${esc(status)}</div><details class="multipart-parent-details" data-multipart-details data-parent-id="${escAttr(parent.id)}" ${expandedMultipartParents.has(parent.id) ? 'open' : ''}><summary><span>子 P 任务明细</span><small>${esc(detailSummary)}</small></summary><div class="multipart-parent-pages">${pages}</div></details></article>`;
     }).join('') : '<div class="empty-state">这个收藏夹还没有多P父任务。</div>';
+    for (const details of elements.multipartParentList.querySelectorAll('[data-multipart-details]')) {
+      details.addEventListener('toggle', () => {
+        const parentId = String(details.dataset.parentId || '');
+        if (details.open) expandedMultipartParents.add(parentId);
+        else expandedMultipartParents.delete(parentId);
+      });
+    }
   }
 
   function parentStatusLabel(status) { return ({ pending: '待开始', running: '处理中', partial: '部分完成', stopped: '已停止', completed: '已完成' })[status] || status || '未知'; }
+  function multipartPartStatusLabel(status) { return ({ pending: '待处理', running: '处理中', stopped: '已停止，可继续', failed: '处理失败，可重试', completed: '已完成', removed: '远程已移除' })[status] || status || '待处理'; }
 
   async function startExistingMultipart(parentId) {
     const parent = (multipartState.parents || []).find((item) => item.id === parentId);
@@ -440,6 +471,16 @@
       if (action === 'refresh') await window.orchestrator.multiPartRefresh(parentId);
       else if (action === 'start') await startExistingMultipart(parentId);
       else if (action === 'stop') await window.orchestrator.multiPartStop(parentId);
+      else if (action === 'stop-part') {
+        setBusy(button, true, '停止中');
+        try {
+          const result = await window.orchestrator.multiPartStopPart({ parentId, cid: button.dataset.partId });
+          if (result.replacementWarning) notify('子 P 已停止，补位未启动', result.replacementWarning);
+          else notify('子 P 已停止', '当前 P 已回退并关闭，其它正在处理或排队的 P 会继续。');
+        } finally {
+          setBusy(button, false, '停止此 P');
+        }
+      }
       else if (action === 'delete') {
         if (!window.confirm('确定删除这个多P父任务及其所有已完成 P 产物吗？')) return;
         await window.orchestrator.multiPartDelete(parentId);

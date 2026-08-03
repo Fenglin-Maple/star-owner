@@ -746,6 +746,11 @@ ipcMain.handle('multipart:stop', async (_event, parentId) => {
   return multiPartManager.stop(parentId);
 });
 
+ipcMain.handle('multipart:stop-part', async (_event, payload = {}) => {
+  assertBackendReady();
+  return multiPartManager.stopPart(payload);
+});
+
 ipcMain.handle('multipart:delete', async (_event, parentId) => {
   assertBackendReady();
   return multiPartManager.delete(parentId);
