@@ -485,45 +485,61 @@ class SharedKnowledgeManager {
     const knownCollectionIds = new Set(this.store.listCollections().map((item) => String(item.id)));
     const collection = this.requireOrCreateCollection(input.collectionId, input.collectionName || defaultMountName(prefix, documents));
     const createdCollection = !knownCollectionIds.has(String(collection.id));
-    const scope = prefix ? 'collection' : 'documents';
     this.clearSharedExclusions(collection.id, documents.map((item) => item.path), repository);
-    if (scope === 'collection') {
-      const existing = this.store.list('sharedMounts').find((item) => item.collectionId === collection.id
-        && item.scope === 'collection'
+    const groups = groupRemoteCollectionDocuments(documents);
+    const mounts = [];
+    const createdMounts = [];
+    const now = new Date().toISOString();
+    for (const group of groups) {
+      const existing = this.store.list('sharedMounts').find((item) => String(item.collectionId) === String(collection.id)
         && sameRepository(item.repository || DEFAULT_REPOSITORY, repository)
-        && documents.every((document) => mountCoversPath(item, document.path)));
-      if (existing) {
-        return this.syncMountInternal(existing.id, catalog, { progressStart: 0.26, progressEnd: 0.96 });
-      }
-    } else {
-      const existingMounts = this.store.list('sharedMounts')
-        .filter((item) => item.collectionId === collection.id && sameRepository(item.repository || DEFAULT_REPOSITORY, repository));
-      documents = documents.filter((document) => !existingMounts.some((mount) => mountCoversPath(mount, document.path)));
-      if (!documents.length) throw new Error('选中的远程文档已经挂载到当前共享收藏夹，无需重复挂载。');
+        && mountRemoteCollectionPrefix(item) === group.prefix);
+      const coversWholeCollection = Boolean(prefix && remotePrefixCovers(prefix, group.prefix));
+      const mount = existing || {
+        id: `mount:${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`,
+        collectionId: collection.id,
+        collectionName: collection.name,
+        scope: coversWholeCollection ? 'collection' : 'documents',
+        remotePrefix: group.prefix,
+        remotePaths: [],
+        repository: { ...repository },
+        createdAt: now,
+        updatedAt: now
+      };
+      if (!existing) createdMounts.push(mount);
+      mount.collectionName = collection.name;
+      mount.scope = mount.scope === 'collection' || coversWholeCollection ? 'collection' : 'documents';
+      mount.remotePrefix = group.prefix;
+      mount.remotePaths = [...new Set([...(mount.remotePaths || []), ...group.documents.map((item) => item.path)].map(String))];
+      Object.assign(mount, remoteMountDescription(group.documents[0], group.prefix));
+      mount.repository = { ...repository };
+      mount.updatedAt = existing ? (mount.updatedAt || now) : now;
+      this.store.set('sharedMounts', mount.id, mount);
+      mounts.push(mount);
     }
-    const mount = {
-      id: `mount:${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`,
-      collectionId: collection.id,
-      collectionName: collection.name,
-      scope,
-      remotePrefix: prefix || commonPrefix(documents.map((item) => item.path)),
-      remotePaths: documents.map((item) => item.path),
-      repository: { ...repository },
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-    this.store.set('sharedMounts', mount.id, mount);
     this.store.commit();
-    let result;
+    let results;
     try {
-      result = await this.syncMountInternal(mount.id, catalog, { progressStart: 0.26, progressEnd: 0.96 });
+      results = await this.syncMountBatchInternal(mounts, catalog, { progressStart: 0.26, progressEnd: 0.96 });
     } catch (error) {
-      this.rollbackNewMount(mount, collection, createdCollection);
+      for (const mount of [...createdMounts].reverse()) this.rollbackNewMount(mount, collection, false);
+      if (createdCollection && !this.store.listTasks({ collectionId: collection.id }).length) {
+        fs.rmSync(collection.collectionRoot, { recursive: true, force: true });
+        this.store.delete('collections', collection.id);
+        this.store.save();
+      }
       throw error;
     }
-    const normalizedMountId = this.normalizeSharedMountRecords(mount.id) || mount.id;
-    this.emitState('shared-mount-created', { mountId: normalizedMountId, collectionId: collection.id });
-    return { ...publicMount(this.store.get('sharedMounts', normalizedMountId) || mount), unchanged: Boolean(result?.unchanged) };
+    const output = results.map((result) => publicMount(this.store.get('sharedMounts', result.id) || result));
+    const primary = output[0] || publicMount(mounts[0]);
+    this.emitState('shared-mount-created', { mountId: primary.id, mountIds: output.map((item) => item.id), collectionId: collection.id });
+    return {
+      ...primary,
+      mounts: output,
+      mountCount: output.length,
+      remoteDocumentCount: output.reduce((sum, item) => sum + Number(item.remoteDocumentCount || 0), 0),
+      unchanged: results.every((result) => result.unchanged)
+    };
   }
 
   rollbackNewMount(mount, collection, createdCollection) {
@@ -576,13 +592,12 @@ class SharedKnowledgeManager {
         catalogs.set(item.key, await this.readRemoteCatalog(item.repository, { force: true, progressStart: start, progressEnd: end }));
       }
       const output = [];
-      for (let index = 0; index < mounts.length; index += 1) {
-        const mount = mounts[index];
-        const repository = normalizeRepository(mount.repository || DEFAULT_REPOSITORY);
-        const start = 0.3 + (index / Math.max(1, mounts.length)) * 0.66;
-        const end = 0.3 + ((index + 1) / Math.max(1, mounts.length)) * 0.66;
-        this.reportOperation({ stage: 'mount-sync', progress: start, current: index, total: mounts.length, message: `正在同步挂载 ${index + 1} / ${mounts.length}：${mount.collectionName || mount.id}` }, true);
-        output.push(await this.syncMountInternal(mount.id, catalogs.get(repositoryIdentity(repository)), { progressStart: start, progressEnd: end }));
+      for (let index = 0; index < repositories.length; index += 1) {
+        const item = repositories[index];
+        const repositoryMounts = mounts.filter((mount) => repositoryIdentity(mount.repository || DEFAULT_REPOSITORY) === item.key);
+        const start = 0.3 + (index / Math.max(1, repositories.length)) * 0.66;
+        const end = 0.3 + ((index + 1) / Math.max(1, repositories.length)) * 0.66;
+        output.push(...await this.syncMountBatchInternal(repositoryMounts, catalogs.get(item.key), { progressStart: start, progressEnd: end }));
       }
       return {
         synced: output.length,
@@ -593,6 +608,76 @@ class SharedKnowledgeManager {
     });
   }
 
+  async syncMountBatchInternal(mounts = [], catalog, progressOptions = {}) {
+    if (!mounts.length) return [];
+    const repository = normalizeRepository(mounts[0].repository || DEFAULT_REPOSITORY);
+    if (mounts.some((mount) => !sameRepository(mount.repository || DEFAULT_REPOSITORY, repository))) {
+      throw new Error('一次共享挂载批处理只能同步同一个 GitHub 仓库。');
+    }
+    const start = Number(progressOptions.progressStart || 0.03);
+    const end = Number(progressOptions.progressEnd || 0.97);
+    const processMounts = async (transport = {}) => {
+      const output = [];
+      for (let index = 0; index < mounts.length; index += 1) {
+        const mount = mounts[index];
+        const mountStart = start + (index / Math.max(1, mounts.length)) * (end - start);
+        const mountEnd = start + ((index + 1) / Math.max(1, mounts.length)) * (end - start);
+        this.reportOperation({
+          stage: 'mount-sync',
+          progress: mountStart,
+          current: index,
+          total: mounts.length,
+          message: `正在同步远程收藏夹 ${index + 1} / ${mounts.length}：${mount.remoteCollectionName || mount.collectionName || mount.id}`
+        }, true);
+        output.push(await this.syncMountInternal(mount.id, catalog, { ...transport, progressStart: mountStart, progressEnd: mountEnd }));
+      }
+      return output;
+    };
+    const requiresDownload = mounts.some((mount) => this.mountPendingDocuments(mount, catalog).length > 0);
+    if (!requiresDownload) return processMounts();
+    const canUseCheckout = typeof this.gitRuntime?.withReadOnlyCheckout === 'function'
+      && (!this.requestOverride || this.gitRuntime.allowCheckoutWithRequestOverride === true);
+    if (canUseCheckout) {
+      try {
+        return await this.gitRuntime.withReadOnlyCheckout({
+          repository,
+          token: this.optionalAuthToken(),
+          onProgress: (event) => this.reportOperation({
+            stage: event.stage || 'git-download',
+            progress: start + Number(event.progress || 0) * (end - start) * 0.2,
+            current: 0,
+            total: mounts.length,
+            message: event.message || '正在一次性下载共享仓库快照...'
+          }, true)
+        }, async ({ root }) => processMounts({ checkoutRoot: root }));
+      } catch (error) {
+        if (isAbortError(error) || error?.code !== 'SHARED_GIT_CHECKOUT_FAILED') throw error;
+        this.reportOperation({ stage: 'mount-api-fallback', progress: start + (end - start) * 0.08, message: `内置 Git 快照不可用，正在切换 GitHub API 兼容下载：${String(error.message || error).slice(0, 180)}` }, true);
+      }
+    }
+    const remoteTree = await this.readRepositoryTree(repository, this.optionalAuthToken());
+    return processMounts({ remoteTree });
+  }
+
+  mountDocuments(mount, catalog) {
+    const repository = normalizeRepository(mount.repository || DEFAULT_REPOSITORY);
+    const scope = mount.scope || 'documents';
+    return catalog.documents.filter((document) => {
+      if (document.invalid || this.isSharedExcluded(mount.collectionId, document.path, repository)) return false;
+      return scope === 'collection'
+        ? (document.path.startsWith(`${mount.remotePrefix}/`) || document.path === mount.remotePrefix)
+        : (mount.remotePaths || []).includes(document.path);
+    });
+  }
+
+  mountPendingDocuments(mount, catalog) {
+    const repository = normalizeRepository(mount.repository || DEFAULT_REPOSITORY);
+    return this.mountDocuments(mount, catalog).filter((document) => {
+      const existing = this.findMountedDocumentTask(mount, document, repository);
+      return !existing || !this.remoteDocumentMatchesLocal(document, existing);
+    });
+  }
+
   async syncMountInternal(mountId, catalogInput = null, progressOptions = {}) {
     const mount = this.store.get('sharedMounts', String(mountId || ''));
     if (!mount) throw new Error('共享挂载不存在。');
@@ -600,12 +685,7 @@ class SharedKnowledgeManager {
     const catalog = catalogInput || await this.readRemoteCatalog(repository, { force: true, progressStart: progressOptions.progressStart || 0.03, progressEnd: Math.min(0.32, progressOptions.progressEnd || 0.32) });
     if (catalog.repository && !sameRepository(catalog.repository, repository)) throw new Error('共享挂载目录来自其它 GitHub 仓库，已拒绝交叉同步。');
     const scope = mount.scope || 'documents';
-    const documents = catalog.documents.filter((document) => {
-      if (document.invalid || this.isSharedExcluded(mount.collectionId, document.path, repository)) return false;
-      return scope === 'collection'
-        ? (document.path.startsWith(`${mount.remotePrefix}/`) || document.path === mount.remotePrefix)
-        : (mount.remotePaths || []).includes(document.path);
-    });
+    const documents = this.mountDocuments(mount, catalog);
     const currentPaths = new Set(documents.map((document) => document.path));
     const localTasks = this.store.listTasks({ collectionId: mount.collectionId }).filter((task) => {
       const mountIds = Array.isArray(task.sharedMountIds) ? task.sharedMountIds : [task.sharedMountId];
@@ -643,6 +723,7 @@ class SharedKnowledgeManager {
     mount.remotePaths = scope === 'collection'
       ? documents.map((item) => item.path)
       : [...new Set([...mount.remotePaths || [], ...documents.map((item) => item.path)])];
+    if (documents[0]) Object.assign(mount, remoteMountDescription(documents[0], mount.remotePrefix));
     mount.remoteFingerprint = sharedDocumentsFingerprint(documents);
     mount.lastCheckedAt = now;
     const unchanged = pendingImports.length === 0 && !remoteStateChanged;
@@ -725,6 +806,14 @@ class SharedKnowledgeManager {
         await this.importRemoteDocument(document, mount, { checkoutRoot, remoteTree });
       }
     };
+    if (progressOptions.checkoutRoot) {
+      await importFrom({ checkoutRoot: progressOptions.checkoutRoot, progressStart: start });
+      return;
+    }
+    if (progressOptions.remoteTree) {
+      await importFrom({ remoteTree: progressOptions.remoteTree, progressStart: start });
+      return;
+    }
     const canUseCheckout = typeof this.gitRuntime?.withReadOnlyCheckout === 'function'
       && (!this.requestOverride || this.gitRuntime.allowCheckoutWithRequestOverride === true);
     if (canUseCheckout) {
@@ -1332,65 +1421,77 @@ class SharedKnowledgeManager {
     const mounts = this.store.list('sharedMounts');
     if (!mounts.length) return '';
     const groups = new Map();
-    const redirects = new Map();
     const survivors = new Map();
-    let changed = false;
+    const usedIds = new Set();
+    let preferredTarget = '';
     for (const mount of mounts) {
       let repository;
       try { repository = normalizeRepository(mount.repository || DEFAULT_REPOSITORY); }
       catch { repository = { ...DEFAULT_REPOSITORY }; }
-      const key = `${String(mount.collectionId || '')}|${repositoryIdentity(repository)}`;
-      if (!groups.has(key)) groups.set(key, { repository, mounts: [] });
-      groups.get(key).mounts.push({ ...mount, repository });
+      const source = { ...mount, repository };
+      const paths = [...new Set((mount.remotePaths || []).map(String).filter(Boolean))];
+      const pathGroups = new Map();
+      for (const remotePath of paths) {
+        const remotePrefix = remoteCollectionPrefixForPath(remotePath) || mountRemoteCollectionPrefix(source);
+        if (!pathGroups.has(remotePrefix)) pathGroups.set(remotePrefix, []);
+        pathGroups.get(remotePrefix).push(remotePath);
+      }
+      if (!pathGroups.size) pathGroups.set(mountRemoteCollectionPrefix(source), []);
+      for (const [remotePrefix, remotePaths] of pathGroups) {
+        if (!remotePrefix) continue;
+        const key = `${String(mount.collectionId || '')}|${repositoryIdentity(repository)}|${remotePrefix}`;
+        if (!groups.has(key)) groups.set(key, {
+          key,
+          collectionId: String(mount.collectionId || ''),
+          repository,
+          remotePrefix,
+          remotePaths: new Set(),
+          sources: [],
+          collectionScope: false
+        });
+        const group = groups.get(key);
+        for (const remotePath of remotePaths) group.remotePaths.add(remotePath);
+        group.sources.push(source);
+        const sourcePrefix = normalizeRemotePrefix(source.remotePrefix || '');
+        if (source.scope === 'collection' && remotePrefixCovers(sourcePrefix, remotePrefix)) group.collectionScope = true;
+      }
     }
     const byCreated = (left, right) => String(left.createdAt || '').localeCompare(String(right.createdAt || '')) || String(left.id).localeCompare(String(right.id));
-    for (const group of groups.values()) {
-      const collectionMounts = group.mounts.filter((mount) => mount.scope === 'collection').sort((left, right) => {
-        const depth = String(left.remotePrefix || '').split('/').filter(Boolean).length - String(right.remotePrefix || '').split('/').filter(Boolean).length;
-        return depth || byCreated(left, right);
+    for (const group of [...groups.values()].sort((left, right) => left.key.localeCompare(right.key))) {
+      const sources = [...group.sources].sort((left, right) => {
+        const preferred = Number(String(right.id) === String(preferredMountId)) - Number(String(left.id) === String(preferredMountId));
+        return preferred || byCreated(left, right);
       });
-      const keptCollections = [];
-      for (const mount of collectionMounts) {
-        const prefix = String(mount.remotePrefix || '');
-        const covering = keptCollections.find((item) => remotePrefixCovers(item.remotePrefix, prefix));
-        if (!covering) {
-          keptCollections.push(mount);
-          continue;
-        }
-        covering.remotePaths = [...new Set([...(covering.remotePaths || []), ...(mount.remotePaths || [])].map(String))];
-        covering.lastSyncedAt = latestIso(covering.lastSyncedAt, mount.lastSyncedAt);
-        covering.lastCheckedAt = latestIso(covering.lastCheckedAt, mount.lastCheckedAt);
-        covering.updatedAt = latestIso(covering.updatedAt, mount.updatedAt);
-        covering.remoteFingerprint = '';
-        redirects.set(String(mount.id), String(covering.id));
-        changed = true;
-      }
-      for (const mount of keptCollections) survivors.set(String(mount.id), mount);
-
-      const documentMounts = group.mounts.filter((mount) => mount.scope !== 'collection').sort(byCreated);
-      const remainingPaths = [...new Set(documentMounts.flatMap((mount) => mount.remotePaths || []).map(String))]
-        .filter((remotePath) => !keptCollections.some((mount) => mountCoversPath(mount, remotePath)));
-      if (remainingPaths.length && documentMounts.length) {
-        const canonical = documentMounts[0];
-        const previousPaths = [...new Set((canonical.remotePaths || []).map(String))].sort();
-        canonical.remotePaths = remainingPaths.sort();
-        canonical.remotePrefix = commonPrefix(canonical.remotePaths);
-        canonical.remoteFingerprint = documentMounts.length === 1 && previousPaths.join('\n') === canonical.remotePaths.join('\n') ? canonical.remoteFingerprint : '';
-        canonical.lastSyncedAt = documentMounts.reduce((value, mount) => latestIso(value, mount.lastSyncedAt), canonical.lastSyncedAt || '');
-        canonical.lastCheckedAt = documentMounts.reduce((value, mount) => latestIso(value, mount.lastCheckedAt), canonical.lastCheckedAt || '');
-        canonical.updatedAt = documentMounts.reduce((value, mount) => latestIso(value, mount.updatedAt), canonical.updatedAt || '');
-        survivors.set(String(canonical.id), canonical);
-        for (const mount of documentMounts.slice(1)) redirects.set(String(mount.id), String(canonical.id));
-        if (documentMounts.length > 1 || previousPaths.join('\n') !== canonical.remotePaths.join('\n')) changed = true;
-      } else if (documentMounts.length) {
-        for (const mount of documentMounts) {
-          const covering = keptCollections.find((candidate) => (mount.remotePaths || []).every((remotePath) => mountCoversPath(candidate, remotePath)));
-          if (covering) redirects.set(String(mount.id), String(covering.id));
-        }
-        changed = true;
-      }
+      const reusable = sources.find((source) => !usedIds.has(String(source.id)));
+      const id = reusable ? String(reusable.id) : `mount:collection-${hash(group.key)}`;
+      usedIds.add(id);
+      const source = reusable || sources[0] || {};
+      const remotePaths = [...group.remotePaths].sort();
+      const scope = group.collectionScope ? 'collection' : 'documents';
+      const unchangedShape = sources.length === 1
+        && String(source.remotePrefix || '') === group.remotePrefix
+        && String(source.scope || 'documents') === scope
+        && [...new Set((source.remotePaths || []).map(String))].sort().join('\n') === remotePaths.join('\n');
+      const survivor = {
+        ...source,
+        id,
+        collectionId: group.collectionId,
+        scope,
+        remotePrefix: group.remotePrefix,
+        remotePaths,
+        remoteCollectionPrefix: group.remotePrefix,
+        remoteCollectionName: source.remoteCollectionName || remoteCollectionFallbackName(group.remotePrefix),
+        repository: { ...group.repository },
+        createdAt: sources.reduce((value, item) => !value || String(item.createdAt || '') < value ? String(item.createdAt || value) : value, ''),
+        lastSyncedAt: sources.reduce((value, item) => latestIso(value, item.lastSyncedAt), ''),
+        lastCheckedAt: sources.reduce((value, item) => latestIso(value, item.lastCheckedAt), ''),
+        updatedAt: sources.reduce((value, item) => latestIso(value, item.updatedAt), ''),
+        remoteFingerprint: unchangedShape ? source.remoteFingerprint : ''
+      };
+      survivors.set(id, survivor);
+      if (!preferredTarget && sources.some((item) => String(item.id) === String(preferredMountId))) preferredTarget = id;
     }
-
+    let changed = false;
     for (const mount of mounts) {
       if (!survivors.has(String(mount.id))) {
         this.store.delete('sharedMounts', mount.id);
@@ -1420,8 +1521,7 @@ class SharedKnowledgeManager {
     if (changed) this.store.save();
     const preferred = String(preferredMountId || '');
     if (preferred && survivors.has(preferred)) return preferred;
-    if (preferred && redirects.has(preferred)) return redirects.get(preferred);
-    return preferred;
+    return preferredTarget || preferred;
   }
 
   isCoveredByAnotherMount(currentMount, remotePath) {
@@ -1564,6 +1664,45 @@ function mountCoversPath(mount = {}, remotePath = '') {
   if (mount.scope === 'collection') return pathName.startsWith(`${String(mount.remotePrefix || '')}/`) || pathName === String(mount.remotePrefix || '');
   return (mount.remotePaths || []).map(String).includes(pathName);
 }
+function remoteCollectionPrefixForPath(remotePath = '') {
+  const segments = String(remotePath || '').replace(/\\/g, '/').split('/').filter(Boolean);
+  if (segments.at(-1) === DOCUMENT_META_FILE) segments.pop();
+  if (segments.length >= 3) return segments.slice(0, 3).join('/');
+  return segments.length > 1 ? segments.slice(0, -1).join('/') : segments.join('/');
+}
+function mountRemoteCollectionPrefix(mount = {}) {
+  const explicit = String(mount.remoteCollectionPrefix || '').trim();
+  if (explicit) return normalizeRemotePrefix(explicit);
+  const remotePath = (mount.remotePaths || []).find(Boolean);
+  if (remotePath) return remoteCollectionPrefixForPath(remotePath);
+  const prefix = normalizeRemotePrefix(mount.remotePrefix || '');
+  const segments = prefix.split('/').filter(Boolean);
+  return segments.length >= 3 ? segments.slice(0, 3).join('/') : prefix;
+}
+function remoteCollectionFallbackName(remotePrefix = '') {
+  return String(remotePrefix || '').split('/').filter(Boolean).at(-1) || '远程收藏夹';
+}
+function remoteMountDescription(document = {}, remotePrefix = '') {
+  return {
+    remoteCollectionPrefix: remotePrefix,
+    remoteCollectionId: String(document.remoteCollectionId || ''),
+    remoteCollectionName: String(document.collectionName || '').trim() || remoteCollectionFallbackName(remotePrefix),
+    remoteContributorGithubLogin: String(document.contributorGithubLogin || ''),
+    remoteContributorGithubId: String(document.contributorGithubId || ''),
+    remoteBilibiliName: String(document.userName || ''),
+    remoteBilibiliUid: String(document.bilibiliUid || document.userId || '')
+  };
+}
+function groupRemoteCollectionDocuments(documents = []) {
+  const groups = new Map();
+  for (const document of documents) {
+    const prefix = remoteCollectionPrefixForPath(document.path);
+    if (!prefix) continue;
+    if (!groups.has(prefix)) groups.set(prefix, { prefix, documents: [] });
+    groups.get(prefix).documents.push(document);
+  }
+  return [...groups.values()];
+}
 function remotePrefixCovers(parent, child) {
   const parentPrefix = String(parent || '').replace(/\/+$/, '');
   const childPrefix = String(child || '').replace(/\/+$/, '');
@@ -1667,7 +1806,7 @@ function localSharedDocumentModified(root, metadata, isMultipartParent = false) 
 }
 function publicMount(mount) { const { remotePaths, ...safe } = mount || {}; return { ...safe, remoteDocumentCount: Array.isArray(remotePaths) ? remotePaths.length : 0 }; }
 function publicCollection(collection) { const { cookieFile, collectionRoot, videosDir, exportDir, ...safe } = collection || {}; return safe; }
-function publicSharedTask(task) { return { id: task.id, title: task.title, bvid: task.bvid, collectionId: task.collectionId, sharedDocumentId: task.sharedDocumentId, sharedRemotePath: task.sharedRemotePath, sharedRemoteSha: task.sharedRemoteSha || '', sharedRepository: task.sharedRepository || DEFAULT_REPOSITORY, sharedMountIds: task.sharedMountIds || (task.sharedMountId ? [task.sharedMountId] : []), remoteState: task.remoteState || 'active', remoteUpdatedAt: task.remoteUpdatedAt || '', updatedAt: task.updatedAt || '' }; }
+function publicSharedTask(task) { return { id: task.id, title: task.title, owner: task.owner || '', bvid: task.bvid, collectionId: task.collectionId, multiPartRole: task.multiPartRole || '', sharedDocumentId: task.sharedDocumentId, sharedRemotePath: task.sharedRemotePath, sharedRemoteSha: task.sharedRemoteSha || '', sharedRepository: task.sharedRepository || DEFAULT_REPOSITORY, sharedMountIds: task.sharedMountIds || (task.sharedMountId ? [task.sharedMountId] : []), remoteState: task.remoteState || 'active', remoteUpdatedAt: task.remoteUpdatedAt || '', updatedAt: task.updatedAt || '' }; }
 function defaultMountName(prefix, documents) { return safeName(documents[0]?.collectionName || prefix.split('/').filter(Boolean).at(-1) || '共享收藏夹', '共享收藏夹', 80); }
 function commonPrefix(paths) {
   if (!paths.length) return '';

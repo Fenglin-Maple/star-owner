@@ -699,7 +699,7 @@ function verifyRendererContracts() {
   if (!outside.includes('scheduleInitialReadyRefresh') || !outside.includes('window.orchestrator.onBootstrap') || !outside.includes('sharedCancelUpload') || !outside.includes('sharedUploadPrepareSelectAll')) {
     throw new Error('B站之外工具仍可能在后端就绪前请求服务，或共享上传中止/准备列表批量操作未接线');
   }
-  if (!outside.includes('ensureSharedRepositoryReady') || !outside.includes('selectedRemotePaths') || !outside.includes('selectedMountIds') || !outside.includes('data-shared-mount-prefix') || !outside.includes('syncSelectedSharedMounts')) {
+  if (!outside.includes('ensureSharedRepositoryReady') || !outside.includes('selectedRemotePaths') || !outside.includes('selectedMountIds') || !outside.includes('data-shared-mount-prefix') || !outside.includes('syncSelectedSharedMounts') || !outside.includes('data-shared-local-collection') || !outside.includes('data-shared-local-mount') || !outside.includes('shared-local-document-row')) {
     throw new Error('共享仓库进入检查、远程树分层挂载或本地挂载多选同步逻辑缺失');
   }
   if (!app.includes("filter((collection) => collection.collectionKind !== 'shared')")) {
@@ -711,7 +711,7 @@ function verifyRendererContracts() {
   if (!outside.includes("typeof window.notify === 'function'") || outside.includes('window.showToast(')) {
     throw new Error('B站之外工具没有接入应用统一 Toast，操作结果会静默丢失');
   }
-  if (!outsideStyles.includes('.outside-tool-detail') || !outsideStyles.includes('.outside-tool-card-stats') || !outsideStyles.includes('.shared-auth-more') || !outsideStyles.includes('.shared-upload-prep-group') || !outsideStyles.includes('resize: vertical') || !outsideStyles.includes('.shared-operation-progress')) {
+  if (!outsideStyles.includes('.outside-tool-detail') || !outsideStyles.includes('.outside-tool-card-stats') || !outsideStyles.includes('.shared-auth-more') || !outsideStyles.includes('.shared-upload-prep-group') || !outsideStyles.includes('resize: vertical') || !outsideStyles.includes('.shared-operation-progress') || !outsideStyles.includes('.shared-local-collection') || !outsideStyles.includes('.shared-local-remote') || !outsideStyles.includes('.shared-local-document-row')) {
     throw new Error('B站之外工具独立视图、入口数据、更多授权或准备上传列表样式缺失');
   }
   if (!preload.includes('sharedBrowserLogin') || !preload.includes('sharedOperationState') || !preload.includes('sharedSetRepository') || !preload.includes('sharedCheckRepository') || !preload.includes('sharedCreateRepository') || !preload.includes('sharedCancelUpload') || !preload.includes('sharedSyncMounts')) {

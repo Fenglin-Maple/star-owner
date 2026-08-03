@@ -324,6 +324,10 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   assert(manager.state().collections.some((item) => item.collectionKind === 'shared'), '共享用户收藏夹没有暴露到状态');
   fs.rmSync(root, { recursive: true, force: true });
   const exactMount = await manager.mount({ documents: catalog.documents, paths: [catalog.documents[0].path], collectionName: 'single-document mount' });
+  const collectionPrefix = remoteRoot.split('/').slice(0, 3).join('/');
+  assert.strictEqual(exactMount.scope, 'documents', '单篇挂载没有使用远程收藏夹下的文档选择范围');
+  assert.strictEqual(exactMount.remotePrefix, collectionPrefix, '单篇挂载没有从一开始归属于对应远程收藏夹挂载源');
+  assert.strictEqual(exactMount.remoteCollectionName, '远程收藏夹', '远程收藏夹挂载源缺少可读名称');
   const secondDocument = { ...secondMeta, path: `${secondRoot}/${DOCUMENT_META_FILE}`, metadataPath: `${secondRoot}/${DOCUMENT_META_FILE}`, remoteSha: 'sha-second' };
   await manager.syncMount(exactMount.id, { documents: [catalog.documents[0], secondDocument] });
   assert.strictEqual(store.listTasks({ collectionId: exactMount.collectionId }).filter((item) => item.sourceType === 'shared-bilibili').length, 1, 'single-document mount expanded to a sibling document');
@@ -331,14 +335,21 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   assert.strictEqual(batchSync.synced, 1, '选中挂载批量同步没有返回正确数量');
   assert(sharedEvents.some((event) => event.type === 'shared-operation-progress' && event.operation?.type === 'mount-sync-batch'), '选中挂载批量同步没有发出进度事件');
   const expandedCatalog = await manager.remoteCatalog();
-  const collectionPrefix = remoteRoot.split('/').slice(0, 3).join('/');
+  const snapshotsBeforeSecondDocument = snapshotDownloads;
+  const secondPartialMount = await manager.mount({ paths: [secondDocument.path], collectionId: exactMount.collectionId });
+  assert.strictEqual(secondPartialMount.id, exactMount.id, '同一远程收藏夹追加单篇文档时创建了第二个挂载源');
+  assert.strictEqual(secondPartialMount.scope, 'documents', '追加单篇文档错误地改成完整收藏夹挂载');
+  assert.strictEqual(secondPartialMount.remoteDocumentCount, 2, '同一远程收藏夹挂载源没有记录追加文档');
+  assert.strictEqual(store.list('sharedMounts').filter((item) => item.collectionId === exactMount.collectionId).length, 1, '单篇与多篇文档挂载没有统一为一个远程收藏夹来源');
+  assert.strictEqual(snapshotDownloads, snapshotsBeforeSecondDocument + 1, '同一远程收藏夹追加文档没有使用一次性 Git 快照');
   const snapshotsBeforeExpandedMount = snapshotDownloads;
   const expandedMount = await manager.mount({ remotePrefix: collectionPrefix, collectionId: exactMount.collectionId });
   const expandedMounts = store.list('sharedMounts').filter((item) => item.collectionId === exactMount.collectionId);
-  assert.strictEqual(expandedMounts.length, 1, '单篇挂载升级为整收藏夹后仍保留重复挂载记录');
-  assert.strictEqual(expandedMounts[0].scope, 'collection', '单篇挂载升级后没有归并为收藏夹挂载');
+  assert.strictEqual(expandedMounts.length, 1, '同一远程收藏夹的完整挂载错误创建了第二个来源记录');
+  assert.strictEqual(expandedMount.id, exactMount.id, '完整收藏夹操作没有复用从单篇起建立的远程收藏夹挂载源');
+  assert.strictEqual(expandedMounts[0].scope, 'collection', '远程收藏夹挂载源没有切换为自动跟随完整收藏夹');
   assert.strictEqual(store.listTasks({ collectionId: exactMount.collectionId }).filter((item) => item.sourceType === 'shared-bilibili').length, 2, '整收藏夹挂载没有补入远程新增文档');
-  assert.strictEqual(snapshotDownloads, snapshotsBeforeExpandedMount + 1, '整收藏夹增量挂载没有将待下载文档合并到一次 Git 快照');
+  assert.strictEqual(snapshotDownloads, snapshotsBeforeExpandedMount, '已完整下载的远程收藏夹在切换自动跟随模式时仍重复下载仓库快照');
   const snapshotsBeforeNoChange = snapshotDownloads;
   const unchangedMount = await manager.mount({ remotePrefix: collectionPrefix, collectionId: exactMount.collectionId });
   assert.strictEqual(unchangedMount.id, expandedMount.id, '重复挂载同一远程收藏夹没有复用规范化后的挂载');
@@ -356,6 +367,23 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   assert.strictEqual(changedSync.downloaded, 1, '远程收藏夹单篇更新没有保持增量导入');
   assert.strictEqual(snapshotDownloads, snapshotsBeforeChangedSync + 1, '远程内容更新没有通过单次 Git 快照下载');
   assert(changedTask && fs.readFileSync(changedTask.outputMarkdown, 'utf8').includes('v2'), '目录索引缺少 blob SHA 时远程更新没有覆盖本地旧文档');
+
+  const otherRoot = '123456/bilibili-远程用户/其它收藏夹/other-document';
+  const otherSummary = Buffer.from('# other remote document\n', 'utf8');
+  const otherMeta = { ...remoteMeta, documentId: 'other-document', bvid: 'BVREMOTE999', title: '其它收藏夹视频', collectionName: '其它收藏夹', contentSha256: sha256(otherSummary), assetSha256: {} };
+  remoteFiles.set(`${otherRoot}/${DOCUMENT_META_FILE}`, Buffer.from(`${JSON.stringify(otherMeta)}\n`, 'utf8'));
+  remoteFiles.set(`${otherRoot}/summary.md`, otherSummary);
+  const crossCollectionCatalog = await manager.remoteCatalog();
+  const otherDocument = crossCollectionCatalog.documents.find((item) => item.documentId === 'other-document');
+  const firstDocument = crossCollectionCatalog.documents.find((item) => item.documentId === 'remote-document');
+  const snapshotsBeforeCrossCollectionMount = snapshotDownloads;
+  const crossCollectionMount = await manager.mount({ paths: [firstDocument.path, otherDocument.path], collectionName: '多个远程来源' });
+  const crossCollectionMounts = store.list('sharedMounts').filter((item) => item.collectionId === crossCollectionMount.collectionId);
+  assert.strictEqual(crossCollectionMount.mountCount, 2, '一次挂载多个远程收藏夹没有创建两个独立来源节点');
+  assert.strictEqual(crossCollectionMounts.length, 2, '本地共享收藏夹没有按远程收藏夹拆分挂载源');
+  assert.strictEqual(new Set(crossCollectionMounts.map((item) => item.remotePrefix)).size, 2, '不同远程收藏夹被错误合并为一个挂载源');
+  assert(crossCollectionMounts.every((item) => item.scope === 'documents' && item.remotePaths.length === 1), '远程收藏夹单篇挂载的数据范围不统一');
+  assert.strictEqual(snapshotDownloads, snapshotsBeforeCrossCollectionMount + 1, '跨多个远程收藏夹的批量挂载重复浅克隆了仓库');
 
   const multiRoot = '123456/multipart/doc-multi';
   const multiMeta = {
@@ -466,6 +494,24 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   assert(!rollbackStore.list('sharedMounts').length, '共享挂载失败后仍残留挂载记录');
   assert(!rollbackStore.listCollections().some((item) => item.collectionKind === 'shared'), '新建共享收藏夹在挂载失败后仍残留');
   fs.rmSync(rollbackRoot, { recursive: true, force: true });
+
+  const migrationRoot = path.join(__dirname, '..', '.cache', 'shared-mount-migration-test');
+  fs.rmSync(migrationRoot, { recursive: true, force: true });
+  const migrationStore = await Store.open(path.join(migrationRoot, 'test.sqlite'));
+  const migrationWorkspace = migrationStore.addWorkspace({ name: '挂载迁移测试', root: path.join(migrationRoot, 'workspace') });
+  migrationStore.setDefaultWorkspace(migrationWorkspace.id);
+  const migrationCollection = migrationStore.upsertCollection({ id: 'legacy-shared-collection', userId: 'shared-user', userName: '共享', name: '旧共享收藏夹', collectionKind: 'shared', internal: true, workspaceId: migrationWorkspace.id, workspaceRoot: migrationWorkspace.root, collectionRoot: path.join(migrationWorkspace.root, '共享', '旧共享收藏夹') });
+  const legacyMountId = 'mount:legacy-flat-record';
+  const legacyPaths = [`${remoteRoot}/${DOCUMENT_META_FILE}`, `${otherRoot}/${DOCUMENT_META_FILE}`];
+  migrationStore.set('sharedMounts', legacyMountId, { id: legacyMountId, collectionId: migrationCollection.id, collectionName: migrationCollection.name, scope: 'documents', remotePrefix: '123456/bilibili-远程用户', remotePaths: legacyPaths, repository: { owner: 'Fenglin-Maple', name: 'Blibili-Markdowns', branch: 'main' }, createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z' });
+  for (let index = 0; index < legacyPaths.length; index += 1) migrationStore.upsertTask({ id: `legacy-shared-task-${index + 1}`, collectionId: migrationCollection.id, sourceType: 'shared-bilibili', status: 'done', title: `旧共享文档 ${index + 1}`, sharedRemotePath: legacyPaths[index], sharedRepository: { owner: 'Fenglin-Maple', name: 'Blibili-Markdowns', branch: 'main' }, sharedMountId: legacyMountId, sharedMountIds: [legacyMountId] });
+  migrationStore.commit();
+  new SharedKnowledgeManager({ store: migrationStore, encryptSecret: (value) => value, decryptSecret: (value) => value, gitRuntime: { state: () => ({ available: true, isolated: true, path: 'test-git' }) } });
+  const migratedMounts = migrationStore.list('sharedMounts');
+  assert.strictEqual(migratedMounts.length, 2, '旧版跨收藏夹扁平挂载没有迁移为两个远程收藏夹来源');
+  assert.strictEqual(new Set(migratedMounts.map((item) => item.remotePrefix)).size, 2, '旧版挂载迁移后远程收藏夹来源仍然混在一起');
+  assert(migrationStore.listTasks({ collectionId: migrationCollection.id }).every((item) => item.sharedMountIds.length === 1), '旧版挂载迁移后文档没有重新绑定唯一远程收藏夹来源');
+  fs.rmSync(migrationRoot, { recursive: true, force: true });
   console.log('shared knowledge manager test passed');
 })().catch((error) => { console.error(error); process.exit(1); });
 

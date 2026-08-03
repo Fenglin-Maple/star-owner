@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.4.7`
+Version: `1.4.8`
 
 ## 1. Portable Release for Users
 
@@ -34,13 +34,15 @@ Star-Owner-v<dependency-version>-model-large-v3-turbo.zip
 Star-Owner-v<dependency-version>-model-large-v3-turbo.zip.sha256
 ```
 
-The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.4.7` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads and read-only mount snapshots.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.4.8` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads and read-only mount snapshots.
 
 ### Updating and migrating an existing installation
 
 For a portable installation, use `设置 -> 应用更新与迁移 -> 检查更新`. Only the GitHub `latest` stable Release is eligible. The application downloads the core archive with retry and Range continuation, verifies its SHA-256, inspects archive paths, stages it, and uses the staged package's helper to replace the complete application file set, including `templates` and the newly packaged project-local `runtime/git`. `workspace/`, the ASR/runtime directories other than `runtime/git`, and `.updates/` are retained; a failed transaction rolls back and records the result for the next launch. An `operation-journal.json` left by an interrupted helper is surfaced on the next startup instead of being silently ignored.
 
 To move data from a v1.0.3 or newer installation, first stop all Agents and close the old application. Copy the complete old project directory to a short new location, start the new release, and use `设置 -> 应用更新与迁移 -> 从旧版目录迁移`. The application validates the source SQLite database and version, backs up the target workspace, migrates it atomically, and can restore the backup if the operation fails. Never copy only individual artifact folders or mix two live installations against the same workspace. Each project copy now gets an independent Bilibili login partition; a blank copy does not inherit another copy's cookies.
+
+When the shared-document manager first opens after upgrading to `1.4.8`, it normalizes local mounts into `local shared collection -> remote collection source -> mounted documents`. Mounting only one document still creates its remote collection source immediately; adding more documents or enabling whole-collection synchronization reuses that source instead of creating a second mount type. Legacy flat records that contain documents from multiple remote collections are split by remote collection and their document bindings are repaired in place. This migration preserves existing local Markdown files and does not redownload unchanged content.
 
 ## 2. Hardware and ASR
 
@@ -210,7 +212,7 @@ The aggregate verifier also runs scheduler, RAG, task rollback, video cache, ima
 
 ### Automatic ASR model download is slow
 
-Open the dependency Release linked by a model name in Settings. For version `1.4.7`, the required published package is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; `Star-Owner-v1.0.0-model-small.zip` is the optional alternate. Keep the ZIP intact and click `从本地导入` on the matching row. The historical medium filename is only for older releases. The application stops an active automatic download for that model and removes its managed cache. A downloading model can be paused from the same row; pausing preserves the `.partial` file for a later ranged resume. Importing while downloading or paused first cancels the automatic transfer and removes its managed partial/install residue, but never removes the source ZIP selected by the user. A wrong version, wrong model, damaged file, modified archive or unexpected layout is rejected with the correct Release URL; an already healthy model remains installed.
+Open the dependency Release linked by a model name in Settings. For version `1.4.8`, the required published package is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; `Star-Owner-v1.0.0-model-small.zip` is the optional alternate. Keep the ZIP intact and click `从本地导入` on the matching row. The historical medium filename is only for older releases. The application stops an active automatic download for that model and removes its managed cache. A downloading model can be paused from the same row; pausing preserves the `.partial` file for a later ranged resume. Importing while downloading or paused first cancels the automatic transfer and removes its managed partial/install residue, but never removes the source ZIP selected by the user. A wrong version, wrong model, damaged file, modified archive or unexpected layout is rejected with the correct Release URL; an already healthy model remains installed.
 
 ### Windows reports a path-too-long risk
 

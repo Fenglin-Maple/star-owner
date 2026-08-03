@@ -847,16 +847,47 @@
 
   function renderSharedMounts() {
     const mounts = sharedData.mounts || [];
+    const collections = sharedData.collections || [];
+    const documents = (sharedData.documents || []).filter((item) => item.multiPartRole !== 'part');
+    const openCollectionIds = new Set([...elements.sharedMountList.querySelectorAll('details[data-shared-local-collection][open]')].map((item) => String(item.dataset.sharedLocalCollection)));
+    const openMountIds = new Set([...elements.sharedMountList.querySelectorAll('details[data-shared-local-mount][open]')].map((item) => String(item.dataset.sharedLocalMount)));
     const validIds = new Set(mounts.map((mount) => String(mount.id)));
     for (const id of [...selectedMountIds]) if (!validIds.has(id)) selectedMountIds.delete(id);
     elements.sharedMountSelectAll.disabled = !mounts.length;
     elements.sharedMountSelectAll.textContent = mounts.length && selectedMountIds.size === mounts.length ? '取消全选' : '全选挂载';
     elements.sharedSyncSelected.disabled = !selectedMountIds.size;
     elements.sharedSyncSelected.textContent = selectedMountIds.size ? `同步选中（${selectedMountIds.size}）` : '同步选中';
-    elements.sharedMountList.innerHTML = mounts.length ? mounts.map((mount) => {
-      const scope = mount.scope === 'collection' ? '远程收藏夹挂载' : '指定文档挂载';
-      return `<div class="shared-mount-row-item"><input class="app-checkbox" type="checkbox" data-shared-mount-select="${escAttr(mount.id)}" ${selectedMountIds.has(String(mount.id)) ? 'checked' : ''}/><div><strong>${esc(mount.collectionName || mount.collectionId)}</strong><small>${esc(sharedRepositoryFullName(mount.repository || {}))} · ${scope} · ${Number(mount.remoteDocumentCount || 0)} 篇 · ${mount.lastSyncedAt ? `上次同步 ${esc(formatUploadDate(mount.lastSyncedAt))}` : '尚未同步'}</small></div><div class="shared-mount-actions"><button class="secondary-button compact-button" type="button" data-shared-action="sync" data-mount-id="${escAttr(mount.id)}">同步</button><button class="secondary-button compact-button danger-button" type="button" data-shared-action="unmount" data-mount-id="${escAttr(mount.id)}">解除挂载</button></div></div>`;
-    }).join('') : '<div class="empty-state">还没有共享挂载。</div>';
+    if (!collections.length) {
+      elements.sharedMountList.innerHTML = '<div class="empty-state">还没有本地“共享”收藏夹。</div>';
+      return;
+    }
+    const documentState = (document) => {
+      if (document.remoteState === 'remote-deleted') return { code: 'stale', label: '远程已失效，本地保留' };
+      if (document.remoteState === 'sync-conflict') return { code: 'conflict', label: '同步冲突，本地保留' };
+      if (document.remoteState === 'local-modified') return { code: 'modified', label: '本地已修改' };
+      if (document.remoteState === 'local-deleted') return { code: 'stale', label: '已从本地移除' };
+      return { code: 'latest', label: '已挂载' };
+    };
+    elements.sharedMountList.innerHTML = [...collections].sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN')).map((collection, collectionIndex) => {
+      const collectionMounts = mounts.filter((mount) => String(mount.collectionId) === String(collection.id));
+      const collectionMountIds = new Set(collectionMounts.map((mount) => String(mount.id)));
+      const collectionDocuments = documents.filter((document) => (document.sharedMountIds || []).some((id) => collectionMountIds.has(String(id))));
+      const mountHtml = [...collectionMounts].sort((a, b) => String(a.remoteCollectionName || a.remotePrefix || '').localeCompare(String(b.remoteCollectionName || b.remotePrefix || ''), 'zh-CN')).map((mount) => {
+        const mountDocuments = documents.filter((document) => (document.sharedMountIds || []).map(String).includes(String(mount.id)));
+        const remoteName = mount.remoteCollectionName || String(mount.remotePrefix || '').split('/').filter(Boolean).at(-1) || '远程收藏夹';
+        const repositoryName = sharedRepositoryFullName(mount.repository || {}) || '未知共享仓库';
+        const identity = [mount.remoteContributorGithubLogin ? `GitHub ${mount.remoteContributorGithubLogin}` : '', mount.remoteBilibiliName ? `B站 ${mount.remoteBilibiliName}` : ''].filter(Boolean).join(' · ');
+        const scope = mount.scope === 'collection' ? '完整收藏夹挂载，后续同步会自动加入远程新增文档' : `当前挂载 ${Number(mount.remoteDocumentCount || mountDocuments.length)} 篇文档`;
+        const rows = [...mountDocuments].sort((a, b) => String(a.title || '').localeCompare(String(b.title || ''), 'zh-CN')).map((document) => {
+          const status = documentState(document);
+          return `<div class="shared-local-document-row shared-state-${escAttr(status.code)}"><span class="shared-tree-marker">MD</span><span class="shared-local-document-main"><strong title="${escAttr(document.title || document.bvid || '')}">${esc(document.title || document.bvid || '未命名视频')}</strong><small>${esc(document.bvid || '无 BV')} · ${esc(document.owner || '未知UP主')} · ${document.remoteUpdatedAt ? `远程更新 ${esc(formatUploadDate(document.remoteUpdatedAt))}` : '远程时间未知'}</small></span><span class="shared-local-document-status">${esc(status.label)}</span></div>`;
+        }).join('');
+        const mountOpen = openMountIds.has(String(mount.id)) || collectionMounts.length === 1;
+        return `<details class="shared-tree-node shared-local-remote" data-shared-local-mount="${escAttr(mount.id)}" ${mountOpen ? 'open' : ''}><summary><input class="app-checkbox" type="checkbox" data-shared-mount-select="${escAttr(mount.id)}" aria-label="选择远程收藏夹挂载 ${escAttr(remoteName)}" ${selectedMountIds.has(String(mount.id)) ? 'checked' : ''}/><span class="shared-tree-marker">REMOTE</span><span><strong title="${escAttr(remoteName)}">${esc(remoteName)}</strong><small>${esc(repositoryName)}${identity ? ` · ${esc(identity)}` : ''}</small></span><em>${mountDocuments.length}</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><div class="shared-local-source-body"><div class="shared-local-source-tools"><span>${esc(scope)} · ${mount.lastSyncedAt ? `上次同步 ${esc(formatUploadDate(mount.lastSyncedAt))}` : '尚未同步'}</span><div class="shared-mount-actions"><button class="secondary-button compact-button" type="button" data-shared-action="sync" data-mount-id="${escAttr(mount.id)}">同步</button><button class="secondary-button compact-button danger-button" type="button" data-shared-action="unmount" data-mount-id="${escAttr(mount.id)}">解除挂载</button></div></div>${rows || '<div class="empty-state shared-local-empty">该远程收藏夹当前没有可显示的本地文档。</div>'}</div></details>`;
+      }).join('');
+      const collectionOpen = openCollectionIds.has(String(collection.id)) || collections.length === 1 || collectionIndex === 0;
+      return `<details class="shared-tree-node shared-local-collection" data-shared-local-collection="${escAttr(collection.id)}" ${collectionOpen ? 'open' : ''}><summary><span class="shared-tree-marker">LOCAL</span><span><strong title="${escAttr(collection.name || collection.id)}">${esc(collection.name || collection.id)}</strong><small>${collectionMounts.length} 个远程收藏夹挂载源 · ${collectionDocuments.length} 篇文档</small></span><em>${collectionMounts.length}</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><div class="shared-tree-children shared-local-collection-body">${mountHtml || '<div class="empty-state shared-local-empty">该共享收藏夹尚未挂载远程收藏夹。</div>'}</div></details>`;
+    }).join('');
   }
 
   function shareableUploadItems() {
