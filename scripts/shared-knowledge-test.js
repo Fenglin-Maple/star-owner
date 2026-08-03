@@ -247,9 +247,37 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   fs.writeFileSync(path.join(templateRoot, 'unlisted.md'), '# 不允许的仓库根文件\n', 'utf8');
   assert.throws(() => execFileSync(process.execPath, [path.join(templateRoot, 'scripts', 'validate-shared-docs.mjs')], { cwd: templateRoot, stdio: 'pipe' }), '共享仓库校验脚本允许了白名单外文件');
   fs.rmSync(path.join(templateRoot, 'unlisted.md'), { force: true });
+  const bundledGit = path.join(__dirname, '..', 'runtime', 'git', 'cmd', process.platform === 'win32' ? 'git.exe' : 'git');
+  if (fs.existsSync(bundledGit)) {
+    execFileSync(bundledGit, ['init', '-b', 'main'], { cwd: templateRoot, stdio: 'pipe' });
+    execFileSync(bundledGit, ['-c', 'user.name=Star Owner Test', '-c', 'user.email=test@example.invalid', 'add', '--all'], { cwd: templateRoot, stdio: 'pipe' });
+    execFileSync(bundledGit, ['-c', 'user.name=Star Owner Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'baseline'], { cwd: templateRoot, stdio: 'pipe' });
+    const baseSha = execFileSync(bundledGit, ['rev-parse', 'HEAD'], { cwd: templateRoot, encoding: 'utf8' }).trim();
+    fs.appendFileSync(templateSummary, '\nPR 作者身份测试。\n', 'utf8');
+    const templateMetadataFile = path.join(templateRoot, stableOne.remoteRoot, DOCUMENT_META_FILE);
+    const templateMetadata = JSON.parse(fs.readFileSync(templateMetadataFile, 'utf8'));
+    templateMetadata.contentSha256 = sha256(fs.readFileSync(templateSummary));
+    templateMetadata.markdownSha256['summary.md'] = templateMetadata.contentSha256;
+    fs.writeFileSync(templateMetadataFile, `${JSON.stringify(templateMetadata, null, 2)}\n`, 'utf8');
+    execFileSync(bundledGit, ['-c', 'user.name=Star Owner Test', '-c', 'user.email=test@example.invalid', 'add', '--all'], { cwd: templateRoot, stdio: 'pipe' });
+    execFileSync(bundledGit, ['-c', 'user.name=Star Owner Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'docs: update own contribution'], { cwd: templateRoot, stdio: 'pipe' });
+    const eventFile = path.join(root, 'pull-request-event.json');
+    fs.writeFileSync(eventFile, `${JSON.stringify({ pull_request: { base: { sha: baseSha }, user: { id: 123456 } }, sender: { id: 999999 } })}\n`, 'utf8');
+    const validatorEnv = { ...process.env, PATH: `${path.dirname(bundledGit)}${path.delimiter}${process.env.PATH || ''}`, GITHUB_EVENT_NAME: 'pull_request', GITHUB_EVENT_PATH: eventFile };
+    execFileSync(process.execPath, [path.join(templateRoot, 'scripts', 'validate-shared-docs.mjs')], { cwd: templateRoot, env: validatorEnv, stdio: 'pipe' });
+    fs.writeFileSync(eventFile, `${JSON.stringify({ pull_request: { base: { sha: baseSha }, user: { id: 888888 } }, sender: { id: 123456 } })}\n`, 'utf8');
+    assert.throws(() => execFileSync(process.execPath, [path.join(templateRoot, 'scripts', 'validate-shared-docs.mjs')], { cwd: templateRoot, env: validatorEnv, stdio: 'pipe' }), '共享仓库校验错误信任 sender 或 workflow actor 身份');
+    fs.rmSync(eventFile, { force: true });
+  }
   const trunkTemplate = sharedRepositoryTemplate({ owner: 'repo-owner', name: 'trunk-shared', branch: 'trunk' });
   const trunkWorkflow = trunkTemplate.find((file) => file.relative === '.github/workflows/validate-shared-docs.yml')?.buffer.toString('utf8') || '';
   assert(trunkWorkflow.includes('branches: ["trunk"]'), '一键建仓模板没有使用仓库实际默认分支');
+  const validatorTemplate = trunkTemplate.find((file) => file.relative === 'scripts/validate-shared-docs.mjs')?.buffer.toString('utf8') || '';
+  const catalogWorkflow = trunkTemplate.find((file) => file.relative === '.github/workflows/build-catalog.yml')?.buffer.toString('utf8') || '';
+  const catalogScript = trunkTemplate.find((file) => file.relative === 'scripts/build-catalog.mjs')?.buffer.toString('utf8') || '';
+  assert(validatorTemplate.includes('event.pull_request?.user?.id') && !validatorTemplate.includes('GITHUB_ACTOR_ID'), '共享校验没有使用 Pull Request 真实作者 ID');
+  assert(catalogWorkflow.includes('concurrency:') && catalogWorkflow.includes('for attempt in 1 2 3'), '共享目录 Action 缺少并发串行或推送重试');
+  assert(catalogScript.includes('totalBytes:') && catalogScript.includes('fileCount:'), '共享目录没有提供挂载容量预检字段');
 
   const privateStore = await Store.open(path.join(root, 'private-repository.sqlite'));
   let privateTreeAuthorized = false;
@@ -495,6 +523,49 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   assert(!rollbackStore.listCollections().some((item) => item.collectionKind === 'shared'), '新建共享收藏夹在挂载失败后仍残留');
   fs.rmSync(rollbackRoot, { recursive: true, force: true });
 
+  const existingRollbackRoot = path.join(__dirname, '..', '.cache', 'shared-existing-mount-rollback-test');
+  fs.rmSync(existingRollbackRoot, { recursive: true, force: true });
+  const existingRollbackStore = await Store.open(path.join(existingRollbackRoot, 'test.sqlite'));
+  const existingRollbackWorkspace = existingRollbackStore.addWorkspace({ name: '已有挂载回滚测试', root: path.join(existingRollbackRoot, 'workspace') });
+  existingRollbackStore.setDefaultWorkspace(existingRollbackWorkspace.id);
+  const transactionPrefix = '123456/bilibili/col-transaction';
+  const transactionRootA = `${transactionPrefix}/doc-a`;
+  const transactionRootB = `${transactionPrefix}/doc-b`;
+  const transactionSummaryV1 = Buffer.from('# transaction v1\n', 'utf8');
+  const transactionFiles = new Map([
+    [`${transactionRootA}/${DOCUMENT_META_FILE}`, Buffer.from(`${JSON.stringify({ ...remoteMeta, documentId: 'doc-a', title: '事务文档 A', contentSha256: sha256(transactionSummaryV1), assetSha256: {}, updatedAt: '2026-08-01T00:00:00.000Z' })}\n`, 'utf8')],
+    [`${transactionRootA}/summary.md`, transactionSummaryV1]
+  ]);
+  const transactionRequest = async (endpoint) => {
+    if (endpoint === '/repos/Fenglin-Maple/Blibili-Markdowns') return { name: 'Blibili-Markdowns', size: 1024, default_branch: 'main', private: false, owner: { login: 'Fenglin-Maple', id: 124229028 } };
+    if (endpoint.includes('/contents/catalog.json')) return { content: buildCatalog(transactionFiles).toString('base64'), encoding: 'base64', sha: 'transaction-catalog' };
+    const error = new Error(`not found: ${endpoint}`); error.status = 404; throw error;
+  };
+  const transactionManager = new SharedKnowledgeManager({
+    store: existingRollbackStore,
+    encryptSecret: (value) => ({ mode: 'test', value }),
+    decryptSecret: (secret) => secret.value,
+    request: transactionRequest,
+    gitRuntime: createSnapshotRuntime(transactionFiles, () => {})
+  });
+  const transactionMount = await transactionManager.mount({ remotePrefix: transactionPrefix, collectionName: '已有挂载回滚' });
+  const transactionTaskBefore = existingRollbackStore.listTasks({ collectionId: transactionMount.collectionId }).find((item) => item.sharedRemotePath === `${transactionRootA}/${DOCUMENT_META_FILE}`);
+  const mountBefore = existingRollbackStore.get('sharedMounts', transactionMount.id);
+  assert(transactionTaskBefore && fs.readFileSync(transactionTaskBefore.outputMarkdown, 'utf8').includes('v1'), '已有挂载回滚基线没有建立');
+  const transactionSummaryV2 = Buffer.from('# transaction v2\n', 'utf8');
+  transactionFiles.set(`${transactionRootA}/${DOCUMENT_META_FILE}`, Buffer.from(`${JSON.stringify({ ...remoteMeta, documentId: 'doc-a', title: '事务文档 A', contentSha256: sha256(transactionSummaryV2), assetSha256: {}, updatedAt: '2026-08-04T00:00:00.000Z' })}\n`, 'utf8'));
+  transactionFiles.set(`${transactionRootA}/summary.md`, transactionSummaryV2);
+  transactionFiles.set(`${transactionRootB}/${DOCUMENT_META_FILE}`, Buffer.from(`${JSON.stringify({ ...remoteMeta, documentId: 'doc-b', title: '事务文档 B', contentSha256: sha256(Buffer.from('# missing\n')), assetSha256: {}, updatedAt: '2026-08-03T00:00:00.000Z' })}\n`, 'utf8'));
+  await transactionManager.remoteCatalog();
+  await assert.rejects(() => transactionManager.mount({ remotePrefix: transactionPrefix, collectionId: transactionMount.collectionId }), /缺少 Markdown/);
+  const mountAfter = existingRollbackStore.get('sharedMounts', transactionMount.id);
+  const transactionTasksAfter = existingRollbackStore.listTasks({ collectionId: transactionMount.collectionId }).filter((item) => item.sourceType === 'shared-bilibili');
+  assert.deepStrictEqual(mountAfter.remotePaths, mountBefore.remotePaths, '已有挂载失败后 remotePaths 没有恢复');
+  assert.strictEqual(transactionTasksAfter.length, 1, '已有挂载失败后残留了半完成文档任务');
+  assert(fs.readFileSync(transactionTasksAfter[0].outputMarkdown, 'utf8').includes('v1'), '已有文档在后续批量挂载失败后没有恢复旧版本');
+  assert(!fs.readdirSync(path.dirname(transactionTasksAfter[0].artifactDir)).some((name) => name.includes('.rollback-') || name.includes('.incoming-')), '共享挂载回滚后残留事务目录');
+  fs.rmSync(existingRollbackRoot, { recursive: true, force: true });
+
   const migrationRoot = path.join(__dirname, '..', '.cache', 'shared-mount-migration-test');
   fs.rmSync(migrationRoot, { recursive: true, force: true });
   const migrationStore = await Store.open(path.join(migrationRoot, 'test.sqlite'));
@@ -531,6 +602,8 @@ function buildCatalog(files) {
   for (const [metadataPath, body] of files.entries()) {
     if (!metadataPath.endsWith(`/${DOCUMENT_META_FILE}`)) continue;
     const metadata = JSON.parse(body.toString('utf8'));
+    const documentRoot = metadataPath.slice(0, -DOCUMENT_META_FILE.length);
+    const documentFiles = [...files.entries()].filter(([relative]) => relative.startsWith(documentRoot));
     documents.push({
       documentId: String(metadata.documentId || ''),
       documentType: String(metadata.documentType || 'single-video'),
@@ -542,6 +615,8 @@ function buildCatalog(files) {
       entryMarkdown: String(metadata.entryMarkdown || ''),
       contentSha256: String(metadata.contentSha256 || ''),
       contributorGithubId: String(metadata.contributorGithubId || metadataPath.split('/')[0] || ''),
+      totalBytes: documentFiles.reduce((sum, [, value]) => sum + value.length, 0),
+      fileCount: documentFiles.length,
       updatedAt: String(metadata.updatedAt || metadata.uploadedAt || ''),
       uploadedAt: String(metadata.uploadedAt || ''),
       metadataPath,

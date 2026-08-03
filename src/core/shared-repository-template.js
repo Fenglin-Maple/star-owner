@@ -15,6 +15,8 @@ function sharedRepositoryTemplate({ owner, name, branch = 'main' }) {
 3. Pull Request 会由 GitHub Actions 检查目录结构、文件类型和必要元数据。
 4. 合并到 \`${defaultBranch}\` 后，GitHub Actions 会更新 \`catalog.json\`。
 
+根目录的 \`_star-owner-repository.json\` 是应用识别共享仓库的规范标记，不应删除或改为其它仓库身份。\`catalog.json\` 由 GitHub Actions 串行维护，并包含挂载前容量检查需要的文件数量与总字节数字段。
+
 ## 目录结构
 
 \`<github-numeric-id>/<bilibili|single|multipart>/col-<source-hash>/doc-<stable-id>/\`
@@ -94,21 +96,38 @@ permissions:
 jobs:
   catalog:
     runs-on: ubuntu-latest
+    concurrency:
+      group: star-owner-catalog-${owner}-${name}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 20
       - run: node scripts/validate-shared-docs.mjs
       - run: node scripts/build-catalog.mjs
-      - name: Commit catalog
+      - name: Commit catalog with retry
         run: |
-          if git diff --quiet -- catalog.json; then exit 0; fi
           git config user.name "star-owner-catalog[bot]"
           git config user.email "star-owner-catalog[bot]@users.noreply.github.com"
-          git add catalog.json
-          git commit -m "chore: rebuild shared catalog"
-          git push
+          for attempt in 1 2 3; do
+            git fetch origin ${JSON.stringify(defaultBranch)}
+            git reset --hard origin/${JSON.stringify(defaultBranch)}
+            node scripts/validate-shared-docs.mjs
+            node scripts/build-catalog.mjs
+            if git diff --quiet -- catalog.json; then
+              echo "catalog.json is already current"
+              exit 0
+            fi
+            git add catalog.json
+            git commit -m "chore: rebuild shared catalog"
+            if git push origin HEAD:${JSON.stringify(defaultBranch)}; then exit 0; fi
+            echo "catalog push attempt \${attempt} lost a race; retrying"
+          done
+          echo "catalog push failed after retries"
+          exit 1
 `),
     textFile('scripts/validate-shared-docs.mjs', VALIDATOR_SCRIPT),
     textFile('scripts/build-catalog.mjs', CATALOG_SCRIPT),
@@ -160,7 +179,8 @@ function pullRequestChanges() {
   try {
     const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
     const baseSha = String(event.pull_request?.base?.sha || '');
-    const actorId = String(process.env.GITHUB_ACTOR_ID || event.sender?.id || '');
+    const actorId = String(event.pull_request?.user?.id || '');
+    if (!/^\\d+$/.test(actorId)) throw new Error('Pull Request 事件缺少真实提交者 GitHub 数字 ID');
     if (!/^[a-f0-9]{40}$/i.test(baseSha)) throw new Error('缺少 Pull Request base SHA');
     const output = execFileSync('git', ['diff', '--name-only', baseSha + '...HEAD'], { cwd: root, encoding: 'utf8' });
     return { files: output.split(/\\r?\\n/).map((item) => item.trim()).filter(Boolean), actorId };
@@ -293,6 +313,7 @@ const documents = walk(root).map((file) => {
     userName: String(metadata.userName || ''), bilibiliUid: String(metadata.bilibiliUid || ''), remoteCollectionId: String(metadata.remoteCollectionId || ''),
     sourceCollectionKind: String(metadata.sourceCollectionKind || ''), contributorGithubId: String(metadata.contributorGithubId || metadataPath.split('/')[0] || ''),
     contributorGithubLogin: String(metadata.contributorGithubLogin || ''), entryMarkdown: String(metadata.entryMarkdown || ''),
+    totalBytes: Number(metadata.totalBytes || 0), fileCount: Array.isArray(metadata.files) ? metadata.files.length : 0,
     contentSha256: String(metadata.contentSha256 || ''), completedAt: String(metadata.completedAt || ''), uploadedAt: String(metadata.uploadedAt || ''),
     updatedAt: String(metadata.updatedAt || metadata.uploadedAt || ''), metadataPath,
     documentRoot: metadataPath.slice(0, -metadataName.length)

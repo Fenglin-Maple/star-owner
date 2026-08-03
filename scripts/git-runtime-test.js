@@ -2,7 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { GitRuntime, gitAuthorizationHeader, normalizeGitAuthor, normalizeGitRemote, parseCredential } = require('../src/core/git-runtime');
+const { GitRuntime, gitAuthorizationHeader, normalizeGitAuthor, normalizeGitRemote, normalizeSparsePaths, parseCredential } = require('../src/core/git-runtime');
 
 (async () => {
   const root = path.resolve(__dirname, '..');
@@ -50,22 +50,36 @@ const { GitRuntime, gitAuthorizationHeader, normalizeGitAuthor, normalizeGitRemo
     const originalAssertAvailable = runtime.assertAvailable.bind(runtime);
     let clonedCheckout = '';
     const checkoutProgress = [];
+    const checkoutCalls = [];
     runtime.assertAvailable = async () => ({ available: true });
     runtime.run = async (args) => {
-      assert(args.includes('core.longpaths=true'), '只读共享仓库快照没有开启 Windows 长路径支持');
-      clonedCheckout = args.at(-1);
-      fs.mkdirSync(path.join(clonedCheckout, '123', 'bilibili', 'col-test', 'doc-test'), { recursive: true });
-      fs.writeFileSync(path.join(clonedCheckout, '123', 'bilibili', 'col-test', 'doc-test', 'summary.md'), '# snapshot\n', 'utf8');
+      checkoutCalls.push(args);
+      if (args.includes('clone')) {
+        assert(args.includes('core.longpaths=true'), '只读共享仓库快照没有开启 Windows 长路径支持');
+        clonedCheckout = args.at(-1);
+        fs.mkdirSync(path.join(clonedCheckout, '123', 'bilibili', 'col-test', 'doc-test'), { recursive: true });
+        fs.writeFileSync(path.join(clonedCheckout, '123', 'bilibili', 'col-test', 'doc-test', 'summary.md'), '# snapshot\n', 'utf8');
+      }
       return { stdout: '', stderr: '' };
     };
-    const snapshotValue = await runtime.withReadOnlyCheckout({ repository: { owner: 'owner', name: 'repository', branch: 'main' }, onProgress: (event) => checkoutProgress.push(event) }, async ({ root: checkout }) => {
+    const sparsePath = '123/bilibili/col-test/doc-test';
+    const snapshotValue = await runtime.withReadOnlyCheckout({ repository: { owner: 'owner', name: 'repository', branch: 'main' }, paths: [sparsePath], expectedBytes: 1024, onProgress: (event) => checkoutProgress.push(event) }, async ({ root: checkout }) => {
       assert(fs.existsSync(path.join(checkout, '123', 'bilibili', 'col-test', 'doc-test', 'summary.md')), '只读 Git 快照回调无法读取下载文件');
       return 'snapshot-ok';
     });
     assert.strictEqual(snapshotValue, 'snapshot-ok', '只读 Git 快照没有返回回调结果');
     assert(checkoutProgress.some((event) => event.stage === 'git-download') && checkoutProgress.some((event) => event.stage === 'git-ready'), '只读 Git 快照没有报告下载进度');
+    const cloneCall = checkoutCalls.find((args) => args.includes('clone'));
+    assert(cloneCall.includes('--filter=blob:none') && cloneCall.includes('--sparse') && cloneCall.includes('--no-checkout'), '只读共享仓库没有使用 partial/sparse clone');
+    assert(checkoutCalls.some((args) => args[0] === 'sparse-checkout' && args[1] === 'set' && args.includes(sparsePath)), '只读共享仓库没有限制到选中文档目录');
     assert(clonedCheckout && !fs.existsSync(clonedCheckout), '只读 Git 快照完成后没有清理临时目录');
-    runtime.run = async (args) => { clonedCheckout = args.at(-1); throw new Error('simulated clone failure'); };
+    assert.deepStrictEqual(normalizeSparsePaths([sparsePath, sparsePath]), [sparsePath], '稀疏下载路径没有去重');
+    await assert.rejects(() => runtime.withReadOnlyCheckout({ repository: { owner: 'owner', name: 'repository', branch: 'main' }, paths: [sparsePath], expectedBytes: 3 * 1024 * 1024 * 1024 }, async () => {}), (error) => error.code === 'SHARED_GIT_CAPACITY_SELECTION');
+    runtime.run = async (args) => {
+      if (!args.includes('clone')) return { stdout: '', stderr: '' };
+      clonedCheckout = args.at(-1);
+      throw new Error('simulated clone failure');
+    };
     await assert.rejects(() => runtime.withReadOnlyCheckout({ repository: { owner: 'owner', name: 'repository', branch: 'main' } }, async () => {}), (error) => error.code === 'SHARED_GIT_CHECKOUT_FAILED');
     assert(clonedCheckout && !fs.existsSync(clonedCheckout), '只读 Git 快照失败后没有清理临时目录');
     runtime.run = originalRun;

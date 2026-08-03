@@ -18,6 +18,9 @@ const MAX_SHARED_PR_BYTES = 1024 * 1024 * 1024;
 const MAX_REMOTE_METADATA_BYTES = 512 * 1024;
 const MAX_REMOTE_CATALOG_BYTES = 32 * 1024 * 1024;
 const MAX_REMOTE_CATALOG_DOCUMENTS = 100000;
+const MAX_SHARED_MOUNT_DOCUMENTS = 2000;
+const MAX_SHARED_MOUNT_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_SHARED_REPOSITORY_BYTES = 10 * 1024 * 1024 * 1024;
 const REPOSITORY_MARKER_FILE = '_star-owner-repository.json';
 const REPOSITORY_SCHEMA_VERSION = 1;
 const REQUIRED_REPOSITORY_CAPABILITIES = Object.freeze(['bilibili-summary', 'single-video-summary', 'multipart-summary', 'catalog-v1']);
@@ -277,6 +280,8 @@ class SharedKnowledgeManager {
         path: metadataPath,
         metadataPath,
         remoteSha: String(entry.remoteSha || entry.metadataSha || ''),
+        totalBytes: Number(entry.totalBytes || 0),
+        fileCount: Number(entry.fileCount || 0),
         updatedAt: entry.updatedAt || entry.uploadedAt || ''
       };
       validateRemoteMetadata(document, metadataPath);
@@ -485,91 +490,75 @@ class SharedKnowledgeManager {
     const knownCollectionIds = new Set(this.store.listCollections().map((item) => String(item.id)));
     const collection = this.requireOrCreateCollection(input.collectionId, input.collectionName || defaultMountName(prefix, documents));
     const createdCollection = !knownCollectionIds.has(String(collection.id));
-    this.clearSharedExclusions(collection.id, documents.map((item) => item.path), repository);
-    const groups = groupRemoteCollectionDocuments(documents);
-    const mounts = [];
-    const createdMounts = [];
-    const now = new Date().toISOString();
-    for (const group of groups) {
-      const existing = this.store.list('sharedMounts').find((item) => String(item.collectionId) === String(collection.id)
-        && sameRepository(item.repository || DEFAULT_REPOSITORY, repository)
-        && mountRemoteCollectionPrefix(item) === group.prefix);
-      const coversWholeCollection = Boolean(prefix && remotePrefixCovers(prefix, group.prefix));
-      const mount = existing || {
-        id: `mount:${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`,
-        collectionId: collection.id,
-        collectionName: collection.name,
-        scope: coversWholeCollection ? 'collection' : 'documents',
-        remotePrefix: group.prefix,
-        remotePaths: [],
-        repository: { ...repository },
-        createdAt: now,
-        updatedAt: now
-      };
-      if (!existing) createdMounts.push(mount);
-      mount.collectionName = collection.name;
-      mount.scope = mount.scope === 'collection' || coversWholeCollection ? 'collection' : 'documents';
-      mount.remotePrefix = group.prefix;
-      mount.remotePaths = [...new Set([...(mount.remotePaths || []), ...group.documents.map((item) => item.path)].map(String))];
-      Object.assign(mount, remoteMountDescription(group.documents[0], group.prefix));
-      mount.repository = { ...repository };
-      mount.updatedAt = existing ? (mount.updatedAt || now) : now;
-      this.store.set('sharedMounts', mount.id, mount);
-      mounts.push(mount);
-    }
-    this.store.commit();
-    let results;
+    const transaction = new SharedMountTransaction(this.store);
+    transaction.captureCollection(collection, { existed: !createdCollection });
     try {
-      results = await this.syncMountBatchInternal(mounts, catalog, { progressStart: 0.26, progressEnd: 0.96 });
-    } catch (error) {
-      for (const mount of [...createdMounts].reverse()) this.rollbackNewMount(mount, collection, false);
-      if (createdCollection && !this.store.listTasks({ collectionId: collection.id }).length) {
-        removePathInside(collection.workspaceRoot || path.dirname(collection.collectionRoot), collection.collectionRoot);
-        this.store.delete('collections', collection.id);
-        this.store.save();
+      this.clearSharedExclusions(collection.id, documents.map((item) => item.path), repository);
+      const groups = groupRemoteCollectionDocuments(documents);
+      const mounts = [];
+      const now = new Date().toISOString();
+      for (const group of groups) {
+        const existing = this.store.list('sharedMounts').find((item) => String(item.collectionId) === String(collection.id)
+          && sameRepository(item.repository || DEFAULT_REPOSITORY, repository)
+          && mountRemoteCollectionPrefix(item) === group.prefix);
+        const coversWholeCollection = Boolean(prefix && remotePrefixCovers(prefix, group.prefix));
+        const mount = existing || {
+          id: `mount:${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`,
+          collectionId: collection.id,
+          collectionName: collection.name,
+          scope: coversWholeCollection ? 'collection' : 'documents',
+          remotePrefix: group.prefix,
+          remotePaths: [],
+          repository: { ...repository },
+          createdAt: now,
+          updatedAt: now
+        };
+        mount.collectionName = collection.name;
+        mount.scope = mount.scope === 'collection' || coversWholeCollection ? 'collection' : 'documents';
+        mount.remotePrefix = group.prefix;
+        mount.remotePaths = [...new Set([...(mount.remotePaths || []), ...group.documents.map((item) => item.path)].map(String))];
+        Object.assign(mount, remoteMountDescription(group.documents[0], group.prefix));
+        mount.repository = { ...repository };
+        mount.updatedAt = existing ? (mount.updatedAt || now) : now;
+        this.store.set('sharedMounts', mount.id, mount);
+        mounts.push(mount);
       }
+      const results = await this.syncMountBatchInternal(mounts, catalog, { transaction, progressStart: 0.26, progressEnd: 0.96 });
+      transaction.commit();
+      const output = results.map((result) => publicMount(this.store.get('sharedMounts', result.id) || result));
+      const primary = output[0] || publicMount(mounts[0]);
+      this.emitState('shared-mount-created', { mountId: primary.id, mountIds: output.map((item) => item.id), collectionId: collection.id });
+      return {
+        ...primary,
+        mounts: output,
+        mountCount: output.length,
+        remoteDocumentCount: output.reduce((sum, item) => sum + Number(item.remoteDocumentCount || 0), 0),
+        unchanged: results.every((result) => result.unchanged)
+      };
+    } catch (error) {
+      appendRollbackFailure(error, () => transaction.rollback());
       throw error;
     }
-    const output = results.map((result) => publicMount(this.store.get('sharedMounts', result.id) || result));
-    const primary = output[0] || publicMount(mounts[0]);
-    this.emitState('shared-mount-created', { mountId: primary.id, mountIds: output.map((item) => item.id), collectionId: collection.id });
-    return {
-      ...primary,
-      mounts: output,
-      mountCount: output.length,
-      remoteDocumentCount: output.reduce((sum, item) => sum + Number(item.remoteDocumentCount || 0), 0),
-      unchanged: results.every((result) => result.unchanged)
-    };
-  }
-
-  rollbackNewMount(mount, collection, createdCollection) {
-    const tasks = this.store.listTasks({ collectionId: mount.collectionId }).filter((task) => {
-      const mountIds = Array.isArray(task.sharedMountIds) ? task.sharedMountIds : [task.sharedMountId];
-      return mountIds.map(String).includes(String(mount.id));
-    });
-    for (const task of tasks) {
-      const remaining = (Array.isArray(task.sharedMountIds) ? task.sharedMountIds : [task.sharedMountId])
-        .filter((id) => id && String(id) !== String(mount.id));
-      if (remaining.length) {
-        this.store.set('tasks', task.id, { ...task, sharedMountIds: remaining, sharedMountId: remaining.at(-1), updatedAt: new Date().toISOString() });
-        continue;
-      }
-      if (task.artifactDir) removePathInside(collection.collectionRoot, task.artifactDir);
-      this.store.delete('tasks', task.id);
-      this.store.delete('videos', task.id);
-    }
-    this.store.delete('sharedMounts', mount.id);
-    if (createdCollection && !this.store.listTasks({ collectionId: collection.id }).length) {
-      removePathInside(collection.workspaceRoot || path.dirname(collection.collectionRoot), collection.collectionRoot);
-      this.store.delete('collections', collection.id);
-    }
-    this.store.save();
   }
 
   async syncMount(mountId, catalogInput = null) {
-    return this.runOperation({ type: 'mount-sync', message: '正在同步共享挂载...' }, async () => (
-      this.syncMountInternal(mountId, catalogInput, { progressStart: 0.03, progressEnd: 0.97 })
-    ));
+    return this.runOperation({ type: 'mount-sync', message: '正在同步共享挂载...' }, async () => {
+      const mount = this.store.get('sharedMounts', String(mountId || ''));
+      if (!mount) throw new Error('共享挂载不存在。');
+      const repository = normalizeRepository(mount.repository || DEFAULT_REPOSITORY);
+      const catalog = catalogInput || await this.readRemoteCatalog(repository, { force: true, progressStart: 0.03, progressEnd: 0.28 });
+      const transaction = new SharedMountTransaction(this.store);
+      transaction.captureCollection(this.store.getCollectionById(mount.collectionId), { existed: true });
+      try {
+        const [result] = await this.syncMountBatchInternal([mount], catalog, { transaction, progressStart: 0.3, progressEnd: 0.97 });
+        transaction.commit();
+        this.emitState('shared-mount-synced', { mountId: result.id, collectionId: result.collectionId, unchanged: result.unchanged });
+        return result;
+      } catch (error) {
+        appendRollbackFailure(error, () => transaction.rollback());
+        throw error;
+      }
+    });
   }
 
   async syncMounts(mountIds = []) {
@@ -591,13 +580,22 @@ class SharedKnowledgeManager {
         const end = 0.03 + ((index + 1) / Math.max(1, repositories.length)) * 0.25;
         catalogs.set(item.key, await this.readRemoteCatalog(item.repository, { force: true, progressStart: start, progressEnd: end }));
       }
+      const transaction = new SharedMountTransaction(this.store);
+      for (const mount of mounts) transaction.captureCollection(this.store.getCollectionById(mount.collectionId), { existed: true });
       const output = [];
-      for (let index = 0; index < repositories.length; index += 1) {
-        const item = repositories[index];
-        const repositoryMounts = mounts.filter((mount) => repositoryIdentity(mount.repository || DEFAULT_REPOSITORY) === item.key);
-        const start = 0.3 + (index / Math.max(1, repositories.length)) * 0.66;
-        const end = 0.3 + ((index + 1) / Math.max(1, repositories.length)) * 0.66;
-        output.push(...await this.syncMountBatchInternal(repositoryMounts, catalogs.get(item.key), { progressStart: start, progressEnd: end }));
+      try {
+        for (let index = 0; index < repositories.length; index += 1) {
+          const item = repositories[index];
+          const repositoryMounts = mounts.filter((mount) => repositoryIdentity(mount.repository || DEFAULT_REPOSITORY) === item.key);
+          const start = 0.3 + (index / Math.max(1, repositories.length)) * 0.66;
+          const end = 0.3 + ((index + 1) / Math.max(1, repositories.length)) * 0.66;
+          output.push(...await this.syncMountBatchInternal(repositoryMounts, catalogs.get(item.key), { transaction, progressStart: start, progressEnd: end }));
+        }
+        transaction.commit();
+        for (const result of output) this.emitState('shared-mount-synced', { mountId: result.id, collectionId: result.collectionId, unchanged: result.unchanged });
+      } catch (error) {
+        appendRollbackFailure(error, () => transaction.rollback());
+        throw error;
       }
       return {
         synced: output.length,
@@ -629,12 +627,15 @@ class SharedKnowledgeManager {
           total: mounts.length,
           message: `正在同步远程收藏夹 ${index + 1} / ${mounts.length}：${mount.remoteCollectionName || mount.collectionName || mount.id}`
         }, true);
-        output.push(await this.syncMountInternal(mount.id, catalog, { ...transport, progressStart: mountStart, progressEnd: mountEnd }));
+        output.push(await this.syncMountInternal(mount.id, catalog, { ...progressOptions, ...transport, progressStart: mountStart, progressEnd: mountEnd }));
       }
       return output;
     };
-    const requiresDownload = mounts.some((mount) => this.mountPendingDocuments(mount, catalog).length > 0);
+    const pendingDocuments = uniqueRemoteDocuments(mounts.flatMap((mount) => this.mountPendingDocuments(mount, catalog)));
+    const requiresDownload = pendingDocuments.length > 0;
     if (!requiresDownload) return processMounts();
+    const checkoutPlan = await this.prepareMountCheckout(pendingDocuments, repository);
+    this.assertMountDestinationCapacity(mounts, catalog, checkoutPlan);
     const canUseCheckout = typeof this.gitRuntime?.withReadOnlyCheckout === 'function'
       && (!this.requestOverride || this.gitRuntime.allowCheckoutWithRequestOverride === true);
     if (canUseCheckout) {
@@ -642,6 +643,9 @@ class SharedKnowledgeManager {
         return await this.gitRuntime.withReadOnlyCheckout({
           repository,
           token: this.optionalAuthToken(),
+          paths: checkoutPlan.paths,
+          expectedBytes: checkoutPlan.expectedBytes,
+          repositorySizeBytes: checkoutPlan.repositorySizeBytes,
           onProgress: (event) => this.reportOperation({
             stage: event.stage || 'git-download',
             progress: start + Number(event.progress || 0) * (end - start) * 0.2,
@@ -649,14 +653,104 @@ class SharedKnowledgeManager {
             total: mounts.length,
             message: event.message || '正在一次性下载共享仓库快照...'
           }, true)
-        }, async ({ root }) => processMounts({ checkoutRoot: root }));
+        }, async ({ root }) => {
+          const verifiedPlan = this.verifyMountCheckout(root, pendingDocuments, checkoutPlan);
+          this.assertMountDestinationCapacity(mounts, catalog, verifiedPlan);
+          return processMounts({ checkoutRoot: root });
+        });
       } catch (error) {
         if (isAbortError(error) || error?.code !== 'SHARED_GIT_CHECKOUT_FAILED') throw error;
         this.reportOperation({ stage: 'mount-api-fallback', progress: start + (end - start) * 0.08, message: `内置 Git 快照不可用，正在切换 GitHub API 兼容下载：${String(error.message || error).slice(0, 180)}` }, true);
       }
     }
-    const remoteTree = await this.readRepositoryTree(repository, this.optionalAuthToken());
+    const remoteTree = checkoutPlan.remoteTree || await this.readRepositoryTree(repository, this.optionalAuthToken());
     return processMounts({ remoteTree });
+  }
+
+  async prepareMountCheckout(documents = [], repositoryInput = this.repository) {
+    const repository = normalizeRepository(repositoryInput);
+    const selected = uniqueRemoteDocuments(documents);
+    if (!selected.length) return { paths: [], expectedBytes: 0, repositorySizeBytes: 0, remoteTree: null, bytesByPath: {} };
+    if (selected.length > MAX_SHARED_MOUNT_DOCUMENTS) {
+      throw new Error(`单次最多挂载或同步 ${MAX_SHARED_MOUNT_DOCUMENTS} 篇共享文档，请缩小选择范围后重试。`);
+    }
+    let remoteTree = null;
+    const unknown = selected.filter((document) => !Number.isFinite(Number(document.totalBytes)) || Number(document.totalBytes) <= 0);
+    if (unknown.length) remoteTree = await this.readRepositoryTree(repository, this.optionalAuthToken());
+    let expectedBytes = 0;
+    const bytesByPath = {};
+    for (const document of selected) {
+      const remoteRoot = documentRootForRemotePath(document.path);
+      const declaredFiles = Number(document.fileCount || 0);
+      if (declaredFiles > MAX_SHARED_DOCUMENT_FILES) throw new Error(`远程共享文档文件数量超过 ${MAX_SHARED_DOCUMENT_FILES} 个：${document.title || document.path}`);
+      let bytes = Number(document.totalBytes || 0);
+      if (!(bytes > 0) && remoteTree) {
+        const files = (remoteTree.tree || []).filter((entry) => entry.type === 'blob' && (entry.path === document.path || entry.path.startsWith(`${remoteRoot}/`)));
+        bytes = validateRemoteTree(files, remoteRoot).totalBytes;
+      }
+      if (!Number.isFinite(bytes) || bytes < 0 || bytes > MAX_SHARED_DOCUMENT_BYTES) {
+        throw new Error(`远程共享文档大小无效或超过 ${formatMiB(MAX_SHARED_DOCUMENT_BYTES)}：${document.title || document.path}`);
+      }
+      expectedBytes += bytes;
+      bytesByPath[String(document.path)] = bytes;
+      if (expectedBytes > MAX_SHARED_MOUNT_BYTES) {
+        throw new Error(`本次挂载或同步内容超过 ${formatMiB(MAX_SHARED_MOUNT_BYTES)}，请分批选择远程收藏夹或文档。`);
+      }
+    }
+    let repositorySizeBytes = 0;
+    try {
+      const info = await this.githubRequest(`/repos/${repository.owner}/${repository.name}`, { token: this.optionalAuthToken() });
+      repositorySizeBytes = Math.max(0, Number(info?.size || 0)) * 1024;
+      if (repositorySizeBytes > MAX_SHARED_REPOSITORY_BYTES) {
+        const error = new Error(`共享仓库总体积超过 ${formatMiB(MAX_SHARED_REPOSITORY_BYTES)} 安全上限，已停止下载。请让仓库维护者清理历史大文件或拆分仓库。`);
+        error.code = 'SHARED_REPOSITORY_TOO_LARGE';
+        throw error;
+      }
+    } catch (error) {
+      if (error?.code === 'SHARED_REPOSITORY_TOO_LARGE') throw error;
+    }
+    return {
+      paths: selected.map((document) => documentRootForRemotePath(document.path)),
+      expectedBytes,
+      repositorySizeBytes,
+      remoteTree,
+      bytesByPath
+    };
+  }
+
+  assertMountDestinationCapacity(mounts, catalog, checkoutPlan) {
+    const byCollection = new Map();
+    for (const mount of mounts) {
+      if (!byCollection.has(String(mount.collectionId))) byCollection.set(String(mount.collectionId), new Set());
+      for (const document of this.mountPendingDocuments(mount, catalog)) byCollection.get(String(mount.collectionId)).add(String(document.path));
+    }
+    for (const [collectionId, remotePaths] of byCollection) {
+      const collection = this.store.getCollectionById(collectionId);
+      if (!collection) throw new Error('共享收藏夹不存在，无法检查挂载磁盘空间。');
+      const expected = [...remotePaths].reduce((sum, remotePath) => sum + Number(checkoutPlan.bytesByPath?.[remotePath] || 0), 0);
+      const probe = fs.existsSync(collection.collectionRoot) ? collection.collectionRoot : collection.workspaceRoot;
+      const available = availableDiskBytes(probe);
+      const required = expected + 256 * 1024 * 1024;
+      if (available > 0 && available < required) {
+        const error = new Error(`共享收藏夹所在磁盘空间不足：至少需要 ${formatMiB(required)}，当前可用约 ${formatMiB(available)}。请清理空间或迁移 Workspace 后重试。`);
+        error.code = 'SHARED_MOUNT_DISK_FULL';
+        throw error;
+      }
+    }
+  }
+
+  verifyMountCheckout(checkoutRoot, documents, checkoutPlan) {
+    const bytesByPath = {};
+    let expectedBytes = 0;
+    for (const document of uniqueRemoteDocuments(documents)) {
+      const remoteRoot = documentRootForRemotePath(document.path);
+      const files = collectCheckoutDocumentFiles(checkoutRoot, remoteRoot);
+      const verified = validateRemoteTree(files.map((file) => ({ type: 'blob', path: `${remoteRoot}/${file.relative}`, size: file.size })), remoteRoot);
+      bytesByPath[String(document.path)] = verified.totalBytes;
+      expectedBytes += verified.totalBytes;
+      if (expectedBytes > MAX_SHARED_MOUNT_BYTES) throw new Error(`本次挂载或同步实际内容超过 ${formatMiB(MAX_SHARED_MOUNT_BYTES)}，已停止导入。`);
+    }
+    return { ...checkoutPlan, expectedBytes, bytesByPath };
   }
 
   mountDocuments(mount, catalog) {
@@ -730,8 +824,8 @@ class SharedKnowledgeManager {
     if (!unchanged || !mount.lastSyncedAt) mount.lastSyncedAt = now;
     mount.updatedAt = unchanged ? (mount.updatedAt || now) : now;
     this.store.set('sharedMounts', mount.id, mount);
-    this.store.commit();
-    this.emitState('shared-mount-synced', { mountId: mount.id, collectionId: mount.collectionId, unchanged });
+    if (!progressOptions.transaction) this.store.commit();
+    if (!progressOptions.transaction) this.emitState('shared-mount-synced', { mountId: mount.id, collectionId: mount.collectionId, unchanged });
     return { ...publicMount(mount), unchanged, downloaded: pendingImports.length, reused: reusedDocuments };
   }
 
@@ -803,7 +897,7 @@ class SharedKnowledgeManager {
           total: documents.length,
           message: `${checkoutRoot ? '正在从本地快照导入' : '正在下载并挂载'}文档 ${index + 1} / ${documents.length}：${document.title || document.bvid || document.documentId}`
         });
-        await this.importRemoteDocument(document, mount, { checkoutRoot, remoteTree });
+        await this.importRemoteDocument(document, mount, { checkoutRoot, remoteTree, transaction: progressOptions.transaction });
       }
     };
     if (progressOptions.checkoutRoot) {
@@ -818,9 +912,14 @@ class SharedKnowledgeManager {
       && (!this.requestOverride || this.gitRuntime.allowCheckoutWithRequestOverride === true);
     if (canUseCheckout) {
       try {
+        const checkoutPlan = await this.prepareMountCheckout(documents, repository);
+        this.assertMountDestinationCapacity([mount], { documents }, checkoutPlan);
         await this.gitRuntime.withReadOnlyCheckout({
           repository,
           token,
+          paths: checkoutPlan.paths,
+          expectedBytes: checkoutPlan.expectedBytes,
+          repositorySizeBytes: checkoutPlan.repositorySizeBytes,
           onProgress: (event) => this.reportOperation({
             stage: event.stage || 'git-download',
             progress: start + Number(event.progress || 0) * (end - start) * 0.24,
@@ -828,14 +927,20 @@ class SharedKnowledgeManager {
             total: documents.length,
             message: event.message || '正在一次性下载共享仓库快照...'
           }, true)
-        }, async ({ root }) => importFrom({ checkoutRoot: root, progressStart: start + (end - start) * 0.24 }));
+        }, async ({ root }) => {
+          const verifiedPlan = this.verifyMountCheckout(root, documents, checkoutPlan);
+          this.assertMountDestinationCapacity([mount], { documents }, verifiedPlan);
+          return importFrom({ checkoutRoot: root, progressStart: start + (end - start) * 0.24 });
+        });
         return;
       } catch (error) {
         if (isAbortError(error) || error?.code !== 'SHARED_GIT_CHECKOUT_FAILED') throw error;
         this.reportOperation({ stage: 'mount-api-fallback', progress: start + (end - start) * 0.08, message: `内置 Git 快照不可用，正在切换 GitHub API 兼容下载：${String(error.message || error).slice(0, 180)}` }, true);
       }
     }
-    const remoteTree = await this.readRepositoryTree(repository, token);
+    const checkoutPlan = await this.prepareMountCheckout(documents, repository);
+    this.assertMountDestinationCapacity([mount], { documents }, checkoutPlan);
+    const remoteTree = checkoutPlan.remoteTree || await this.readRepositoryTree(repository, token);
     await importFrom({ remoteTree, progressStart: start + (end - start) * 0.12 });
   }
 
@@ -931,7 +1036,7 @@ class SharedKnowledgeManager {
     return { task, documentId, remoteRoot, files, metadata, totalBytes: metadata.totalBytes };
   }
 
-  async importRemoteDocument(document, mount, { checkoutRoot = '', remoteTree = null } = {}) {
+  async importRemoteDocument(document, mount, { checkoutRoot = '', remoteTree = null, transaction = null } = {}) {
     if (document.invalid) return null;
     let metadata = document;
     const collection = this.store.getCollectionById(mount.collectionId);
@@ -1012,16 +1117,21 @@ class SharedKnowledgeManager {
       }
       const incomingMarkdownName = findMarkdown(temp, incomingMetadata.entryMarkdown || (isMultipartParent ? 'index.md' : 'summary.md'));
       if (!incomingMarkdownName) throw new Error(`远程文档缺少 Markdown：${document.path}`);
-      const previous = `${target}.previous-${Date.now().toString(36)}`;
-      if (fs.existsSync(target)) fs.renameSync(target, previous);
-      try {
-        fs.renameSync(temp, target);
-        fs.rmSync(previous, { recursive: true, force: true });
+      if (transaction) {
+        transaction.installDirectory(collection.collectionRoot, temp, target);
         installed = true;
-      } catch (error) {
-        fs.rmSync(target, { recursive: true, force: true });
-        if (fs.existsSync(previous)) fs.renameSync(previous, target);
-        throw error;
+      } else {
+        const previous = `${target}.previous-${Date.now().toString(36)}`;
+        if (fs.existsSync(target)) fs.renameSync(target, previous);
+        try {
+          fs.renameSync(temp, target);
+          fs.rmSync(previous, { recursive: true, force: true });
+          installed = true;
+        } catch (error) {
+          fs.rmSync(target, { recursive: true, force: true });
+          if (fs.existsSync(previous)) fs.renameSync(previous, target);
+          throw error;
+        }
       }
       const markdownName = incomingMarkdownName;
       const now = new Date().toISOString();
@@ -1632,6 +1742,122 @@ class SharedKnowledgeManager {
   emitState(type, detail = {}) { this.emit({ type, ...detail, sharedKnowledge: this.state() }); }
 }
 
+class SharedMountTransaction {
+  constructor(store) {
+    this.store = store;
+    this.collections = new Map();
+    this.fileChanges = [];
+    this.finished = false;
+  }
+
+  captureCollection(collection, { existed = true } = {}) {
+    if (!collection?.id) throw new Error('共享挂载事务缺少收藏夹。');
+    const collectionId = String(collection.id);
+    if (this.collections.has(collectionId)) return;
+    const scopes = ['tasks', 'videos', 'sharedMounts', 'sharedExclusions'];
+    const records = Object.fromEntries(scopes.map((scope) => [scope, this.store.list(scope)
+      .filter((item) => String(item.collectionId || '') === collectionId)
+      .map(cloneRecord)]));
+    this.collections.set(collectionId, {
+      collectionId,
+      collectionRoot: String(collection.collectionRoot || ''),
+      collection: existed ? cloneRecord(this.store.getCollectionById(collectionId)) : null,
+      records
+    });
+  }
+
+  installDirectory(collectionRoot, incoming, target) {
+    if (this.finished) throw new Error('共享挂载事务已经结束。');
+    const root = path.resolve(collectionRoot);
+    const source = assertInside(root, incoming);
+    const destination = assertInside(root, target);
+    const previous = `${destination}.rollback-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
+    if (!fs.existsSync(source)) throw new Error(`共享挂载暂存目录不存在：${source}`);
+    let backedUp = false;
+    try {
+      if (fs.existsSync(destination)) {
+        fs.renameSync(destination, previous);
+        backedUp = true;
+      }
+      fs.renameSync(source, destination);
+      this.fileChanges.push({ root, target: destination, previous: backedUp ? previous : '' });
+    } catch (error) {
+      if (fs.existsSync(destination)) removePathInside(root, destination);
+      if (backedUp && fs.existsSync(previous)) fs.renameSync(previous, destination);
+      throw error;
+    }
+  }
+
+  commit() {
+    if (this.finished) return;
+    this.store.commit();
+    this.finished = true;
+    for (const change of this.fileChanges) {
+      if (!change.previous || !fs.existsSync(change.previous)) continue;
+      try { removePathInside(change.root, change.previous); } catch {}
+    }
+  }
+
+  rollback() {
+    if (this.finished) return;
+    const failures = [];
+    for (const change of [...this.fileChanges].reverse()) {
+      try {
+        if (fs.existsSync(change.target)) removePathInside(change.root, change.target);
+        if (change.previous && fs.existsSync(change.previous)) fs.renameSync(change.previous, change.target);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    try {
+      for (const snapshot of this.collections.values()) {
+        for (const scope of Object.keys(snapshot.records)) {
+          for (const current of this.store.list(scope).filter((item) => String(item.collectionId || '') === snapshot.collectionId)) {
+            const id = recordId(current);
+            if (id) this.store.delete(scope, id);
+          }
+          for (const record of snapshot.records[scope]) this.store.set(scope, recordId(record), record);
+        }
+        if (snapshot.collection) this.store.set('collections', snapshot.collectionId, snapshot.collection);
+        else this.store.delete('collections', snapshot.collectionId);
+      }
+      this.store.commit();
+    } catch (error) {
+      failures.push(error);
+    }
+    this.finished = true;
+    if (failures.length) throw new Error(`共享挂载回滚未完整完成：${failures.map((error) => error.message || String(error)).join('；')}`);
+  }
+}
+
+function cloneRecord(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function recordId(record = {}) {
+  return String(record.id || record.key || '');
+}
+
+function appendRollbackFailure(error, rollback) {
+  try { rollback(); }
+  catch (rollbackError) { error.message = `${error.message || String(error)}；${rollbackError.message || String(rollbackError)}`; }
+}
+
+function uniqueRemoteDocuments(documents = []) {
+  const output = new Map();
+  for (const document of documents) {
+    const remotePath = String(document?.path || document?.metadataPath || '');
+    if (remotePath && !output.has(remotePath)) output.set(remotePath, document);
+  }
+  return [...output.values()];
+}
+
+function documentRootForRemotePath(remotePath) {
+  const normalized = assertRemotePath(remotePath);
+  if (!normalized.endsWith(`/${DOCUMENT_META_FILE}`)) throw new Error(`远程共享文档元数据路径无效：${normalized}`);
+  return normalized.slice(0, -DOCUMENT_META_FILE.length).replace(/\/+$/, '');
+}
+
 function stableDocumentId(task, collection) {
   const githubId = String(task.githubUserId || 'unknown-github-user');
   const bilibiliUid = String(task.sourceBilibiliUid || task.bilibiliUid || collection.bilibiliUid || collection.userId || 'unknown-bilibili-user');
@@ -1903,6 +2129,7 @@ function validateRemoteTree(entries, remoteRoot) {
     total += size;
   }
   if (total > MAX_SHARED_DOCUMENT_BYTES) throw new Error(`远程共享文档总大小不能超过 ${formatMiB(MAX_SHARED_DOCUMENT_BYTES)}。`);
+  return { files: entries.length, totalBytes: total };
 }
 
 function validateRemoteMetadata(metadata, metadataPath = '') {
@@ -1917,12 +2144,21 @@ function validateRemoteMetadata(metadata, metadataPath = '') {
 
 function assertRemotePath(value) {
   const normalized = String(value || '').replace(/\\/g, '/');
-  if (!normalized || normalized.startsWith('/') || normalized.split('/').some((part) => !part || part === '.' || part === '..') || normalized.length > 500) throw new Error('远程共享路径不安全。');
+  if (!normalized || normalized.startsWith('/') || /[\u0000-\u001f\u007f]/.test(normalized) || normalized.split('/').some((part) => !part || part === '.' || part === '..') || normalized.length > 500) throw new Error('远程共享路径不安全。');
   return normalized;
 }
 
 function normalizeRemotePrefix(value) { return String(value || '').replace(/\\/g, '/').replace(/\/+$/, '') ? assertRemotePath(String(value).replace(/\\/g, '/').replace(/\/+$/, '')) : ''; }
 function formatMiB(bytes) { return `${Math.round(Number(bytes || 0) / 1024 / 1024)} MiB`; }
+function availableDiskBytes(target) {
+  try {
+    const stat = fs.statfsSync(target);
+    const bytes = Number(stat.bavail) * Number(stat.bsize);
+    return Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
+  } catch {
+    return 0;
+  }
+}
 
 function validateGithubToken(value) {
   const token = String(value || '').trim();

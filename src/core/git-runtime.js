@@ -5,6 +5,9 @@ const { promisify } = require('util');
 const { ensureDir, assertInside } = require('./workspace');
 
 const execFileAsync = promisify(execFile);
+const MIN_SHARED_CHECKOUT_FREE_BYTES = 512 * 1024 * 1024;
+const MAX_SHARED_CHECKOUT_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_SHARED_REPOSITORY_BYTES = 10 * 1024 * 1024 * 1024;
 
 class GitRuntime {
   constructor({ projectRoot, gitPath = '' } = {}) {
@@ -69,13 +72,16 @@ class GitRuntime {
     return { stdout: String(result.stdout || ''), stderr: String(result.stderr || '') };
   }
 
-  async withReadOnlyCheckout({ repository, token = '', signal = null, onProgress = null } = {}, callback) {
+  async withReadOnlyCheckout({ repository, token = '', paths = [], expectedBytes = 0, repositorySizeBytes = 0, signal = null, onProgress = null } = {}, callback) {
     if (typeof callback !== 'function') throw new Error('只读 Git 快照缺少处理回调。');
     const owner = String(repository?.owner || '').trim();
     const name = String(repository?.name || '').trim();
     const branch = String(repository?.branch || 'main').trim();
     if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(owner) || !/^[A-Za-z0-9._-]{1,100}$/.test(name)) throw new Error('GitHub 共享仓库信息不完整，无法下载只读快照。');
     if (!branch || branch.length > 120 || /(?:\.\.|[~^:?*\[\\\s]|^\/|\/$|\.lock$|\/\.)/.test(branch)) throw new Error('共享仓库分支名称不安全。');
+    const sparsePaths = normalizeSparsePaths(paths);
+    const selectedBytes = normalizeCheckoutBytes(expectedBytes, MAX_SHARED_CHECKOUT_BYTES, '本次共享挂载内容');
+    const repositoryBytes = normalizeCheckoutBytes(repositorySizeBytes, MAX_SHARED_REPOSITORY_BYTES, '共享仓库总体积');
     const report = (stage, progress, message) => { if (typeof onProgress === 'function') onProgress({ stage, progress, message }); };
     let checkout = '';
     let checkoutReady = false;
@@ -83,18 +89,35 @@ class GitRuntime {
       await this.assertAvailable();
       throwIfAborted(signal);
       const workRoot = ensureDir(path.join(this.projectRoot, '.cache', 'shared-git'));
+      const requiredBytes = Math.max(MIN_SHARED_CHECKOUT_FREE_BYTES, selectedBytes * 2 + 256 * 1024 * 1024, repositoryBytes + 256 * 1024 * 1024);
+      assertAvailableDiskSpace(workRoot, requiredBytes);
       checkout = fs.mkdtempSync(path.join(workRoot, 'download-'));
       const remoteUrl = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(name)}.git`;
       const gitEnv = String(token || '').trim()
         ? { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'http.extraHeader', GIT_CONFIG_VALUE_0: gitAuthorizationHeader(token) }
         : {};
       report('git-download', 0.04, `正在一次性下载 ${owner}/${name} 的最新只读快照...`);
-      await this.run(['-c', 'core.longpaths=true', 'clone', '--depth', '1', '--single-branch', '--no-tags', '--branch', branch, remoteUrl, checkout], {
+      const cloneArgs = ['-c', 'core.longpaths=true', 'clone', '--depth', '1', '--single-branch', '--no-tags', '--branch', branch];
+      if (sparsePaths.length) cloneArgs.push('--filter=blob:none', '--sparse', '--no-checkout');
+      cloneArgs.push(remoteUrl, checkout);
+      await this.run(cloneArgs, {
         cwd: workRoot,
         env: gitEnv,
         signal,
         timeoutMs: 30 * 60 * 1000
       });
+      if (sparsePaths.length) {
+        report('git-sparse', 0.58, `仓库索引已读取，正在仅提取 ${sparsePaths.length} 个选中文档目录...`);
+        await this.run(['sparse-checkout', 'init', '--cone'], { cwd: checkout, env: gitEnv, signal });
+        for (let index = 0; index < sparsePaths.length;) {
+          const chunk = takeArgumentChunk(sparsePaths, index);
+          const command = index === 0 ? 'set' : 'add';
+          await this.run(['sparse-checkout', command, '--cone', '--skip-checks', ...chunk.values], { cwd: checkout, env: gitEnv, signal });
+          index = chunk.nextIndex;
+        }
+        await this.run(['checkout', '--force', 'HEAD'], { cwd: checkout, env: gitEnv, signal });
+        assertAvailableDiskSpace(workRoot, Math.max(256 * 1024 * 1024, selectedBytes));
+      }
       checkoutReady = true;
       report('git-ready', 1, '共享仓库只读快照已下载，正在从本地批量导入所需文档...');
       return await callback({ root: checkout, repository: { owner, name, branch } });
@@ -105,7 +128,7 @@ class GitRuntime {
         canceled.code = 'ABORT_ERR';
         throw canceled;
       }
-      if (checkoutReady) throw error;
+      if (checkoutReady || String(error?.code || '').startsWith('SHARED_GIT_CAPACITY_')) throw error;
       const wrapped = new Error(`项目内置 Git 下载共享仓库失败：${sanitizeGitError(error)}`);
       wrapped.code = 'SHARED_GIT_CHECKOUT_FAILED';
       throw wrapped;
@@ -266,8 +289,67 @@ async function removeCheckout(directory) {
 
 function normalizeRelative(value) {
   const normalized = String(value || '').replace(/\\/g, '/').replace(/^\/+/, '');
-  if (!normalized || normalized.split('/').some((part) => !part || part === '.' || part === '..')) throw new Error('共享文件路径不安全。');
+  if (!normalized || /[\u0000-\u001f\u007f]/.test(normalized) || normalized.split('/').some((part) => !part || part === '.' || part === '..')) throw new Error('共享文件路径不安全。');
   return normalized;
+}
+
+function normalizeSparsePaths(values = []) {
+  const output = [];
+  const seen = new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    const normalized = normalizeRelative(value).replace(/\/+$/, '');
+    if (normalized.length > 500) throw new Error('共享文档稀疏下载路径过长。');
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    output.push(normalized);
+  }
+  if (output.length > 2000) throw new Error('单次共享文档稀疏下载目录超过 2000 个。');
+  return output;
+}
+
+function normalizeCheckoutBytes(value, maximum, label) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes < 0) throw new Error(`${label}大小无效。`);
+  if (bytes > maximum) {
+    const error = new Error(`${label}超过 ${formatBytes(maximum)} 安全上限。`);
+    error.code = label.includes('仓库') ? 'SHARED_GIT_CAPACITY_REPOSITORY' : 'SHARED_GIT_CAPACITY_SELECTION';
+    throw error;
+  }
+  return bytes;
+}
+
+function assertAvailableDiskSpace(target, requiredBytes) {
+  let available = 0;
+  try {
+    const stat = fs.statfsSync(target);
+    available = Number(stat.bavail) * Number(stat.bsize);
+  } catch {
+    return;
+  }
+  if (!Number.isFinite(available) || available <= 0 || available >= requiredBytes) return;
+  const error = new Error(`共享文档下载所需磁盘空间不足：至少需要 ${formatBytes(requiredBytes)}，当前可用约 ${formatBytes(available)}。请清理项目所在磁盘后重试。`);
+  error.code = 'SHARED_GIT_CAPACITY_DISK';
+  throw error;
+}
+
+function takeArgumentChunk(values, start, maximumCharacters = 12000) {
+  const output = [];
+  let characters = 0;
+  let index = start;
+  while (index < values.length) {
+    const value = values[index];
+    if (output.length && characters + value.length + 1 > maximumCharacters) break;
+    output.push(value);
+    characters += value.length + 1;
+    index += 1;
+  }
+  return { values: output, nextIndex: index };
+}
+
+function formatBytes(value) {
+  const bytes = Math.max(0, Number(value || 0));
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GiB`;
+  return `${Math.ceil(bytes / 1024 / 1024)} MiB`;
 }
 
 function sanitizeGitError(error) {
@@ -355,4 +437,4 @@ function createGitEnvironment({ source = process.env, overrides = {}, projectRoo
   return env;
 }
 
-module.exports = { GitRuntime, createGitEnvironment, gitAuthorizationHeader, normalizeGitAuthor, normalizeGitRemote, normalizeRelative, parseCredential, sanitizeGitError };
+module.exports = { GitRuntime, assertAvailableDiskSpace, createGitEnvironment, gitAuthorizationHeader, normalizeGitAuthor, normalizeGitRemote, normalizeRelative, normalizeSparsePaths, parseCredential, sanitizeGitError };
