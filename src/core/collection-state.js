@@ -74,10 +74,18 @@ function favoriteStatus(task = {}, collection = {}) {
 function collectionKindInfo(collection = {}) {
   if (collection.collectionKind === 'video-cache') return { code: 'video-cache', label: '内置缓存视频' };
   if (collection.collectionKind === 'multimodal-document') return { code: 'multimodal-document', label: '多模态文档' };
+  if (collection.collectionKind === 'document-archive') return { code: 'document-archive', label: '本地文档归档' };
   if (collection.collectionKind === 'bilibili-multipart') return { code: 'bilibili-multipart', label: 'B站多P视频' };
   if (collection.collectionKind === 'shared') return { code: 'shared', label: '共享挂载' };
   if (collection.internal === true) return { code: 'default', label: '默认' };
   return { code: 'bilibili', label: 'B站收藏夹' };
+}
+
+function collectionUserKindInfo(collection = {}, user = {}) {
+  const userId = String(collection.userId || user.id || '').trim();
+  if (userId === 'shared-user' || collection.collectionKind === 'shared') return { code: 'shared', label: '共享用户' };
+  if (userId === 'builtin-agent-user' || collection.internal === true) return { code: 'builtin', label: '内置用户' };
+  return { code: 'bilibili', label: '哔哩哔哩用户' };
 }
 
 module.exports = {
@@ -85,6 +93,7 @@ module.exports = {
   REMOVED_FAVORITE_SUFFIX,
   collectionBlockReason,
   collectionKindInfo,
+  collectionUserKindInfo,
   collectionSourceName,
   collectionStorageName,
   collectionSyncReady,

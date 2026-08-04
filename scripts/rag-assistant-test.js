@@ -10,6 +10,12 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+function catalogItem(catalog, id) {
+  const item = catalog.find((entry) => String(entry.id) === String(id));
+  assert(item, `missing knowledge catalog entry: ${id}`);
+  return item;
+}
+
 function readBody(request) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -184,6 +190,16 @@ async function startFakeProvider() {
     store.upsertUser({ id: 'rag-user', mid: 'rag-user', name: '测试用户' });
     store.upsertCollection({ id: 'rag-collection', name: 'AI 收藏夹', userId: 'rag-user', userName: '测试用户' });
     store.upsertTask({ id: 'rag-task', collectionId: 'rag-collection', bvid: 'BVRAGTEST', title: '星藏家测试文档', owner: '测试 UP', status: 'done', outputMarkdown: markdown, publishedAt: '2026-06-18T08:00:00.000Z', favoriteAddedAt: '2026-06-20T09:30:00.000Z', completedAt: new Date().toISOString() });
+    const extraKnowledgeMarkdown = path.join(root, 'extra-knowledge.md');
+    fs.writeFileSync(extraKnowledgeMarkdown, '# 额外知识库测试文档\n\n用于验证目录层级。\n', 'utf8');
+    store.upsertCollection({ id: 'rag-same-name-collection', name: '同名用户收藏夹', userId: 'rag-user-2', userName: '测试用户' });
+    store.upsertTask({ id: 'rag-same-name-task', collectionId: 'rag-same-name-collection', bvid: 'BVRAGSAMENAME', title: '同名用户测试文档', owner: '测试 UP 2', status: 'done', outputMarkdown: extraKnowledgeMarkdown, completedAt: new Date().toISOString() });
+    store.upsertCollection({ id: 'rag-multimodal-collection', name: '本地多模态资料', userId: 'builtin-agent-user', userName: '内置用户', internal: true, collectionKind: 'multimodal-document' });
+    store.upsertTask({ id: 'rag-multimodal-task', collectionId: 'rag-multimodal-collection', bvid: 'RAGMULTIMODAL', title: '本地多模态测试文档', owner: '内置处理器', status: 'done', outputMarkdown: extraKnowledgeMarkdown, completedAt: new Date().toISOString() });
+    store.upsertCollection({ id: 'rag-archive-collection', name: '本地文档归档', userId: 'builtin-agent-user', userName: '内置用户', internal: true, collectionKind: 'document-archive' });
+    store.upsertTask({ id: 'rag-archive-task', collectionId: 'rag-archive-collection', bvid: 'RAGARCHIVE', title: '本地归档测试文档', owner: '内置处理器', status: 'done', outputMarkdown: extraKnowledgeMarkdown, completedAt: new Date().toISOString() });
+    store.upsertCollection({ id: 'rag-shared-collection', name: '共享知识资料', userId: 'shared-user', userName: '共享用户', internal: true, collectionKind: 'shared' });
+    store.upsertTask({ id: 'rag-shared-task', collectionId: 'rag-shared-collection', bvid: 'RAGSHARED', title: '共享测试文档', owner: '共享挂载', status: 'done', outputMarkdown: extraKnowledgeMarkdown, completedAt: new Date().toISOString() });
     const historicalMarkdown = path.join(root, 'historical.md');
     fs.writeFileSync(historicalMarkdown, '# 旧版本\n\n不应默认进入 RAG。\n', 'utf8');
     store.upsertTask({ id: 'rag-task-old', collectionId: 'rag-collection', bvid: 'BVRAGTEST', title: '星藏家测试文档旧版本', status: 'done', outputMarkdown: historicalMarkdown, singleTask: true, knowledgeActive: false, completedAt: '2026-06-17T08:00:00.000Z' });
@@ -206,7 +222,13 @@ async function startFakeProvider() {
     const migrated = assistant.rawProvider('legacy-provider');
     const emptyStateWithStaleSession = assistant.state('rag-session-that-no-longer-exists');
     assert(emptyStateWithStaleSession.activeSession === null && emptyStateWithStaleSession.sessions.length === 0, 'stale RAG session id did not fall back to the empty state');
-    assert(assistant.knowledgeCatalog()[0].documentCount === 1, 'superseded single-video document was included in the default RAG catalog');
+    const initialCatalog = assistant.knowledgeCatalog();
+    assert(catalogItem(initialCatalog, 'rag-collection').documentCount === 1, 'superseded single-video document was included in the default RAG catalog');
+    assert(catalogItem(initialCatalog, 'rag-collection').userKindInfo?.code === 'bilibili' && catalogItem(initialCatalog, 'rag-collection').userKindInfo.label === '哔哩哔哩用户', 'Bilibili catalog entries did not expose the user type');
+    assert(catalogItem(initialCatalog, 'rag-same-name-collection').userId === 'rag-user-2', 'catalog did not preserve a same-name user identity');
+    assert(catalogItem(initialCatalog, 'rag-multimodal-collection').kindInfo?.code === 'multimodal-document', 'multimodal catalog classification failed');
+    assert(catalogItem(initialCatalog, 'rag-archive-collection').kindInfo?.code === 'document-archive' && catalogItem(initialCatalog, 'rag-archive-collection').kindInfo.label === '本地文档归档', 'document archive catalog classification failed');
+    assert(catalogItem(initialCatalog, 'rag-shared-collection').userKindInfo?.code === 'shared', 'shared catalog entries did not expose the user type');
     assert(migrated.maxOutputTokens === DEFAULT_MAX_OUTPUT_TOKENS && migrated.enabledModels[0].contextWindow === 400000 && migrated.enabledModels[0].maxOutputTokens === 128000, 'legacy token defaults were not migrated');
     assert(normalizeModel({ id: 'unknown-modern-model' }).contextWindow === DEFAULT_CONTEXT_WINDOW, 'modern default context window is incorrect');
     assert(MAX_RAG_TOOL_ROUNDS === 24 && RAG_AUTO_COMPACT_TRIGGER === 0.75, 'RAG tool/auto-compression limits are incorrect');
@@ -425,7 +447,7 @@ async function startFakeProvider() {
     assert(denied && approvals.length === 1, 'restricted outside-sandbox approval was not enforced');
 
     const state = assistant.state(session.id);
-    assert(state.knowledgeCatalog[0]?.documentCount === 2, 'knowledge catalog classification failed');
+    assert(catalogItem(state.knowledgeCatalog, 'rag-collection').documentCount === 2, 'knowledge catalog classification failed');
     assert(state.modelUsage.reduce((sum, item) => sum + Number(item.requests || 0), 0) >= 8, 'per-model request count did not include extended RAG and compression calls');
     assert(events.some((item) => item.type === 'assistant-delta') && events.some((item) => item.type === 'tool'), 'stream events were not emitted');
     const shutdownController = new AbortController();

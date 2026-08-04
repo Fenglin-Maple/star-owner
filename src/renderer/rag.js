@@ -276,7 +276,7 @@
 
   function renderKnowledgeMenu(menu, selected, session) {
     const streaming = activeStreaming();
-    const groups = groupBy(state.knowledgeCatalog, (item) => item.userName);
+    const groups = groupKnowledgeCatalog(state.knowledgeCatalog);
     menu.innerHTML = '';
     if (state.knowledgeCatalog.length) {
       const search = document.createElement('label');
@@ -285,21 +285,54 @@
       search.querySelector('input').addEventListener('input', (event) => filterKnowledgeMenu(menu, event.target.value));
       menu.appendChild(search);
     }
-    for (const [user, collections] of groups) {
-      const heading = document.createElement('div');
-      heading.className = 'rag-knowledge-user';
-      heading.textContent = user;
-      heading.dataset.knowledgeUser = user;
-      menu.appendChild(heading);
-      for (const collection of collections) {
-        const label = document.createElement('label');
-        label.className = 'rag-knowledge-option';
-        label.dataset.knowledgeUser = user;
-        label.dataset.knowledgeSearch = `${user} ${collection.name} ${collection.kindInfo?.label || ''}`.toLocaleLowerCase();
-        label.innerHTML = `<input type="checkbox" value="${escapeAttr(collection.id)}" ${selected.has(collection.id) ? 'checked' : ''} ${!session || streaming ? 'disabled' : ''}><span>${escapeHtml(collection.name)}</span>${collection.kindInfo?.label ? `<em class="collection-kind-badge" data-kind="${escapeAttr(collection.kindInfo.code)}">${escapeHtml(collection.kindInfo.label)}</em>` : ''}<small>${collection.documentCount} 篇</small>`;
-        label.querySelector('input').addEventListener('change', () => updateKnowledgeSelection(menu));
-        menu.appendChild(label);
+    for (const userGroup of groups) {
+      const userSection = document.createElement('section');
+      userSection.className = 'rag-knowledge-user-group';
+      userSection.dataset.knowledgeUserKey = userGroup.key;
+      userSection.dataset.knowledgeUserId = userGroup.userId;
+      userSection.dataset.knowledgeUserType = userGroup.userKindInfo.code;
+
+      const userHeading = document.createElement('header');
+      userHeading.className = 'rag-knowledge-user';
+      userHeading.dataset.knowledgeUserKey = userGroup.key;
+      userHeading.dataset.knowledgeUser = userGroup.userName;
+      const userKind = document.createElement('strong');
+      userKind.textContent = userGroup.userKindInfo.label;
+      const userName = document.createElement('span');
+      userName.textContent = userGroup.userName;
+      userName.title = userGroup.userName;
+      userHeading.append(userKind, userName);
+      userSection.appendChild(userHeading);
+
+      for (const kindGroup of userGroup.kinds) {
+        const kindSection = document.createElement('section');
+        kindSection.className = 'rag-knowledge-kind-group';
+        kindSection.dataset.knowledgeKindKey = kindGroup.key;
+        kindSection.dataset.knowledgeKindCode = kindGroup.key;
+
+        const kindHeading = document.createElement('div');
+        kindHeading.className = 'rag-knowledge-kind';
+        kindHeading.dataset.kind = kindGroup.key;
+        kindHeading.textContent = kindGroup.kindInfo.label;
+        kindSection.appendChild(kindHeading);
+
+        for (const collection of kindGroup.collections) {
+          const label = document.createElement('label');
+          const documentCount = Number.isFinite(Number(collection.documentCount)) ? Number(collection.documentCount) : 0;
+          label.className = 'rag-knowledge-option';
+          label.dataset.knowledgeUserKey = userGroup.key;
+          label.dataset.knowledgeKindKey = kindGroup.key;
+          label.dataset.knowledgeCollectionId = String(collection.id || '');
+          label.dataset.knowledgeSearch = `${userGroup.userKindInfo.label} ${userGroup.userName} ${kindGroup.kindInfo.label} ${collection.name}`.toLocaleLowerCase();
+          label.title = `${userGroup.userName} / ${kindGroup.kindInfo.label} / ${collection.name}`;
+          label.setAttribute('aria-label', `${collection.name}，${documentCount} 篇文档`);
+          label.innerHTML = `<input type="checkbox" value="${escapeAttr(collection.id)}" ${selected.has(collection.id) ? 'checked' : ''} ${!session || streaming ? 'disabled' : ''}><span class="rag-knowledge-option-copy"><strong>${escapeHtml(collection.name)}</strong><small class="rag-knowledge-document-count"><span>${documentCount}</span> 篇文档</small></span>`;
+          label.querySelector('input').addEventListener('change', () => updateKnowledgeSelection(menu));
+          kindSection.appendChild(label);
+        }
+        userSection.appendChild(kindSection);
       }
+      menu.appendChild(userSection);
     }
     if (!state.knowledgeCatalog.length) menu.innerHTML = '<div class="rag-list-empty">暂无已完成 Markdown</div>';
   }
@@ -307,8 +340,11 @@
   function filterKnowledgeMenu(menu, value) {
     const query = String(value || '').trim().toLocaleLowerCase();
     for (const option of menu.querySelectorAll('.rag-knowledge-option')) option.hidden = Boolean(query) && !option.dataset.knowledgeSearch.includes(query);
-    for (const heading of menu.querySelectorAll('.rag-knowledge-user')) {
-      heading.hidden = ![...menu.querySelectorAll('.rag-knowledge-option')].some((option) => option.dataset.knowledgeUser === heading.dataset.knowledgeUser && !option.hidden);
+    for (const kindGroup of menu.querySelectorAll('.rag-knowledge-kind-group')) {
+      kindGroup.hidden = ![...kindGroup.querySelectorAll('.rag-knowledge-option')].some((option) => !option.hidden);
+    }
+    for (const userGroup of menu.querySelectorAll('.rag-knowledge-user-group')) {
+      userGroup.hidden = ![...userGroup.querySelectorAll('.rag-knowledge-option')].some((option) => !option.hidden);
     }
   }
 
@@ -1097,7 +1133,52 @@
   window.addEventListener('star:model-config-changed', () => refresh(activeSessionId, { quiet: true }));
   window.orchestrator.onRagEvent(handleEvent);
 
+  const knowledgeUserKindOrder = new Map([['bilibili', 0], ['builtin', 1], ['shared', 2], ['other', 3]]);
+  const knowledgeKindOrder = new Map([
+    ['bilibili', 0], ['default', 1], ['video-cache', 2], ['bilibili-multipart', 3],
+    ['multimodal-document', 4], ['document-archive', 5], ['shared', 6], ['other', 7]
+  ]);
+  const knowledgeCollator = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' });
+
   function providerName(id) { return state.providers.find((item) => item.id === id)?.name || '未配置供应商'; }
+  function groupKnowledgeCatalog(items) {
+    const users = new Map();
+    for (const item of items || []) {
+      const userName = String(item.userName || '未知用户').trim() || '未知用户';
+      const userId = String(item.userId || '').trim();
+      const userKey = userId ? `id:${userId}` : `name:${userName.toLocaleLowerCase()}`;
+      const userKindInfo = knowledgeUserKindInfo(item);
+      if (!users.has(userKey)) users.set(userKey, { key: userKey, userId, userName, userKindInfo, kinds: new Map() });
+      const user = users.get(userKey);
+      const kindKey = String(item.kindInfo?.code || 'other').trim() || 'other';
+      if (!user.kinds.has(kindKey)) user.kinds.set(kindKey, { key: kindKey, kindInfo: knowledgeKindInfo(item), collections: [] });
+      user.kinds.get(kindKey).collections.push(item);
+    }
+    return [...users.values()]
+      .sort((a, b) => (knowledgeUserKindOrder.get(a.userKindInfo.code) ?? 99) - (knowledgeUserKindOrder.get(b.userKindInfo.code) ?? 99)
+        || knowledgeCollator.compare(a.userName, b.userName)
+        || knowledgeCollator.compare(a.userId, b.userId))
+      .map((user) => ({
+        ...user,
+        kinds: [...user.kinds.values()]
+          .sort((a, b) => (knowledgeKindOrder.get(a.key) ?? 99) - (knowledgeKindOrder.get(b.key) ?? 99) || knowledgeCollator.compare(a.kindInfo.label, b.kindInfo.label))
+          .map((kind) => ({
+            ...kind,
+            collections: kind.collections.sort((a, b) => knowledgeCollator.compare(String(a.name || ''), String(b.name || '')) || knowledgeCollator.compare(String(a.id || ''), String(b.id || '')))
+          }))
+      }));
+  }
+  function knowledgeUserKindInfo(item) {
+    const info = item?.userKindInfo;
+    if (info?.code && info?.label) return info;
+    if (item?.userId === 'shared-user' || item?.kindInfo?.code === 'shared') return { code: 'shared', label: '共享用户' };
+    if (item?.userId === 'builtin-agent-user' || item?.kindInfo?.code && ['default', 'video-cache', 'multimodal-document', 'document-archive', 'bilibili-multipart'].includes(item.kindInfo.code)) return { code: 'builtin', label: '内置用户' };
+    return { code: 'bilibili', label: '哔哩哔哩用户' };
+  }
+  function knowledgeKindInfo(item) {
+    if (!item?.kindInfo?.label) return { code: 'other', label: '其他收藏夹' };
+    return { code: String(item.kindInfo.code || 'other'), label: String(item.kindInfo.label) };
+  }
   function groupBy(items, key) { const map = new Map(); for (const item of items || []) { const value = key(item); if (!map.has(value)) map.set(value, []); map.get(value).push(item); } return map; }
   function mergeModels(...lists) { const map = new Map(); for (const item of lists.flat()) map.set(item.id, { ...(map.get(item.id) || {}), ...item }); return [...map.values()].sort((a, b) => String(a.id).localeCompare(String(b.id))); }
   function toolLabel(name) { return ({ knowledge_search: '检索知识库', knowledge_list_documents: '列出知识库原文', knowledge_read_document: '读取原始 Markdown', knowledge_view_images: '查看知识库原图', list_files: '列出文件', read_file: '读取文件', write_file: '写入文件', run_command: '执行 CMD', web_search: '联网搜索', browse_url: '读取网页', open_browser: '打开浏览器', spawn_subagent: '调用子 Agent' })[name] || name || '工具'; }

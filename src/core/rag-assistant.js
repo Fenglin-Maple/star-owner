@@ -9,7 +9,7 @@ const MarkdownIt = require('markdown-it');
 const pdf = require('pdf-parse');
 const mammoth = require('mammoth');
 const { projectRuntimeEnvironment, resolveSystemExecutable } = require('./child-process-io');
-const { collectionKindInfo, favoriteStatus } = require('./collection-state');
+const { collectionKindInfo, collectionUserKindInfo, favoriteStatus } = require('./collection-state');
 const { isPrivateNetworkHost, parseHttpUrl } = require('./network-policy');
 const { assertSafeWindowsPath, ensureDir: ensureWorkspaceDir } = require('./workspace');
 
@@ -340,11 +340,21 @@ class RagAssistant {
         name: collection.name,
         userId: collection.userId || user?.id || '',
         userName: collection.userName || user?.name || '未知用户',
+        userKindInfo: collectionUserKindInfo(collection, user),
         kindInfo: collectionKindInfo(collection),
         documentCount: documents.length,
         updatedAt: documents.map((task) => task.completedAt || task.updatedAt || '').sort().at(-1) || collection.updatedAt || ''
       };
-    }).filter(Boolean).sort((a, b) => `${a.userName}/${a.name}`.localeCompare(`${b.userName}/${b.name}`, 'zh-Hans-CN'));
+    }).filter(Boolean).sort((a, b) => {
+      const userNameOrder = String(a.userName).localeCompare(String(b.userName), 'zh-Hans-CN');
+      if (userNameOrder) return userNameOrder;
+      const userIdOrder = String(a.userId).localeCompare(String(b.userId), 'zh-Hans-CN');
+      if (userIdOrder) return userIdOrder;
+      const kindOrder = String(a.kindInfo?.code || '').localeCompare(String(b.kindInfo?.code || ''), 'zh-Hans-CN');
+      if (kindOrder) return kindOrder;
+      const nameOrder = String(a.name).localeCompare(String(b.name), 'zh-Hans-CN');
+      return nameOrder || String(a.id).localeCompare(String(b.id), 'zh-Hans-CN');
+    });
   }
 
   async importFiles(sessionId, filePaths) {

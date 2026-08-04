@@ -42,6 +42,13 @@ function assert(condition, message) {
   assert(main.includes('multipartHotEvent') && main.includes("['stream', 'multipart-progress', 'session-updated']") && multipartManager.includes("}, 400);"), 'multi-part token events are still sent to the renderer without throttling');
   assert(main.includes('highFrequencyMultipartEvent') && main.includes("['stream', 'session-updated', 'multipart-progress']"), 'multi-part progress is still exported into the persistent activity log');
   const index = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const ragRenderer = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'rag.js'), 'utf8');
+  const ragCss = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'rag.css'), 'utf8');
+  assert(ragRenderer.includes('renderKnowledgeMenu(elements.knowledgeMenu, selected, session)') && ragRenderer.includes('renderKnowledgeMenu(elements.headKnowledgeMenu, selected, session)'), 'RAG knowledge picker menus do not share the same renderer');
+  assert(ragRenderer.includes('groupKnowledgeCatalog(state.knowledgeCatalog)') && ragRenderer.includes('const userKey = userId ? `id:${userId}`') && ragRenderer.includes('item.kindInfo?.code'), 'RAG knowledge picker is not grouped by stable user identity and collection kind');
+  assert(ragRenderer.includes('dataset.knowledgeUserKey') && ragRenderer.includes('dataset.knowledgeKindCode') && ragRenderer.includes('dataset.knowledgeCollectionId') && ragRenderer.includes('rag-knowledge-document-count'), 'RAG knowledge picker is missing semantic hierarchy or document count markers');
+  assert(ragRenderer.includes('for (const kindGroup of menu.querySelectorAll') && ragRenderer.includes('for (const userGroup of menu.querySelectorAll'), 'RAG knowledge picker search does not collapse empty kind and user groups');
+  assert(ragCss.includes('.rag-knowledge-user-group') && ragCss.includes('.rag-knowledge-kind-group') && ragCss.includes('.rag-knowledge-option { min-height: 40px; display: grid; grid-template-columns: 18px minmax(0, 1fr);') && ragCss.includes('.rag-knowledge-option-copy small') && ragCss.includes('white-space: nowrap'), 'RAG knowledge picker hierarchy or no-wrap document count layout is missing');
   const repositoryCardIndex = index.indexOf('<details class="shared-repository-card">');
   assert(repositoryCardIndex >= 0 && !index.slice(repositoryCardIndex, repositoryCardIndex + 120).includes(' open'), 'shared repository configuration must be collapsed by default');
   assert(index.includes('<summary class="shared-repository-summary"><strong>当前共享仓库</strong>') && index.includes('class="shared-repository-config"'), 'shared repository status summary or configuration body is missing');
