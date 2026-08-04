@@ -400,3 +400,99 @@ body.shared-upload-locked { overflow: hidden; }
   .shared-local-document-row { grid-template-columns: 34px minmax(0, 1fr); }
   .shared-local-document-status { grid-column: 2; text-align: left; }
 }
+
+/* Keep the shared download/upload flows on the same vertical tracks. */
+.shared-layout {
+  --shared-source-list-height: 320px;
+  --shared-target-list-height: 360px;
+  grid-template-rows: max-content 48px minmax(0, 1fr);
+  align-items: stretch;
+}
+.shared-layout > .outside-pane {
+  display: grid;
+  grid-row: 1 / -1;
+  grid-template-rows: subgrid;
+  align-content: stretch;
+  row-gap: 0;
+  min-height: 880px;
+}
+.shared-pane-source, .shared-pane-target {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  min-height: 0;
+}
+.shared-pane-source > .shared-catalog-list,
+.shared-pane-source > .shared-upload-list {
+  flex: 0 1 auto;
+  width: 100%;
+  height: var(--shared-source-list-height);
+  min-height: var(--shared-source-list-height);
+  max-height: 72vh;
+  margin-top: auto;
+}
+.shared-pane-source > .shared-upload-list { max-height: var(--shared-source-list-height); }
+.shared-pane-source > .shared-upload-list { margin-bottom: 18px; }
+.shared-layout > .outside-pane > .shared-flow-arrow {
+  grid-row: 2;
+  align-self: stretch;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+}
+.shared-pane-target > .shared-local-mount-list,
+.shared-pane-target .shared-upload-prepare-list {
+  flex: 0 1 auto;
+  width: 100%;
+  height: var(--shared-target-list-height);
+  min-height: var(--shared-target-list-height);
+  max-height: 560px;
+  margin-top: auto;
+}
+.shared-pane-target .shared-upload-prepare-list { max-height: var(--shared-target-list-height); }
+.shared-upload-preparation {
+  flex: 1 1 auto !important;
+  min-height: 0;
+}
+
+@media (max-width: 1120px) {
+  .shared-layout {
+    grid-template-rows: none;
+  }
+  .shared-layout > .outside-pane {
+    display: flex;
+    flex-direction: column;
+    grid-row: auto;
+    min-height: 0 !important;
+    gap: 11px;
+  }
+  .shared-layout > .outside-pane > .shared-flow-arrow {
+    height: auto;
+    min-height: 42px;
+    margin: 3px 0;
+  }
+  .shared-pane-source > .shared-catalog-list,
+  .shared-pane-source > .shared-upload-list,
+  .shared-pane-target > .shared-local-mount-list,
+  .shared-pane-target .shared-upload-prepare-list {
+    flex: 0 1 auto;
+    margin-top: 0;
+  }
+}
+
+@media (max-width: 760px) {
+  .shared-layout {
+    --shared-source-list-height: 260px;
+    --shared-target-list-height: 280px;
+  }
+  .shared-pane-source > .shared-catalog-list,
+  .shared-pane-source > .shared-upload-list {
+    min-height: var(--shared-source-list-height);
+    max-height: 60vh;
+  }
+  .shared-pane-target > .shared-local-mount-list,
+  .shared-pane-target .shared-upload-prepare-list {
+    min-height: var(--shared-target-list-height);
+    max-height: 60vh;
+  }
+}
