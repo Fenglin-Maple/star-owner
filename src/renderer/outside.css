@@ -496,3 +496,97 @@ body.shared-upload-locked { overflow: hidden; }
     max-height: 60vh;
   }
 }
+
+/* Give each stage of the shared flow a clear, repeatable visual container. */
+.shared-catalog-actions,
+.shared-upload-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  min-height: 46px;
+  padding: 5px 6px;
+  border: 1px solid color-mix(in srgb, var(--line) 84%, transparent);
+  background: color-mix(in srgb, var(--row) 42%, var(--bg));
+}
+.shared-catalog-actions span { margin-left: auto; }
+.shared-upload-actions > button { flex: 0 0 auto; }
+
+.shared-pane-source > .shared-upload-list {
+  display: block;
+  height: var(--shared-source-list-height);
+  min-height: var(--shared-source-list-height);
+  max-height: var(--shared-source-list-height);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 7px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 62%, var(--panel));
+}
+.shared-pane-target .shared-upload-prepare-list {
+  display: block;
+}
+
+.shared-layout .shared-pane-source > .shared-catalog-list > .empty-state,
+.shared-layout .shared-pane-source > .shared-upload-list > .empty-state,
+.shared-layout .shared-pane-target > .shared-local-mount-list > .empty-state,
+.shared-layout .shared-pane-target .shared-upload-prepare-list > .empty-state {
+  height: 100%;
+  min-height: 0 !important;
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  background: color-mix(in srgb, var(--row) 18%, transparent);
+}
+.shared-layout .shared-pane-target .shared-upload-prepare-list > .empty-state {
+  height: calc(var(--shared-target-list-height) - 8px);
+  min-height: calc(var(--shared-target-list-height) - 8px) !important;
+}
+
+.shared-local-mount-toolbar,
+.shared-upload-preparation > .outside-subpanel-title {
+  min-height: 38px;
+  padding: 6px 9px;
+  border: 1px solid color-mix(in srgb, var(--line) 84%, transparent);
+  border-left: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 24%, var(--row));
+}
+.shared-local-mount-toolbar { margin-top: 0; }
+.shared-upload-preparation > .outside-subpanel-title { flex: 0 0 auto; }
+.shared-upload-prepare-toolbar {
+  padding: 6px 7px;
+  border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+  background: color-mix(in srgb, var(--row) 30%, var(--bg));
+}
+
+.shared-layout > .outside-pane > .shared-flow-arrow {
+  gap: 10px;
+  padding: 0 12px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  background: color-mix(in srgb, var(--accent-soft) 13%, transparent);
+}
+.shared-layout > .outside-pane > .shared-flow-arrow svg {
+  width: 19px;
+  height: 19px;
+  padding: 2px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+  background: color-mix(in srgb, var(--accent-soft) 42%, transparent);
+}
+.shared-layout > .outside-pane > .shared-flow-arrow span {
+  line-height: 1.35;
+  text-align: center;
+}
+
+@media (max-width: 760px) {
+  .shared-catalog-actions,
+  .shared-upload-actions {
+    align-items: stretch;
+  }
+  .shared-catalog-actions span { margin-left: 0; }
+  .shared-layout > .outside-pane > .shared-flow-arrow {
+    padding-inline: 8px;
+  }
+}
