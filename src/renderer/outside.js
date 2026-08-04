@@ -146,6 +146,7 @@
   let sharedRepositoryCheckPromise = null;
   let sharedRepositoryCheckedForEntry = false;
   let sharedCatalogLoadedKey = '';
+  let sharedListResizeObserver = null;
   const selectedUploadTaskIds = new Set();
   const selectedPreparedTaskIds = new Set();
   const selectedRemotePaths = new Set();
@@ -174,6 +175,24 @@
       toolBodies.set(id, body);
       body.remove();
     }
+  }
+
+  function setupSharedListAlignment() {
+    const ResizeObserverCtor = window.ResizeObserver;
+    const catalogList = elements.sharedCatalogList;
+    const uploadList = elements.sharedUploadList;
+    const layout = catalogList?.closest('.shared-layout');
+    if (!ResizeObserverCtor || !catalogList || !uploadList || !layout) return;
+    sharedListResizeObserver?.disconnect();
+    sharedListResizeObserver = new ResizeObserverCtor(() => {
+      if (!catalogList.style.height) {
+        layout.style.removeProperty('--shared-upload-list-height');
+        return;
+      }
+      const height = Math.round(catalogList.getBoundingClientRect().height);
+      if (height > 0) layout.style.setProperty('--shared-upload-list-height', `${height}px`);
+    });
+    sharedListResizeObserver.observe(catalogList);
   }
 
   function openOutsideTool(id) {
@@ -1574,6 +1593,7 @@
   function escAttr(value) { return esc(value); }
 
   setupToolNavigation();
+  setupSharedListAlignment();
   elements.subtitleChoose.addEventListener('click', chooseSubtitles);
   elements.subtitleStart.addEventListener('click', startSubtitles);
   elements.videoChooseFiles.addEventListener('click', () => chooseVideos('files'));

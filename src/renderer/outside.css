@@ -515,9 +515,9 @@ body.shared-upload-locked { overflow: hidden; }
 
 .shared-pane-source > .shared-upload-list {
   display: block;
-  height: var(--shared-source-list-height);
-  min-height: var(--shared-source-list-height);
-  max-height: var(--shared-source-list-height);
+  height: var(--shared-upload-list-height, var(--shared-source-list-height));
+  min-height: var(--shared-upload-list-height, var(--shared-source-list-height));
+  max-height: var(--shared-upload-list-height, var(--shared-source-list-height));
   overflow: auto;
   overscroll-behavior: contain;
   padding: 7px;
