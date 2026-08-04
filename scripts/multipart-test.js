@@ -22,9 +22,10 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   const bili = { getVideoInfo: async () => ({ bvid: 'BV1MULTIPART', title: '多P测试视频', owner: { name: '测试作者' }, pic: '', pages: currentPages, duration: 600 }) };
   const sessions = new Map();
   let failNextStart = false;
+  let listSessionCalls = 0;
   const internalAgentManager = {
     running: new Map(),
-    listSessions: () => [...sessions.values()],
+    listSessions: () => { listSessionCalls += 1; return [...sessions.values()]; },
     createSession: (input) => {
       const sequence = sessions.size + 1;
       const session = { id: `session-${sequence}`, workerId: `worker-${sequence}`, status: 'idle', progress: 0, phase: '', currentTaskId: '', ...input };
@@ -131,6 +132,9 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   const livePart = manager.state().parents[0].parts.find((item) => item.cid === '102');
   assert(livePart.displayStatus === 'running' && livePart.progressPercent === 42 && livePart.phase === '模型正在撰写', '子 P 没有暴露独立实时进度和阶段');
   assert(manager.state().parents[0].progress > 0.25, '父任务总进度没有汇总正在运行的子 P 进度');
+  listSessionCalls = 0;
+  for (let index = 0; index < 1000; index += 1) manager.handleAgentEvent({ type: 'stream', sessionId: sessionOne.id, parentId: created.id, mode: 'multipart' });
+  assert.strictEqual(listSessionCalls, 0, '多P流式增量仍在每个 token 上扫描全部 Agent 会话');
 
   failNextStart = true;
   const stoppedPart = await manager.stopPart({ parentId: created.id, cid: '102' });

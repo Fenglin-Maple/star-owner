@@ -1371,9 +1371,18 @@ class InternalAgentManager {
     const modelContentLength = session.contentIsNotice ? 0 : String(session.content || '').length;
     session.progress = Math.min(0.86, baseProgress + Math.log10(1 + modelContentLength) * 0.045);
     session.updatedAt = new Date().toISOString();
-    this.syncMultipartTaskProgress(session, session.phase, session.progress);
     this.store.set('internalAgentSessions', session.id, session);
-    this.emit({ type: 'stream', sessionId, delta, replaceContent, phase: session.phase, progress: session.progress });
+    this.emit({
+      type: 'stream',
+      sessionId,
+      taskId: session.currentTaskId || '',
+      parentId: session.multiPartParentId || '',
+      mode: session.mode || '',
+      delta,
+      replaceContent,
+      phase: session.phase,
+      progress: session.progress
+    });
   }
 
   addUsage(session, usage) {
@@ -1413,7 +1422,7 @@ class InternalAgentManager {
     Object.assign(session, latest);
     this.store.set('internalAgentSessions', latest.id, latest);
     this.store.save();
-    this.emit({ type: 'log', sessionId: latest.id, entry: latest.logs.at(-1) });
+    this.emit({ type: 'log', sessionId: latest.id, taskId: latest.currentTaskId || '', parentId: latest.multiPartParentId || '', mode: latest.mode || '', entry: latest.logs.at(-1) });
   }
 
   finishSession(session, status, phase) {

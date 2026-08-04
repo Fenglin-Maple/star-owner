@@ -36,6 +36,9 @@ function assert(condition, message) {
   assert(outside.includes('videoPreviewGate.isCurrent(generation)') && outside.includes('documentPreviewGate.isCurrent(generation)'), 'local import previews did not reject stale responses');
   assert(outside.includes("if (event.localToolbox) { localRefreshGate.next()") && outside.includes("if (event.multiPart) { multipartRefreshGate.next()"), 'push events did not invalidate their matching in-flight toolbox state');
   assert(outside.includes('data-multipart-details') && outside.includes('multipartPartStatusLabel') && outside.includes('multiPartStopPart({ parentId'), 'multi-part parent viewer is missing expandable per-P progress or the isolated stop action');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+  const multipartManager = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'multipart-manager.js'), 'utf8');
+  assert(main.includes("event.type === 'stream' && event.mode === 'multipart'") && multipartManager.includes("}, 400);"), 'multi-part token events are still sent to the renderer without throttling');
   const preload = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
   assert(preload.includes("multiPartStopPart: (payload) => ipcRenderer.invoke('multipart:stop-part', payload)"), 'multi-part per-P stop IPC was not exposed through the preload boundary');
   const ai = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'ai.js'), 'utf8');

@@ -288,6 +288,14 @@ class MultiPartManager {
   }
 
   handleAgentEvent(event = {}) {
+    const eventType = String(event.type || '');
+    if (['stream', 'log', 'session-updated'].includes(eventType)) {
+      // Stream deltas can arrive once per token. They only need to wake the
+      // throttled viewer; full task/session scans belong to terminal events.
+      const lightweightParentId = event.parentId || event.session?.multiPartParentId || '';
+      if (lightweightParentId) this.scheduleStateEmit(lightweightParentId);
+      return;
+    }
     const session = event.session || (event.sessionId
       ? this.internalAgentManager.listSessions().find((item) => item.id === event.sessionId)
       : null);
@@ -310,15 +318,10 @@ class MultiPartManager {
         : (pending ? (done ? 'partial' : 'pending') : 'completed');
     parent.completedAt = parent.status === 'completed' ? (parent.completedAt || new Date().toISOString()) : '';
     parent.updatedAt = new Date().toISOString();
-    const lightweight = ['stream', 'log', 'session-updated'].includes(String(event.type || ''));
-    if (!lightweight) {
-      this.store.set('multiPartParents', parent.id, parent);
-      this.store.commit();
-      this.writeIndex(parent);
-      this.emitState('multipart-parent-updated', parent.id);
-    } else {
-      this.scheduleStateEmit(parent.id);
-    }
+    this.store.set('multiPartParents', parent.id, parent);
+    this.store.commit();
+    this.writeIndex(parent);
+    this.emitState('multipart-parent-updated', parent.id);
   }
 
   requireParent(id) {
@@ -572,7 +575,7 @@ class MultiPartManager {
     const timer = setTimeout(() => {
       this.stateEmitTimers.delete(key);
       this.emit({ type: 'multipart-progress', parentId: key, multiPart: this.state() });
-    }, 250);
+    }, 400);
     timer.unref?.();
     this.stateEmitTimers.set(key, timer);
   }

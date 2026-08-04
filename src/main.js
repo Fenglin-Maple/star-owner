@@ -1525,7 +1525,12 @@ function publishInternalAgentEvent(event) {
   if (store && event.type !== 'stream' && event.type !== 'session-updated') {
     store.recordActivity({ ...record, type: `internal-agent-${event.type}` });
   }
-  mainWindow?.webContents.send('internal-agent:event', record);
+  // Multi-part model text is not rendered in the Agent pages. Avoid sending
+  // one IPC payload per token while the outside-tool viewer only needs the
+  // throttled progress event handled below.
+  if (!(event.type === 'stream' && event.mode === 'multipart')) {
+    mainWindow?.webContents.send('internal-agent:event', record);
+  }
   multiPartManager?.handleAgentEvent(record);
   if (['task-completed', 'task-attempt-aborted', 'video-unavailable'].includes(event.type)) {
     mainWindow?.webContents.send('app:event', {
