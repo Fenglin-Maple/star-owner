@@ -793,12 +793,14 @@
                       <div class="shared-auth-more-body"><label class="shared-token-field"><span>备用：粘贴 Fine-grained Token</span><input id="sharedToken" type="password" autocomplete="off" placeholder="仅上传 / PR 需要" /></label><button id="sharedSetToken" class="secondary-button" type="button">保存 Token</button><div class="shared-auth-clear"><button id="sharedLogout" class="secondary-button compact-button danger-button" type="button" hidden>清除星藏家 GitHub 授权</button><small>清除应用数据库和内置 Git 私有存储中的令牌，用于切换提交账户；绝不清除系统 Git、系统凭据库或用户全局 Git 配置。</small></div></div>
                     </details>
                   </div>
-                  <div class="shared-repository-card">
-                    <div class="shared-auth-intro"><strong>当前共享仓库</strong><span id="sharedRepositoryStatus">正在读取仓库配置...</span></div>
-                    <div class="shared-repository-switch"><label><span>已验证并连接的仓库</span><select id="sharedRepositorySelect"><option value="">正在读取...</option></select></label><button id="sharedRepositoryOpen" class="secondary-button compact-button" type="button">打开仓库</button></div>
-                    <div class="shared-repository-connect"><input id="sharedRepositoryInput" placeholder="输入 GitHub 仓库链接或 owner/repository" /><button id="sharedRepositorySave" class="secondary-button" type="button">检测并连接</button></div>
-                    <details class="shared-repository-create"><summary>创建我自己的共享文档仓库</summary><div><label><span>公开仓库名称</span><input id="sharedRepositoryCreateName" value="star-owner-shared-knowledge" /></label><button id="sharedRepositoryCreate" class="primary-button" type="button">一键创建并初始化</button><small>将创建公开仓库，并预置 README、贡献规范、目录校验与目录索引 GitHub Actions。</small></div></details>
-                  </div>
+                  <details class="shared-repository-card">
+                    <summary class="shared-repository-summary"><strong>当前共享仓库</strong><span id="sharedRepositoryStatus">正在读取仓库配置...</span></summary>
+                    <div class="shared-repository-config">
+                      <div class="shared-repository-switch"><label><span>已验证并连接的仓库</span><select id="sharedRepositorySelect"><option value="">正在读取...</option></select></label><button id="sharedRepositoryOpen" class="secondary-button compact-button" type="button">打开仓库</button></div>
+                      <div class="shared-repository-connect"><input id="sharedRepositoryInput" aria-label="输入 GitHub 仓库链接或 owner/repository" placeholder="输入 GitHub 仓库链接或 owner/repository" /><button id="sharedRepositorySave" class="secondary-button" type="button">检测并连接</button></div>
+                      <details class="shared-repository-create"><summary>创建我自己的共享文档仓库</summary><div><label><span>公开仓库名称</span><input id="sharedRepositoryCreateName" value="star-owner-shared-knowledge" /></label><button id="sharedRepositoryCreate" class="primary-button" type="button">一键创建并初始化</button><small>将创建公开仓库，并预置 README、贡献规范、目录校验与目录索引 GitHub Actions。</small></div></details>
+                    </div>
+                  </details>
                   <div id="sharedOperationProgress" class="shared-operation-progress" hidden aria-live="polite"><div class="shared-operation-head"><strong id="sharedOperationMessage">正在执行共享操作...</strong><span id="sharedOperationCount"></span></div><div class="local-progress"><span id="sharedOperationBar"></span></div><div id="sharedOperationPercent" class="shared-operation-percent">0%</div></div>
                   <div class="outside-split-layout shared-layout">
                     <div class="outside-pane shared-download-pane">

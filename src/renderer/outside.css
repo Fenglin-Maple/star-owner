@@ -215,7 +215,16 @@
 .shared-token-field > span { color: var(--muted); font-size: 10px; }
 .shared-auth-clear { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding-top: 9px; border-top: 1px solid color-mix(in srgb, var(--line) 65%, transparent); }
 .shared-auth-clear small { color: var(--muted-2); font-size: 10px; line-height: 1.4; }
-.shared-repository-card { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 82%, transparent); }
+.shared-repository-card { display: block; padding: 0; border: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 82%, transparent); overflow: hidden; }
+.shared-repository-summary { display: grid; grid-template-columns: auto minmax(0, 1fr) 16px; align-items: center; gap: 10px; min-height: 48px; padding: 9px 12px; color: var(--text); cursor: pointer; list-style: none; user-select: none; }
+.shared-repository-summary::-webkit-details-marker, .shared-repository-summary::marker { display: none; }
+.shared-repository-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.shared-repository-summary strong { min-width: 0; color: var(--text); font-size: 12px; font-weight: 700; white-space: nowrap; }
+.shared-repository-summary span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; text-align: right; }
+.shared-repository-summary::after { content: "+"; color: var(--accent); font: 16px var(--font-mono); text-align: center; }
+.shared-repository-card[open] > .shared-repository-summary { border-bottom: 1px solid color-mix(in srgb, var(--line) 76%, transparent); }
+.shared-repository-card[open] > .shared-repository-summary::after { content: "−"; }
+.shared-repository-config { display: grid; gap: 10px; padding: 10px 12px 12px; }
 .shared-repository-switch { display: grid; grid-template-columns: minmax(240px, 1fr) auto; gap: 8px; align-items: end; }
 .shared-repository-switch label { display: grid; gap: 5px; min-width: 0; }
 .shared-repository-switch label > span { color: var(--muted); font-size: 10px; }
@@ -382,6 +391,9 @@ body.shared-upload-locked { overflow: hidden; }
   .outside-form-grid, .shared-upload-filter-grid, .shared-catalog-filter-grid { grid-template-columns: 1fr; }
   .outside-pane-title, .shared-auth-intro { align-items: flex-start; flex-direction: column; }
   .outside-pane-title small, .shared-auth-intro span { text-align: left; }
+  .shared-repository-summary { grid-template-columns: minmax(0, 1fr) 16px; align-items: start; gap: 3px 8px; }
+  .shared-repository-summary strong, .shared-repository-summary span { grid-column: 1; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+  .shared-repository-summary::after { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
   .multipart-viewer-toolbar, .shared-auth-primary, .shared-auth-more-body, .shared-upload-actions, .shared-repository-switch, .shared-repository-connect, .shared-repository-create > div, .shared-upload-prepare-toolbar, .shared-catalog-actions { grid-template-columns: 1fr; }
   .shared-auth-primary > button, .shared-auth-more-body > button, .shared-upload-actions > button, .shared-repository-switch > button, .shared-repository-connect > button, .shared-repository-create button, .shared-upload-prepare-toolbar button, .shared-catalog-actions > button { width: 100%; }
   .shared-catalog-actions span { text-align: left; }
