@@ -163,6 +163,28 @@ function assert(condition, message) {
   manager.abortAttempt(toggleClaim.id, toggleSession.workerId, 'test cleanup', 'test');
   manager.deleteSession(toggleSession.id);
   const collection = manager.listInternalCollections().find((item) => item.id !== toggleCollection.id);
+  const multipartFailureTask = {
+    id: `${collection.id}:multipart-failure-test`,
+    collectionId: collection.id,
+    bvid: 'BVMULTIFAIL1',
+    title: '多 P 失败重试测试',
+    status: 'claimed',
+    enabled: true,
+    multiPartRole: 'part',
+    multiPartParentId: 'multipart-parent-test',
+    multiPartId: 'cid-failure-test',
+    multiPartProgress: 0.7,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  store.upsertTask(multipartFailureTask);
+  store.commit();
+  const markedMultipartFailure = manager.markMultipartTaskFailed(multipartFailureTask, '供应商资源池暂不可用', 'infrastructure-failure');
+  assert(markedMultipartFailure.status === 'pending' && markedMultipartFailure.enabled === false, 'failed multipart task did not return to a disabled pending state');
+  assert(markedMultipartFailure.multiPartFailed === true && markedMultipartFailure.multiPartProgress === 0, 'failed multipart task did not expose a retryable failure marker');
+  assert(events.some((event) => event.type === 'multipart-task-failed' && event.taskId === multipartFailureTask.id), 'multipart failure did not notify the parent viewer');
+  store.delete('tasks', multipartFailureTask.id);
+  store.commit();
   const persistedCollectionRoot = collection.collectionRoot;
   const movedDefaultWorkspace = store.addWorkspace({ name: 'New default workspace', root: path.join(root, 'workspace-new') });
   store.setDefaultWorkspace(movedDefaultWorkspace.id);

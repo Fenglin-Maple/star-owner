@@ -41,6 +41,13 @@ class InternalAgentManager {
     this.running = new Map();
     this.startLocks = new Map();
     this.forcedStops = new Map();
+    // Model streams can emit dozens of updates per second. Keep the hot
+    // session object in memory and batch persistence so sql.js/export I/O
+    // cannot block Electron's main process on every token.
+    this.sessionCache = new Map();
+    this.dirtySessionIds = new Set();
+    this.sessionFlushTimer = null;
+    this.sessionFlushDelayMs = 1000;
     this.emptyResponseRetryDelays = normalizeRetryDelays(emptyResponseRetryDelays);
     this.ensureInternalUser();
     this.recoverInterruptedSessions();
@@ -74,7 +81,16 @@ class InternalAgentManager {
   }
 
   listSessions() {
-    return this.store.list('internalAgentSessions').sort((a, b) => {
+    const stored = this.store.list('internalAgentSessions');
+    const storedIds = new Set(stored.map((session) => String(session.id || '')));
+    for (const session of stored) {
+      const id = String(session.id || '');
+      if (id && !this.sessionCache.has(id)) this.sessionCache.set(id, session);
+    }
+    for (const id of [...this.sessionCache.keys()]) {
+      if (!storedIds.has(id) && !this.dirtySessionIds.has(id)) this.sessionCache.delete(id);
+    }
+    return stored.map((session) => sessionSnapshot(this.sessionCache.get(String(session.id || '')) || session)).sort((a, b) => {
       const created = String(b.createdAt || '').localeCompare(String(a.createdAt || ''));
       return created || String(b.id || '').localeCompare(String(a.id || ''));
     });
@@ -555,6 +571,8 @@ class InternalAgentManager {
       }
     }
     try { this.store.updateWorker(session.workerId, { status: 'paused', pauseReason: '对应的应用内 Agent 工作流已被用户删除。' }); } catch {}
+    this.sessionCache.delete(session.id);
+    this.dirtySessionIds.delete(session.id);
     this.store.delete('internalAgentSessions', session.id);
     this.store.save();
     return { deleted: true, id: session.id };
@@ -577,9 +595,12 @@ class InternalAgentManager {
       session.currentTaskId = '';
       session.currentRunId = '';
       session.updatedAt = new Date().toISOString();
-      this.store.set('internalAgentSessions', session.id, session);
+      this.sessionCache.set(session.id, session);
+      this.dirtySessionIds.add(session.id);
     }
-    this.store.save();
+    if (this.sessionFlushTimer) clearTimeout(this.sessionFlushTimer);
+    this.sessionFlushTimer = null;
+    this.flushSessionCache();
   }
 
   reconcileModelAvailability(providerId = '') {
@@ -749,6 +770,7 @@ class InternalAgentManager {
           latest.currentTaskId = '';
           latest.currentRunId = '';
           this.abortAttempt(task.id, latest.workerId, latest.lastError, 'infrastructure-failure');
+          this.markMultipartTaskFailed(task, latest.lastError, 'infrastructure-failure');
           this.store.updateWorker(latest.workerId, { status: 'paused', pauseReason: report, pausedAt: new Date().toISOString() });
           this.saveSession(latest);
           this.log(latest, `基础设施故障，Agent 已停止：${latest.lastError}`);
@@ -776,6 +798,7 @@ class InternalAgentManager {
         latest.currentTaskId = '';
         latest.currentRunId = '';
         this.abortAttempt(task.id, latest.workerId, latest.lastError, 'internal-agent-error');
+        this.markMultipartTaskFailed(task, latest.lastError, 'internal-agent-error');
         this.saveSession(latest);
         this.log(latest, `任务失败：${latest.lastError}`);
         if (latest.mode === 'single' || !latest.acceptNewTasks) return;
@@ -834,6 +857,7 @@ class InternalAgentManager {
       abortReason: '',
       abortSource: '',
       abortedAt: '',
+      ...(task.multiPartRole === 'part' ? { multiPartFailed: false, multiPartFailureReason: '', multiPartFailedAt: '' } : {}),
       ...(task.multiPartRole === 'part' ? { multiPartProgress: 0.05, multiPartPhase: '已领取，准备处理', multiPartStopped: false, multiPartStopReason: '', multiPartStoppedAt: '' } : {}),
       updatedAt: now.toISOString()
     });
@@ -978,6 +1002,9 @@ class InternalAgentManager {
         this.abortAttempt(session.currentTaskId, session.workerId, reason, forced?.source || 'internal-agent-loop-failure');
       } catch (cleanupError) {
         session.lastError = `${reason}\n任务缓存清理将在启动恢复时重试：${cleanupError.message || String(cleanupError)}`;
+      }
+      if (session.mode === 'multipart' && !forced) {
+        try { this.markMultipartTaskFailed(this.store.getTask(session.currentTaskId), reason, 'internal-agent-loop-failure'); } catch {}
       }
     }
     try {
@@ -1348,11 +1375,39 @@ class InternalAgentManager {
     return result;
   }
 
+  markMultipartTaskFailed(task, reason, source = 'internal-agent-error') {
+    if (!task?.multiPartParentId) return null;
+    const current = this.store.getTask(task.id);
+    if (!current || current.status === 'done') return current;
+    const now = new Date().toISOString();
+    const message = String(reason || '多 P 子任务处理失败，请重试。');
+    const next = {
+      ...current,
+      status: 'pending',
+      enabled: false,
+      failureReason: message,
+      multiPartFailed: true,
+      multiPartFailureReason: message,
+      multiPartFailedAt: now,
+      multiPartStopped: false,
+      multiPartStopReason: '',
+      multiPartProgress: 0,
+      multiPartPhase: '处理失败，可重试',
+      abortSource: String(source || current.abortSource || 'internal-agent-error'),
+      updatedAt: now
+    };
+    this.store.upsertTask(next);
+    this.store.commit();
+    this.emit({ type: 'multipart-task-failed', sessionId: '', taskId: next.id, parentId: next.multiPartParentId, mode: 'multipart', reason: message });
+    return next;
+  }
+
   reclaimExpired(collectionId) {
     const active = new Set(this.store.listToolRuns().filter((run) => ['queued', 'running'].includes(run.status) && run.workId).map((run) => `${run.taskId}:${run.workId}`));
     for (const task of this.store.listTasks({ collectionId })) {
       if (!['claimed', 'rejected'].includes(task.status) || !task.leaseExpiresAt || Date.parse(task.leaseExpiresAt) > Date.now() || active.has(`${task.id}:${task.workId}`)) continue;
       this.abortAttempt(task.id, task.claimedBy, '任务租约已超时，内置 Agent 未完成或未正常中止本次工作。', 'lease-expired');
+      if (task.multiPartParentId) this.markMultipartTaskFailed(task, '任务租约已超时，子 P 任务未正常完成。', 'lease-expired');
     }
   }
 
@@ -1371,7 +1426,8 @@ class InternalAgentManager {
     const modelContentLength = session.contentIsNotice ? 0 : String(session.content || '').length;
     session.progress = Math.min(0.86, baseProgress + Math.log10(1 + modelContentLength) * 0.045);
     session.updatedAt = new Date().toISOString();
-    this.store.set('internalAgentSessions', session.id, session);
+    this.touchSession(session);
+    if (session.mode === 'multipart') return;
     this.emit({
       type: 'stream',
       sessionId,
@@ -1400,8 +1456,20 @@ class InternalAgentManager {
     this.syncMultipartTaskProgress(latest, latest.phase, latest.progress);
     if (persist) this.saveSession(latest);
     else {
-      this.store.set('internalAgentSessions', latest.id, latest);
-      this.emit({ type: 'session-updated', session: this.publicSession(latest) });
+      this.touchSession(latest);
+      if (latest.mode === 'multipart') {
+        this.emit({
+          type: 'multipart-progress',
+          sessionId: latest.id,
+          taskId: latest.currentTaskId || '',
+          parentId: latest.multiPartParentId || '',
+          mode: 'multipart',
+          phase: latest.phase,
+          progress: latest.progress
+        });
+      } else {
+        this.emit({ type: 'session-updated', session: this.publicSession(latest) });
+      }
     }
   }
 
@@ -1416,12 +1484,11 @@ class InternalAgentManager {
   }
 
   log(session, message) {
-    const latest = this.store.get('internalAgentSessions', session.id) || session;
+    const latest = this.sessionCache.get(session.id) || this.store.get('internalAgentSessions', session.id) || session;
     latest.logs = [...(latest.logs || []), { at: new Date().toISOString(), message: String(message) }].slice(-200);
     latest.updatedAt = new Date().toISOString();
     Object.assign(session, latest);
-    this.store.set('internalAgentSessions', latest.id, latest);
-    this.store.save();
+    this.touchSession(latest);
     this.emit({ type: 'log', sessionId: latest.id, taskId: latest.currentTaskId || '', parentId: latest.multiPartParentId || '', mode: latest.mode || '', entry: latest.logs.at(-1) });
   }
 
@@ -1438,10 +1505,60 @@ class InternalAgentManager {
 
   saveSession(session) {
     session.updatedAt = new Date().toISOString();
+    this.sessionCache.set(session.id, session);
+    this.dirtySessionIds.delete(session.id);
+    if (this.sessionFlushTimer) {
+      clearTimeout(this.sessionFlushTimer);
+      this.sessionFlushTimer = null;
+    }
     this.store.set('internalAgentSessions', session.id, session);
     this.store.save();
-    this.emit({ type: 'session-updated', session: this.publicSession(session) });
+    if (this.dirtySessionIds.size) this.scheduleSessionFlush();
+    this.emit(session.mode === 'multipart'
+      ? {
+          type: 'session-updated',
+          sessionId: session.id,
+          taskId: session.currentTaskId || '',
+          parentId: session.multiPartParentId || '',
+          mode: 'multipart',
+          status: session.status,
+          phase: session.phase,
+          progress: session.progress
+        }
+      : { type: 'session-updated', session: this.publicSession(session) });
     return session;
+  }
+
+  touchSession(session) {
+    this.sessionCache.set(session.id, session);
+    this.dirtySessionIds.add(session.id);
+    this.scheduleSessionFlush();
+    return session;
+  }
+
+  scheduleSessionFlush() {
+    if (this.sessionFlushTimer) return;
+    this.sessionFlushTimer = setTimeout(() => {
+      this.sessionFlushTimer = null;
+      this.flushSessionCache();
+    }, this.sessionFlushDelayMs);
+    this.sessionFlushTimer.unref?.();
+  }
+
+  flushSessionCache() {
+    const ids = [...this.dirtySessionIds];
+    if (!ids.length) return;
+    try {
+      for (const id of ids) {
+        const session = this.sessionCache.get(id);
+        if (session) this.store.set('internalAgentSessions', id, session);
+      }
+      this.store.save();
+      for (const id of ids) this.dirtySessionIds.delete(id);
+    } catch (error) {
+      console.error(`[internal-agent-session] batch persistence failed: ${error.message || String(error)}`);
+      this.scheduleSessionFlush();
+    }
   }
 
   publicSession(session) {
@@ -1498,8 +1615,10 @@ class InternalAgentManager {
   }
 
   requireSession(id) {
-    const session = this.store.get('internalAgentSessions', String(id || ''));
+    const key = String(id || '');
+    const session = this.sessionCache.get(key) || this.store.get('internalAgentSessions', key);
     if (!session) throw new Error('应用内 Agent 会话不存在。');
+    this.sessionCache.set(key, session);
     return session;
   }
 
@@ -1534,6 +1653,9 @@ class InternalAgentManager {
       multiPartStopped: false,
       multiPartStopReason: '',
       multiPartStoppedAt: '',
+      multiPartFailed: false,
+      multiPartFailureReason: '',
+      multiPartFailedAt: '',
       updatedAt: now
     };
     const event = { id: `submission-completed:${task.workId || task.id}`, taskId: task.id, type: 'completed', createdAt: now, collectionId: task.collectionId, workerId: session.workerId, agentName: session.workerId, workId: task.workId || '', processingSeconds: secondsBetween(task.claimedAt, now), videoDuration: Number(task.duration || 0), internalAgent: true, multipart: true, parentDocumentId: task.parentDocumentId, partId: task.multiPartId };
@@ -1582,6 +1704,7 @@ class InternalAgentManager {
       session.currentTaskId = '';
       session.currentRunId = '';
       session.updatedAt = new Date().toISOString();
+      this.sessionCache.set(session.id, session);
       this.store.set('internalAgentSessions', session.id, session);
     }
     this.store.save();
@@ -1623,6 +1746,7 @@ class InternalAgentManager {
       if (!count) continue;
       session.failed = Math.max(0, Number(session.failed || 0) - count);
       session.skipped = Number(session.skipped || 0) + count;
+      this.sessionCache.set(session.id, session);
       this.store.set('internalAgentSessions', session.id, session);
     }
     for (const run of this.store.listToolRuns({ taskId: task.id })) {
@@ -1631,6 +1755,14 @@ class InternalAgentManager {
     }
     this.store.save();
   }
+}
+
+function sessionSnapshot(session) {
+  return {
+    ...session,
+    logs: Array.isArray(session?.logs) ? session.logs.map((entry) => ({ ...entry })) : [],
+    multiPartTaskIds: Array.isArray(session?.multiPartTaskIds) ? [...session.multiPartTaskIds] : session?.multiPartTaskIds
+  };
 }
 
 function collectMaterials(artifactDir) {

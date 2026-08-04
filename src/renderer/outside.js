@@ -84,6 +84,8 @@
     sharedMount: $('#sharedMount'),
     sharedMountSelectAll: $('#sharedMountSelectAll'),
     sharedSyncSelected: $('#sharedSyncSelected'),
+    sharedClearMountSelection: $('#sharedClearMountSelection'),
+    sharedMountSelectionCount: $('#sharedMountSelectionCount'),
     sharedMountList: $('#sharedMountList'),
     sharedUpload: $('#sharedUpload'),
     sharedUploadSelectAll: $('#sharedUploadSelectAll'),
@@ -422,15 +424,26 @@
         const label = multipartPartStatusLabel(displayStatus);
         const phase = String(task.phase || label);
         const canStop = task.pageState !== 'removed' && task.status !== 'done' && task.enabled !== false && task.stopped !== true;
-        const stopLabel = task.status === 'done' ? '已完成' : task.pageState === 'removed' ? '不可用' : task.stopped ? '已停止' : '停止此 P';
+        const partAction = task.status === 'done' || task.pageState === 'removed'
+          ? { action: '', label: task.status === 'done' ? '已完成' : '不可用', className: 'secondary-button', disabled: true }
+          : task.stopped
+            ? { action: 'resume-part', label: '继续此 P', className: 'primary-button', disabled: false }
+            : displayStatus === 'failed'
+              ? { action: 'retry-part', label: '重试此 P', className: 'primary-button', disabled: false }
+              : { action: 'stop-part', label: '停止此 P', className: 'secondary-button', disabled: !canStop };
         const errorTitle = task.error ? ` title="${escAttr(task.error)}"` : '';
-        return `<div class="multipart-parent-page ${stateClass}"${errorTitle}><div class="multipart-part-main"><input class="app-checkbox" type="checkbox" aria-label="选择 P${Number(page.page || 1)}" data-parent-id="${escAttr(parent.id)}" data-parent-page="${escAttr(page.cid)}" ${checked ? 'checked' : ''} ${task.pageState === 'removed' || task.status === 'done' ? 'disabled' : ''}/><div class="multipart-part-copy"><strong>P${Number(page.page || 1)} · ${esc(page.part || '')}</strong><small>${esc(label)} · CID ${esc(page.cid)} · ${formatDuration(page.duration)}</small></div><button class="secondary-button compact-button multipart-part-stop" type="button" data-multipart-action="stop-part" data-parent-id="${escAttr(parent.id)}" data-part-id="${escAttr(page.cid)}" ${canStop ? '' : 'disabled'}>${esc(stopLabel)}</button></div><div class="multipart-part-progress"><div class="local-progress"><span style="width:${progress}%"></span></div><span>${Math.round(progress)}%</span></div><div class="multipart-part-phase">${esc(phase)}</div></div>`;
+        return `<div class="multipart-parent-page ${stateClass}"${errorTitle}><div class="multipart-part-main"><input class="app-checkbox" type="checkbox" aria-label="选择 P${Number(page.page || 1)}" data-parent-id="${escAttr(parent.id)}" data-parent-page="${escAttr(page.cid)}" ${checked ? 'checked' : ''} ${task.pageState === 'removed' || task.status === 'done' ? 'disabled' : ''}/><div class="multipart-part-copy"><strong>P${Number(page.page || 1)} · ${esc(page.part || '')}</strong><small>${esc(label)} · CID ${esc(page.cid)} · ${formatDuration(page.duration)}</small></div><button class="${partAction.className} compact-button multipart-part-stop" type="button" data-multipart-action="${escAttr(partAction.action)}" data-parent-id="${escAttr(parent.id)}" data-part-id="${escAttr(page.cid)}" ${partAction.disabled ? 'disabled' : ''}>${esc(partAction.label)}</button></div><div class="multipart-part-progress"><div class="local-progress"><span style="width:${progress}%"></span></div><span>${Math.round(progress)}%</span></div><div class="multipart-part-phase">${esc(phase)}</div></div>`;
       }).join('');
       const progress = Math.max(0, Math.min(100, Math.round(Number(parent.progress || 0) * 100)));
       const running = Number(parent.running || 0);
       const stopped = Number(parent.stopped || 0);
+      const failed = Number(parent.failed || 0);
+      const pending = Math.max(0, Number(parent.total || 0) - Number(parent.completed || 0) - stopped - failed);
       const detailSummary = [`${parent.total} 个子 P`, running ? `${running} 个处理中` : '', stopped ? `${stopped} 个已停止` : ''].filter(Boolean).join(' · ');
-      return `<article class="multipart-parent-record" data-parent-record="${escAttr(parent.id)}"><div class="multipart-parent-head"><div><strong>${esc(parent.title)}</strong><small>${esc(parent.bvid)} · ${esc(parent.collectionName || '')} · ${status}</small></div><div class="multipart-parent-actions"><button class="secondary-button compact-button" type="button" data-multipart-action="refresh" data-parent-id="${escAttr(parent.id)}">刷新 P</button>${parent.activeSessions?.length ? `<button class="secondary-button compact-button" type="button" data-multipart-action="stop" data-parent-id="${escAttr(parent.id)}">停止全部</button>` : `<button class="primary-button compact-button" type="button" data-multipart-action="start" data-parent-id="${escAttr(parent.id)}">继续</button>`}<button class="secondary-button compact-button danger-button" type="button" data-multipart-action="delete" data-parent-id="${escAttr(parent.id)}">删除</button></div></div><div class="local-progress"><span style="width:${progress}%"></span></div><div class="multipart-parent-summary">${parent.completed}/${parent.total} P · ${progress}% · ${esc(status)}</div><details class="multipart-parent-details" data-multipart-details data-parent-id="${escAttr(parent.id)}" ${expandedMultipartParents.has(parent.id) ? 'open' : ''}><summary><span>子 P 任务明细</span><small>${esc(detailSummary)}</small></summary><div class="multipart-parent-pages">${pages}</div></details></article>`;
+      const batchActions = parent.activeSessions?.length
+        ? `<button class="secondary-button compact-button" type="button" data-multipart-action="stop" data-parent-id="${escAttr(parent.id)}">停止全部</button>`
+        : `${stopped ? `<button class="primary-button compact-button" type="button" data-multipart-action="resume-stopped" data-parent-id="${escAttr(parent.id)}">全部继续（${stopped}）</button>` : ''}${failed ? `<button class="primary-button compact-button" type="button" data-multipart-action="retry-failed" data-parent-id="${escAttr(parent.id)}">全部重试（${failed}）</button>` : ''}${pending ? `<button class="secondary-button compact-button" type="button" data-multipart-action="start" data-parent-id="${escAttr(parent.id)}">继续选中</button>` : ''}`;
+      return `<article class="multipart-parent-record" data-parent-record="${escAttr(parent.id)}"><div class="multipart-parent-head"><div><strong>${esc(parent.title)}</strong><small>${esc(parent.bvid)} · ${esc(parent.collectionName || '')} · ${status}</small></div><div class="multipart-parent-actions"><button class="secondary-button compact-button" type="button" data-multipart-action="refresh" data-parent-id="${escAttr(parent.id)}">刷新 P</button>${batchActions}<button class="secondary-button compact-button danger-button" type="button" data-multipart-action="delete" data-parent-id="${escAttr(parent.id)}">删除</button></div></div><div class="local-progress"><span style="width:${progress}%"></span></div><div class="multipart-parent-summary">${parent.completed}/${parent.total} P · ${progress}% · ${esc(status)}</div><details class="multipart-parent-details" data-multipart-details data-parent-id="${escAttr(parent.id)}" ${expandedMultipartParents.has(parent.id) ? 'open' : ''}><summary><span>子 P 任务明细</span><small>${esc(detailSummary)}${failed ? ` · ${failed} 个失败` : ''}</small></summary><div class="multipart-parent-pages">${pages}</div></details></article>`;
     }).join('') : '<div class="empty-state">这个收藏夹还没有多P父任务。</div>';
     for (const details of elements.multipartParentList.querySelectorAll('[data-multipart-details]')) {
       details.addEventListener('toggle', () => {
@@ -441,8 +454,24 @@
     }
   }
 
-  function parentStatusLabel(status) { return ({ pending: '待开始', running: '处理中', partial: '部分完成', stopped: '已停止', completed: '已完成' })[status] || status || '未知'; }
+  function parentStatusLabel(status) { return ({ pending: '待开始', running: '处理中', partial: '部分完成', stopped: '已停止', failed: '处理失败', completed: '已完成' })[status] || status || '未知'; }
   function multipartPartStatusLabel(status) { return ({ pending: '待处理', running: '处理中', stopped: '已停止，可继续', failed: '处理失败，可重试', completed: '已完成', removed: '远程已移除' })[status] || status || '待处理'; }
+
+  async function startMultipartPages(parentId, selectedPages, actionLabel = '继续') {
+    const parent = (multipartState.parents || []).find((item) => item.id === parentId);
+    if (!parent) return;
+    if (!selectedPages.length) return notify('无法继续多 P 任务', '请至少选择一个尚未完成的 P。');
+    await window.orchestrator.multiPartStart({
+      parentId,
+      selectedPages,
+      providerId: parent.settings?.providerId,
+      modelId: parent.settings?.modelId,
+      ...parent.settings?.taskOptions,
+      taskRequirements: parent.settings?.taskRequirements || ''
+    });
+    await refresh();
+    notify(`多 P 任务${actionLabel}已开始`, `已提交 ${selectedPages.length} 个 P 到应用内 Agent 队列。`, 'success');
+  }
 
   async function startExistingMultipart(parentId) {
     const parent = (multipartState.parents || []).find((item) => item.id === parentId);
@@ -470,6 +499,18 @@
     try {
       if (action === 'refresh') await window.orchestrator.multiPartRefresh(parentId);
       else if (action === 'start') await startExistingMultipart(parentId);
+      else if (action === 'resume-part' || action === 'retry-part') {
+        setBusy(button, true, action === 'retry-part' ? '重试中' : '继续中');
+        try { await startMultipartPages(parentId, [button.dataset.partId], action === 'retry-part' ? '重试' : '继续'); }
+        finally { setBusy(button, false, action === 'retry-part' ? '重试此 P' : '继续此 P'); }
+      }
+      else if (action === 'resume-stopped' || action === 'retry-failed') {
+        const parent = (multipartState.parents || []).find((item) => item.id === parentId);
+        const pages = (parent?.parts || []).filter((part) => action === 'resume-stopped' ? part.stopped : part.displayStatus === 'failed').map((part) => String(part.cid));
+        setBusy(button, true, action === 'retry-failed' ? '重试中' : '继续中');
+        try { await startMultipartPages(parentId, pages, action === 'retry-failed' ? '重试' : '继续'); }
+        finally { setBusy(button, false, action === 'retry-failed' ? `全部重试（${pages.length}）` : `全部继续（${pages.length}）`); }
+      }
       else if (action === 'stop') await window.orchestrator.multiPartStop(parentId);
       else if (action === 'stop-part') {
         setBusy(button, true, '停止中');
@@ -943,6 +984,8 @@
     const openMountIds = new Set([...elements.sharedMountList.querySelectorAll('details[data-shared-local-mount][open]')].map((item) => String(item.dataset.sharedLocalMount)));
     const validIds = new Set(mounts.map((mount) => String(mount.id)));
     for (const id of [...selectedMountIds]) if (!validIds.has(id)) selectedMountIds.delete(id);
+    elements.sharedMountSelectionCount.textContent = String(selectedMountIds.size);
+    elements.sharedClearMountSelection.disabled = !selectedMountIds.size;
     elements.sharedMountSelectAll.disabled = !mounts.length;
     elements.sharedMountSelectAll.textContent = mounts.length && selectedMountIds.size === mounts.length ? '取消全选' : '全选挂载';
     elements.sharedSyncSelected.disabled = !selectedMountIds.size;
@@ -1073,6 +1116,37 @@
     });
   }
 
+  function sharedUploadItemRow(item, preparation = false) {
+    const task = item.task;
+    if (preparation) {
+      return `<div class="shared-upload-prep-item"><input class="app-checkbox" type="checkbox" data-shared-upload-prep-select="${escAttr(task.id)}" ${selectedPreparedTaskIds.has(String(task.id)) ? 'checked' : ''}/><span><strong>${esc(task.title || task.bvid)}</strong><small>${esc(task.bvid)} · ${esc(task.owner || '未知UP主')} · ${formatUploadDuration(item.duration)} · ${esc(formatUploadDate(item.completedAt))}</small></span><button class="secondary-button compact-button" type="button" data-shared-upload-remove="${escAttr(task.id)}">移除</button></div>`;
+    }
+    const selected = selectedUploadTaskIds.has(String(task.id));
+    const maximum = Number(sharedData.limits?.maxUploadDocuments || 1000);
+    return `<label class="shared-upload-row"><input class="app-checkbox" type="checkbox" data-shared-upload-task="${escAttr(task.id)}" ${selected ? 'checked' : ''} ${!selected && selectedUploadTaskIds.size >= maximum ? 'disabled' : ''}/><span><strong>${esc(task.title || task.bvid)}</strong><small>${esc(task.bvid || '')} · ${esc(task.owner || '未知UP主')} · ${esc(item.userName)} / ${esc(item.collectionName)}</small></span><span class="shared-upload-candidate-meta"><strong>${task.sharedUploadPr ? '已创建过 PR' : '未上传'}</strong><small>${formatUploadDuration(item.duration)} · ${esc(formatUploadDate(task.completedAt))}</small></span></label>`;
+  }
+
+  function sharedUploadTree(items, { preparation = false, forceOpen = false } = {}) {
+    const users = new Map();
+    for (const item of items) {
+      const userKey = `${item.userId || ''}:${item.userName || ''}`;
+      if (!users.has(userKey)) users.set(userKey, { id: item.userId || '', name: item.userName || '未知用户', collections: new Map() });
+      const user = users.get(userKey);
+      const collectionKey = String(item.collection.id || `${item.userId}:${item.collectionName}`);
+      if (!user.collections.has(collectionKey)) user.collections.set(collectionKey, { name: item.collectionName, items: [] });
+      user.collections.get(collectionKey).items.push(item);
+    }
+    return [...users.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')).map((user, userIndex) => {
+      const collectionValues = [...user.collections.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+      const collectionCount = collectionValues.reduce((sum, collection) => sum + collection.items.length, 0);
+      const collectionsHtml = collectionValues.map((collection, collectionIndex) => {
+        const collectionOpen = forceOpen || collectionValues.length === 1;
+        return `<details class="shared-tree-node shared-tree-collection shared-upload-collection" ${collectionOpen ? 'open' : ''}><summary><span class="shared-tree-marker">COL</span><span><strong title="${escAttr(collection.name)}">${esc(collection.name)}</strong><small>${collection.items.length} 篇待处理总结</small></span><em>${collection.items.length}</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><div class="shared-tree-collection-body shared-upload-tree-items">${collection.items.sort((a, b) => String(a.task.title || '').localeCompare(String(b.task.title || ''), 'zh-CN')).map((item) => sharedUploadItemRow(item, preparation)).join('')}</div></details>`;
+      }).join('');
+      return `<details class="shared-tree-node shared-tree-bilibili shared-upload-user" ${forceOpen || users.size === 1 || userIndex === 0 ? 'open' : ''}><summary><span class="shared-tree-marker">USER</span><span><strong title="${escAttr(user.name)}">${esc(user.name)}</strong><small>${collectionValues.length} 个收藏夹 · ${collectionCount} 篇总结</small></span><em>${collectionCount}</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><div class="shared-tree-children">${collectionsHtml}</div></details>`;
+    }).join('');
+  }
+
   function renderSharedUploadPreparation(items) {
     const selectedItems = items.filter((item) => selectedUploadTaskIds.has(String(item.task.id)));
     const maximum = Number(sharedData.limits?.maxUploadDocuments || 1000);
@@ -1096,14 +1170,8 @@
       elements.sharedUploadPrepareList.innerHTML = '<div class="empty-state">准备上传列表中没有符合筛选条件的文档。</div>';
       return;
     }
-    const groups = new Map();
-    for (const item of visibleItems) {
-      const key = String(item.collection.id || `${item.userId}:${item.collectionName}`);
-      if (!groups.has(key)) groups.set(key, { collectionName: item.collectionName, userName: item.userName, items: [] });
-      groups.get(key).items.push(item);
-    }
     const forceOpen = Boolean(elements.sharedUploadPrepareCollectionFilter.value.trim() || elements.sharedUploadPrepareFilter.value.trim());
-    elements.sharedUploadPrepareList.innerHTML = [...groups.values()].sort((a, b) => a.collectionName.localeCompare(b.collectionName, 'zh-CN')).map((group) => `<details class="shared-upload-prep-group" ${forceOpen ? 'open' : ''}><summary><span><strong>${esc(group.collectionName)}</strong><small>${esc(group.userName)}</small></span><em>${group.items.length} 篇</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary><div>${group.items.map((item) => `<div class="shared-upload-prep-item"><input class="app-checkbox" type="checkbox" data-shared-upload-prep-select="${escAttr(item.task.id)}" ${selectedPreparedTaskIds.has(String(item.task.id)) ? 'checked' : ''}/><span><strong>${esc(item.task.title || item.task.bvid)}</strong><small>${esc(item.task.bvid)} · ${esc(item.task.owner || '未知UP主')} · ${formatUploadDuration(item.duration)} · ${esc(formatUploadDate(item.completedAt))}</small></span><button class="secondary-button compact-button" type="button" data-shared-upload-remove="${escAttr(item.task.id)}">移除</button></div>`).join('')}</div></details>`).join('');
+    elements.sharedUploadPrepareList.innerHTML = sharedUploadTree(visibleItems, { preparation: true, forceOpen });
   }
 
   function renderSharedUploads() {
@@ -1116,11 +1184,9 @@
     elements.sharedUploadResultCount.textContent = `筛选结果 ${items.length} / ${allItems.length}`;
     const maximum = Number(sharedData.limits?.maxUploadDocuments || 1000);
     elements.sharedUploadSelectAll.disabled = !items.length || selectedUploadTaskIds.size >= maximum;
-    elements.sharedUploadList.innerHTML = items.length ? items.map((item) => {
-      const task = item.task;
-      const selected = selectedUploadTaskIds.has(String(task.id));
-      return `<label class="shared-upload-row"><input class="app-checkbox" type="checkbox" data-shared-upload-task="${escAttr(task.id)}" ${selected ? 'checked' : ''} ${!selected && selectedUploadTaskIds.size >= maximum ? 'disabled' : ''}/><span><strong>${esc(task.title || task.bvid)}</strong><small>${esc(task.bvid || '')} · ${esc(task.owner || '未知UP主')} · ${esc(item.userName)} / ${esc(item.collectionName)}</small></span><span class="shared-upload-candidate-meta"><strong>${task.sharedUploadPr ? '已创建过 PR' : '未上传'}</strong><small>${formatUploadDuration(item.duration)} · ${esc(formatUploadDate(item.completedAt))}</small></span></label>`;
-    }).join('') : '<div class="empty-state">当前筛选条件下没有可共享的 B站视频总结产物。</div>';
+    elements.sharedUploadList.innerHTML = items.length
+      ? sharedUploadTree(items, { forceOpen: Boolean(elements.sharedUploadFilter.value.trim() || elements.sharedUploadUserFilter.value.trim() || elements.sharedUploadCollectionFilter.value.trim()) })
+      : '<div class="empty-state">当前筛选条件下没有可共享的 B站视频总结产物。</div>';
     renderSharedUploadPreparation(allItems);
   }
 
@@ -1555,6 +1621,12 @@
     const mounts = sharedData.mounts || [];
     if (mounts.length && selectedMountIds.size === mounts.length) selectedMountIds.clear();
     else for (const mount of mounts) selectedMountIds.add(String(mount.id));
+    renderSharedMounts();
+  });
+  elements.sharedClearMountSelection.addEventListener('click', () => {
+    if (!selectedMountIds.size) return;
+    if (!window.confirm('确定解除当前选中的本地挂载选择吗？不会删除本地共享收藏夹或已挂载文档。')) return;
+    selectedMountIds.clear();
     renderSharedMounts();
   });
   elements.sharedSyncSelected.addEventListener('click', syncSelectedSharedMounts);

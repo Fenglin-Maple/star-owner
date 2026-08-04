@@ -19,6 +19,8 @@ class MultiPartManager {
     this.emit = emit || (() => {});
     this.indexRefreshFailures = [];
     this.stateEmitTimers = new Map();
+    this.partTaskCache = new Map();
+    this.partTaskCacheTtlMs = 250;
     this.refreshStoredIndexes();
   }
 
@@ -138,6 +140,9 @@ class MultiPartManager {
         part.multiPartStopped = false;
         part.multiPartStopReason = '';
         part.multiPartStoppedAt = '';
+        part.multiPartFailed = false;
+        part.multiPartFailureReason = '';
+        part.multiPartFailedAt = '';
       }
       part.updatedAt = new Date().toISOString();
       this.store.upsertTask(part);
@@ -190,6 +195,9 @@ class MultiPartManager {
     task.multiPartStopped = true;
     task.multiPartStopReason = stopReason;
     task.multiPartStoppedAt = now;
+    task.multiPartFailed = false;
+    task.multiPartFailureReason = '';
+    task.multiPartFailedAt = '';
     task.multiPartProgress = 0;
     task.multiPartPhase = '已单独停止，等待继续';
     task.updatedAt = now;
@@ -224,6 +232,9 @@ class MultiPartManager {
       refreshed.multiPartStopped = true;
       refreshed.multiPartStopReason = stopReason;
       refreshed.multiPartStoppedAt = now;
+      refreshed.multiPartFailed = false;
+      refreshed.multiPartFailureReason = '';
+      refreshed.multiPartFailedAt = '';
       refreshed.multiPartProgress = 0;
       refreshed.multiPartPhase = '已单独停止，等待继续';
       refreshed.updatedAt = new Date().toISOString();
@@ -289,11 +300,14 @@ class MultiPartManager {
 
   handleAgentEvent(event = {}) {
     const eventType = String(event.type || '');
-    if (['stream', 'log', 'session-updated'].includes(eventType)) {
+    if (['stream', 'log', 'session-updated', 'multipart-progress'].includes(eventType)) {
       // Stream deltas can arrive once per token. They only need to wake the
       // throttled viewer; full task/session scans belong to terminal events.
       const lightweightParentId = event.parentId || event.session?.multiPartParentId || '';
-      if (lightweightParentId) this.scheduleStateEmit(lightweightParentId);
+      if (lightweightParentId) {
+        this.invalidatePartTaskCache(lightweightParentId);
+        this.scheduleStateEmit(lightweightParentId);
+      }
       return;
     }
     const session = event.session || (event.sessionId
@@ -306,6 +320,7 @@ class MultiPartManager {
     if (!parentId) return;
     const parent = this.store.get('multiPartParents', parentId);
     if (!parent) return;
+    this.invalidatePartTaskCache(parent.id);
     const parts = this.partTasks(parent.id);
     const done = parts.filter((item) => item.status === 'done').length;
     const pending = parts.filter((item) => item.status !== 'done' && item.pageState !== 'removed').length;
@@ -331,7 +346,18 @@ class MultiPartManager {
   }
 
   partTasks(parentId) {
-    return this.store.listTasks().filter((task) => task.multiPartParentId === String(parentId || '') && task.multiPartRole === 'part');
+    const key = String(parentId || '');
+    const cached = this.partTaskCache.get(key);
+    if (cached && Date.now() - cached.createdAt < this.partTaskCacheTtlMs) return cached.tasks;
+    const tasks = this.store.listTasks().filter((task) => task.multiPartParentId === key && task.multiPartRole === 'part');
+    this.partTaskCache.set(key, { createdAt: Date.now(), tasks });
+    return tasks;
+  }
+
+  invalidatePartTaskCache(parentId = '') {
+    const key = String(parentId || '');
+    if (key) this.partTaskCache.delete(key);
+    else this.partTaskCache.clear();
   }
 
   activeSessions(parentId) {
@@ -424,6 +450,9 @@ class MultiPartManager {
       multiPartStopped: Boolean(current?.multiPartStopped),
       multiPartStopReason: String(current?.multiPartStopReason || ''),
       multiPartStoppedAt: String(current?.multiPartStoppedAt || ''),
+      multiPartFailed: Boolean(current?.multiPartFailed),
+      multiPartFailureReason: String(current?.multiPartFailureReason || ''),
+      multiPartFailedAt: String(current?.multiPartFailedAt || ''),
       multiPartParentId: parent.id,
       parentDocumentId: parent.parentDocumentId,
       multiPartId: cid,
@@ -511,6 +540,7 @@ class MultiPartManager {
     ensureDir(parent.parentRoot);
     const parts = this.partTasks(parent.id).sort((a, b) => Number(a.page || 0) - Number(b.page || 0));
     const partSummaries = parts.flatMap((task) => partSummaryLines(parent, task));
+    const coverReference = this.ensureParentCover(parent, parts);
     const lines = [
       `# ${parent.title} · 多P视频目录`, '',
       '## 小结', '',
@@ -523,8 +553,53 @@ class MultiPartManager {
       '## 字幕', '', '每个 P 的 ASR 时间戳和站内字幕位于对应 P 的产物目录。', '',
       '## 处理记录', '', `- BV：${parent.bvid}`, `- 最后刷新：${parent.lastRefreshedAt || parent.updatedAt}`, `- 产物身份：${parent.parentDocumentId}`
     ];
+    if (coverReference) lines.splice(1, 0, `![视频封面](${coverReference})`, '');
     writeTextIfChanged(path.join(parent.parentRoot, 'index.md'), `${lines.join('\n')}\n`);
-    writeTextIfChanged(path.join(parent.parentRoot, 'metadata.json'), `${JSON.stringify({ ...parent, parts: parts.map(publicPartMetadata) }, null, 2)}\n`);
+    writeTextIfChanged(path.join(parent.parentRoot, 'metadata.json'), `${JSON.stringify({ ...parent, coverFile: coverReference, parts: parts.map(publicPartMetadata) }, null, 2)}\n`);
+  }
+
+  ensureParentCover(parent, parts) {
+    const ordered = [...parts].sort((left, right) => {
+      const leftP1 = Number(left.page || 0) === 1 ? 0 : 1;
+      const rightP1 = Number(right.page || 0) === 1 ? 0 : 1;
+      return leftP1 - rightP1 || Number(left.page || 0) - Number(right.page || 0);
+    });
+    const candidates = [];
+    for (const task of ordered) {
+      const artifactDir = String(task.artifactDir || task.preallocatedArtifactDir || '');
+      if (!artifactDir) continue;
+      if (task.coverFile) candidates.push(path.isAbsolute(String(task.coverFile)) ? String(task.coverFile) : path.join(artifactDir, String(task.coverFile)));
+      for (const name of ['cover.jpg', 'cover.jpeg', 'cover.png', 'cover.webp', 'thumbnail.jpg', 'thumbnail.png']) candidates.push(path.join(artifactDir, name));
+      try {
+        for (const name of fs.readdirSync(path.join(artifactDir, 'frames'))) {
+          if (/^frame-\d+\.(?:jpe?g|png|webp)$/i.test(name)) candidates.push(path.join(artifactDir, 'frames', name));
+        }
+      } catch {}
+    }
+    if (parent.coverFile) {
+      const existing = path.isAbsolute(String(parent.coverFile))
+        ? String(parent.coverFile)
+        : path.join(parent.parentRoot, String(parent.coverFile));
+      candidates.push(existing);
+    }
+    const source = candidates.find((candidate) => {
+      try { return fs.statSync(assertInside(parent.parentRoot, candidate)).isFile(); } catch { return false; }
+    });
+    if (source) {
+      const extension = ['.jpg', '.jpeg', '.png', '.webp'].includes(path.extname(source).toLowerCase()) ? path.extname(source).toLowerCase() : '.jpg';
+      const target = path.join(parent.parentRoot, `cover${extension === '.jpeg' ? '.jpg' : extension}`);
+      try {
+        if (path.resolve(source) !== path.resolve(target)) fs.copyFileSync(source, target);
+        for (const staleName of ['cover.jpg', 'cover.jpeg', 'cover.png', 'cover.webp']) {
+          const stale = path.join(parent.parentRoot, staleName);
+          if (path.resolve(stale) !== path.resolve(target) && fs.existsSync(stale)) fs.rmSync(stale, { force: true });
+        }
+        parent.coverFile = path.basename(target);
+        this.store.set('multiPartParents', parent.id, parent);
+        return path.basename(target).replace(/\\/g, '/');
+      } catch {}
+    }
+    return /^https?:\/\//i.test(String(parent.cover || '').trim()) ? String(parent.cover).trim() : '';
   }
 
   publicParent(parent) {
@@ -537,7 +612,7 @@ class MultiPartManager {
     const completed = parts.filter((task) => task.status === 'done').length;
     const running = parts.filter((task) => sessionsByTask.has(String(task.id))).length;
     const stopped = parts.filter((task) => task.multiPartStopped === true).length;
-    const failed = parts.filter((task) => task.status === 'failed').length;
+    const failed = parts.filter((task) => isMultipartTaskFailed(task)).length;
     const progress = publicParts.length
       ? publicParts.reduce((total, task) => total + clampProgress(task.progress), 0) / publicParts.length
       : 0;
@@ -674,7 +749,7 @@ function publicPart(task, session = null) {
       ? 'stopped'
       : active
         ? 'running'
-        : task.status === 'failed' ? 'failed' : 'pending';
+        : isMultipartTaskFailed(task) ? 'failed' : 'pending';
   return {
     id: task.id,
     cid: task.cid,
@@ -685,6 +760,7 @@ function publicPart(task, session = null) {
     displayStatus,
     enabled: task.enabled !== false,
     stopped: task.multiPartStopped === true,
+    failed: isMultipartTaskFailed(task),
     pageState: task.pageState || 'active',
     progress,
     progressPercent: Math.round(progress * 100),
@@ -692,11 +768,14 @@ function publicPart(task, session = null) {
     sessionId: active ? String(session.id || '') : '',
     outputMarkdown: task.outputMarkdown || '',
     completedAt: task.completedAt || '',
-    error: task.failureReason || task.infrastructureError || task.abortReason || task.multiPartStopReason || '',
+    error: task.failureReason || task.infrastructureError || task.multiPartFailureReason || task.abortReason || task.multiPartStopReason || '',
     parentDocumentId: task.parentDocumentId
   };
 }
 function publicPartMetadata(task) { return publicPart(task); }
+function isMultipartTaskFailed(task) {
+  return Boolean(task && (task.multiPartFailed === true || task.status === 'failed'));
+}
 function publicCollection(collection) { const { cookieFile, collectionRoot, videosDir, exportDir, ...safe } = collection; return safe; }
 function escapeMermaid(value) { return String(value || '').replace(/[\[\]{}()<>"']/g, '').slice(0, 80); }
 function clampProgress(value) {
@@ -712,7 +791,7 @@ function partSummaryLines(parent, task) {
   const status = completed
     ? (task.pageState === 'removed' ? '已完成，远程页面已移除' : '已完成')
     : task.pageState === 'removed' ? '远程已移除'
-      : task.status === 'failed' ? '处理失败，可继续重试'
+      : isMultipartTaskFailed(task) ? '处理失败，可继续重试'
         : '待处理';
   const lines = [`### ${title}`, '', `- 状态：${status}`, `- CID：${task.cid || '-'}`];
   if (completed) lines.push(`- [打开本 P 完整总结](${link})`);

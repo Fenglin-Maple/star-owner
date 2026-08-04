@@ -48,6 +48,13 @@ class ToolRunner {
     this.leaseTimer = null;
     this.cpuStopTimer = null;
     this.cleanupRecoveryTimer = null;
+    this.volatileRunIds = new Set();
+    this.volatileRunFlushTimer = null;
+    this.volatileRunFlushDelayMs = 1000;
+    this.pendingLogWrites = new Map();
+    this.logFlushTimer = null;
+    this.logFlushDelayMs = 1000;
+    this.logFlushThresholdBytes = 256 * 1024;
     this.maintenance = null;
     this.gpuAsr = new AsrService({
       id: 'asr-gpu',
@@ -497,7 +504,7 @@ class ToolRunner {
           onProgress: (progress) => {
             if (Date.now() - lastProgressWrite < 800 && Number(progress.progress || 0) < 1) return;
             lastProgressWrite = Date.now();
-            this.updateRun(run.id, { asrProgress: progress });
+            this.updateRun(run.id, { asrProgress: progress }, { persist: false });
             this.appendLog(run.id, `[${new Date().toISOString()}] ASR ${Math.round(Number(progress.progress || 0) * 100)}% (${Number(progress.audioSeconds || 0).toFixed(1)}s / ${Number(progress.totalSeconds || 0).toFixed(1)}s)\n`);
           }
         }), Number(run.timeoutMs || DEFAULT_TIMEOUT_MS), () => service.cancel(run.id));
@@ -558,7 +565,7 @@ class ToolRunner {
           queueLength: queue.queued,
           queueReason: queue.reason,
           estimatedWaitMs: queue.estimatedWaitMs
-        });
+        }, { persist: false });
       },
       onStart: ({ pool: startedPool, lane }) => {
         const latest = this.store.getToolRun(state.runId);
@@ -698,6 +705,7 @@ class ToolRunner {
         clearInterval(diskTimer);
         if (state.child === child) state.child = null;
         if (this.processes.get(state.runId) === child) this.processes.delete(state.runId);
+        this.flushPendingLogs(state.runId);
         error ? reject(error) : resolve(result);
       };
       readUtf8(child.stdout, (text) => {
@@ -709,12 +717,12 @@ class ToolRunner {
           ...(progress ? { downloadProgress: progress } : {}),
           ...(mediaProgress ? { mediaProgress } : {}),
           lastOutputAt: new Date().toISOString()
-        });
+        }, { persist: false });
       });
       readUtf8(child.stderr, (text) => {
         rememberOutput(text);
         this.appendLog(state.runId, text);
-        this.updateRun(state.runId, { lastOutputAt: new Date().toISOString() });
+        this.updateRun(state.runId, { lastOutputAt: new Date().toISOString() }, { persist: false });
       });
       child.on('error', (error) => finish(error));
       child.on('close', (code, signal) => {
@@ -762,6 +770,7 @@ class ToolRunner {
       signal: 'CANCELLED',
       finishedAt: new Date().toISOString()
     });
+    this.flushPendingLogs(runId);
     this.publish({ type: 'tool-run-cancelled', runId, toolId: run.toolId, taskId: run.taskId });
     return next;
   }
@@ -806,6 +815,7 @@ class ToolRunner {
       finishedAt: new Date().toISOString(),
       ...patch
     });
+    this.flushPendingLogs(state.runId);
     this.publish({
       type: `tool-run-${status}`,
       runId: state.runId,
@@ -1244,6 +1254,12 @@ class ToolRunner {
     this.scheduler.shutdown();
     this.gpuAsr.stop();
     this.cpuAsr.stop();
+    if (this.volatileRunFlushTimer) clearTimeout(this.volatileRunFlushTimer);
+    this.volatileRunFlushTimer = null;
+    this.flushVolatileRunUpdates();
+    if (this.logFlushTimer) clearTimeout(this.logFlushTimer);
+    this.logFlushTimer = null;
+    this.flushPendingLogs();
     this.maintenance = null;
     this.initialized = false;
   }
@@ -1280,14 +1296,82 @@ class ToolRunner {
     throw new Error('Application is shutting down; dependency installation was cancelled.');
   }
 
-  updateRun(id, patch) {
-    return this.store.updateToolRun(id, patch);
+  updateRun(id, patch, options = {}) {
+    const persist = options.persist !== false;
+    const next = this.store.updateToolRun(id, patch, { persist });
+    if (persist) {
+      // A sql.js export contains all runs, including every other dirty run.
+      this.volatileRunIds.clear();
+      if (this.volatileRunFlushTimer) clearTimeout(this.volatileRunFlushTimer);
+      this.volatileRunFlushTimer = null;
+    } else {
+      this.volatileRunIds.add(String(id));
+      this.scheduleVolatileRunFlush();
+    }
+    return next;
+  }
+
+  scheduleVolatileRunFlush() {
+    if (this.volatileRunFlushTimer) return;
+    this.volatileRunFlushTimer = setTimeout(() => {
+      this.volatileRunFlushTimer = null;
+      this.flushVolatileRunUpdates();
+    }, this.volatileRunFlushDelayMs);
+    this.volatileRunFlushTimer.unref?.();
+  }
+
+  flushVolatileRunUpdates() {
+    if (!this.volatileRunIds.size) return;
+    try {
+      // Progress is already updated in sql.js; defer only the expensive disk export.
+      this.store.save();
+      this.volatileRunIds.clear();
+    } catch (error) {
+      console.error(`[tool-runner] deferred progress persistence failed: ${error.message || String(error)}`);
+      this.scheduleVolatileRunFlush();
+    }
   }
 
   appendLog(runId, text) {
     const run = this.store.getToolRun(runId);
     if (!run?.logFile) return;
-    try { fs.appendFileSync(run.logFile, String(text), 'utf8'); } catch {}
+    const content = String(text || '');
+    if (!content) return;
+    const key = String(runId);
+    const pending = this.pendingLogWrites.get(key) || { logFile: run.logFile, text: '', bytes: 0 };
+    pending.logFile = run.logFile;
+    pending.text += content;
+    pending.bytes += Buffer.byteLength(content, 'utf8');
+    this.pendingLogWrites.set(key, pending);
+    if (pending.bytes >= this.logFlushThresholdBytes) this.flushPendingLogs(key);
+    else this.scheduleLogFlush();
+  }
+
+  scheduleLogFlush() {
+    if (this.logFlushTimer) return;
+    this.logFlushTimer = setTimeout(() => {
+      this.logFlushTimer = null;
+      this.flushPendingLogs();
+    }, this.logFlushDelayMs);
+    this.logFlushTimer.unref?.();
+  }
+
+  flushPendingLogs(runId = '') {
+    const keys = runId ? [String(runId)] : [...this.pendingLogWrites.keys()];
+    for (const key of keys) {
+      const pending = this.pendingLogWrites.get(key);
+      if (!pending?.text) continue;
+      try {
+        fs.appendFileSync(pending.logFile, pending.text, 'utf8');
+        if (this.pendingLogWrites.get(key) === pending) this.pendingLogWrites.delete(key);
+      } catch {}
+    }
+    if (!this.pendingLogWrites.size && this.logFlushTimer) {
+      clearTimeout(this.logFlushTimer);
+      this.logFlushTimer = null;
+    } else if (this.pendingLogWrites.size) {
+      this.scheduleLogFlush();
+    }
   }
 
   publish(event) {

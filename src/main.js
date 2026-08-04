@@ -1522,16 +1522,19 @@ function resolveTaskDisplayCover(task) {
 
 function publishInternalAgentEvent(event) {
   const record = { createdAt: new Date().toISOString(), ...event };
-  if (store && event.type !== 'stream' && event.type !== 'session-updated') {
+  const highFrequencyMultipartEvent = event.mode === 'multipart'
+    && ['log', 'multipart-progress'].includes(String(event.type || ''));
+  if (store && !['stream', 'session-updated', 'multipart-progress'].includes(String(event.type || '')) && !highFrequencyMultipartEvent) {
     store.recordActivity({ ...record, type: `internal-agent-${event.type}` });
   }
   // Multi-part model text is not rendered in the Agent pages. Avoid sending
-  // one IPC payload per token while the outside-tool viewer only needs the
-  // throttled progress event handled below.
-  if (!(event.type === 'stream' && event.mode === 'multipart')) {
+  // token-level and full-session progress payloads to the renderer.
+  const multipartMode = event.mode === 'multipart' || event.session?.mode === 'multipart';
+  const multipartHotEvent = multipartMode && ['stream', 'multipart-progress', 'session-updated'].includes(event.type);
+  if (!multipartHotEvent) {
     mainWindow?.webContents.send('internal-agent:event', record);
   }
-  multiPartManager?.handleAgentEvent(record);
+  if (!multipartHotEvent || event.type !== 'stream') multiPartManager?.handleAgentEvent(record);
   if (['task-completed', 'task-attempt-aborted', 'video-unavailable'].includes(event.type)) {
     mainWindow?.webContents.send('app:event', {
       createdAt: record.createdAt,

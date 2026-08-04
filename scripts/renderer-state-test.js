@@ -36,9 +36,15 @@ function assert(condition, message) {
   assert(outside.includes('videoPreviewGate.isCurrent(generation)') && outside.includes('documentPreviewGate.isCurrent(generation)'), 'local import previews did not reject stale responses');
   assert(outside.includes("if (event.localToolbox) { localRefreshGate.next()") && outside.includes("if (event.multiPart) { multipartRefreshGate.next()"), 'push events did not invalidate their matching in-flight toolbox state');
   assert(outside.includes('data-multipart-details') && outside.includes('multipartPartStatusLabel') && outside.includes('multiPartStopPart({ parentId'), 'multi-part parent viewer is missing expandable per-P progress or the isolated stop action');
+  assert(['resume-part', 'retry-part', 'resume-stopped', 'retry-failed'].every((action) => outside.includes(`'${action}'`)), 'multi-part stopped or failed P tasks are missing continue/retry controls');
   const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
   const multipartManager = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'multipart-manager.js'), 'utf8');
-  assert(main.includes("event.type === 'stream' && event.mode === 'multipart'") && multipartManager.includes("}, 400);"), 'multi-part token events are still sent to the renderer without throttling');
+  assert(main.includes('multipartHotEvent') && main.includes("['stream', 'multipart-progress', 'session-updated']") && multipartManager.includes("}, 400);"), 'multi-part token events are still sent to the renderer without throttling');
+  assert(main.includes('highFrequencyMultipartEvent') && main.includes("['stream', 'session-updated', 'multipart-progress']"), 'multi-part progress is still exported into the persistent activity log');
+  const index = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  assert(index.includes('sharedClearMountSelection') && index.includes('shared-mount-flow-arrow') && index.indexOf('id="sharedMount"') < index.indexOf('id="sharedCatalogList"'), 'shared mount controls were not moved above the remote catalog or cannot clear selection');
+  const outsideCss = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'outside.css'), 'utf8');
+  assert(outsideCss.includes('.shared-upload-list { height: auto;') && outside.includes('sharedUploadTree(visibleItems') && outside.includes('sharedUploadTree(items'), 'shared upload directories do not shrink for one item or reuse the tree hierarchy');
   const preload = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
   assert(preload.includes("multiPartStopPart: (payload) => ipcRenderer.invoke('multipart:stop-part', payload)"), 'multi-part per-P stop IPC was not exposed through the preload boundary');
   const ai = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'ai.js'), 'utf8');

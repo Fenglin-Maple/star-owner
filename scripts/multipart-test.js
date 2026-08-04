@@ -83,6 +83,8 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   fs.mkdirSync(partOne.preallocatedArtifactDir, { recursive: true });
   fs.mkdirSync(path.join(partOne.preallocatedArtifactDir, 'frames'), { recursive: true });
   fs.writeFileSync(path.join(partOne.preallocatedArtifactDir, 'frames', 'frame-001.jpg'), Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+  const parentRoot = path.resolve(partOne.preallocatedArtifactDir, '..', '..');
+  fs.writeFileSync(path.join(parentRoot, 'cover.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   fs.writeFileSync(path.join(partOne.preallocatedArtifactDir, 'summary.md'), '# P1\n\n## 小结\n\n这是第一 P 应写入父目录的小结。\n\n![代表画面](frames/frame-001.jpg)\n\n### 小结内要点\n\n- 保留结构化要点。\n\n## 思维导图\n\n不应复制到父目录的小结区域。\n', 'utf8');
   store.upsertTask({ ...partOne, status: 'done', outputMarkdown: path.join(partOne.preallocatedArtifactDir, 'summary.md'), completedAt: new Date().toISOString() });
   store.commit();
@@ -90,6 +92,9 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   assert.strictEqual(manager.state().parents[0].completed, 1, '多P完成进度没有回写父任务');
   const indexFile = path.join(partOne.preallocatedArtifactDir, '..', '..', 'index.md');
   const completedIndex = fs.readFileSync(indexFile, 'utf8');
+  assert(fs.existsSync(path.join(parentRoot, 'cover.jpg')), 'multipart parent cover was not copied from the P1 frame');
+  assert(!fs.existsSync(path.join(parentRoot, 'cover.png')), 'stale multipart parent cover extension was not removed');
+  assert(completedIndex.includes('cover.jpg') && completedIndex.includes('!['), 'multipart index did not include a local cover reference');
   assert(completedIndex.includes('## 每 P 小结') && completedIndex.includes('这是第一 P 应写入父目录的小结。'), '父目录没有包含已完成 P 的小结');
   assert(completedIndex.includes('parts/cid-101/frames/frame-001.jpg'), '父目录中的 P 小结图片没有改写为相对父目录的路径');
   assert(completedIndex.includes('##### 小结内要点'), 'P 小结内部标题没有降级到父目录层级之下');
@@ -153,6 +158,33 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   assert.strictEqual(manager.state().parents[0].status, 'stopped', '多P会话结束后父任务状态没有保持为已停止');
   const resumed = await manager.start({ parentId: created.id, selectedPages: ['102'], providerId: 'provider-multipart', modelId: 'model-multipart', concurrency: 1 });
   assert(resumed.sessions.length === 1 && store.getTask(partTwo.id).enabled === true && store.getTask(partTwo.id).multiPartStopped === false, '已单独停止的子 P 无法重新选择并继续');
+  await manager.stop(created.id);
+
+  for (const taskId of [partTwo.id, partThree.id]) {
+    const task = store.getTask(taskId);
+    store.upsertTask({ ...task, status: 'pending', enabled: false, multiPartStopped: true, multiPartFailed: false, multiPartPhase: 'stopped' });
+  }
+  store.commit();
+  const continued = await manager.start({ parentId: created.id, selectedPages: ['102', '103'], providerId: 'provider-multipart', modelId: 'model-multipart', concurrency: 2 });
+  assert.strictEqual(continued.sessions.length, 2, 'batch continue did not restore all selected stopped P tasks');
+  assert(['102', '103'].every((cid) => {
+    const task = store.getTask(`${created.id}:part:${cid}`);
+    return task.enabled === true && task.multiPartStopped === false;
+  }), 'batch continue left a stopped P disabled');
+  await manager.stop(created.id);
+
+  for (const taskId of [partTwo.id, partThree.id]) {
+    const task = store.getTask(taskId);
+    store.upsertTask({ ...task, status: 'pending', enabled: false, multiPartStopped: false, multiPartFailed: true, multiPartFailureReason: 'simulated failure', multiPartPhase: 'failed; retry available' });
+  }
+  store.commit();
+  manager.invalidatePartTaskCache(created.id);
+  const failedParent = manager.state().parents.find((item) => item.id === created.id);
+  assert.strictEqual(failedParent.failed, 2, 'failed P tasks were not exposed to the parent viewer');
+  assert(failedParent.parts.filter((item) => ['102', '103'].includes(item.cid)).every((item) => item.displayStatus === 'failed'), 'failed P tasks did not expose retryable status');
+  const retried = await manager.start({ parentId: created.id, selectedPages: ['102', '103'], providerId: 'provider-multipart', modelId: 'model-multipart', concurrency: 2 });
+  assert.strictEqual(retried.sessions.length, 2, 'batch retry did not start all selected failed P tasks');
+  assert(['102', '103'].every((cid) => store.getTask(`${created.id}:part:${cid}`).multiPartFailed === false), 'batch retry did not clear the previous failure marker');
   await manager.stop(created.id);
 
   await manager.delete(created.id);

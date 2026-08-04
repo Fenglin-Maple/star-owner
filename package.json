@@ -1,7 +1,7 @@
 {
   "name": "star-owner",
   "productName": "星藏家",
-  "version": "1.4.15",
+  "version": "1.4.16",
   "dependencyReleaseVersion": "1.0.0",
   "private": true,
   "license": "GPL-3.0-or-later",
@@ -38,6 +38,7 @@
     "test:multipart": "node scripts/multipart-test.js",
     "test:shared-knowledge": "node scripts/shared-knowledge-test.js",
     "test:renderer-state": "node scripts/renderer-state-test.js",
+    "test:progress-persistence": "node scripts/progress-persistence-test.js",
     "test:runtime-isolation": "node scripts/runtime-isolation-test.js",
     "test:git-runtime": "node scripts/git-runtime-test.js",
     "test:runtime-node": "node scripts/electron-node-runtime-test.js",

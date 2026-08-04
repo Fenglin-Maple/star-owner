@@ -279,12 +279,12 @@ class Store {
     return run;
   }
 
-  updateToolRun(id, patch) {
+  updateToolRun(id, patch, { persist = true } = {}) {
     const current = this.get('toolRuns', id);
     if (!current) throw new Error(`Tool run not found: ${id}`);
     const next = { ...current, ...patch, updatedAt: new Date().toISOString() };
     this.set('toolRuns', id, next);
-    this.save();
+    if (persist !== false) this.save();
     return next;
   }
 
