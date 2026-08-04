@@ -188,6 +188,10 @@
 .outside-pane-title { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding-bottom: 8px; border-bottom: 1px solid color-mix(in srgb, var(--line) 76%, transparent); }
 .outside-pane-title span { color: var(--text); font-size: 12px; font-weight: 750; }
 .outside-pane-title small { color: var(--muted); font-size: 10px; text-align: right; }
+.shared-pane-title { align-items: flex-start; }
+.shared-pane-title-copy { display: grid; gap: 3px; min-width: 0; }
+.shared-pane-title-copy > small { color: var(--muted); font-size: 10px; line-height: 1.45; text-align: left; }
+.shared-pane-route { flex: 0 0 auto; min-width: 0; max-width: 46%; padding-top: 1px; line-height: 1.4; overflow-wrap: anywhere; }
 .outside-form-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .outside-checkbox-field { align-items: start !important; min-height: 40px; gap: 8px; }
 .outside-checkbox-field > span { display: grid; gap: 2px; color: var(--text) !important; font-size: 11px !important; line-height: 1.35; }
@@ -338,7 +342,7 @@
 .shared-upload-candidate-meta { min-width: 0; text-align: right; }
 .shared-upload-candidate-meta strong, .shared-upload-candidate-meta small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shared-upload-candidate-meta strong { color: var(--text); font-size: 10px; }
-.shared-upload-preparation { flex: 1 1 470px !important; display: flex; flex-direction: column; gap: 7px; min-height: 470px; padding-top: 10px; border-top: 1px solid var(--line); }
+.shared-upload-preparation { flex: 1 1 470px !important; display: flex; flex-direction: column; gap: 7px; min-height: 470px; }
 .shared-upload-prepare-toolbar { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(170px, 1fr) auto auto; gap: 7px; }
 .shared-upload-prepare-toolbar input { min-width: 0; height: 32px; }
 .shared-upload-prepare-count { color: var(--muted); font: 10px var(--font-mono); }
@@ -391,6 +395,7 @@ body.shared-upload-locked { overflow: hidden; }
   .outside-form-grid, .shared-upload-filter-grid, .shared-catalog-filter-grid { grid-template-columns: 1fr; }
   .outside-pane-title, .shared-auth-intro { align-items: flex-start; flex-direction: column; }
   .outside-pane-title small, .shared-auth-intro span { text-align: left; }
+  .shared-pane-route { max-width: 100%; }
   .shared-repository-summary { grid-template-columns: minmax(0, 1fr) 16px; align-items: start; gap: 3px 8px; }
   .shared-repository-summary strong, .shared-repository-summary span { grid-column: 1; text-align: left; white-space: normal; overflow-wrap: anywhere; }
   .shared-repository-summary::after { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
@@ -427,6 +432,7 @@ body.shared-upload-locked { overflow: hidden; }
   align-content: stretch;
   row-gap: 0;
   min-height: 880px;
+  border-top-width: 2px;
 }
 .shared-pane-source, .shared-pane-target {
   display: flex;
@@ -434,6 +440,7 @@ body.shared-upload-locked { overflow: hidden; }
   gap: 11px;
   min-height: 0;
 }
+.shared-pane-target { padding-top: 10px; border-top: 1px solid var(--line); }
 .shared-pane-source > .shared-catalog-list,
 .shared-pane-source > .shared-upload-list {
   flex: 0 1 auto;
