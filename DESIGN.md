@@ -1,6 +1,6 @@
 # 星藏家 Design
 
-Version: `1.4.19`
+Version: `1.5.0`
 
 ## 1. Product Goal
 
@@ -316,11 +316,11 @@ The Bilibili WebView partition is derived from the normalized absolute project r
 
 The two current models support local ZIP import. The accepted asset name is generated only from `dependencyReleaseVersion`; the selected file must exactly match that name and the official Release SHA-256. Archive inspection rejects links, traversal, foreign runtime paths, the wrong model directory and missing probes before maintenance mode or target replacement. Import cancels and joins an in-flight automatic download for the same model, removes its `.partial`, archive, staging, backup and transaction residue, then copies the selected file into a managed temporary location. Each successful installation writes a managed manifest containing schema, package ID, dependency release, logical asset name, verified archive SHA-256 and exact probes. That manifest is included in the same staging/backup journal as the payload, so rollback restores both. Existing official v1.0.0 probe-only installations receive one explicit checksum-backed adoption; an adoption marker prevents future missing or malformed manifests from being silently trusted. Existing healthy model files remain untouched until verified staging commits atomically, and remain available after validation failure. Package-name links and error dialogs point to the exact dependency Release. The v1.0.0 medium asset remains untouched for older applications.
 
-Version `1.4.19` keeps runtime and ASR dependencies pinned to baseline `1.0.0`. The current dependency manager exposes `large-v3-turbo` as the required default and `small` as an optional alternate. The historical `medium` package remains untouched in the v1.0.0 Release for older applications and is not exposed by the current model registry. The published Turbo asset contract is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; packaging can build it with `npm run package:model:turbo`. The shared-document uploader and downloader additionally require the project-local Portable Git under `runtime/git`; they never fall back to a system Git installation or global Git configuration.
+Version `1.5.0` keeps runtime and ASR dependencies pinned to baseline `1.0.0`. The current dependency manager exposes `large-v3-turbo` as the required default and `small` as an optional alternate. The historical `medium` package remains untouched in the v1.0.0 Release for older applications and is not exposed by the current model registry. The published Turbo asset contract is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; packaging can build it with `npm run package:model:turbo`. The shared-document uploader and downloader additionally require the project-local Portable Git under `runtime/git`; they never fall back to a system Git installation or global Git configuration.
 
 Media tool subprocesses never resolve `node` through the system `PATH`. Normal source tests use `process.execPath`; the desktop application launches its bundled Electron executable with `ELECTRON_RUN_AS_NODE=1`. Python processes receive `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`, and streamed stdout/stderr use incremental UTF-8 decoders so a multibyte Chinese character split across chunks is not replaced.
 
-### 1.4.19 Shared-tool, README and RAG presentation
+### 1.5.0 Shared-tool, README and RAG presentation
 
 The GitHub sharing tool keeps repository configuration collapsed until requested, aligns its download/mount and upload/commit columns through shared tracks, and uses a bounded centered width for local import tools. README Markdown may retain GitHub-compatible inline HTML only after Renderer sanitization; relative raster images are resolved through a main-process path, size and signature boundary. The RAG knowledge picker groups catalog entries by stable user identity and collection kind while preserving collection IDs for selection and retrieval. Search hides empty collection-kind and user groups, and document counts remain a no-wrap secondary line. These presentation changes do not alter task execution, repository transactions, RAG retrieval or persistence contracts.
 
