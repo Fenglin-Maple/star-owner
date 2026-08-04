@@ -355,7 +355,7 @@ The “B站之外” page is organized as independent tool entry cards with comp
 - Electron main and WebView run with sandbox boundaries and strict navigation policies.
 - Credentials require safeStorage; cookies remain local plaintext only where tools require it.
 - Provider Base URLs, headers, private networks and hidden browsing are validated.
-- Markdown raw HTML is disabled; images are constrained by source, size and signature.
+- Knowledge-library and RAG Markdown keep raw HTML disabled. The bundled project README alone accepts GitHub-style HTML through a DOMPurify tag/attribute allowlist; its images are limited to HTTPS or raster files whose real paths remain inside the project. Knowledge images remain constrained by source, size and signature.
 - Filesystem deletion and API reading resolve real paths under registered roots.
 - Update archive validation rejects Win32 drive, UNC/device, NTFS alternate-stream, control-character, dot/empty segment, reserved-device and case-collision paths before extraction.
 - Application shutdown and restart recovery abort active video attempts rather than resuming partial state.

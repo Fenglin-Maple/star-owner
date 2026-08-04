@@ -6,6 +6,7 @@ const { isAllowedBilibiliNavigation, isBilibiliVideoNavigation } = require('../s
 const { assertHiddenBrowserUrl } = require('../src/core/hidden-browser-policy');
 const { assertBilibiliUrl, isAllowedApiOrigin, isPrivateNetworkHost } = require('../src/core/network-policy');
 const { startPinnedDnsProxy } = require('../src/core/pinned-dns-proxy');
+const { resolveReadmeImage } = require('../src/core/readme-assets');
 const { MAX_MARKDOWN_BYTES, validateSubmission } = require('../src/core/validation');
 const { normalizeVideoUrl } = require('../tools/video-tool');
 
@@ -33,6 +34,39 @@ function requestThroughProxy(proxy, target) {
 }
 
 (async () => {
+  const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+  const preloadSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
+  const rendererSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const rendererIndex = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const readmeAllowedAttributes = /const README_ALLOWED_ATTRIBUTES = \[([^\]]*)\]/.exec(rendererSource)?.[1] || '';
+  assert(mainSource.includes("readmeMarkdownRenderer = new MarkdownIt({ html: true") && (mainSource.match(/new MarkdownIt\(\{ html: false/g) || []).length >= 2, 'README HTML support weakened document or RAG raw-HTML isolation');
+  assert(rendererSource.includes('window.DOMPurify.sanitize') && rendererSource.includes('FORBID_TAGS') && rendererSource.includes('ALLOW_DATA_ATTR: false') && !readmeAllowedAttributes.includes("'class'") && rendererIndex.indexOf('dompurify/dist/purify.min.js') < rendererIndex.indexOf('src="./app.js"'), 'README HTML is inserted without a strict tag and attribute sanitizer');
+  assert(mainSource.includes("ipcMain.handle('docs:resolve-readme-image'") && preloadSource.includes("ipcRenderer.invoke('docs:resolve-readme-image', source)") && rendererSource.includes('window.orchestrator.resolveReadmeImage(source)'), 'README local images bypass the main-process resolver');
+  const readmeAssetRoot = path.join(__dirname, '..', '.cache', 'security-readme-assets');
+  const readmeAssetOutside = path.join(__dirname, '..', '.cache', 'security-readme-outside');
+  fs.rmSync(readmeAssetRoot, { recursive: true, force: true });
+  fs.rmSync(readmeAssetOutside, { recursive: true, force: true });
+  fs.mkdirSync(path.join(readmeAssetRoot, 'assets'), { recursive: true });
+  fs.mkdirSync(readmeAssetOutside, { recursive: true });
+  fs.writeFileSync(path.join(readmeAssetRoot, 'assets', 'icon.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  fs.writeFileSync(path.join(readmeAssetRoot, 'assets', 'unsafe.svg'), '<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+  fs.writeFileSync(path.join(readmeAssetOutside, 'outside.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  try {
+    assert(resolveReadmeImage(readmeAssetRoot, 'assets/icon.png').startsWith('file:'), 'project-contained README raster image was rejected');
+    assert(!resolveReadmeImage(readmeAssetRoot, '../security-readme-outside/outside.png'), 'README image traversal escaped the project root');
+    assert(!resolveReadmeImage(readmeAssetRoot, 'assets/unsafe.svg'), 'unvalidated README image content was accepted');
+    assert(!resolveReadmeImage(readmeAssetRoot, 'https://example.com/image.png'), 'remote README image was accepted by the local-file resolver');
+    const linkedOutside = path.join(readmeAssetRoot, 'linked-outside');
+    try {
+      fs.symlinkSync(readmeAssetOutside, linkedOutside, process.platform === 'win32' ? 'junction' : 'dir');
+      assert(!resolveReadmeImage(readmeAssetRoot, 'linked-outside/outside.png'), 'README image directory link escaped the project root');
+    } catch (error) {
+      if (!['EPERM', 'EACCES', 'UNKNOWN'].includes(error.code)) throw error;
+    }
+  } finally {
+    fs.rmSync(readmeAssetRoot, { recursive: true, force: true });
+    fs.rmSync(readmeAssetOutside, { recursive: true, force: true });
+  }
   assert(isAllowedBilibiliNavigation('https://passport.bilibili.com/login'), 'Bilibili login navigation was rejected');
   assert(isAllowedBilibiliNavigation('https://b23.tv/abc'), 'Bilibili short link was rejected');
   assert(!isAllowedBilibiliNavigation('https://example.com/?bilibili=1'), 'non-Bilibili navigation was accepted');

@@ -206,6 +206,7 @@
     elements.toolDetailKicker.textContent = card.querySelector('.outside-tool-kicker')?.textContent || '';
     elements.toolDetailTitle.textContent = card.querySelector('h2')?.textContent || '工具';
     elements.toolDetailDescription.textContent = card.querySelector('.outside-tool-description')?.textContent || '';
+    elements.toolDetail.classList.toggle('is-local-tool', card.hasAttribute('data-local-tool'));
     elements.homeHead.hidden = true;
     elements.toolStack.hidden = true;
     elements.toolDetail.hidden = false;
@@ -229,6 +230,7 @@
       card?.appendChild(body);
     }
     elements.toolDetailBody.replaceChildren();
+    elements.toolDetail.classList.remove('is-local-tool');
     elements.toolDetail.hidden = true;
     elements.homeHead.hidden = false;
     elements.toolStack.hidden = false;

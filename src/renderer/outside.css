@@ -174,6 +174,7 @@
 .outside-tool-card-stats span { padding: 3px 6px; border: 1px solid color-mix(in srgb, var(--line) 80%, transparent); border-radius: 4px; color: var(--muted); background: color-mix(in srgb, var(--bg) 30%, transparent); font-size: 10px; line-height: 1.25; }
 
 .outside-tool-detail { display: grid; align-content: start; gap: 14px; min-height: 0; padding-bottom: 24px; }
+.outside-tool-detail.is-local-tool { width: min(100%, 960px); margin-inline: auto; }
 .outside-detail-head { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 14px; padding: 0 0 13px; border-bottom: 1px solid var(--line); }
 .outside-detail-head h2 { margin: 1px 0 3px; font-size: 20px; }
 .outside-detail-head p { margin: 0; color: var(--muted); font-size: 12px; }
@@ -432,7 +433,8 @@ body.shared-upload-locked { overflow: hidden; }
   align-content: stretch;
   row-gap: 0;
   min-height: 880px;
-  border-top-width: 2px;
+  border-top-width: 3px;
+  border-top-color: var(--accent);
 }
 .shared-pane-source, .shared-pane-target {
   display: flex;

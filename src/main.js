@@ -26,6 +26,7 @@ const { isPrivateNetworkHost } = require('./core/network-policy');
 const { startPinnedDnsProxy } = require('./core/pinned-dns-proxy');
 const { repairPortablePythonHome } = require('./core/portable-runtime');
 const { RagAssistant } = require('./core/rag-assistant');
+const { resolveReadmeImage } = require('./core/readme-assets');
 const { SharedKnowledgeManager } = require('./core/shared-knowledge-manager');
 const { Store } = require('./core/store');
 const { StartupFolderProbe } = require('./core/startup-folder-probe');
@@ -44,7 +45,7 @@ const DEPENDENCY_RELEASE_VERSION = PACKAGE_METADATA.dependencyReleaseVersion || 
 const DEFAULT_WINDOW = { width: 1350, height: 836 };
 const README_FILE = path.join(__dirname, '..', 'README.md');
 const RENDERER_FILE = path.join(__dirname, 'renderer', 'index.html');
-const markdownRenderer = new MarkdownIt({ html: false, linkify: true, typographer: false });
+const readmeMarkdownRenderer = new MarkdownIt({ html: true, linkify: true, typographer: false });
 const LOCAL_MEDIA_EXTENSIONS = [...new Set([...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS])].map((extension) => extension.slice(1));
 
 try {
@@ -394,8 +395,16 @@ ipcMain.handle('app:get-runtime', async () => ({
 
 ipcMain.handle('docs:read-readme', async () => {
   const markdown = fs.readFileSync(README_FILE, 'utf8');
-  return { path: README_FILE, markdown, html: markdownRenderer.render(markdown) };
+  return {
+    path: README_FILE,
+    markdown,
+    html: readmeMarkdownRenderer.render(markdown)
+  };
 });
+
+ipcMain.handle('docs:resolve-readme-image', async (_event, source) => (
+  resolveReadmeImage(path.dirname(README_FILE), source)
+));
 
 ipcMain.handle('docs:open-readme', async () => {
   const error = await shell.openPath(README_FILE);

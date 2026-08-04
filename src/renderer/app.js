@@ -1354,13 +1354,88 @@ function setNavSubgroupOpen(target, open) {
   else if (localStorage.getItem('sidebarOpenSubgroup') === target.dataset.navSubgroup) localStorage.removeItem('sidebarOpenSubgroup');
 }
 
+const README_ALLOWED_TAGS = [
+  'a', 'blockquote', 'br', 'code', 'del', 'div', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'hr', 'img', 'li', 'ol', 'p', 'pre', 'span', 'strong', 'table', 'tbody', 'td', 'th', 'thead', 'tr', 'ul'
+];
+const README_ALLOWED_ATTRIBUTES = ['align', 'alt', 'colspan', 'height', 'href', 'rowspan', 'src', 'title', 'width'];
+
+async function renderReadme(readme) {
+  if (!window.DOMPurify) {
+    const message = document.createElement('p');
+    message.textContent = 'README 安全渲染组件不可用。';
+    readmeContent.replaceChildren(message);
+    return;
+  }
+  const template = document.createElement('template');
+  template.innerHTML = window.DOMPurify.sanitize(readme.html || '', {
+    ALLOWED_TAGS: README_ALLOWED_TAGS,
+    ALLOWED_ATTR: README_ALLOWED_ATTRIBUTES,
+    ALLOW_ARIA_ATTR: false,
+    ALLOW_DATA_ATTR: false,
+    FORBID_TAGS: ['audio', 'button', 'embed', 'form', 'iframe', 'input', 'math', 'object', 'script', 'style', 'svg', 'video'],
+    FORBID_ATTR: ['style'],
+    RETURN_TRUSTED_TYPE: false
+  });
+  await normalizeReadmeLinks(template.content);
+  readmeContent.replaceChildren(template.content);
+}
+
+async function normalizeReadmeLinks(root) {
+  const localImages = [];
+  for (const image of root.querySelectorAll('img')) {
+    const source = image.getAttribute('src') || '';
+    image.removeAttribute('src');
+    if (/^https:\/\//i.test(source)) {
+      try {
+        const resolved = new URL(source);
+        if (resolved.username || resolved.password) throw new Error('README image URL contains credentials');
+        image.src = resolved.href;
+      } catch {
+        image.classList.add('readme-image-unavailable');
+      }
+    } else if (source && !source.startsWith('//') && !/^[a-z][a-z\d+.-]*:/i.test(source)) {
+      localImages.push(window.orchestrator.resolveReadmeImage(source).then((resolved) => {
+        if (resolved) image.src = resolved;
+        else image.classList.add('readme-image-unavailable');
+      }).catch(() => image.classList.add('readme-image-unavailable')));
+    } else {
+      image.removeAttribute('src');
+      image.classList.add('readme-image-unavailable');
+    }
+    image.loading = 'lazy';
+    image.decoding = 'async';
+  }
+  for (const link of root.querySelectorAll('a')) {
+    const href = link.getAttribute('href') || '';
+    if (/^https:\/\//i.test(href)) {
+      try {
+        const resolved = new URL(href);
+        if (resolved.username || resolved.password) throw new Error('README link contains credentials');
+        link.href = resolved.href;
+        link.rel = 'noreferrer';
+      } catch {
+        link.removeAttribute('href');
+      }
+    } else if (href.startsWith('#')) {
+      // Keep in-document anchors available to the browser.
+    } else if (href && !href.startsWith('//') && !href.includes('\\') && !/^[a-z][a-z\d+.-]*:/i.test(href) && href.split(/[?#]/, 1)[0]) {
+      // Main-process openProjectPath applies the project-root and realpath checks.
+      link.dataset.readmeProjectLink = 'true';
+    } else {
+      link.removeAttribute('href');
+    }
+  }
+  await Promise.all(localImages);
+}
+
 async function loadReadme() {
   if (readmeMarkdown) return;
   if (readmeLoadingPromise) return readmeLoadingPromise;
-  readmeLoadingPromise = window.orchestrator.readReadme().then((document) => {
-    readmeMarkdown = document.markdown || '';
-    readmePath.textContent = document.path || '';
-    readmeContent.innerHTML = document.html || `<p>${TEXT.readmeLoading}</p>`;
+  readmeLoadingPromise = window.orchestrator.readReadme().then((readme) => {
+    readmeMarkdown = readme.markdown || '';
+    readmePath.textContent = readme.path || '';
+    return renderReadme(readme);
   }).finally(() => { readmeLoadingPromise = null; });
   return readmeLoadingPromise;
 }
@@ -3097,10 +3172,12 @@ readmeContent?.addEventListener('click', (event) => {
   if (!link) return;
   const href = link.getAttribute('href') || '';
   if (!href || href.startsWith('#')) return;
+  if (link.dataset.readmeProjectLink !== 'true' && !/^https:\/\//i.test(href)) return;
   event.preventDefault();
+  const projectPath = href.split(/[?#]/, 1)[0];
   const action = /^https?:\/\//i.test(href)
     ? window.orchestrator.openExternal(href)
-    : window.orchestrator.openProjectPath(href);
+    : window.orchestrator.openProjectPath(projectPath);
   action.catch((error) => showToast(TEXT.toastError, error.message || String(error), 'error'));
 });
 document.querySelector('#addWorkspace')?.addEventListener('click', async () => {

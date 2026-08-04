@@ -34,6 +34,7 @@ contextBridge.exposeInMainWorld('orchestrator', {
   copyText: (value) => ipcRenderer.invoke('clipboard:write', value),
   copyImage: (source) => ipcRenderer.invoke('clipboard:write-image', source),
   readReadme: () => ipcRenderer.invoke('docs:read-readme'),
+  resolveReadmeImage: (source) => ipcRenderer.invoke('docs:resolve-readme-image', source),
   openReadme: () => ipcRenderer.invoke('docs:open-readme'),
   openProjectPath: (value) => ipcRenderer.invoke('docs:open-project-path', value),
   openExternal: (url) => ipcRenderer.invoke('app:open-external', url),

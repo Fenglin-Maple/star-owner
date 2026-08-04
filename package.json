@@ -53,6 +53,7 @@
     "node": ">=22"
   },
   "dependencies": {
+    "dompurify": "^3.4.12",
     "electron": "^43.0.0",
     "fast-xml-parser": "^5.10.1",
     "jszip": "^3.10.1",

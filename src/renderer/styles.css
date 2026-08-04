@@ -1522,6 +1522,9 @@ body.theme-day input[type="date"], body.theme-bili input[type="date"], body.them
 .readme-document h2:first-of-type { margin-top: 0; }
 .readme-document h3 { margin: 20px 0 8px; font-size: 15px; }
 .readme-document p { margin: 8px 0; color: color-mix(in srgb, var(--text) 87%, var(--muted)); }
+.readme-document [align="center"] { text-align: center; }
+.readme-document img { max-width: 100%; height: auto; object-fit: contain; vertical-align: middle; }
+.readme-document img + img { margin-left: 4px; }
 .readme-document ul, .readme-document ol { margin: 8px 0; padding-left: 22px; }
 .readme-document li { margin: 4px 0; }
 .readme-document a { color: var(--accent); text-decoration: none; }
