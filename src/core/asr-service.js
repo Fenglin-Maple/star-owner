@@ -107,7 +107,14 @@ class AsrService {
         }
         this.pending.delete(requestId);
         this.currentRequestId = '';
-        message.ok ? pending.resolve(message) : pending.reject(new Error(message.error || 'ASR request failed.'));
+        if (message.ok) {
+          pending.resolve(message);
+        } else {
+          const error = new Error(message.error || 'ASR request failed.');
+          if (message.code) error.code = String(message.code);
+          if (message.failureKind) error.failureKind = String(message.failureKind);
+          pending.reject(error);
+        }
       });
       readUtf8(child.stderr, (text) => {
         const message = text.trim();

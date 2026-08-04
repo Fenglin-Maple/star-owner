@@ -41,6 +41,7 @@ The service binds to `127.0.0.1`, accepts origin-less local process requests, re
 - Confirmed deleted/down/unavailable videos are terminal: remove the task, write an `unavailableTasks` tombstone, and do not recreate it during sync.
 - Tools run through `ToolRunner`; internal Agents never bypass resource pools to invoke project scripts directly.
 - Every video runs ASR even when station subtitles exist. Timeline links use SRT or `segments[].start/end`, never inferred text order.
+- ASR writes SRT, timestamped text and segment JSON from one normalized sentence list. Empty `segments=[]` is a valid no-speech result with diagnostics; malformed individual timestamps are repaired when safe or retried with up to three parameter profiles before the Agent model is called.
 - Provider/model removal makes affected sessions unavailable. Active work must rollback and remain paused until configuration is valid and the user restarts it.
 - Each normal video uses complete current-task material. At an estimated 82% context window, or after a provider context-limit error, use independent same-provider/model compaction requests that process every source chunk and retain evidence. Do not carry prior video messages into the next task.
 
@@ -104,6 +105,7 @@ npm run test:persistence
 npm run test:collection-sync
 npm run test:bili-client
 npm run test:asr-format
+npm run test:asr-output
 npm run test:analytics
 npm run test:asr-service
 npm run test:local-toolbox

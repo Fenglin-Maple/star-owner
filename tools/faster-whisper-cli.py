@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 import argparse
 import json
+import math
 import os
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +21,13 @@ GPU_COMPUTE_TYPES = {
     "turbo": "int8_float16",
 }
 DLL_HANDLES = []
+
+
+class AsrOutputError(ValueError):
+    """Raised when Whisper produced sentence data that cannot be materialized safely."""
+
+    code = "ASR_OUTPUT_INVALID"
+    failure_kind = "task"
 
 
 def configure_project_dlls():
@@ -156,14 +165,14 @@ def transcribe(args):
 
     try:
         segments, info = run_model(WhisperModel, target_model, source, args, device, compute_type)
-        materialized = sentence_segments(list(segments))
+        materialized, normalization = normalize_sentence_segments(sentence_segments(list(segments)))
     except Exception as error:
         if args.device != "auto" or device == "cpu":
             raise
         print(f"CUDA inference failed, retrying on CPU int8: {error}", file=sys.stderr)
         device, compute_type = "cpu", "int8"
         segments, info = run_model(WhisperModel, target_model, source, args, device, compute_type)
-        materialized = sentence_segments(list(segments))
+        materialized, normalization = normalize_sentence_segments(sentence_segments(list(segments)))
 
     srt_file = output_dir / "transcript.srt"
     text_file = output_dir / "asr-transcript.txt"
@@ -184,7 +193,7 @@ def transcribe(args):
             {"id": segment.id, "start": segment.start, "end": segment.end, "text": segment.text.strip()}
             for segment in materialized
         ],
-        "diagnostics": transcript_diagnostics(materialized, info.duration),
+        "diagnostics": transcript_diagnostics(materialized, info.duration, normalization),
     }
     json_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"ok": True, "srt": str(srt_file), "text": str(text_file), "json": str(json_file), "segments": len(materialized)}, ensure_ascii=False))
@@ -208,7 +217,15 @@ def run_model(model_class, model_path, source, args, device, compute_type):
     return model.transcribe(str(source), **transcription_options(args.language, args.beam_size, True))
 
 
-def transcription_options(language="auto", beam_size=5, condition_on_previous_text=True, max_new_tokens=None):
+def transcription_options(
+    language="auto",
+    beam_size=5,
+    condition_on_previous_text=True,
+    max_new_tokens=None,
+    vad_min_silence_duration_ms=500,
+    vad_speech_pad_ms=400,
+    hallucination_silence_threshold=2.0,
+):
     requested = str(language or "auto").strip().lower()
     normalized_max_new_tokens = None
     if max_new_tokens not in (None, ""):
@@ -223,17 +240,17 @@ def transcription_options(language="auto", beam_size=5, condition_on_previous_te
         "vad_filter": True,
         "vad_parameters": {
             "min_speech_duration_ms": 150,
-            "min_silence_duration_ms": 500,
-            "speech_pad_ms": 400,
+            "min_silence_duration_ms": max(100, min(2000, int(vad_min_silence_duration_ms or 500))),
+            "speech_pad_ms": max(0, min(1000, int(vad_speech_pad_ms or 0))),
         },
         "max_new_tokens": normalized_max_new_tokens,
-        "hallucination_silence_threshold": 2.0,
+        "hallucination_silence_threshold": max(0.1, min(5.0, float(hallucination_silence_threshold or 2.0))),
         "word_timestamps": True,
         "condition_on_previous_text": bool(condition_on_previous_text),
     }
 
 
-def transcript_diagnostics(segments, duration):
+def transcript_diagnostics(segments, duration, normalization=None):
     total_duration = max(0.0, float(duration or 0.0))
     intervals = sorted((max(0.0, float(item.start)), max(0.0, float(item.end))) for item in segments if float(item.end) >= float(item.start))
     merged = []
@@ -253,7 +270,7 @@ def transcript_diagnostics(segments, duration):
         warnings.append("No speech segments were recognized; verify that the source contains audible speech and retry with the correct audio track.")
     elif total_duration >= 60 and speech_seconds / total_duration < 0.04:
         warnings.append("Recognized speech occupies less than 4% of the audio. This may be music/silence, a wrong audio track, or incomplete recognition.")
-    return {
+    diagnostics = {
         "sentenceCount": len(segments),
         "speechSeconds": round(speech_seconds, 3),
         "speechCoverage": round(speech_seconds / total_duration, 4) if total_duration else 0,
@@ -263,6 +280,9 @@ def transcript_diagnostics(segments, duration):
         "largestGaps": sorted(gaps, key=lambda item: item["seconds"], reverse=True)[:8],
         "warnings": warnings,
     }
+    if normalization is not None:
+        diagnostics["normalization"] = normalization
+    return diagnostics
 
 
 def write_srt(file, segments):
@@ -355,6 +375,118 @@ def sentence_segments(segments, offset=0.0, starting_id=0):
     return result
 
 
+def normalize_sentence_segments(segments, starting_id=0):
+    source = list(segments or [])
+    result = []
+    report = {
+        "sourceSentenceCount": len(source),
+        "sentenceCount": 0,
+        "droppedEmptyCount": 0,
+        "mergedDuplicateCount": 0,
+        "mergedOverlapCount": 0,
+        "adjustedStartCount": 0,
+    }
+    for source_index, item in enumerate(source):
+        content = str(getattr(item, "text", "") or "").strip()
+        if not content:
+            report["droppedEmptyCount"] += 1
+            continue
+        start = finite_timestamp(getattr(item, "start", None), source_index, "start")
+        end = finite_timestamp(getattr(item, "end", None), source_index, "end")
+        if start < 0:
+            start = 0.0
+            report["adjustedStartCount"] += 1
+        if end < start:
+            raise AsrOutputError(f"ASR sentence {source_index + 1} ends before it starts: {start} > {end}")
+        current = SimpleNamespace(id=0, start=start, end=end, text=content)
+        if not result:
+            result.append(current)
+            continue
+
+        previous = result[-1]
+        if current.start <= previous.end and duplicate_text_relation(previous.text, current.text):
+            previous_text = comparable_text(previous.text)
+            current_text = comparable_text(current.text)
+            selected_text = current.text if len(current_text) >= len(previous_text) else previous.text
+            previous.start = min(previous.start, current.start)
+            previous.end = max(previous.end, current.end)
+            previous.text = selected_text
+            report["mergedDuplicateCount"] += 1
+            continue
+
+        if current.start < previous.start:
+            if current.end <= previous.end:
+                previous.text = join_segment_text(previous.text, current.text)
+                report["mergedOverlapCount"] += 1
+                continue
+            current.start = previous.end
+            report["adjustedStartCount"] += 1
+        result.append(current)
+
+    for index, item in enumerate(result):
+        if index > 0 and item.start < result[index - 1].start:
+            item.start = result[index - 1].end
+            report["adjustedStartCount"] += 1
+        if item.end < item.start:
+            raise AsrOutputError(f"ASR sentence {index + 1} cannot be normalized: {item.start} > {item.end}")
+        item.id = starting_id + index
+    report["sentenceCount"] = len(result)
+    report["applied"] = any(report[key] for key in (
+        "droppedEmptyCount",
+        "mergedDuplicateCount",
+        "mergedOverlapCount",
+        "adjustedStartCount",
+    ))
+    return result, report
+
+
+def finite_timestamp(value, source_index, label):
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as error:
+        raise AsrOutputError(f"ASR sentence {source_index + 1} has an invalid {label} timestamp") from error
+    if not math.isfinite(number):
+        raise AsrOutputError(f"ASR sentence {source_index + 1} has a non-finite {label} timestamp")
+    return number
+
+
+def comparable_text(value):
+    return "".join(
+        character.casefold()
+        for character in str(value or "")
+        if not character.isspace() and not unicodedata.category(character).startswith(("P", "S"))
+    )
+
+
+def duplicate_text_relation(left, right):
+    left_value = comparable_text(left)
+    right_value = comparable_text(right)
+    if min(len(left_value), len(right_value)) < 6:
+        return False
+    return left_value in right_value or right_value in left_value
+
+
+def join_segment_text(left, right):
+    left_value = str(left or "").rstrip()
+    right_value = str(right or "").lstrip()
+    if not left_value:
+        return right_value
+    if not right_value:
+        return left_value
+    separator = "" if is_cjk(left_value[-1]) or is_cjk(right_value[0]) else " "
+    return f"{left_value}{separator}{right_value}"
+
+
+def is_cjk(character):
+    codepoint = ord(character)
+    return (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0x3040 <= codepoint <= 0x30FF
+        or 0xAC00 <= codepoint <= 0xD7AF
+    )
+
+
 def flush_sentence(target, parts, starting_id, sentence_start, sentence_end, fallback_start, fallback_end, offset):
     if not parts:
         return
@@ -372,8 +504,8 @@ def append_sentence(target, starting_id, start, end, text, offset):
     content = str(text or "").strip()
     if not content:
         return
-    safe_start = max(0.0, float(start or 0.0) + float(offset or 0.0))
-    safe_end = max(safe_start, float(end if end is not None else start or 0.0) + float(offset or 0.0))
+    safe_start = float(start if start is not None else 0.0) + float(offset or 0.0)
+    safe_end = float(end if end is not None else (start if start is not None else 0.0)) + float(offset or 0.0)
     target.append(SimpleNamespace(id=starting_id + len(target), start=safe_start, end=safe_end, text=content))
 
 

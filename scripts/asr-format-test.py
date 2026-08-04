@@ -76,6 +76,49 @@ def main():
     )])
     assert len(japanese) == 2 and japanese[0].text == "これは日本語です。"
 
+    short_regression, short_report = cli.normalize_sentence_segments([
+        SimpleNamespace(start=177.93, end=180.33, text="short duplicate"),
+        SimpleNamespace(start=177.27, end=183.93, text="short duplicate with continuation"),
+    ])
+    assert len(short_regression) == 1
+    assert short_regression[0].start == 177.27 and short_regression[0].end == 183.93
+    assert short_report["mergedDuplicateCount"] == 1
+
+    long_regression, long_report = cli.normalize_sentence_segments([
+        SimpleNamespace(start=766.8, end=768.04, text="previous sentence"),
+        SimpleNamespace(start=765.74, end=789.9, text="different sentence after a timestamp regression"),
+    ])
+    assert len(long_regression) == 2
+    assert long_regression[1].start == 768.04 and long_regression[1].end == 789.9
+    assert long_report["adjustedStartCount"] == 1
+
+    empty_transcript, empty_report = cli.normalize_sentence_segments([])
+    assert empty_transcript == [] and empty_report["sentenceCount"] == 0
+    assert cli.transcript_diagnostics(empty_transcript, 120)["warnings"]
+    dropped_empty, dropped_report = cli.normalize_sentence_segments([
+        SimpleNamespace(start=1.0, end=2.0, text=""),
+    ])
+    assert dropped_empty == [] and dropped_report["droppedEmptyCount"] == 1
+
+    try:
+        cli.normalize_sentence_segments([
+            SimpleNamespace(start=float("nan"), end=2.0, text="invalid timestamp"),
+        ])
+        raise AssertionError("non-finite timestamps must be rejected")
+    except cli.AsrOutputError as error:
+        assert error.code == "ASR_OUTPUT_INVALID" and error.failure_kind == "task"
+
+    fallback_options = cli.transcription_options(
+        condition_on_previous_text=False,
+        vad_min_silence_duration_ms=350,
+        vad_speech_pad_ms=250,
+        hallucination_silence_threshold=1.2,
+    )
+    assert fallback_options["condition_on_previous_text"] is False
+    assert fallback_options["vad_parameters"]["min_silence_duration_ms"] == 350
+    assert fallback_options["vad_parameters"]["speech_pad_ms"] == 250
+    assert fallback_options["hallucination_silence_threshold"] == 1.2
+
     diagnostics = cli.transcript_diagnostics([
         SimpleNamespace(start=1.0, end=3.0),
         SimpleNamespace(start=15.0, end=18.0),

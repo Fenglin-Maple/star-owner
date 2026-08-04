@@ -152,13 +152,18 @@ function validateAsrTimeline(artifactDir, errors) {
     errors.push('ASR segment JSON must contain a segments array.');
     return;
   }
-  const invalid = payload.segments.find((segment, index, segments) => !Number.isFinite(Number(segment.start))
-    || !Number.isFinite(Number(segment.end))
-    || Number(segment.start) < 0
-    || Number(segment.end) < Number(segment.start)
-    || (index > 0 && Number(segment.start) < Number(segments[index - 1].start))
-    || !String(segment.text || '').trim());
-  if (invalid) errors.push('Every ASR sentence segment must contain text and finite start/end timestamps.');
+  const invalidIndex = payload.segments.findIndex((segment, index, segments) => {
+    if (!segment || typeof segment !== 'object') return true;
+    return !Number.isFinite(Number(segment.start))
+      || !Number.isFinite(Number(segment.end))
+      || Number(segment.start) < 0
+      || Number(segment.end) < Number(segment.start)
+      || (index > 0 && Number(segment.start) < Number(segments[index - 1]?.start))
+      || !String(segment.text || '').trim();
+  });
+  if (invalidIndex >= 0) {
+    errors.push(describeInvalidAsrSegment(payload.segments, invalidIndex));
+  }
 
   const srt = fs.readFileSync(srtFile, 'utf8');
   const timedText = fs.readFileSync(textFile, 'utf8');
@@ -175,6 +180,30 @@ function validateAsrTimeline(artifactDir, errors) {
   if (mismatched) {
     errors.push('ASR SRT, timestamped text, and segment JSON must contain matching sentence start/end timestamps.');
   }
+}
+
+function validateAsrArtifacts(artifactDir) {
+  const errors = [];
+  try {
+    validateAsrTimeline(path.resolve(String(artifactDir || '')), errors);
+  } catch (error) {
+    errors.push(`ASR 产物校验异常：${error.message || String(error)}`);
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+function describeInvalidAsrSegment(segments, index) {
+  const segment = segments[index] || {};
+  const start = Number(segment.start);
+  const end = Number(segment.end);
+  if (!String(segment.text || '').trim()) return `ASR 第 ${index + 1} 个句段没有可用文本。`;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return `ASR 第 ${index + 1} 个句段包含非有限时间戳。`;
+  if (start < 0) return `ASR 第 ${index + 1} 个句段起点不能为负数：${start}。`;
+  if (end < start) return `ASR 第 ${index + 1} 个句段结束时间 ${end} 早于起始时间 ${start}。`;
+  if (index > 0 && segments[index - 1] && start < Number(segments[index - 1].start)) {
+    return `ASR 第 ${index + 1} 个句段起点 ${start} 早于上一句段起点 ${Number(segments[index - 1]?.start)}。`;
+  }
+  return `ASR 第 ${index + 1} 个句段格式无效。`;
 }
 
 function validateRegularFile(file, root, label, maxBytes, errors) {
@@ -298,4 +327,4 @@ function sameTimestamp(left, right) {
   return Number.isFinite(left) && Number.isFinite(right) && Math.abs(left - right) <= 0.002;
 }
 
-module.exports = { MAX_IMAGE_BYTES, MAX_MARKDOWN_BYTES, MAX_METADATA_BYTES, validateSubmission };
+module.exports = { MAX_IMAGE_BYTES, MAX_MARKDOWN_BYTES, MAX_METADATA_BYTES, validateAsrArtifacts, validateSubmission };

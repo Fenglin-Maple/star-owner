@@ -1,7 +1,7 @@
 {
   "name": "star-owner",
   "productName": "星藏家",
-  "version": "1.4.17",
+  "version": "1.4.18",
   "dependencyReleaseVersion": "1.0.0",
   "private": true,
   "license": "GPL-3.0-or-later",
@@ -25,6 +25,7 @@
     "test:update-migration": "node scripts/update-manager-test.js",
     "test:bili-client": "node scripts/bili-client-test.js",
     "test:asr-format": "node scripts/asr-format-test-runner.js",
+    "test:asr-output": "node scripts/asr-output-validation-test.js",
     "test:media-edge": "node scripts/media-edge-cases-test.js",
     "test:analytics": "node scripts/analytics-test.js",
     "test:scheduler": "node scripts/resource-scheduler-test.js",

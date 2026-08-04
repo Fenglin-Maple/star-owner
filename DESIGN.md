@@ -1,6 +1,6 @@
 # 星藏家 Design
 
-Version: `1.4.17`
+Version: `1.4.18`
 
 ## 1. Product Goal
 
@@ -319,6 +319,10 @@ The two current models support local ZIP import. The accepted asset name is gene
 Version `1.4.17` keeps runtime and ASR dependencies pinned to baseline `1.0.0`. The current dependency manager exposes `large-v3-turbo` as the required default and `small` as an optional alternate. The historical `medium` package remains untouched in the v1.0.0 Release for older applications and is not exposed by the current model registry. The published Turbo asset contract is `Star-Owner-v1.0.0-model-large-v3-turbo.zip`; packaging can build it with `npm run package:model:turbo`. The shared-document uploader and downloader additionally require the project-local Portable Git under `runtime/git`; they never fall back to a system Git installation or global Git configuration.
 
 Media tool subprocesses never resolve `node` through the system `PATH`. Normal source tests use `process.execPath`; the desktop application launches its bundled Electron executable with `ELECTRON_RUN_AS_NODE=1`. Python processes receive `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`, and streamed stdout/stderr use incremental UTF-8 decoders so a multibyte Chinese character split across chunks is not replaced.
+
+### 1.4.18 ASR timeline normalization and retry
+
+Every faster-whisper output is normalized before SRT, timestamped text and JSON are written. Adjacent duplicate or contained segments are merged, recoverable start-time regressions are repaired in transcript order, and empty individual segments are dropped. An entirely empty `segments` array remains valid and carries a no-speech diagnostic; it is not treated as an ASR failure. The independent artifact validator remains strict for non-finite, reversed or non-monotonic timestamps and reports the exact segment. ToolRunner validates the three artifacts before any Agent model request. A failed output validation can run up to three ASR attempts in the same scheduled ASR lane: the default profile, a no-previous-text profile, and a conservative low-beam/VAD profile. Infrastructure errors are not silently reclassified as output validation errors.
 
 ### 1.4.17 Shared-tool hierarchy
 

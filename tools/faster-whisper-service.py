@@ -61,7 +61,14 @@ def main():
                 raise ValueError(f"unknown action: {action}")
             emit(transcribe(model, cli, args, request_id, request))
         except Exception as error:
-            emit({"id": request.get("id", ""), "ok": False, "error": str(error)})
+            response = {"id": request.get("id", ""), "ok": False, "error": str(error)}
+            code = getattr(error, "code", "")
+            failure_kind = getattr(error, "failure_kind", "")
+            if code:
+                response["code"] = str(code)
+            if failure_kind:
+                response["failureKind"] = str(failure_kind)
+            emit(response)
 
 
 def transcribe(model, cli, args, request_id, request):
@@ -78,6 +85,9 @@ def transcribe(model, cli, args, request_id, request):
         request.get("beamSize", 5),
         request.get("conditionOnPreviousText", True),
         request.get("maxNewTokens"),
+        request.get("vadMinSilenceDurationMs", 500),
+        request.get("vadSpeechPadMs", 400),
+        request.get("hallucinationSilenceThreshold", 2.0),
     ))
     total_duration = max(0.0, float(getattr(info, "duration", 0.0) or 0.0))
     emit({"event": "progress", "id": request_id, "phase": "audio-loaded", "progress": 0, "totalSeconds": total_duration})
@@ -95,7 +105,13 @@ def transcribe(model, cli, args, request_id, request):
             "totalSeconds": total_duration,
             "progress": min(1, processed_seconds / total_duration) if total_duration else 1,
         })
-    materialized = cli.sentence_segments(recognized)
+    try:
+        materialized, normalization = cli.normalize_sentence_segments(cli.sentence_segments(recognized))
+    except Exception as error:
+        # Keep output-shape failures distinguishable from model/runtime failures.
+        error.code = getattr(error, "code", "ASR_OUTPUT_INVALID")
+        error.failure_kind = getattr(error, "failure_kind", "task")
+        raise
     emit({
         "event": "progress",
         "id": request_id,
@@ -110,7 +126,7 @@ def transcribe(model, cli, args, request_id, request):
     json_file = output_dir / "asr-result.json"
     cli.write_srt(srt_file, materialized)
     cli.write_timestamped_text(text_file, materialized)
-    diagnostics = cli.transcript_diagnostics(materialized, total_duration)
+    diagnostics = cli.transcript_diagnostics(materialized, total_duration, normalization)
     payload = {
         "model": args.model,
         "source": str(source),

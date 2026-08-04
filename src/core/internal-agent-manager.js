@@ -2115,6 +2115,11 @@ function describeToolRun(run = {}) {
     const progress = `${Math.round(Number(run.downloadProgress.percent || 0))}%`;
     return `${run.toolName || run.toolId} · 下载 ${progress}`;
   }
+  if (run.asrProgress) {
+    const progress = `${Math.round(Number(run.asrProgress.progress || 0) * 100)}%`;
+    const attempt = run.asrProgress.attempt ? ` ${run.asrProgress.attempt}/${run.asrProgress.totalAttempts || 3}` : '';
+    return `${run.toolName || run.toolId} · ASR${attempt} ${progress}`;
+  }
   if (run.status === 'running' && ['media-preparation', 'audio-preparation'].includes(run.stage)) {
     return `${run.toolName || run.toolId} · FFmpeg 处理中（等待工具输出）`;
   }

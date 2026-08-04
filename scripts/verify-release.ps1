@@ -148,6 +148,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Bilibili client test failed." }
   & npm run test:asr-format
   if ($LASTEXITCODE -ne 0) { throw "ASR sentence timestamp format test failed." }
+  & npm run test:asr-output
+  if ($LASTEXITCODE -ne 0) { throw "ASR output validation and retry test failed." }
   & npm run test:media-edge
   if ($LASTEXITCODE -ne 0) { throw "Media edge-case test failed." }
   & npm run test:analytics

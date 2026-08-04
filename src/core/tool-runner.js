@@ -10,6 +10,7 @@ const { isVideoUnavailableMessage, unsupportedVideoError, videoUnavailableError 
 const { ResourceScheduler } = require('./resource-scheduler');
 const { abortTaskAttempt, recoverPendingAttemptCleanups } = require('./task-attempt');
 const { removeUnavailableTask } = require('./unavailable-task');
+const { validateAsrArtifacts } = require('./validation');
 const { inspectVideoSupport } = require('./video-support');
 const { assertDiskSpace } = require('./disk-space');
 const { PROJECT_ROOT, TOOL_ID_PATH_LENGTH, assertInside, assertSafeWindowsPath, ensureDir, safeName } = require('./workspace');
@@ -466,6 +467,8 @@ class ToolRunner {
           duration: this.store.getTask(run.taskId)?.duration,
           message: audioStatus.message
         });
+        const validation = validateAsrArtifacts(run.artifactDir);
+        if (!validation.ok) throw asrOutputValidationError(validation.errors, 1);
         this.updateRun(run.id, { asrResult: result, actualCommand: 'ASR skipped: source video has no audio stream' });
         this.appendLog(run.id, `[${new Date().toISOString()}] ASR skipped: source video has no audio stream; empty diagnostic artifacts created.\n`);
         this.recordAsrManifest(run);
@@ -500,14 +503,27 @@ class ToolRunner {
           catch (error) { diskError = error; service.cancel(run.id); }
         }, 5000);
         diskTimer.unref?.();
-        const result = await withTimeout(service.request(request, {
+        const result = await this.requestValidatedAsr({
+          service,
+          request,
+          outputDir,
+          artifactDir: run.artifactDir,
+          timeoutMs: Number(run.timeoutMs || DEFAULT_TIMEOUT_MS),
+          isCancelled: () => state.cancelled,
+          cancelError: () => cancelledError(run.id),
+          onAttempt: ({ attempt, totalAttempts, profile }) => {
+            this.appendLog(run.id, `[${new Date().toISOString()}] ASR attempt ${attempt}/${totalAttempts}: ${profile}\n`);
+          },
+          onValidationFailure: ({ attempt, totalAttempts, errors }) => {
+            this.appendLog(run.id, `[${new Date().toISOString()}] ASR output validation failed ${attempt}/${totalAttempts}: ${errors.join('; ')}\n`);
+          },
           onProgress: (progress) => {
             if (Date.now() - lastProgressWrite < 800 && Number(progress.progress || 0) < 1) return;
             lastProgressWrite = Date.now();
             this.updateRun(run.id, { asrProgress: progress }, { persist: false });
-            this.appendLog(run.id, `[${new Date().toISOString()}] ASR ${Math.round(Number(progress.progress || 0) * 100)}% (${Number(progress.audioSeconds || 0).toFixed(1)}s / ${Number(progress.totalSeconds || 0).toFixed(1)}s)\n`);
+            this.appendLog(run.id, `[${new Date().toISOString()}] ASR ${progress.attempt || 1}/${progress.totalAttempts || 3} ${Math.round(Number(progress.progress || 0) * 100)}% (${Number(progress.audioSeconds || 0).toFixed(1)}s / ${Number(progress.totalSeconds || 0).toFixed(1)}s)\n`);
           }
-        }), Number(run.timeoutMs || DEFAULT_TIMEOUT_MS), () => service.cancel(run.id));
+        });
         clearInterval(diskTimer);
         diskTimer = null;
         if (diskError) throw diskError;
@@ -517,7 +533,7 @@ class ToolRunner {
         return result;
       } catch (error) {
         if (diskError) throw diskError;
-        if (state.cancelled || ['RUN_CANCELLED', 'SCHEDULER_CANCELLED', 'TOOL_TIMEOUT'].includes(error.code)) throw error;
+        if (state.cancelled || ['RUN_CANCELLED', 'SCHEDULER_CANCELLED', 'LOCAL_TOOL_CANCELLED', 'TOOL_TIMEOUT'].includes(error.code)) throw error;
         if (!isAsrInfrastructureFailure(error, service)) {
           error.code ||= 'ASR_TRANSCRIPTION_FAILED';
           error.failureKind ||= 'task';
@@ -530,6 +546,66 @@ class ToolRunner {
         state.asrService = null;
       }
     });
+  }
+
+  async requestValidatedAsr({ service, request, outputDir, artifactDir, timeoutMs = DEFAULT_TIMEOUT_MS, signal, isCancelled, cancelError, onAttempt, onValidationFailure, onProgress }) {
+    const profiles = asrAttemptProfiles(request);
+    const validationRoot = path.resolve(String(artifactDir || path.dirname(outputDir)));
+    const throwIfCancelled = () => {
+      if (signal?.aborted || isCancelled?.()) throw cancelError?.() || utilityCancelledError();
+    };
+    let detectedLanguage = '';
+    let lastValidation = { ok: false, errors: ['ASR 未生成可校验的输出。'] };
+    for (let attemptIndex = 0; attemptIndex < profiles.length; attemptIndex += 1) {
+      throwIfCancelled();
+      const profile = profiles[attemptIndex];
+      const attempt = attemptIndex + 1;
+      clearAsrOutputFiles(outputDir);
+      const attemptRequest = {
+        ...request,
+        ...profile.options,
+        language: attemptIndex > 0 && isAutomaticLanguage(request.language) && detectedLanguage
+          ? detectedLanguage
+          : request.language
+      };
+      onAttempt?.({ attempt, totalAttempts: profiles.length, profile: profile.label, request: attemptRequest });
+      let result;
+      try {
+        result = await withTimeout(service.request(attemptRequest, {
+          onProgress: (progress) => onProgress?.({
+            ...progress,
+            attempt,
+            totalAttempts: profiles.length,
+            retrying: attempt > 1,
+            retryProfile: profile.label
+          })
+        }), timeoutMs, () => service.cancel(request.id));
+      } catch (error) {
+        if (!isAsrOutputShapeError(error)) throw error;
+        lastValidation = { ok: false, errors: [error.message || String(error)] };
+        onValidationFailure?.({ attempt, totalAttempts: profiles.length, profile: profile.label, errors: lastValidation.errors });
+        continue;
+      }
+      throwIfCancelled();
+      if (isAutomaticLanguage(request.language) && isUsableDetectedLanguage(result.language)) detectedLanguage = result.language;
+      try {
+        lastValidation = validateAsrArtifacts(validationRoot);
+      } catch (error) {
+        lastValidation = { ok: false, errors: [`ASR 产物校验异常：${error.message || String(error)}`] };
+      }
+      if (lastValidation.ok) {
+        return {
+          ...result,
+          attempt,
+          attemptsUsed: attempt,
+          retryCount: attempt - 1,
+          retryProfile: profile.label,
+          outputValidation: { ok: true }
+        };
+      }
+      onValidationFailure?.({ attempt, totalAttempts: profiles.length, profile: profile.label, errors: lastValidation.errors });
+    }
+    throw asrOutputValidationError(lastValidation.errors, profiles.length);
   }
 
   runCommandStage(state, pool, stage, args) {
@@ -634,15 +710,24 @@ class ToolRunner {
         signal?.addEventListener?.('abort', abort, { once: true });
         try {
           assertDiskSpace(PROJECT_ROOT);
-          return await service.request({
-            id: requestId,
-            action: 'transcribe',
-            audio: audioFile,
+          return await this.requestValidatedAsr({
+            service,
             outputDir,
-            language,
-            beamSize: 5,
-            conditionOnPreviousText: true
-          }, { onProgress });
+            artifactDir: path.dirname(outputDir),
+            signal,
+            cancelError: utilityCancelledError,
+            timeoutMs: DEFAULT_TIMEOUT_MS,
+            request: {
+              id: requestId,
+              action: 'transcribe',
+              audio: audioFile,
+              outputDir,
+              language,
+              beamSize: 5,
+              conditionOnPreviousText: true
+            },
+            onProgress
+          });
         } catch (error) {
           if (signal?.aborted) throw utilityCancelledError();
           if (!isAsrInfrastructureFailure(error, service)) {
@@ -1670,6 +1755,63 @@ function clampNumber(value, min, max, fallback) {
 function optionalAsrMaxNewTokens(value) {
   if (value === undefined || value === null || value === '') return undefined;
   return clampNumber(value, 32, 220, 220);
+}
+
+function asrAttemptProfiles(request = {}) {
+  const beamSize = clampNumber(request.beamSize, 1, 10, 5);
+  const conditionOnPreviousText = request.conditionOnPreviousText !== false;
+  return [
+    {
+      label: '默认参数',
+      options: { beamSize, conditionOnPreviousText }
+    },
+    {
+      label: '关闭前文条件',
+      options: { beamSize, conditionOnPreviousText: false }
+    },
+    {
+      label: '低束搜索与保守分段',
+      options: {
+        beamSize: 1,
+        conditionOnPreviousText: false,
+        vadMinSilenceDurationMs: 350,
+        vadSpeechPadMs: 250,
+        hallucinationSilenceThreshold: 1.2
+      }
+    }
+  ];
+}
+
+function clearAsrOutputFiles(outputDir) {
+  for (const name of ['transcript.srt', 'asr-transcript.txt', 'asr-result.json']) {
+    try { fs.rmSync(path.join(outputDir, name), { force: true }); } catch {}
+  }
+}
+
+function asrOutputValidationError(errors, attempts) {
+  const detail = (errors || []).slice(0, 8).join('；') || 'ASR 输出文件不完整。';
+  const error = new Error(`ASR 输出在 ${attempts} 次尝试后仍未通过时间轴校验：${detail}`);
+  error.code = 'ASR_OUTPUT_INVALID';
+  error.failureKind = 'task';
+  error.validationErrors = [...(errors || [])];
+  error.possibleCauses = [
+    'Whisper 在重复语音、背景人声或剪辑边界处产生了回退时间戳',
+    'ASR 输出文件被外部进程改写或不完整'
+  ];
+  return error;
+}
+
+function isAutomaticLanguage(value) {
+  return !value || /^(?:auto|automatic)$/i.test(String(value).trim());
+}
+
+function isUsableDetectedLanguage(value) {
+  return /^[a-z]{2,3}$/i.test(String(value || '').trim());
+}
+
+function isAsrOutputShapeError(error) {
+  if (error?.code === 'ASR_OUTPUT_INVALID') return true;
+  return /ASR sentence \d+ (?:has an invalid|has a non-finite|ends before it starts)|ASR sentence \d+ cannot be normalized/i.test(String(error?.message || error || ''));
 }
 
 function cancelledError(runId) {
