@@ -41,6 +41,9 @@ const apiToolAnalytics = document.querySelector('#apiToolAnalytics');
 const settingsOutput = document.querySelector('#settingsOutput');
 const workspaceList = document.querySelector('#workspaceList');
 const themeChoices = document.querySelector('#themeChoices');
+const appTitle = document.querySelector('#appTitle');
+const appTitleCn = document.querySelector('#appTitleCn');
+const appTitleEn = document.querySelector('#appTitleEn');
 const credentialSelect = document.querySelector('#credentialSelect');
 const credentialUsername = document.querySelector('#credentialUsername');
 const credentialPassword = document.querySelector('#credentialPassword');
@@ -387,6 +390,23 @@ const THEMES = [
   ['mint', '\u9752\u8584\u8377', '\u6e05\u51b7\u9752\u7eff\u8272\u8c03'],
   ['endfield', '\u7ec8\u672b\u5730 / Endfield', '\u6696\u767d\u5de5\u7a0b\u754c\u9762\u4e0e\u4fe1\u53f7\u9ec4\u64cd\u4f5c\u6807\u8bb0']
 ];
+
+const APP_WORDMARK_VARIANTS = [
+  { id: 'full-segoe', chinese: '\u661f\u85cf\u5bb6', english: 'Star-Owner' },
+  { id: 'full-brush', chinese: '\u661f\u85cf\u5bb6', english: 'Star-Owner' },
+  { id: 'star-segoe', chinese: '\u661f', english: 'Star-Owner' },
+  { id: 'star-bodoni', chinese: '\u661f', english: 'Star-Owner' },
+  { id: 'owner-segoe', chinese: '\u661f', english: 'Owner' },
+  { id: 'owner-brush-swash', chinese: '\u661f', english: 'Owner' }
+];
+
+function randomizeAppWordmark() {
+  if (!appTitle || !appTitleCn || !appTitleEn) return;
+  const variant = APP_WORDMARK_VARIANTS[Math.floor(Math.random() * APP_WORDMARK_VARIANTS.length)];
+  appTitle.dataset.wordmarkVariant = variant.id;
+  appTitleCn.textContent = variant.chinese;
+  appTitleEn.textContent = variant.english;
+}
 
 function applyI18n() {
   for (const node of document.querySelectorAll('[data-i18n]')) {
@@ -3473,6 +3493,7 @@ window.orchestrator.getRuntime().then(handleRuntime).catch((error) => {
 
 applyI18n();
 renderThemeChoices();
+randomizeAppWordmark();
 applyTheme(localStorage.getItem('themeId') || 'night');
 setSidebarCollapsed(localStorage.getItem('sidebarCollapsed') === '1');
 restoreNavGroup();

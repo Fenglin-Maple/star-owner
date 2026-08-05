@@ -390,23 +390,98 @@ svg {
 
 .app-mark { width: 25px; height: 25px; border-radius: 7px; object-fit: cover; box-shadow: 0 0 14px var(--accent-soft); }
 
-.app-title { font-size: 13px; font-weight: 650; }
+.app-title {
+  --app-title-cn-color: #ffffff;
+  --app-title-en-color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  color: var(--app-title-cn-color);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+.app-title-cn {
+  color: var(--app-title-cn-color);
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", DengXian, sans-serif;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+.app-title-en-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  line-height: 1;
+}
 .app-title b {
   display: inline-block;
-  margin-left: 4px;
-  color: color-mix(in srgb, var(--accent) 68%, var(--text));
+  color: var(--app-title-en-color);
   font-family: "Segoe Script", "Segoe Print", "Bradley Hand", "Brush Script MT", cursive;
   font-size: 1.16em;
   font-style: italic;
   font-weight: 700;
   line-height: 1;
   letter-spacing: 0;
-  text-shadow: 0 1px 8px color-mix(in srgb, var(--accent) 24%, transparent);
+  text-shadow: 0 1px 8px color-mix(in srgb, var(--app-title-en-color) 30%, transparent);
   transform: rotate(-2deg) skewX(-5deg) translateY(-.25px);
   transform-origin: center;
 }
-body.theme-bili .app-title b { color: #ffffff; }
-body.theme-claude .app-title { font-family: var(--font-display); font-size: 15px; font-weight: 700; letter-spacing: 0; }
+.app-title-swash {
+  position: absolute;
+  right: -4px;
+  bottom: -7px;
+  left: -2px;
+  width: calc(100% + 6px);
+  height: 8px;
+  display: none;
+  overflow: visible;
+  color: var(--app-title-en-color);
+  pointer-events: none;
+}
+.app-title-swash path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  opacity: .78;
+}
+.app-title[data-wordmark-variant="full-brush"] .app-title-cn,
+.app-title[data-wordmark-variant="star-bodoni"] .app-title-cn,
+.app-title[data-wordmark-variant="owner-brush-swash"] .app-title-cn { font-weight: 650; }
+.app-title[data-wordmark-variant="full-brush"] b,
+.app-title[data-wordmark-variant="owner-brush-swash"] b {
+  font-family: "Brush Script MT", "Segoe Script", "Lucida Handwriting", cursive;
+  transform: rotate(-1deg) skewX(-3deg) translateY(-.25px);
+}
+.app-title[data-wordmark-variant="star-segoe"] b { font-size: 1.24em; }
+.app-title[data-wordmark-variant="star-bodoni"] b {
+  font-family: "Bodoni MT", Georgia, serif;
+  font-size: 1.2em;
+  font-weight: 700;
+  transform: translateY(-.25px);
+}
+.app-title[data-wordmark-variant="owner-segoe"] b,
+.app-title[data-wordmark-variant="owner-brush-swash"] b { font-size: 1.38em; }
+.app-title[data-wordmark-variant="owner-brush-swash"] .app-title-swash { display: block; }
+
+body.theme-day .app-title,
+body.theme-mint .app-title {
+  --app-title-cn-color: #111111;
+  --app-title-en-color: var(--accent);
+}
+body.theme-bili .app-title {
+  --app-title-cn-color: #ffffff;
+  --app-title-en-color: #23ade5;
+}
+body.theme-bili .app-title b {
+  text-shadow: 0 1px 2px rgba(72, 15, 39, .42), 0 0 7px rgba(255, 255, 255, .54);
+}
+body.theme-endfield .app-title {
+  --app-title-cn-color: #f2f2f0;
+  --app-title-en-color: var(--signal);
+}
 
 .user-profile {
   position: relative;
@@ -1601,8 +1676,6 @@ body.theme-endfield .windowbar::after {
   background: var(--signal);
   pointer-events: none;
 }
-body.theme-endfield .app-title { color: #f2f2f0; font-weight: 700; }
-body.theme-endfield .app-title b { color: var(--signal); }
 body.theme-endfield .window-status { color: #aaa9a2; }
 body.theme-endfield .window-controls button,
 body.theme-endfield .windowbar .menu-button { color: #c7c7bf; }
@@ -2074,7 +2147,7 @@ body.theme-endfield *::-webkit-scrollbar-thumb:hover { background: #191919; back
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
 /* 1.0.9 update and reserved-toolbox surfaces */
-.app-title small { margin-left: 8px; font-size: 11px; font-weight: 600; opacity: .62; }
+.app-title small { margin-left: 8px; font-family: var(--font-ui); font-size: 11px; font-weight: 600; opacity: .62; }
 .update-status { min-height: 24px; margin: 12px 0; color: var(--text-muted); white-space: pre-wrap; }
 .update-migration-row { display: flex; align-items: center; gap: 12px; margin-top: 10px; color: var(--text-muted); font-size: 12px; }
 .outside-placeholder { min-height: 180px; display: flex; align-items: center; gap: 18px; }
