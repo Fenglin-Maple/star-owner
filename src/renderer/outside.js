@@ -79,8 +79,17 @@
     sharedCatalogResultCount: $('#sharedCatalogResultCount'),
     sharedMountFiltered: $('#sharedMountFiltered'),
     sharedCatalogList: $('#sharedCatalogList'),
+    sharedCollectionPicker: $('#sharedCollectionPicker'),
+    sharedCollectionToggle: $('#sharedCollectionToggle'),
+    sharedCollectionLabel: $('#sharedCollectionLabel'),
+    sharedCollectionMenu: $('#sharedCollectionMenu'),
+    sharedCollectionCreateTrigger: $('#sharedCollectionCreateTrigger'),
+    sharedCollectionCreateRow: $('#sharedCollectionCreateRow'),
+    sharedCollectionCreateInput: $('#sharedCollectionCreateInput'),
+    sharedCollectionCreateConfirm: $('#sharedCollectionCreateConfirm'),
+    sharedCollectionCreateCancel: $('#sharedCollectionCreateCancel'),
+    sharedCollectionOptions: $('#sharedCollectionOptions'),
     sharedCollection: $('#sharedCollection'),
-    sharedCollectionName: $('#sharedCollectionName'),
     sharedMount: $('#sharedMount'),
     sharedMountSelectAll: $('#sharedMountSelectAll'),
     sharedSyncSelected: $('#sharedSyncSelected'),
@@ -148,6 +157,7 @@
   let sharedRepositoryCheckedForEntry = false;
   let sharedCatalogLoadedKey = '';
   let sharedListResizeObserver = null;
+  let sharedCollectionNewName = '';
   const selectedUploadTaskIds = new Set();
   const selectedPreparedTaskIds = new Set();
   const selectedRemotePaths = new Set();
@@ -569,9 +579,19 @@
     } catch (error) { notify('多P父任务操作失败', error); }
   }
 
+  function automaticSharedCollectionName() {
+    const now = new Date();
+    const pad = (value) => String(value).padStart(2, '0');
+    return `共享收藏夹-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
+  }
+
   function sharedCollectionPayload() {
-    const collectionId = elements.sharedCollection.value === '__new__' ? '' : elements.sharedCollection.value;
-    return { collectionId, collectionName: collectionId ? '' : elements.sharedCollectionName.value.trim() };
+    const selected = String(elements.sharedCollection.value || '');
+    const collectionId = selected === '__new__' ? '' : selected;
+    return {
+      collectionId,
+      collectionName: collectionId ? '' : (sharedCollectionNewName.trim() || automaticSharedCollectionName())
+    };
   }
 
   function sharedDocumentRoot(document) {
@@ -584,12 +604,71 @@
     return parts.slice(0, 3).join('/') || root;
   }
 
+  function resetSharedCollectionCreateForm() {
+    elements.sharedCollectionCreateInput.value = '';
+    elements.sharedCollectionCreateTrigger.hidden = false;
+    elements.sharedCollectionCreateRow.hidden = true;
+  }
+
+  function setSharedCollectionMenuOpen(open) {
+    const next = Boolean(open);
+    elements.sharedCollectionMenu.hidden = !next;
+    elements.sharedCollectionToggle.setAttribute('aria-expanded', String(next));
+  }
+
+  function renderSharedCollectionOptions(collections) {
+    const current = String(elements.sharedCollection.value || '');
+    elements.sharedCollectionOptions.innerHTML = collections.map((item) => `<button class="shared-collection-option" type="button" role="menuitemradio" aria-checked="${String(item.id) === current}" data-shared-collection-id="${escAttr(item.id)}"><svg class="shared-collection-option-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 9h8M8 13h5"/></svg><span><strong>${esc(item.name)}</strong><small>本地共享收藏夹 · ${Number(item.documentCount || item.videoCount || item.mediaCount || 0)} 篇文档</small></span></button>`).join('');
+    const automatic = elements.sharedCollectionMenu.querySelector('[data-shared-collection-id=""]');
+    if (automatic) automatic.setAttribute('aria-checked', String(!current));
+  }
+
   function renderSharedCollections() {
     const collections = sharedData.collections || [];
-    const current = elements.sharedCollection.value;
-    elements.sharedCollection.innerHTML = `<option value="__new__">创建新共享收藏夹</option>${collections.map((item) => `<option value="${escAttr(item.id)}">${esc(item.name)}</option>`).join('')}`;
-    if (collections.some((item) => item.id === current)) elements.sharedCollection.value = current;
-    else if (collections.length && !elements.sharedCollectionName.value) elements.sharedCollection.value = collections[0].id;
+    const current = String(elements.sharedCollection.value || '');
+    const validCurrent = current === '' || current === '__new__' || collections.some((item) => String(item.id) === current);
+    const nextValue = validCurrent ? current : '';
+    if (!validCurrent) sharedCollectionNewName = '';
+    elements.sharedCollection.innerHTML = `<option value="">挂载时自动创建</option><option value="__new__">创建新共享收藏夹</option>${collections.map((item) => `<option value="${escAttr(item.id)}">${esc(item.name)}</option>`).join('')}`;
+    elements.sharedCollection.value = nextValue;
+    if (nextValue !== '__new__') sharedCollectionNewName = '';
+    const selected = collections.find((item) => String(item.id) === nextValue);
+    elements.sharedCollectionLabel.textContent = selected?.name
+      || (nextValue === '__new__' && sharedCollectionNewName ? `新建：${sharedCollectionNewName}` : '未选择，挂载时自动创建');
+    renderSharedCollectionOptions(collections);
+  }
+
+  function beginSharedCollectionCreate() {
+    elements.sharedCollectionCreateTrigger.hidden = true;
+    elements.sharedCollectionCreateRow.hidden = false;
+    setSharedCollectionMenuOpen(true);
+    requestAnimationFrame(() => elements.sharedCollectionCreateInput.focus());
+  }
+
+  function confirmSharedCollectionCreate() {
+    const name = elements.sharedCollectionCreateInput.value.trim();
+    if (!name) {
+      notify('无法创建共享收藏夹', '请输入新共享收藏夹名称。');
+      elements.sharedCollectionCreateInput.focus();
+      return;
+    }
+    sharedCollectionNewName = name;
+    elements.sharedCollection.value = '__new__';
+    resetSharedCollectionCreateForm();
+    renderSharedCollections();
+    setSharedCollectionMenuOpen(false);
+    renderSharedCatalog();
+    requestAnimationFrame(() => elements.sharedCollectionToggle.focus());
+  }
+
+  function selectSharedCollection(id) {
+    const value = String(id || '');
+    sharedCollectionNewName = '';
+    elements.sharedCollection.value = value;
+    renderSharedCollections();
+    setSharedCollectionMenuOpen(false);
+    renderSharedCatalog();
+    requestAnimationFrame(() => elements.sharedCollectionToggle.focus());
   }
 
   function sharedRepositoryFullName(repository = sharedData.repository || {}) {
@@ -1006,6 +1085,11 @@
       ));
       for (const pathName of selectedPaths) selectedRemotePaths.delete(String(pathName));
       await refresh();
+      if (result?.collectionId) {
+        sharedCollectionNewName = '';
+        elements.sharedCollection.value = String(result.collectionId);
+        renderSharedCollections();
+      }
       renderSharedCatalog();
       notify(result?.unchanged ? '远程内容没有变化' : '共享文档挂载完成', result?.unchanged
         ? '本地文档完整且远程收藏夹版本未变化，本次无需重复下载。'
@@ -1640,7 +1724,55 @@
   elements.sharedRepositoryCreate.addEventListener('click', createSharedRepository);
   elements.sharedCatalog.addEventListener('click', () => loadSharedCatalog({ force: true }));
   for (const control of [elements.sharedGithubFilter, elements.sharedBilibiliFilter, elements.sharedVideoFilter]) control.addEventListener('input', renderSharedCatalog);
-  elements.sharedCollection.addEventListener('change', renderSharedCatalog);
+  elements.sharedCollectionToggle.addEventListener('click', (event) => {
+    event.stopPropagation();
+    setSharedCollectionMenuOpen(elements.sharedCollectionMenu.hidden);
+  });
+  elements.sharedCollectionToggle.addEventListener('keydown', (event) => {
+    if (!['ArrowDown', 'Enter', ' '].includes(event.key)) return;
+    event.preventDefault();
+    setSharedCollectionMenuOpen(true);
+    const firstOption = elements.sharedCollectionCreateRow.hidden
+      ? elements.sharedCollectionMenu.querySelector('#sharedCollectionCreateTrigger:not([hidden]), [data-shared-collection-id]:not([hidden])')
+      : elements.sharedCollectionCreateInput;
+    firstOption?.focus();
+  });
+  elements.sharedCollectionCreateTrigger.addEventListener('click', (event) => {
+    event.stopPropagation();
+    beginSharedCollectionCreate();
+  });
+  elements.sharedCollectionCreateConfirm.addEventListener('click', (event) => {
+    event.stopPropagation();
+    confirmSharedCollectionCreate();
+  });
+  elements.sharedCollectionCreateCancel.addEventListener('click', (event) => {
+    event.stopPropagation();
+    resetSharedCollectionCreateForm();
+    elements.sharedCollectionCreateTrigger.focus();
+  });
+  elements.sharedCollectionCreateInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); confirmSharedCollectionCreate(); }
+    else if (event.key === 'Escape') { event.preventDefault(); resetSharedCollectionCreateForm(); setSharedCollectionMenuOpen(false); elements.sharedCollectionToggle.focus(); }
+  });
+  elements.sharedCollectionMenu.addEventListener('click', (event) => {
+    const option = event.target.closest('[data-shared-collection-id]');
+    if (option) selectSharedCollection(option.dataset.sharedCollectionId);
+  });
+  elements.sharedCollectionMenu.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && event.target !== elements.sharedCollectionCreateInput) {
+      event.preventDefault();
+      setSharedCollectionMenuOpen(false);
+      elements.sharedCollectionToggle.focus();
+    }
+  });
+  elements.sharedCollection.addEventListener('change', () => {
+    if (elements.sharedCollection.value !== '__new__') sharedCollectionNewName = '';
+    renderSharedCollections();
+    renderSharedCatalog();
+  });
+  document.addEventListener('pointerdown', (event) => {
+    if (!elements.sharedCollectionPicker.contains(event.target)) setSharedCollectionMenuOpen(false);
+  });
   elements.sharedMount.addEventListener('click', () => mountShared({ button: elements.sharedMount }));
   elements.sharedMountFiltered.addEventListener('click', () => mountShared({ paths: filteredSharedDocuments().filter((item) => !item.invalid).map((item) => item.path), button: elements.sharedMountFiltered }));
   elements.sharedCatalogList.addEventListener('change', (event) => {
@@ -1681,7 +1813,8 @@
     }
     renderSharedUploads();
   });
-  for (const control of [elements.sharedUploadFilter, elements.sharedUploadUserFilter, elements.sharedUploadCollectionFilter, elements.sharedUploadSort]) control.addEventListener('input', renderSharedUploads);
+  for (const control of [elements.sharedUploadFilter, elements.sharedUploadUserFilter, elements.sharedUploadCollectionFilter]) control.addEventListener('input', renderSharedUploads);
+  elements.sharedUploadSort.addEventListener('change', renderSharedUploads);
   elements.sharedUploadDurationMin.addEventListener('input', () => { normalizeSharedUploadDuration('minimum'); renderSharedUploads(); });
   elements.sharedUploadDurationMax.addEventListener('input', () => { normalizeSharedUploadDuration('maximum'); renderSharedUploads(); });
   elements.sharedUploadList.addEventListener('change', (event) => {

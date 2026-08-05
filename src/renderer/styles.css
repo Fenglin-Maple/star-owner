@@ -373,7 +373,8 @@ svg {
 
 .windowbar {
   position: relative;
-  z-index: 30;
+  z-index: 120;
+  isolation: isolate;
   display: grid;
   grid-template-columns: minmax(240px, 1fr) auto auto;
   align-items: center;
@@ -390,7 +391,18 @@ svg {
 .app-mark { width: 25px; height: 25px; border-radius: 7px; object-fit: cover; box-shadow: 0 0 14px var(--accent-soft); }
 
 .app-title { font-size: 13px; font-weight: 650; }
-.app-title b { margin-left: 3px; color: color-mix(in srgb, var(--accent) 68%, var(--text)); font-weight: 650; }
+.app-title b {
+  display: inline-block;
+  margin-left: 3px;
+  color: color-mix(in srgb, var(--accent) 68%, var(--text));
+  font-family: "STKaiti", "Kaiti SC", "KaiTi", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  font-size: 1.08em;
+  font-style: italic;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-shadow: 0 1px 8px color-mix(in srgb, var(--accent) 24%, transparent);
+  transform: skewX(-7deg) translateY(-.25px);
+}
 body.theme-bili .app-title b { color: #ffffff; }
 body.theme-claude .app-title { font-family: var(--font-display); font-size: 15px; font-weight: 700; letter-spacing: 0; }
 
@@ -419,7 +431,7 @@ body.theme-claude .app-title { font-family: var(--font-display); font-size: 15px
   position: absolute;
   top: calc(100% + 6px);
   right: 0;
-  z-index: 10;
+  z-index: 140;
   width: min(380px, calc(100vw - 28px));
   display: block;
   padding: 12px;
@@ -1204,6 +1216,7 @@ body.theme-day input[type="date"], body.theme-bili input[type="date"], body.them
   scrollbar-gutter: stable;
   padding-right: 7px;
 }
+.overview-layout > *:not(.activity-panel) { flex: 0 0 auto; }
 .overview-layout .stat-card { padding: 12px 14px; }
 .overview-layout .stat-card strong { margin-top: 5px; font-size: 23px; }
 .onboarding-panel { margin: 0; padding: 11px 13px 13px; overflow: hidden; }
@@ -1277,8 +1290,20 @@ body.theme-day input[type="date"], body.theme-bili input[type="date"], body.them
 .quickstart-content { padding: 0 14px 14px; border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent); }
 .quickstart-actions { min-height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 11px; }
 .quickstart-content pre { max-height: 270px; }
-.overview-layout > .activity-panel { flex: 1 0 auto; min-height: 250px; height: min(360px, 42vh); display: flex; flex-direction: column; margin: 0; overflow: hidden; }
+.overview-layout > .activity-panel { flex: 0 1 auto; min-height: 176px; height: clamp(176px, 24vh, 220px); display: flex; flex-direction: column; margin: 0; overflow: hidden; }
 .overview-layout > .activity-panel pre { flex: 1; min-height: 0; max-height: none; }
+
+/* Keep the recent log compact in a normal window, then let it absorb spare
+   height on tall/fullscreen windows. An expanded prompt keeps its default
+   height so the page can scroll instead of compressing the onboarding panels. */
+@media (min-width: 981px) and (min-height: 860px) {
+  .overview-layout > .activity-panel { flex: 1 1 auto; min-height: 220px; height: auto; }
+  .overview-layout:has(.quickstart-disclosure[open]) > .activity-panel { flex: 0 1 auto; min-height: 220px; height: 220px; }
+}
+
+@media (max-height: 760px) and (min-width: 761px) {
+  .overview-layout > .activity-panel { min-height: 156px; height: 156px; }
+}
 
 /* Task target, analytics, and inventory */
 #page-tasks.active { grid-template-rows: auto 78px 150px minmax(0, 1fr); gap: 10px; }
