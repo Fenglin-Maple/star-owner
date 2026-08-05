@@ -16,7 +16,7 @@
       <header class="windowbar">
         <div class="window-left">
           <img class="app-mark" src="../../assets/star-note.png" alt="" />
-          <span class="app-title">星<b>藏家</b><small id="appVersion">v-</small></span>
+          <span class="app-title">星<b lang="en">owner</b><small id="appVersion">v-</small></span>
         </div>
         <div class="window-status">
           <span id="apiBadge">API...</span>
@@ -835,7 +835,11 @@
                           </div>
                         </div>
                         <div class="shared-filter-divider"><span>远程目录筛选</span></div>
-                        <div class="shared-catalog-filter-grid"><label><span>GitHub 用户</span><input id="sharedGithubFilter" list="sharedGithubOptions" placeholder="全部" /><datalist id="sharedGithubOptions"></datalist></label><label><span>哔哩哔哩用户</span><input id="sharedBilibiliFilter" list="sharedBilibiliOptions" placeholder="全部" /><datalist id="sharedBilibiliOptions"></datalist></label><label><span>视频名称</span><input id="sharedVideoFilter" list="sharedVideoOptions" placeholder="全部" /><datalist id="sharedVideoOptions"></datalist></label></div>
+                        <div class="shared-catalog-filter-grid">
+                          <label><span>GitHub 用户</span><span class="shared-filter-control"><input id="sharedGithubFilter" list="sharedGithubOptions" placeholder="全部" /><button class="shared-filter-chevron" type="button" data-shared-filter-target="sharedGithubFilter" title="显示 GitHub 用户选项" aria-label="显示 GitHub 用户选项" aria-haspopup="listbox"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></button></span><datalist id="sharedGithubOptions"></datalist></label>
+                          <label><span>哔哩哔哩用户</span><span class="shared-filter-control"><input id="sharedBilibiliFilter" list="sharedBilibiliOptions" placeholder="全部" /><button class="shared-filter-chevron" type="button" data-shared-filter-target="sharedBilibiliFilter" title="显示哔哩哔哩用户选项" aria-label="显示哔哩哔哩用户选项" aria-haspopup="listbox"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></button></span><datalist id="sharedBilibiliOptions"></datalist></label>
+                          <label><span>视频名称</span><span class="shared-filter-control"><input id="sharedVideoFilter" list="sharedVideoOptions" placeholder="全部" /><button class="shared-filter-chevron" type="button" data-shared-filter-target="sharedVideoFilter" title="显示视频名称选项" aria-label="显示视频名称选项" aria-haspopup="listbox"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></button></span><datalist id="sharedVideoOptions"></datalist></label>
+                        </div>
                         <div class="shared-list-heading"><strong>远程共享文档目录</strong><span>按贡献者、B站用户和视频名称筛选</span></div>
                         <div id="sharedCatalogList" class="shared-catalog-list"><div class="empty-state">尚未读取远程目录。</div></div>
                         <div class="shared-catalog-resize-note">拖动列表右下角可调整目录高度。勾选文档后，可挂载到下方指定的“共享”收藏夹。</div>
@@ -851,8 +855,8 @@
                         <div class="outside-pane-title shared-pane-title"><div class="shared-pane-title-copy"><span>02 · 上传与提交</span><small>筛选本地已完成的 B站总结文档，并通过 Fork / PR 提交到共享仓库。</small></div><small class="shared-pane-route">已完成 B站总结 → Fork / PR</small></div>
                         <div class="shared-upload-actions shared-action-grid"><button id="sharedUploadRefresh" class="secondary-button" type="button">刷新本地目录</button><button id="sharedUploadSelectAll" class="secondary-button" type="button">全选当前筛选结果</button><button id="sharedUpload" class="primary-button" type="button">创建 Fork / PR</button><span id="sharedUploadResultCount" class="shared-action-status">正在读取可共享产物</span></div>
                         <div class="shared-upload-filter-grid">
-                          <label><span>用户</span><input id="sharedUploadUserFilter" list="sharedUploadUserOptions" placeholder="全部" /><datalist id="sharedUploadUserOptions"></datalist></label>
-                          <label><span>收藏夹</span><input id="sharedUploadCollectionFilter" list="sharedUploadCollectionOptions" placeholder="全部" /><datalist id="sharedUploadCollectionOptions"></datalist></label>
+                          <label><span>用户</span><span class="shared-filter-control"><input id="sharedUploadUserFilter" list="sharedUploadUserOptions" placeholder="全部" /><button class="shared-filter-chevron" type="button" data-shared-filter-target="sharedUploadUserFilter" title="显示用户选项" aria-label="显示用户选项" aria-haspopup="listbox"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></button></span><datalist id="sharedUploadUserOptions"></datalist></label>
+                          <label><span>收藏夹</span><span class="shared-filter-control"><input id="sharedUploadCollectionFilter" list="sharedUploadCollectionOptions" placeholder="全部" /><button class="shared-filter-chevron" type="button" data-shared-filter-target="sharedUploadCollectionFilter" title="显示收藏夹选项" aria-label="显示收藏夹选项" aria-haspopup="listbox"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></button></span><datalist id="sharedUploadCollectionOptions"></datalist></label>
                           <label><span>标题 / BV / UP主</span><input id="sharedUploadFilter" placeholder="全部" /></label>
                           <label><span>生成时间排序</span><select id="sharedUploadSort"><option value="completed-desc">新到旧</option><option value="completed-asc">旧到新</option></select></label>
                         </div>
@@ -862,7 +866,7 @@
                       </div>
                       <div class="shared-flow-arrow shared-upload-flow-arrow" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v14M6 11l6 6 6-6"/></svg><span>上方选中的总结文档将加入下方准备上传列表</span></div>
                       <div class="shared-pane-target shared-upload-target">
-                        <div class="shared-upload-preparation"><div class="outside-subpanel-title shared-list-heading"><strong>准备上传列表</strong><span id="sharedUploadSelectedCount">已选 0 篇</span></div><div class="shared-upload-prepare-toolbar"><input id="sharedUploadPrepareCollectionFilter" list="sharedUploadPrepareCollectionOptions" placeholder="全部" /><datalist id="sharedUploadPrepareCollectionOptions"></datalist><input id="sharedUploadPrepareFilter" placeholder="全部" /><button id="sharedUploadPrepareSelectAll" class="secondary-button compact-button" type="button">全选筛选结果</button><button id="sharedUploadPrepareRemove" class="secondary-button compact-button danger-button" type="button">移除勾选</button></div><div id="sharedUploadPrepareResultCount" class="shared-upload-prepare-count">显示 0 / 0 篇</div><div id="sharedUploadPrepareList" class="shared-upload-prepare-list"><div class="empty-state">从上方筛选结果中选择要共享的总结文档。</div></div></div>
+                        <div class="shared-upload-preparation"><div class="outside-subpanel-title shared-list-heading"><strong>准备上传列表</strong><span id="sharedUploadSelectedCount">已选 0 篇</span></div><div class="shared-upload-prepare-toolbar"><span class="shared-filter-control"><input id="sharedUploadPrepareCollectionFilter" list="sharedUploadPrepareCollectionOptions" placeholder="全部" /><button class="shared-filter-chevron" type="button" data-shared-filter-target="sharedUploadPrepareCollectionFilter" title="显示收藏夹选项" aria-label="显示准备上传收藏夹选项" aria-haspopup="listbox"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></button></span><datalist id="sharedUploadPrepareCollectionOptions"></datalist><input id="sharedUploadPrepareFilter" placeholder="全部" /><button id="sharedUploadPrepareSelectAll" class="secondary-button compact-button" type="button">全选筛选结果</button><button id="sharedUploadPrepareRemove" class="secondary-button compact-button danger-button" type="button">移除勾选</button></div><div id="sharedUploadPrepareResultCount" class="shared-upload-prepare-count">显示 0 / 0 篇</div><div id="sharedUploadPrepareList" class="shared-upload-prepare-list"><div class="empty-state">从上方筛选结果中选择要共享的总结文档。</div></div></div>
                       </div>
                     </div>
                   </div>

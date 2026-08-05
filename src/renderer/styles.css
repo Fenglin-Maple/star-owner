@@ -393,15 +393,17 @@ svg {
 .app-title { font-size: 13px; font-weight: 650; }
 .app-title b {
   display: inline-block;
-  margin-left: 3px;
+  margin-left: 4px;
   color: color-mix(in srgb, var(--accent) 68%, var(--text));
-  font-family: "STKaiti", "Kaiti SC", "KaiTi", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
-  font-size: 1.08em;
+  font-family: "Segoe Script", "Segoe Print", "Bradley Hand", "Brush Script MT", cursive;
+  font-size: 1.16em;
   font-style: italic;
   font-weight: 700;
+  line-height: 1;
   letter-spacing: 0;
   text-shadow: 0 1px 8px color-mix(in srgb, var(--accent) 24%, transparent);
-  transform: skewX(-7deg) translateY(-.25px);
+  transform: rotate(-2deg) skewX(-5deg) translateY(-.25px);
+  transform-origin: center;
 }
 body.theme-bili .app-title b { color: #ffffff; }
 body.theme-claude .app-title { font-family: var(--font-display); font-size: 15px; font-weight: 700; letter-spacing: 0; }

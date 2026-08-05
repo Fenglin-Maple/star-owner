@@ -1696,6 +1696,14 @@
   function esc(value) { return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;'); }
   function escAttr(value) { return esc(value); }
 
+  function openSharedFilterPicker(button) {
+    const input = document.getElementById(button.dataset.sharedFilterTarget || '');
+    if (!input) return;
+    input.focus();
+    if (typeof input.showPicker !== 'function') return;
+    try { input.showPicker(); } catch {}
+  }
+
   setupToolNavigation();
   setupSharedListAlignment();
   elements.subtitleChoose.addEventListener('click', chooseSubtitles);
@@ -1870,6 +1878,12 @@
   $('#localDocumentImportClose').addEventListener('click', () => closeImportModal('document'));
   $('#localDocumentImportCancel').addEventListener('click', () => closeImportModal('document'));
   elements.page.addEventListener('click', (event) => {
+    const filterChevron = event.target.closest('.shared-filter-chevron');
+    if (filterChevron) {
+      event.stopPropagation();
+      openSharedFilterPicker(filterChevron);
+      return;
+    }
     const card = event.target.closest('[data-outside-open]');
     if (card && card.closest('#outsideToolStack')) { openOutsideTool(card.dataset.outsideOpen); return; }
     handleJobAction(event);
