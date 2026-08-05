@@ -88,6 +88,7 @@
     sharedMountSelectionCount: $('#sharedMountSelectionCount'),
     sharedMountList: $('#sharedMountList'),
     sharedUpload: $('#sharedUpload'),
+    sharedUploadRefresh: $('#sharedUploadRefresh'),
     sharedUploadSelectAll: $('#sharedUploadSelectAll'),
     sharedUploadFilter: $('#sharedUploadFilter'),
     sharedUploadUserFilter: $('#sharedUploadUserFilter'),
@@ -118,7 +119,7 @@
   };
   if (!elements.page) return;
 
-  const { RequestGate } = window.StarOwnerRendererGuards;
+  const { RequestGate, runLatestRequest } = window.StarOwnerRendererGuards;
 
   let state = { jobs: [], videoCollections: [], documentCollections: [] };
   let multipartState = { collections: [], parents: [] };
@@ -161,6 +162,7 @@
   const snapshotRefreshGate = new RequestGate();
   const multipartProviderGate = new RequestGate();
   const sharedCatalogGate = new RequestGate();
+  const sharedUploadRefreshGate = new RequestGate();
   const videoSelectionGate = new RequestGate();
   const videoPreviewGate = new RequestGate();
   const documentSelectionGate = new RequestGate();
@@ -286,6 +288,22 @@
     renderMultipart();
     renderShared();
     return state;
+  }
+
+  async function refreshSharedLocalDirectory() {
+    return runLatestRequest({
+      requestGate: sharedUploadRefreshGate,
+      resultGate: snapshotRefreshGate,
+      onStart: () => setBusy(elements.sharedUploadRefresh, true, '刷新中'),
+      request: () => window.orchestrator.snapshot(),
+      onAccept: (nextSnapshot) => {
+        snapshot = nextSnapshot;
+        renderSharedUploads();
+        notify('本地目录已刷新', `已更新 ${shareableUploadItems().length} 篇可共享总结。`, 'success');
+      },
+      onReject: (error) => notify('刷新本地目录失败', error),
+      onFinish: () => setBusy(elements.sharedUploadRefresh, false, '刷新本地目录')
+    });
   }
 
   function applySharedState(nextState) {
@@ -1652,6 +1670,7 @@
     renderSharedMounts();
   });
   elements.sharedSyncSelected.addEventListener('click', syncSelectedSharedMounts);
+  elements.sharedUploadRefresh.addEventListener('click', refreshSharedLocalDirectory);
   elements.sharedUpload.addEventListener('click', uploadShared);
   elements.sharedUploadCancel.addEventListener('click', cancelSharedUpload);
   elements.sharedUploadSelectAll.addEventListener('click', () => {

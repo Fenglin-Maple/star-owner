@@ -390,7 +390,8 @@ svg {
 .app-mark { width: 25px; height: 25px; border-radius: 7px; object-fit: cover; box-shadow: 0 0 14px var(--accent-soft); }
 
 .app-title { font-size: 13px; font-weight: 650; }
-.app-title b { margin-left: 3px; color: var(--muted); font-weight: 560; }
+.app-title b { margin-left: 3px; color: color-mix(in srgb, var(--accent) 68%, var(--text)); font-weight: 650; }
+body.theme-bili .app-title b { color: #ffffff; }
 body.theme-claude .app-title { font-family: var(--font-display); font-size: 15px; font-weight: 700; letter-spacing: 0; }
 
 .user-profile {
@@ -1193,9 +1194,9 @@ body.theme-day input[type="date"], body.theme-bili input[type="date"], body.them
 /* Compact startup page */
 .overview-layout.active,
 .overview-layout.active.startup-complete {
-  grid-template-rows: none;
-  grid-auto-rows: max-content;
-  align-content: start;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
   gap: 10px;
   overflow-x: hidden;
   overflow-y: auto;
@@ -1276,7 +1277,7 @@ body.theme-day input[type="date"], body.theme-bili input[type="date"], body.them
 .quickstart-content { padding: 0 14px 14px; border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent); }
 .quickstart-actions { min-height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 11px; }
 .quickstart-content pre { max-height: 270px; }
-.overview-layout > .activity-panel { min-height: 250px; height: min(360px, 42vh); display: flex; flex-direction: column; margin: 0; overflow: hidden; }
+.overview-layout > .activity-panel { flex: 1 0 auto; min-height: 250px; height: min(360px, 42vh); display: flex; flex-direction: column; margin: 0; overflow: hidden; }
 .overview-layout > .activity-panel pre { flex: 1; min-height: 0; max-height: none; }
 
 /* Task target, analytics, and inventory */
@@ -1574,7 +1575,7 @@ body.theme-endfield .windowbar::after {
   pointer-events: none;
 }
 body.theme-endfield .app-title { color: #f2f2f0; font-weight: 700; }
-body.theme-endfield .app-title b,
+body.theme-endfield .app-title b { color: var(--signal); }
 body.theme-endfield .window-status { color: #aaa9a2; }
 body.theme-endfield .window-controls button,
 body.theme-endfield .windowbar .menu-button { color: #c7c7bf; }

@@ -258,6 +258,7 @@
 .shared-operation-progress.is-complete .shared-operation-percent { color: var(--green); }
 
 .shared-layout .outside-pane { min-height: 420px; }
+.shared-tool-body { --panel: var(--row); }
 .shared-download-pane { align-content: start; }
 .shared-catalog-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .shared-catalog-actions span { min-width: 0; margin-left: auto; color: var(--muted); font: 10px var(--font-mono); text-align: right; }
@@ -271,6 +272,8 @@
 .shared-catalog-filter-grid label { display: grid; gap: 4px; min-width: 0; }
 .shared-catalog-filter-grid label > span { color: var(--muted); font-size: 10px; }
 .shared-catalog-filter-grid input { min-width: 0; height: 32px; }
+.shared-mount-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.shared-mount-row, .shared-catalog-filter-grid, .shared-upload-filter-grid { width: 58%; max-width: 620px; }
 .shared-catalog-list { display: block; width: 100%; height: 500px; min-height: 360px; max-height: 72vh; resize: vertical; overflow: auto; overscroll-behavior: contain; padding: 7px; border: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 62%, var(--panel)); }
 .shared-catalog-list > .empty-state { min-height: 100%; display: grid; place-items: center; }
 .shared-catalog-resize-note { margin-top: -5px; color: var(--muted-2); font-size: 9px; text-align: right; }
@@ -450,8 +453,9 @@ body.shared-upload-locked { overflow: hidden; }
   height: var(--shared-source-list-height);
   min-height: var(--shared-source-list-height);
   max-height: 72vh;
-  margin-top: auto;
+  margin-top: 0;
 }
+.shared-pane-source > .shared-list-heading { margin-top: auto; }
 .shared-pane-source > .shared-upload-list { max-height: var(--shared-source-list-height); }
 .shared-pane-source > .shared-upload-list { margin-bottom: 18px; }
 .shared-layout > .outside-pane > .shared-flow-arrow {
@@ -519,20 +523,50 @@ body.shared-upload-locked { overflow: hidden; }
 }
 
 /* Give each stage of the shared flow a clear, repeatable visual container. */
-.shared-catalog-actions,
-.shared-upload-actions {
+.shared-list-heading {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-start;
+  align-items: baseline;
+  justify-content: space-between;
   gap: 8px;
-  min-height: 46px;
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 8px;
+  border-left: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 24%, var(--row));
+}
+.shared-list-heading strong { min-width: 0; color: var(--text); font-size: 11px; font-weight: 700; }
+.shared-list-heading > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; }
+.shared-local-mount-title.shared-list-heading { min-height: 0; padding: 0; border-left: 0; background: transparent; }
+.shared-catalog-actions,
+.shared-upload-actions,
+.shared-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-areas: "primary status" "secondary tertiary";
+  align-items: stretch;
+  gap: 8px;
+  min-height: 82px;
   padding: 5px 6px;
   border: 1px solid color-mix(in srgb, var(--line) 84%, transparent);
   background: color-mix(in srgb, var(--row) 42%, var(--bg));
 }
-.shared-catalog-actions span { margin-left: auto; }
-.shared-upload-actions > button { flex: 0 0 auto; }
+.shared-catalog-actions > button,
+.shared-upload-actions > button { width: 100%; min-width: 0; }
+.shared-catalog-actions > .shared-action-status,
+.shared-upload-actions > .shared-action-status {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+  margin: 0;
+  color: var(--muted);
+  font: 10px var(--font-mono);
+  text-align: right;
+}
+#sharedCatalog, #sharedUploadRefresh { grid-area: primary; }
+#sharedCatalogResultCount, #sharedUploadResultCount { grid-area: status; }
+#sharedMountFiltered, #sharedUploadSelectAll { grid-area: secondary; }
+#sharedMount, #sharedUpload { grid-area: tertiary; }
 
 .shared-pane-source > .shared-upload-list {
   display: block;
@@ -560,6 +594,14 @@ body.shared-upload-locked { overflow: hidden; }
   place-items: center;
   text-align: center;
   background: color-mix(in srgb, var(--row) 18%, transparent);
+}
+.shared-layout .shared-pane-source > .shared-catalog-list,
+.shared-layout .shared-pane-source > .shared-upload-list,
+.shared-layout .shared-pane-target > .shared-local-mount-list,
+.shared-layout .shared-pane-target .shared-upload-prepare-list {
+  background: color-mix(in srgb, var(--content) 92%, var(--accent) 8%);
+  border-color: color-mix(in srgb, var(--line) 88%, var(--accent) 12%);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .shared-layout .shared-pane-target .shared-upload-prepare-list > .empty-state {
   height: calc(var(--shared-target-list-height) - 8px);
@@ -602,11 +644,16 @@ body.shared-upload-locked { overflow: hidden; }
 }
 
 @media (max-width: 760px) {
+  .shared-mount-row, .shared-catalog-filter-grid, .shared-upload-filter-grid { width: 100%; max-width: 100%; }
+  .shared-mount-row { grid-template-columns: 1fr; }
   .shared-catalog-actions,
   .shared-upload-actions {
+    grid-template-columns: 1fr;
+    grid-template-areas: "primary" "status" "secondary" "tertiary";
     align-items: stretch;
   }
-  .shared-catalog-actions span { margin-left: 0; }
+  .shared-catalog-actions > .shared-action-status,
+  .shared-upload-actions > .shared-action-status { justify-content: flex-start; text-align: left; }
   .shared-layout > .outside-pane > .shared-flow-arrow {
     padding-inline: 8px;
   }

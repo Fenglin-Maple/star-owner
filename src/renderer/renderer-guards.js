@@ -34,5 +34,23 @@
     return Boolean(stream) && (!messageId || stream.id === messageId);
   }
 
-  return { RequestGate, SerialQueue, streamMatches };
+  async function runLatestRequest({ requestGate, resultGate = requestGate, onStart, request, onAccept, onReject, onFinish }) {
+    const requestGeneration = requestGate.next();
+    const resultGeneration = resultGate === requestGate ? requestGeneration : resultGate.next();
+    onStart?.();
+    try {
+      const value = await request();
+      if (!requestGate.isCurrent(requestGeneration) || !resultGate.isCurrent(resultGeneration)) return { accepted: false, value };
+      await onAccept?.(value);
+      return { accepted: true, value };
+    } catch (error) {
+      const accepted = requestGate.isCurrent(requestGeneration) && resultGate.isCurrent(resultGeneration);
+      if (accepted) await onReject?.(error);
+      return { accepted, error };
+    } finally {
+      if (requestGate.isCurrent(requestGeneration)) await onFinish?.();
+    }
+  }
+
+  return { RequestGate, SerialQueue, runLatestRequest, streamMatches };
 });

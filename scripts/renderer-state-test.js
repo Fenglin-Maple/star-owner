@@ -1,9 +1,29 @@
-const { RequestGate, SerialQueue, streamMatches } = require('../src/renderer/renderer-guards');
+const { RequestGate, SerialQueue, runLatestRequest, streamMatches } = require('../src/renderer/renderer-guards');
 const fs = require('fs');
 const path = require('path');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
+function fakeButton(label) {
+  const listeners = new Map();
+  return {
+    disabled: false,
+    textContent: label,
+    addEventListener(type, listener) { listeners.set(type, listener); },
+    click() { return listeners.get('click')?.(); }
+  };
 }
 
 (async () => {
@@ -29,8 +49,66 @@ function assert(condition, message) {
   const current = gate.next();
   assert(!gate.isCurrent(stale) && gate.isCurrent(current), 'request gate did not reject stale async results');
   assert(streamMatches({ id: 'new-message' }, 'new-message') && !streamMatches({ id: 'new-message' }, 'old-message'), 'stream guard did not reject an old message event');
+
+  const refreshButton = fakeButton('刷新本地目录');
+  const buttonGate = new RequestGate();
+  const snapshotGate = new RequestGate();
+  let snapshotRequest = deferred();
+  let renderedSnapshot = { tasks: [{ id: 'old' }] };
+  const refreshNotices = [];
+  const renderSnapshots = [];
+  const handleRefreshClick = () => runLatestRequest({
+    requestGate: buttonGate,
+    resultGate: snapshotGate,
+    onStart: () => { refreshButton.disabled = true; refreshButton.textContent = '刷新中'; },
+    request: () => snapshotRequest.promise,
+    onAccept: (value) => {
+      renderedSnapshot = value;
+      renderSnapshots.push(value.tasks.map((task) => task.id).join(','));
+      refreshNotices.push('success');
+    },
+    onReject: () => refreshNotices.push('error'),
+    onFinish: () => { refreshButton.disabled = false; refreshButton.textContent = '刷新本地目录'; }
+  });
+  refreshButton.addEventListener('click', handleRefreshClick);
+
+  const successfulRefresh = refreshButton.click();
+  assert(refreshButton.disabled && refreshButton.textContent === '刷新中', 'shared local refresh did not enter its busy state immediately after click');
+  snapshotRequest.resolve({ tasks: [{ id: 'new' }] });
+  await successfulRefresh;
+  assert(renderedSnapshot.tasks[0].id === 'new' && renderSnapshots.at(-1) === 'new' && refreshNotices.at(-1) === 'success', 'shared local refresh did not apply and render the successful snapshot');
+  assert(!refreshButton.disabled && refreshButton.textContent === '刷新本地目录', 'shared local refresh did not restore its button after success');
+
+  snapshotRequest = deferred();
+  const snapshotBeforeFailure = renderedSnapshot;
+  const failedRefresh = refreshButton.click();
+  snapshotRequest.reject(new Error('expected snapshot failure'));
+  await failedRefresh;
+  assert(renderedSnapshot === snapshotBeforeFailure && refreshNotices.at(-1) === 'error', 'shared local refresh did not preserve the previous list or report a current failure');
+  assert(!refreshButton.disabled && refreshButton.textContent === '刷新本地目录', 'shared local refresh did not restore its button after failure');
+
+  const olderFullSnapshot = deferred();
+  const olderFullGeneration = snapshotGate.next();
+  const olderFullRefresh = olderFullSnapshot.promise.then((value) => {
+    if (snapshotGate.isCurrent(olderFullGeneration)) renderedSnapshot = value;
+  });
+  snapshotRequest = deferred();
+  const newerManualRefresh = refreshButton.click();
+  olderFullSnapshot.resolve({ tasks: [{ id: 'stale-full' }] });
+  snapshotRequest.resolve({ tasks: [{ id: 'latest-manual' }] });
+  await Promise.all([olderFullRefresh, newerManualRefresh]);
+  assert(renderedSnapshot.tasks[0].id === 'latest-manual', 'an older full refresh overwrote the newer manual snapshot');
+
+  snapshotRequest = deferred();
+  const staleManualRefresh = refreshButton.click();
+  const newerFullGeneration = snapshotGate.next();
+  snapshotRequest.resolve({ tasks: [{ id: 'stale-manual' }] });
+  await staleManualRefresh;
+  if (snapshotGate.isCurrent(newerFullGeneration)) renderedSnapshot = { tasks: [{ id: 'latest-full' }] };
+  assert(renderedSnapshot.tasks[0].id === 'latest-full' && !refreshButton.disabled, 'a stale manual refresh overwrote the newer full snapshot or left its button busy');
+
   const outside = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'outside.js'), 'utf8');
-  assert(['localRefreshGate', 'multipartRefreshGate', 'sharedRefreshGate', 'snapshotRefreshGate'].every((name) => outside.includes(`const ${name} = new RequestGate()`)), 'outside toolbox did not isolate refresh generations by state domain');
+  assert(['localRefreshGate', 'multipartRefreshGate', 'sharedRefreshGate', 'snapshotRefreshGate', 'sharedUploadRefreshGate'].every((name) => outside.includes(`const ${name} = new RequestGate()`)), 'outside toolbox did not isolate refresh generations by state domain');
   assert(outside.includes('if (!Object.values(accepted).some(Boolean)) return state'), 'outside toolbox refresh did not reject a fully stale snapshot');
   assert(outside.includes('videoPreviewTimer') && outside.includes('documentPreviewTimer') && !outside.includes('let previewTimer = null'), 'video and document previews still shared one debounce timer');
   assert(outside.includes('videoPreviewGate.isCurrent(generation)') && outside.includes('documentPreviewGate.isCurrent(generation)'), 'local import previews did not reject stale responses');
@@ -42,6 +120,7 @@ function assert(condition, message) {
   assert(main.includes('multipartHotEvent') && main.includes("['stream', 'multipart-progress', 'session-updated']") && multipartManager.includes("}, 400);"), 'multi-part token events are still sent to the renderer without throttling');
   assert(main.includes('highFrequencyMultipartEvent') && main.includes("['stream', 'session-updated', 'multipart-progress']"), 'multi-part progress is still exported into the persistent activity log');
   const index = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
   const ragRenderer = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'rag.js'), 'utf8');
   const ragCss = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'rag.css'), 'utf8');
   assert(ragRenderer.includes('renderKnowledgeMenu(elements.knowledgeMenu, selected, session)') && ragRenderer.includes('renderKnowledgeMenu(elements.headKnowledgeMenu, selected, session)'), 'RAG knowledge picker menus do not share the same renderer');
@@ -53,14 +132,22 @@ function assert(condition, message) {
   assert(repositoryCardIndex >= 0 && !index.slice(repositoryCardIndex, repositoryCardIndex + 120).includes(' open'), 'shared repository configuration must be collapsed by default');
   assert(index.includes('<summary class="shared-repository-summary"><strong>当前共享仓库</strong>') && index.includes('class="shared-repository-config"'), 'shared repository status summary or configuration body is missing');
   assert(index.includes('挂载到本地共享收藏夹') && index.includes('我的 本地B站总结文档'), 'shared download/upload labels do not identify their local destinations and sources');
+  assert(index.includes('id="sharedUploadRefresh"') && index.includes('刷新本地目录'), 'shared upload flow is missing the local-directory refresh action');
+  assert((index.match(/shared-list-heading/g) || []).length >= 4 && ['远程共享文档目录', '本地共享收藏夹与远程挂载', '我的 本地B站总结文档', '准备上传列表'].every((label) => index.includes(label)), 'shared list regions are missing descriptive headings');
   assert((index.match(/class="outside-pane-title shared-pane-title"/g) || []).length === 2 && index.includes('浏览远程共享目录') && index.includes('筛选本地已完成的 B站总结文档'), 'shared column headings are missing their paired descriptions');
   assert(index.includes('sharedClearMountSelection') && index.includes('shared-mount-flow-arrow') && index.indexOf('id="sharedMount"') < index.indexOf('id="sharedCollection"') && index.indexOf('id="sharedCollection"') < index.indexOf('id="sharedGithubFilter"'), 'shared mount target was not moved between the remote commands and filters');
   const mountArrowIndex = index.indexOf('shared-mount-flow-arrow');
   assert(index.includes('远程目录筛选') && index.indexOf('id="sharedCatalogList"') < mountArrowIndex && mountArrowIndex < index.indexOf('id="sharedMountSelectAll"') && index.indexOf('id="sharedClearMountSelection"') < index.indexOf('id="sharedMountList"'), 'local shared-collection controls were not placed between the remote and local lists');
   assert(index.indexOf('id="sharedUploadSelectAll"') < index.indexOf('id="sharedUploadResultCount"') && index.indexOf('id="sharedUploadSelectAll"') < index.indexOf('id="sharedUploadUserFilter"'), 'shared upload selection actions were not moved above the candidate filters');
   assert(index.includes('shared-upload-flow-arrow') && index.indexOf('id="sharedUploadList"') < index.indexOf('shared-upload-flow-arrow') && index.indexOf('shared-upload-flow-arrow') < index.indexOf('id="sharedUploadPrepareList"'), 'upload candidate and preparation lists do not expose their downward relationship');
+  assert(index.indexOf('id="sharedUploadRefresh"') < index.indexOf('id="sharedUploadSelectAll"') && index.indexOf('id="sharedUploadSelectAll"') < index.indexOf('id="sharedUpload"'), 'shared upload actions are not ordered as refresh, select-all, then PR');
   const outsideCss = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'outside.css'), 'utf8');
-  assert(outsideCss.includes('.shared-upload-list { height: auto;') && outsideCss.includes('grid-template-rows: subgrid') && outsideCss.includes('.shared-layout > .outside-pane > .shared-flow-arrow') && outsideCss.includes('.shared-repository-summary') && outsideCss.includes('.shared-repository-card[open]') && outsideCss.includes('.shared-pane-title-copy > small') && outsideCss.includes('border-top-width: 3px') && outsideCss.includes('border-top-color: var(--accent)') && outsideCss.includes('.shared-pane-target { padding-top: 10px; border-top: 1px solid var(--line); }') && /display:\s*flex;\s*flex-direction:\s*column;\s*grid-row:\s*auto;/.test(outsideCss) && outsideCss.includes('--shared-source-list-height') && outsideCss.includes('--shared-target-list-height') && outside.includes('sharedUploadTree(visibleItems') && outside.includes('sharedUploadTree(items'), 'shared directories lost the aligned flow tracks, theme-colored top border, responsive stacking, aligned target headings, or collapsible repository configuration');
+  assert(outsideCss.includes('.shared-upload-list { height: auto;') && outsideCss.includes('grid-template-rows: subgrid') && outsideCss.includes('.shared-layout > .outside-pane > .shared-flow-arrow') && outsideCss.includes('.shared-repository-summary') && outsideCss.includes('.shared-repository-card[open]') && outsideCss.includes('.shared-pane-title-copy > small') && outsideCss.includes('border-top-width: 3px') && outsideCss.includes('border-top-color: var(--accent)') && outsideCss.includes('.shared-pane-target { padding-top: 10px; border-top: 1px solid var(--line); }') && /display:\s*flex;\s*flex-direction:\s*column;\s*grid-row:\s*auto;/.test(outsideCss) && outsideCss.includes('--shared-source-list-height') && outsideCss.includes('--shared-target-list-height') && outsideCss.includes('.shared-action-grid') && outsideCss.includes('grid-template-areas: "primary status" "secondary tertiary"') && outsideCss.includes('width: 58%') && outsideCss.includes('background: color-mix(in srgb, var(--content) 92%, var(--accent) 8%)') && outsideCss.includes('.shared-tool-body { --panel: var(--row); }') && outside.includes('sharedUploadTree(visibleItems') && outside.includes('sharedUploadTree(items'), 'shared directories lost the aligned flow tracks, theme-colored top border, responsive stacking, action grid, or distinct list surfaces');
+  assert((outsideCss.match(/\.shared-mount-row, \.shared-catalog-filter-grid, \.shared-upload-filter-grid \{ width: 100%; max-width: 100%; \}/g) || []).length === 1 && outsideCss.includes('.shared-mount-row { grid-template-columns: 1fr; }'), 'shared filters still expand at the desktop breakpoint or the narrow mount fields do not stack');
+  assert(index.includes('class="outside-tool-body shared-tool-body"') && !index.includes('class="outside-tool-body shared-tool-body" hidden>\n                  <div class="outside-tool-meta"'), 'the shared theme variables are not attached to the reparented shared-tool body');
+  assert(index.indexOf('id="sharedUploadDurationMax"') < index.indexOf('shared-upload-title shared-list-heading') && index.indexOf('shared-upload-title shared-list-heading') < index.indexOf('id="sharedUploadList"'), 'the local upload list heading is not positioned directly above its list');
+  assert(outside.includes('async function refreshSharedLocalDirectory') && outside.includes('resultGate: snapshotRefreshGate') && outside.includes('runLatestRequest({') && outside.includes('elements.sharedUploadRefresh.addEventListener'), 'shared local-directory refresh is not connected to the shared snapshot generation');
+  assert(styles.includes('.app-title b { margin-left: 3px; color: color-mix(in srgb, var(--accent) 68%, var(--text));') && styles.includes('body.theme-bili .app-title b { color: #ffffff; }') && styles.includes('body.theme-endfield .app-title b { color: var(--signal); }') && styles.includes('.overview-layout > .activity-panel { flex: 1 0 auto; min-height: 250px; height: min(360px, 42vh);'), 'brand title theme contrast or flexible recent-status height is missing');
   assert(outsideCss.includes('.outside-tool-detail.is-local-tool { width: min(100%, 960px); margin-inline: auto; }') && outside.includes("classList.toggle('is-local-tool', card.hasAttribute('data-local-tool'))") && outside.includes("classList.remove('is-local-tool')"), 'local outside tools do not follow the centered settings-page width or clear it on return');
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
   assert(index.indexOf('dompurify/dist/purify.min.js') < index.indexOf('src="./app.js"') && app.includes('window.DOMPurify.sanitize') && app.includes('ALLOW_DATA_ATTR: false') && app.includes('normalizeReadmeLinks(template.content)') && app.includes('window.orchestrator.resolveReadmeImage(source)') && app.includes('link.dataset.readmeProjectLink = \'true\'') && app.includes("link.dataset.readmeProjectLink !== 'true'") && app.includes('window.orchestrator.openProjectPath(projectPath)'), 'project README HTML is not strictly sanitized before rendering, local images bypass the main-process resolver, or safe project links are not preserved');
