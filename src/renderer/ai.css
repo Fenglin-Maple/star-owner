@@ -138,6 +138,8 @@
 
 .dependency-list { display: grid; gap: 6px; overflow: visible; }
 .dependency-item { min-width: 0; min-height: 82px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; gap: 10px; padding: 8px 9px; border: 1px solid var(--line); border-radius: 6px; background: color-mix(in srgb, var(--row) 54%, transparent); }
+.dependency-item.dependency-target { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 24%, transparent); background: color-mix(in srgb, var(--accent-soft) 52%, var(--row)); }
+.dependency-item:focus { outline: none; }
 .dependency-main { min-width: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 3px; }
 .dependency-main > div { min-width: 0; display: flex; align-items: center; gap: 7px; }
 .dependency-name-link { min-width: 0; padding: 0; overflow: hidden; border: 0; color: var(--text); background: transparent; font: inherit; font-size: 11px; font-weight: 650; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; transition: color .16s ease; }

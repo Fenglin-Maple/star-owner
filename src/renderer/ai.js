@@ -31,6 +31,10 @@
   let initialized = false;
   let modelSaveTimer = null;
   let modelSavePromise = Promise.resolve();
+  let dependencyFocusId = '';
+  let dependencyFocusTimer = null;
+  let dependencyRenderFrame = null;
+  let dependencyStructureKey = '';
   const pendingSessionActions = new Set();
   let agentContextMenu = null;
   let duplicateDecisionResolver = null;
@@ -540,30 +544,94 @@
 
   function renderDependencies() {
     if (!dependencyState) return;
-    const recoveryWarning = dependencyState.recovery?.warning
-      ? `<div class="dependency-recovery-warning"><strong>依赖恢复记录已隔离</strong><p>${html(dependencyState.recovery.warning)}</p></div>`
-      : '';
-    elements.dependencyList.innerHTML = recoveryWarning + dependencyState.packages.map((item) => {
+    const packages = Array.isArray(dependencyState.packages) ? dependencyState.packages : [];
+    const recoveryMessage = dependencyState.recovery?.warning || '';
+    const structureKey = JSON.stringify({ recovery: Boolean(recoveryMessage), packages: packages.map((item) => [item.id, Boolean(item.localImport)]) });
+    if (structureKey !== dependencyStructureKey) {
+      const recoveryWarning = recoveryMessage
+        ? '<div class="dependency-recovery-warning" data-dependency-recovery><strong>依赖恢复记录已隔离</strong><p></p></div>'
+        : '';
+      elements.dependencyList.innerHTML = recoveryWarning + packages.map((item) => `<div class="dependency-item" data-dependency-id="${esc(item.id)}" tabindex="-1">
+        <div class="dependency-main">
+          <div><button class="dependency-name-link" type="button" data-dependency-release></button><span class="dependency-state"></span></div>
+          <p></p>
+          <div class="dependency-progress"><span></span></div>
+        </div>
+        <div class="dependency-actions">
+          ${item.localImport ? `<button class="secondary-button compact-button" type="button" data-import-dependency="${esc(item.id)}">从本地导入</button>` : ''}
+          <button class="primary-button compact-button" type="button" data-download-dependency="${esc(item.id)}"></button>
+        </div>
+      </div>`).join('');
+      dependencyStructureKey = structureKey;
+    }
+
+    const recovery = elements.dependencyList.querySelector('[data-dependency-recovery] p');
+    if (recovery && recovery.textContent !== recoveryMessage) recovery.textContent = recoveryMessage;
+    for (const item of packages) {
       const importBusy = dependencyImportBusy(item.status);
       const pausable = dependencyPausable(item.status);
       const paused = item.status === 'paused';
-      return `<div class="dependency-item">
-        <div class="dependency-main">
-          <div><button class="dependency-name-link" type="button" data-dependency-release="${esc(item.releaseUrl || dependencyState.dependencyReleasePage)}" title="打开正确版本 Release">${html(item.name)}</button><span class="dependency-state ${esc(item.status)}">${dependencyStatus(item)}</span></div>
-          <p>${html(item.message || item.description)}</p>
-          <div class="dependency-progress"><span style="width:${Math.round(Number(item.progress || 0) * 100)}%"></span></div>
-        </div>
-        <div class="dependency-actions">
-          ${item.localImport ? `<button class="secondary-button compact-button" type="button" data-import-dependency="${esc(item.id)}" ${importBusy ? 'disabled' : ''}>从本地导入</button>` : ''}
-          <button class="${pausable || paused ? 'secondary-button' : 'primary-button'} compact-button" type="button" data-download-dependency="${esc(item.id)}" ${dependencyActionDisabled(item.status) ? 'disabled' : ''}>${pausable ? '暂停' : (paused ? '继续下载' : (item.available ? '重新下载' : '下载'))}</button>
-        </div>
-      </div>`;
-    }).join('');
-    for (const button of elements.dependencyList.querySelectorAll('[data-download-dependency]')) button.addEventListener('click', () => toggleDependencyDownload(button.dataset.downloadDependency, button));
-    for (const button of elements.dependencyList.querySelectorAll('[data-import-dependency]')) button.addEventListener('click', () => importDependency(button.dataset.importDependency, button));
-    for (const button of elements.dependencyList.querySelectorAll('[data-dependency-release]')) button.addEventListener('click', () => {
-      window.orchestrator.openExternal(button.dataset.dependencyRelease).catch((error) => notify('无法打开 Release', error.message || String(error), 'error'));
+      const row = elements.dependencyList.querySelector(`[data-dependency-id="${CSS.escape(String(item.id || ''))}"]`);
+      if (!row) continue;
+      row.classList.toggle('dependency-target', item.id === dependencyFocusId);
+      const release = row.querySelector('[data-dependency-release]');
+      const status = row.querySelector('.dependency-state');
+      const message = row.querySelector('.dependency-main > p');
+      const progress = row.querySelector('.dependency-progress span');
+      const importButton = row.querySelector('[data-import-dependency]');
+      const downloadButton = row.querySelector('[data-download-dependency]');
+      if (release.textContent !== String(item.name || '')) release.textContent = item.name || '';
+      const releaseUrl = item.releaseUrl || dependencyState.dependencyReleasePage || '';
+      if (release.dataset.dependencyRelease !== releaseUrl) release.dataset.dependencyRelease = releaseUrl;
+      if (release.title !== '打开正确版本 Release') release.title = '打开正确版本 Release';
+      const statusClass = `dependency-state ${item.status || ''}`;
+      const statusText = dependencyStatus(item);
+      if (status.className !== statusClass) status.className = statusClass;
+      if (status.textContent !== statusText) status.textContent = statusText;
+      if (message.textContent !== String(item.message || item.description || '')) message.textContent = item.message || item.description || '';
+      const width = `${Math.round(Number(item.progress || 0) * 100)}%`;
+      if (progress.style.width !== width) progress.style.width = width;
+      if (importButton && importButton.disabled !== importBusy) importButton.disabled = importBusy;
+      const downloadClass = `${pausable || paused ? 'secondary-button' : 'primary-button'} compact-button`;
+      const downloadDisabled = dependencyActionDisabled(item.status);
+      if (downloadButton.className !== downloadClass) downloadButton.className = downloadClass;
+      if (downloadButton.disabled !== downloadDisabled) downloadButton.disabled = downloadDisabled;
+      const actionLabel = pausable ? '暂停' : (paused ? '继续下载' : (item.available ? '重新下载' : '下载'));
+      if (downloadButton.textContent !== actionLabel) downloadButton.textContent = actionLabel;
+    }
+  }
+
+  function scheduleDependencyRender() {
+    if (dependencyRenderFrame !== null) return;
+    dependencyRenderFrame = requestAnimationFrame(() => {
+      dependencyRenderFrame = null;
+      renderDependencies();
     });
+  }
+
+  function focusDependencyItem(packageId) {
+    dependencyFocusId = String(packageId || '');
+    if (!dependencyFocusId) return;
+    renderDependencies();
+    setTimeout(() => {
+      const row = elements.dependencyList.querySelector(`[data-dependency-id="${CSS.escape(dependencyFocusId)}"]`);
+      const settingsPage = $('#page-settings');
+      if (row && settingsPage) {
+        const pageBox = settingsPage.getBoundingClientRect();
+        const rowBox = row.getBoundingClientRect();
+        const rowOffset = settingsPage.scrollTop + rowBox.top - pageBox.top;
+        const centeredTop = Math.max(0, rowOffset - Math.max(24, (settingsPage.clientHeight - rowBox.height) / 2));
+        settingsPage.scrollTo({ top: centeredTop, behavior: 'auto' });
+      }
+      row?.focus({ preventScroll: true });
+    }, 80);
+    if (dependencyFocusTimer) clearTimeout(dependencyFocusTimer);
+    dependencyFocusTimer = setTimeout(() => {
+      const row = elements.dependencyList.querySelector(`[data-dependency-id="${CSS.escape(dependencyFocusId)}"]`);
+      row?.classList.remove('dependency-target');
+      dependencyFocusId = '';
+      dependencyFocusTimer = null;
+    }, 2600);
   }
 
   function maybeShowDependencyPrompt() {
@@ -839,6 +907,22 @@
   elements.modelSave.addEventListener('click', async () => { try { await saveProviderForm(); notify('供应商已保存', '配置已供 RAG 和应用内 Agent 共用。', 'success'); } catch (error) { notify('保存失败', error.message || String(error), 'error'); } });
   elements.modelFetch.addEventListener('click', fetchModels);
   elements.modelDelete.addEventListener('click', () => deleteProvider(elements.modelDelete));
+  elements.dependencyList.addEventListener('click', (event) => {
+    const download = event.target.closest('[data-download-dependency]');
+    if (download) {
+      toggleDependencyDownload(download.dataset.downloadDependency, download);
+      return;
+    }
+    const importButton = event.target.closest('[data-import-dependency]');
+    if (importButton) {
+      importDependency(importButton.dataset.importDependency, importButton);
+      return;
+    }
+    const release = event.target.closest('[data-dependency-release]');
+    if (release?.dataset.dependencyRelease) {
+      window.orchestrator.openExternal(release.dataset.dependencyRelease).catch((error) => notify('无法打开 Release', error.message || String(error), 'error'));
+    }
+  });
   elements.dependencyRefresh.addEventListener('click', async () => {
     try { dependencyState = await window.orchestrator.dependencyState(); renderDependencies(); }
     catch (error) { notify('依赖状态刷新失败', error.message || String(error), 'error'); }
@@ -872,17 +956,18 @@
     maybeShowDependencyPrompt();
   });
   window.starFlushModelConfig = flushPendingModelSave;
+  window.addEventListener('star:focus-dependency', (event) => focusDependencyItem(event.detail?.packageId));
   window.orchestrator.onInternalAgentEvent(handleInternalEvent);
   window.orchestrator.onDependencyEvent((event) => {
     if (event.state) dependencyState = event.state;
     if (event.type === 'dependency-error') notify('依赖下载失败', event.error || '未知错误', 'error');
-    if (activeAiPage() === 'settings') renderDependencies();
+    if (activeAiPage() === 'settings') scheduleDependencyRender();
   });
   window.orchestrator.onRuntime((runtime) => {
     if (runtime?.pathSafety) { pathSafetyState = runtime.pathSafety; maybeShowPathSafetyPrompt(); }
     if (runtime?.dependencies) {
       dependencyState = runtime.dependencies;
-      if (activeAiPage() === 'settings') renderDependencies();
+      if (activeAiPage() === 'settings') scheduleDependencyRender();
       maybeShowDependencyPrompt();
     }
   });

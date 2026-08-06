@@ -100,6 +100,13 @@ const prepareUpdateButton = document.querySelector('#prepareUpdate');
 const applyUpdateButton = document.querySelector('#applyUpdate');
 const inspectMigrationButton = document.querySelector('#inspectMigration');
 const outsideBilibiliToggle = document.querySelector('#outsideBilibiliToggle');
+const dependencyDownloadIndicator = document.querySelector('#dependencyDownloadIndicator');
+const dependencyDownloadButton = document.querySelector('#dependencyDownloadButton');
+const dependencyDownloadRingValue = document.querySelector('#dependencyDownloadRingValue');
+const dependencyDownloadCount = document.querySelector('#dependencyDownloadCount');
+const dependencyDownloadSummary = document.querySelector('#dependencyDownloadSummary');
+const dependencyDownloadItems = document.querySelector('#dependencyDownloadItems');
+const dependencyIndicatorApi = window.StarOwnerDependencyIndicator;
 
 let runtime = {};
 let folders = [];
@@ -163,6 +170,8 @@ let bootstrapHideTimer = null;
 let backendSnapshotLoaded = false;
 let outsideBilibiliAnimationTimer = null;
 let outsideBilibiliAnimationTarget = null;
+let dependencyIndicatorState = null;
+let dependencyIndicatorFrame = null;
 const SNAPSHOT_IGNORED_EVENTS = new Set([
   'asr-progress',
   'asr-service-log',
@@ -1239,6 +1248,82 @@ function setPage(name, sourceItem = null) {
 
 function activePageName() {
   return document.querySelector('.page.active')?.id?.replace(/^page-/, '') || 'overview';
+}
+
+function setNodeText(node, value) {
+  const text = String(value ?? '');
+  if (node && node.textContent !== text) node.textContent = text;
+}
+
+function dependencyIndicatorItem(packageItem) {
+  const button = document.createElement('button');
+  button.className = 'dependency-download-item';
+  button.type = 'button';
+  button.dataset.dependencyJump = packageItem.id;
+  button.innerHTML = '<span class="dependency-download-item-copy"><strong></strong><span></span></span><em></em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg><span class="dependency-download-item-track"><span></span></span>';
+  button.addEventListener('click', () => jumpToDependencySettings(button.dataset.dependencyJump));
+  return button;
+}
+
+function renderDependencyIndicator() {
+  dependencyIndicatorFrame = null;
+  const activePackages = dependencyIndicatorApi?.activeDependencyPackages(dependencyIndicatorState) || [];
+  const visible = activePackages.length > 0;
+  if (dependencyDownloadIndicator.hidden !== !visible) dependencyDownloadIndicator.hidden = !visible;
+  if (!visible) {
+    dependencyDownloadIndicator.classList.remove('is-open');
+    dependencyDownloadButton.setAttribute('aria-expanded', 'false');
+    if (dependencyDownloadItems.childElementCount) dependencyDownloadItems.replaceChildren();
+    return;
+  }
+
+  const progress = dependencyIndicatorApi.aggregateDependencyProgress(activePackages);
+  const percent = Math.round(progress * 100);
+  const dashOffset = String(100 - percent);
+  if (dependencyDownloadRingValue.style.strokeDashoffset !== dashOffset) dependencyDownloadRingValue.style.strokeDashoffset = dashOffset;
+  setNodeText(dependencyDownloadSummary, `${activePackages.length} 项 · ${percent}%`);
+  const indicatorTitle = `依赖处理中 ${percent}%`;
+  const indicatorLabel = `查看 ${activePackages.length} 项依赖下载进度，当前 ${percent}%`;
+  if (dependencyDownloadButton.title !== indicatorTitle) dependencyDownloadButton.title = indicatorTitle;
+  if (dependencyDownloadButton.getAttribute('aria-label') !== indicatorLabel) dependencyDownloadButton.setAttribute('aria-label', indicatorLabel);
+  const countHidden = activePackages.length < 2;
+  if (dependencyDownloadCount.hidden !== countHidden) dependencyDownloadCount.hidden = countHidden;
+  setNodeText(dependencyDownloadCount, activePackages.length);
+
+  const retained = new Set();
+  for (const [index, packageItem] of activePackages.entries()) {
+    const selector = `[data-dependency-jump="${CSS.escape(String(packageItem.id || ''))}"]`;
+    const row = dependencyDownloadItems.querySelector(selector) || dependencyIndicatorItem(packageItem);
+    const rowAtIndex = dependencyDownloadItems.children[index];
+    if (rowAtIndex !== row) dependencyDownloadItems.insertBefore(row, rowAtIndex || null);
+    const itemPercent = Math.round(Number(packageItem.progress || 0) * 100);
+    const status = dependencyIndicatorApi.dependencyStatusLabel(packageItem.status);
+    setNodeText(row.querySelector('strong'), packageItem.name || packageItem.id || '项目依赖');
+    setNodeText(row.querySelector('.dependency-download-item-copy span'), `${status} · ${packageItem.message || '正在处理依赖包'}`);
+    setNodeText(row.querySelector('em'), `${itemPercent}%`);
+    const bar = row.querySelector('.dependency-download-item-track span');
+    const width = `${itemPercent}%`;
+    if (bar.style.width !== width) bar.style.width = width;
+    const packageId = String(packageItem.id || '');
+    const rowTitle = `前往设置查看 ${packageItem.name || packageItem.id}`;
+    if (row.dataset.dependencyJump !== packageId) row.dataset.dependencyJump = packageId;
+    if (row.title !== rowTitle) row.title = rowTitle;
+    retained.add(row);
+  }
+  for (const row of [...dependencyDownloadItems.children]) if (!retained.has(row)) row.remove();
+}
+
+function scheduleDependencyIndicator(state) {
+  dependencyIndicatorState = state || { packages: [] };
+  if (dependencyIndicatorFrame) return;
+  dependencyIndicatorFrame = requestAnimationFrame(renderDependencyIndicator);
+}
+
+function jumpToDependencySettings(packageId) {
+  dependencyDownloadIndicator.classList.remove('is-open');
+  dependencyDownloadButton.setAttribute('aria-expanded', 'false');
+  setPage('settings');
+  requestAnimationFrame(() => window.dispatchEvent(new CustomEvent('star:focus-dependency', { detail: { packageId } })));
 }
 
 function renderSnapshotPage(name) {
@@ -2889,6 +2974,15 @@ document.querySelector('#userProfile')?.addEventListener('mouseleave', (event) =
   const profile = event.currentTarget;
   profileCloseTimer = setTimeout(() => profile.classList.remove('profile-open', 'profile-suppressed'), 320);
 });
+dependencyDownloadButton?.addEventListener('click', () => {
+  const open = dependencyDownloadIndicator.classList.toggle('is-open');
+  dependencyDownloadButton.setAttribute('aria-expanded', String(open));
+});
+document.addEventListener('pointerdown', (event) => {
+  if (dependencyDownloadIndicator?.contains(event.target)) return;
+  dependencyDownloadIndicator?.classList.remove('is-open');
+  dependencyDownloadButton?.setAttribute('aria-expanded', 'false');
+}, true);
 document.querySelector('#sidebarToggle')?.addEventListener('click', toggleSidebar);
 document.querySelector('#sidebarToggleInSettings')?.addEventListener('click', toggleSidebar);
 
@@ -3406,6 +3500,7 @@ document.querySelector('#refreshRuns')?.addEventListener('click', async () => {
 
 async function handleRuntime(data = {}) {
   runtime = { ...runtime, ...data };
+  if (data.dependencies) scheduleDependencyIndicator(data.dependencies);
   renderUpdateState(runtime.update);
   locallyDirtyPages.add('settings');
   if (activePageName() === 'settings') schedulePageRender('settings', { force: true });
@@ -3450,6 +3545,11 @@ async function handleRuntime(data = {}) {
 }
 
 window.orchestrator.onRuntime(handleRuntime);
+window.orchestrator.onDependencyEvent((event) => {
+  if (!event?.state) return;
+  runtime.dependencies = event.state;
+  scheduleDependencyIndicator(event.state);
+});
 window.orchestrator.onUpdateEvent((event) => {
   if (event?.state) {
     runtime.update = event.state;

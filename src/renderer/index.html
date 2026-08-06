@@ -27,6 +27,21 @@
         </div>
         <div class="window-status">
           <span id="apiBadge">API...</span>
+          <div id="dependencyDownloadIndicator" class="dependency-download-indicator" hidden>
+            <button id="dependencyDownloadButton" class="dependency-download-button" type="button" aria-label="查看依赖下载进度" aria-expanded="false">
+              <svg class="dependency-download-ring" viewBox="0 0 36 36" aria-hidden="true">
+                <circle class="dependency-download-ring-track" cx="18" cy="18" r="15.5" pathLength="100" />
+                <circle id="dependencyDownloadRingValue" class="dependency-download-ring-value" cx="18" cy="18" r="15.5" pathLength="100" />
+              </svg>
+              <svg class="dependency-download-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11M7 10l5 5 5-5M5 20h14"/></svg>
+              <span id="dependencyDownloadCount" class="dependency-download-count" hidden></span>
+            </button>
+            <div id="dependencyDownloadPopover" class="dependency-download-popover" role="dialog" aria-label="正在处理的依赖">
+              <div class="dependency-download-popover-head"><strong>依赖下载</strong><span id="dependencyDownloadSummary">0%</span></div>
+              <div id="dependencyDownloadItems" class="dependency-download-items"></div>
+              <small>点击项目可前往设置查看详情</small>
+            </div>
+          </div>
           <div id="userProfile" class="user-profile">
             <img id="userAvatar" alt="" />
             <span id="userName"></span>
@@ -1101,6 +1116,7 @@
     <div id="toastViewport" class="toast-viewport" aria-live="polite" aria-atomic="true"></div>
     <script src="../../node_modules/dompurify/dist/purify.min.js"></script>
     <script src="../../node_modules/mermaid/dist/mermaid.min.js"></script>
+    <script src="./dependency-indicator.js"></script>
     <script src="./app.js"></script>
     <script src="./renderer-guards.js"></script>
     <script src="./rag.js"></script>

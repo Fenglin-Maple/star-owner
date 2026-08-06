@@ -1,4 +1,5 @@
 const { RequestGate, SerialQueue, runLatestRequest, streamMatches } = require('../src/renderer/renderer-guards');
+const { activeDependencyPackages, aggregateDependencyProgress, dependencyStatusLabel } = require('../src/renderer/dependency-indicator');
 const fs = require('fs');
 const path = require('path');
 
@@ -27,6 +28,15 @@ function fakeButton(label) {
 }
 
 (async () => {
+  const activeDependencies = activeDependencyPackages({ packages: [
+    { id: 'runtime-base', status: 'downloading', progress: 0.5, totalBytes: 300 },
+    { id: 'model-small', status: 'verifying', progress: 0.75, totalBytes: 100 },
+    { id: 'model-large-v3-turbo', status: 'available', progress: 1, totalBytes: 900 }
+  ] });
+  assert(activeDependencies.map((item) => item.id).join(',') === 'runtime-base,model-small', 'dependency indicator included an inactive package or omitted an active package');
+  assert(aggregateDependencyProgress(activeDependencies) === 0.5625, 'dependency indicator did not weight aggregate progress by known package sizes');
+  assert(dependencyStatusLabel('waiting-install') === '等待安装' && dependencyStatusLabel('unknown') === '处理中', 'dependency indicator status labels are incomplete');
+
   const queue = new SerialQueue();
   const order = [];
   const first = queue.run(async () => {
@@ -164,6 +174,10 @@ function fakeButton(label) {
   assert(preload.includes("multiPartStopPart: (payload) => ipcRenderer.invoke('multipart:stop-part', payload)"), 'multi-part per-P stop IPC was not exposed through the preload boundary');
   const ai = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'ai.js'), 'utf8');
   assert(ai.includes('event.replaceContent || session.contentIsNotice') && ai.includes('session.contentIsNotice = false'), 'Agent model output did not replace an empty-response or validation notice on the first real content delta');
+  assert(index.indexOf('id="dependencyDownloadIndicator"') < index.indexOf('id="userProfile"') && index.includes('id="dependencyDownloadRingValue"') && index.includes('id="dependencyDownloadItems"'), 'dependency download indicator is missing or is not positioned before the user profile');
+  assert(index.indexOf('src="./dependency-indicator.js"') < index.indexOf('src="./app.js"') && app.includes('requestAnimationFrame(renderDependencyIndicator)') && app.includes('if (rowAtIndex !== row) dependencyDownloadItems.insertBefore') && app.includes("window.dispatchEvent(new CustomEvent('star:focus-dependency'"), 'dependency indicator is not loaded before the app, frame-coalesced, stably reconciled, or connected to dependency-row navigation');
+  assert(app.includes('scheduleDependencyIndicator(event.state)') && !app.slice(app.indexOf("window.orchestrator.onDependencyEvent((event) => {"), app.indexOf('window.orchestrator.onUpdateEvent')).includes('refreshSnapshot'), 'dependency progress events trigger a global snapshot refresh');
+  assert(ai.includes('data-dependency-id=') && ai.includes("window.addEventListener('star:focus-dependency'") && ai.includes('structureKey !== dependencyStructureKey') && ai.includes('dependencyRenderFrame = requestAnimationFrame') && ai.includes("if (activeAiPage() === 'settings') scheduleDependencyRender()") && ai.includes("elements.dependencyList.addEventListener('click'") && styles.includes('.dependency-download-ring-value') && styles.includes('.dependency-download-popover'), 'dependency rows cannot be focused from the themed progress popover or are still rebuilt on every progress event');
   console.log('renderer state guard test passed');
 })().catch((error) => {
   console.error(error);

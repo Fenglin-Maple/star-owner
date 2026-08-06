@@ -388,6 +388,115 @@ svg {
 .window-left { gap: 10px; padding-left: 14px; }
 .window-status { gap: 12px; padding: 0 12px; color: var(--muted); font-size: 12px; -webkit-app-region: no-drag; }
 
+.dependency-download-indicator {
+  position: relative;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  color: var(--accent);
+  -webkit-app-region: no-drag;
+}
+.dependency-download-indicator::after { content: ""; position: absolute; top: 100%; right: -8px; left: -8px; height: 10px; }
+.dependency-download-button {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: inherit;
+  background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.dependency-download-button:hover { background: color-mix(in srgb, var(--accent-soft) 100%, var(--row-hover) 28%); }
+.dependency-download-button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.dependency-download-ring { position: absolute; inset: 0; width: 34px; height: 34px; overflow: visible; transform: rotate(-90deg); }
+.dependency-download-ring circle { fill: none; stroke-width: 2.2; }
+.dependency-download-ring-track { stroke: color-mix(in srgb, currentColor 22%, transparent); }
+.dependency-download-ring-value { stroke: currentColor; stroke-linecap: round; stroke-dasharray: 100; stroke-dashoffset: 100; transition: stroke-dashoffset .18s linear; }
+.dependency-download-glyph { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.dependency-download-count {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  min-width: 15px;
+  height: 15px;
+  display: grid;
+  place-items: center;
+  padding: 0 3px;
+  border: 1px solid var(--chrome);
+  border-radius: 999px;
+  color: var(--content);
+  background: var(--accent);
+  font: 700 9px/1 var(--font-mono);
+}
+.dependency-download-popover {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  z-index: 145;
+  width: min(340px, calc(100vw - 28px));
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--row);
+  box-shadow: 0 18px 42px var(--shadow);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity .14s ease, transform .14s ease, visibility .14s ease;
+}
+.dependency-download-indicator:hover .dependency-download-popover,
+.dependency-download-indicator:focus-within .dependency-download-popover,
+.dependency-download-indicator.is-open .dependency-download-popover { opacity: 1; visibility: visible; pointer-events: auto; transform: translateY(0); }
+.dependency-download-popover-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 1px 2px 8px; }
+.dependency-download-popover-head strong { font-size: 12px; }
+.dependency-download-popover-head span { color: var(--accent); font: 650 11px var(--font-mono); }
+.dependency-download-items { display: grid; gap: 5px; max-height: min(330px, calc(100vh - 128px)); overflow: auto; }
+.dependency-download-item {
+  width: 100%;
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 14px;
+  grid-template-rows: auto 4px;
+  gap: 6px 9px;
+  align-items: center;
+  padding: 8px 9px;
+  border: 1px solid color-mix(in srgb, var(--line) 68%, transparent);
+  border-radius: 5px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg) 34%, transparent);
+  text-align: left;
+  cursor: pointer;
+}
+.dependency-download-item:hover { border-color: color-mix(in srgb, var(--accent) 52%, var(--line)); background: color-mix(in srgb, var(--accent-soft) 56%, var(--row-hover)); }
+.dependency-download-item-copy { min-width: 0; display: grid; gap: 2px; }
+.dependency-download-item-copy strong,
+.dependency-download-item-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dependency-download-item-copy strong { font-size: 11px; }
+.dependency-download-item-copy span { color: var(--muted); font-size: 9px; }
+.dependency-download-item > em { color: var(--accent); font: 650 10px var(--font-mono); font-style: normal; }
+.dependency-download-item > svg { width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 1.8; }
+.dependency-download-item-track { grid-column: 1 / -1; height: 4px; overflow: hidden; border-radius: 99px; background: color-mix(in srgb, var(--bg) 72%, transparent); }
+.dependency-download-item-track span { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--accent); transition: width .18s linear; }
+.dependency-download-popover > small { display: block; padding: 7px 2px 0; color: var(--muted); font-size: 9px; }
+
+body.theme-bili .dependency-download-indicator { color: #ffffff; }
+body.theme-bili .dependency-download-button { background: rgba(255, 255, 255, .17); }
+body.theme-bili .dependency-download-button:hover { background: rgba(255, 255, 255, .27); }
+body.theme-bili .dependency-download-count { color: #f25d8e; border-color: #f25d8e; background: #ffffff; }
+body.theme-bili .dependency-download-popover { color: var(--text); background: #ffffff; }
+body.theme-endfield .dependency-download-indicator { color: var(--signal); }
+body.theme-endfield .dependency-download-button { background: #282826; }
+body.theme-endfield .dependency-download-button:hover { background: #383834; }
+body.theme-endfield .dependency-download-count { color: #191919; border-color: #191919; background: var(--signal); }
+body.theme-endfield .dependency-download-popover { border-radius: 3px; }
+
 .app-mark { width: 25px; height: 25px; border-radius: 7px; object-fit: cover; box-shadow: 0 0 14px var(--accent-soft); }
 
 .app-title {
