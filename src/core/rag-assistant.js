@@ -44,7 +44,8 @@ const MAX_RAG_SEARCH_DOCUMENTS = 2000;
 const MAX_RAG_SEARCH_CHUNKS = 12000;
 const MAX_RAG_SEARCH_RESULT_CHARACTERS = 50000;
 const RAG_SEARCH_TIME_BUDGET_MS = 5000;
-const MAX_RAG_VISION_IMAGES_PER_RESPONSE = 4;
+const MAX_RAG_VISION_IMAGES_PER_TOOL_CALL = 4;
+const MAX_RAG_API_MESSAGE_BYTES = 24 * 1024 * 1024;
 const MAX_MODEL_VISION_IMAGE_BYTES = 1024 * 1024;
 const MAX_MODEL_VISION_IMAGE_DIMENSION = 2048;
 const knowledgeMarkdownParser = new MarkdownIt({ html: false, linkify: false, typographer: false });
@@ -536,11 +537,15 @@ class RagAssistant {
     let finished = false;
     let toolRounds = 0;
     let toolCallsUsed = 0;
+    let visionBudgetExhausted = false;
     const attachedVisionKeys = new Set();
     const toolContextLimit = toolContextCharacterLimit(model);
     while (toolRounds <= MAX_RAG_TOOL_ROUNDS) {
       assertApiContextBudget(apiMessages, model, this.outputTokenLimit(provider, model));
-      const availableTools = toolCallsUsed < MAX_RAG_TOOL_CALLS ? tools : [];
+      assertApiPayloadBudget(apiMessages);
+      const availableTools = toolCallsUsed < MAX_RAG_TOOL_CALLS
+        ? tools.filter((item) => !visionBudgetExhausted || item.function?.name !== 'knowledge_view_images')
+        : [];
       const result = await this.streamCompletion(provider, {
         model: session.modelId,
         messages: apiMessages,
@@ -577,10 +582,6 @@ class RagAssistant {
             key: outcome.visionKeys[index] || imagePartIdentity(part)
           }));
           const freshVision = visionCandidates.filter((item) => !item.key || !attachedVisionKeys.has(item.key));
-          const availableVisionSlots = Math.max(0, MAX_RAG_VISION_IMAGES_PER_RESPONSE - attachedVisionKeys.size);
-          if (freshVision.length > availableVisionSlots) {
-            throw new Error(`This response can inspect at most ${MAX_RAG_VISION_IMAGES_PER_RESPONSE} distinct knowledge images. Answer from the images already loaded or start a new request for different images.`);
-          }
           let toolText = truncate(outcome.text, toolContextLimit);
           if (visionCandidates.length && !freshVision.length) toolText += '\n\nThe requested pixels were already attached earlier in this response; reuse that image input instead of loading it again.';
           const toolMessage = { role: 'tool', tool_call_id: call.id, content: toolText };
@@ -588,7 +589,9 @@ class RagAssistant {
             role: 'user',
             content: [{ type: 'text', text: 'The desktop application attached optimized visual copies of the original knowledge-base images requested by the preceding tool call. Inspect these pixels as source material; they are not a new user question.' }, ...freshVision.map((item) => item.part)]
           } : null;
-          assertApiContextBudget([...apiMessages, toolMessage, ...(attachmentMessage ? [attachmentMessage] : [])], model, this.outputTokenLimit(provider, model));
+          const candidateMessages = [...apiMessages, toolMessage, ...(attachmentMessage ? [attachmentMessage] : [])];
+          assertApiContextBudget(candidateMessages, model, this.outputTokenLimit(provider, model));
+          assertApiPayloadBudget(candidateMessages);
           event.status = 'succeeded';
           event.output = truncate(outcome.text, 30000);
           if (outcome.images.length) event.images = outcome.images;
@@ -603,6 +606,10 @@ class RagAssistant {
           event.output = error.message || String(error);
           event.finishedAt = new Date().toISOString();
           apiMessages.push({ role: 'tool', tool_call_id: call.id, content: `ERROR: ${event.output}` });
+          if (call.name === 'knowledge_view_images' && ['MODEL_CONTEXT_LIMIT', 'MODEL_REQUEST_PAYLOAD_LIMIT'].includes(error.code)) {
+            visionBudgetExhausted = true;
+            apiMessages.push({ role: 'system', content: 'The safe image budget for this response is exhausted. Do not request more images in this response; answer now from the images and knowledge already loaded.' });
+          }
         }
         this.emit({ type: 'tool', sessionId: session.id, messageId: assistantId, tool: event });
       }
@@ -766,7 +773,7 @@ class RagAssistant {
         tool('knowledge_read_document', 'Read an exact, unsummarized range from one original Markdown document. Continue with both next_start_line and next_start_column until End of document.', { document_id: { type: 'string' }, start_line: { type: 'integer' }, start_column: { type: 'integer' }, line_count: { type: 'integer' } }, ['document_id']),
         tool('knowledge_search', 'Search selected local Markdown knowledge libraries. Results include document ids; use knowledge_read_document when exact wording or complete context matters.', { query: { type: 'string' }, limit: { type: 'integer' } }, ['query'])
       );
-      if (model.supportsVision) tools.unshift(tool('knowledge_view_images', 'Load original local images from a selected Markdown document into this multimodal conversation. Returns safe image URIs that can be embedded in the answer.', { document_id: { type: 'string' }, image_indices: { type: 'array', items: { type: 'integer' }, maxItems: 4 } }, ['document_id']));
+      if (model.supportsVision) tools.unshift(tool('knowledge_view_images', 'Load up to four original local images from a selected Markdown document into this multimodal conversation. The tool may be called repeatedly while context and request-size budgets remain available. Returns safe image URIs that can be embedded in the answer.', { document_id: { type: 'string' }, image_indices: { type: 'array', items: { type: 'integer' }, maxItems: MAX_RAG_VISION_IMAGES_PER_TOOL_CALL } }, ['document_id']));
     }
     if (model.supportsSubagents) tools.push(tool('spawn_subagent', 'Delegate one focused research or analysis subtask to an isolated call of the current model.', { task: { type: 'string' } }, ['task']));
     return tools;
@@ -983,8 +990,8 @@ class RagAssistant {
     const collection = this.store.getCollectionById(task.collectionId);
     const images = this.knowledgeDocumentImages(task);
     if (!images.length) return 'This Markdown document has no readable local images.';
-    const requested = Array.isArray(imageIndices) && imageIndices.length ? imageIndices : images.slice(0, 4).map((_, index) => index + 1);
-    const indices = [...new Set(requested.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value >= 1 && value <= images.length))].slice(0, 4);
+    const requested = Array.isArray(imageIndices) && imageIndices.length ? imageIndices : images.slice(0, MAX_RAG_VISION_IMAGES_PER_TOOL_CALL).map((_, index) => index + 1);
+    const indices = [...new Set(requested.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value >= 1 && value <= images.length))].slice(0, MAX_RAG_VISION_IMAGES_PER_TOOL_CALL);
     if (!indices.length) throw new Error(`No valid image index was supplied. This document has ${images.length} local images.`);
     const selected = indices.map((value) => ({ ...images[value - 1], index: value, uri: knowledgeImageUri(task.id, value) }));
     return {
@@ -1712,6 +1719,15 @@ function assertApiContextBudget(messages, model, outputTokens) {
 
 function estimateTokens(value) {
   return Math.max(0, Math.ceil(String(value || '').length / 3.5));
+}
+
+function assertApiPayloadBudget(messages) {
+  const bytes = Buffer.byteLength(JSON.stringify(messages || []), 'utf8');
+  if (bytes <= MAX_RAG_API_MESSAGE_BYTES) return;
+  const error = new Error(`当前多模态请求约 ${Math.ceil(bytes / 1024 / 1024)} MiB，超过兼容供应商的安全请求体上限。请让模型先根据已经查看的图片回答，再发送下一条消息继续查看。`);
+  error.code = 'MODEL_REQUEST_PAYLOAD_LIMIT';
+  error.failureKind = 'context';
+  throw error;
 }
 
 function estimateApiMessageTokens(messages) {

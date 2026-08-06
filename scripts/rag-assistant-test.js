@@ -146,6 +146,19 @@ async function startFakeProvider() {
       ]);
       return;
     }
+    const fullConversationText = JSON.stringify(body.messages || []);
+    if (fullConversationText.includes('IMAGE_MULTI_BATCH_TEST')) {
+      const loadedBatches = (body.messages || []).filter((message) => Array.isArray(message.content) && message.content.some((part) => part.type === 'image_url')).length;
+      if (loadedBatches < 2) {
+        const indices = loadedBatches === 0 ? [1, 2, 3, 4] : [5, 6, 7, 8];
+        sse(response, [
+          { choices: [{ delta: { tool_calls: [{ index: 0, id: `call-image-batch-${loadedBatches + 1}`, type: 'function', function: { name: 'knowledge_view_images', arguments: JSON.stringify({ document_id: 'rag-task', image_indices: indices }) } }] } }] }
+        ]);
+      } else {
+        sse(response, [{ choices: [{ delta: { content: '已分两批查看八张图片。' } }] }]);
+      }
+      return;
+    }
     if (toolResult) {
       sse(response, [
         { choices: [{ delta: { content: '根据本地知识库，' } }] },
@@ -189,7 +202,13 @@ async function startFakeProvider() {
     fs.writeFileSync(knowledgeImage, tinyPng);
     const largeKnowledgeImage = path.join(root, 'large-frame.png');
     fs.writeFileSync(largeKnowledgeImage, Buffer.concat([tinyPng, Buffer.alloc(4 * 1024 * 1024)]));
-    fs.appendFileSync(markdown, '\n![测试关键帧](frame.png)\n\n![大体积原图](large-frame.png)\n', 'utf8');
+    const additionalKnowledgeImages = [];
+    for (let index = 3; index <= 8; index += 1) {
+      const file = path.join(root, `frame-${index}.png`);
+      fs.writeFileSync(file, tinyPng);
+      additionalKnowledgeImages.push(file);
+    }
+    fs.appendFileSync(markdown, `\n![测试关键帧](frame.png)\n\n![大体积原图](large-frame.png)\n\n${additionalKnowledgeImages.map((file, index) => `![补充图片 ${index + 3}](${path.basename(file)})`).join('\n\n')}\n`, 'utf8');
     store.upsertUser({ id: 'rag-user', mid: 'rag-user', name: '测试用户' });
     store.upsertCollection({ id: 'rag-collection', name: 'AI 收藏夹', userId: 'rag-user', userName: '测试用户' });
     store.upsertTask({ id: 'rag-task', collectionId: 'rag-collection', bvid: 'BVRAGTEST', title: '星藏家测试文档', owner: '测试 UP', status: 'done', outputMarkdown: markdown, publishedAt: '2026-06-18T08:00:00.000Z', favoriteAddedAt: '2026-06-20T09:30:00.000Z', completedAt: new Date().toISOString() });
@@ -318,6 +337,14 @@ async function startFakeProvider() {
     assert(sentImageUrl.length < 1024 && preparedVisionFiles.includes(knowledgeImage), 'knowledge image model input was not passed through the bounded vision-image preparation path');
     const imageUri = imageReply.toolEvents[0].images[0].uri;
     assert(assistant.resolveKnowledgeImage(session.id, imageUri) === knowledgeImage, 'safe knowledge image URI did not resolve to the original file');
+    const imageTool = assistant.toolDefinitions(assistant.requireSession(session.id), assistant.sessionModel(assistant.requireSession(session.id))).find((item) => item.function?.name === 'knowledge_view_images');
+    assert(imageTool?.function?.parameters?.properties?.image_indices?.maxItems === 4, 'knowledge image tool batch limit is not four images');
+    const multiBatchSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-tools', knowledgeCollectionIds: ['rag-collection'], title: 'Multi-batch vision test' });
+    const multiBatchReply = await assistant.send(multiBatchSession.id, { content: 'IMAGE_MULTI_BATCH_TEST' });
+    assert(multiBatchReply.content === '已分两批查看八张图片。' && multiBatchReply.toolEvents.length === 2 && multiBatchReply.toolEvents.every((event) => event.status === 'succeeded'), 'RAG could not inspect more than four images through repeated four-image batches in one response');
+    const finalMultiBatchRequest = [...fake.requests].reverse().find((item) => JSON.stringify(item.messages || []).includes('IMAGE_MULTI_BATCH_TEST'));
+    const finalMultiBatchImages = (finalMultiBatchRequest?.messages || []).flatMap((message) => Array.isArray(message.content) ? message.content : []).filter((part) => part.type === 'image_url');
+    assert(finalMultiBatchImages.length === 8, 'RAG retained a fixed per-response image-count limit instead of dynamic budgets');
     const largeImageOutcome = assistant.viewKnowledgeImages(assistant.requireSession(session.id), assistant.sessionModel(assistant.requireSession(session.id)), 'rag-task', [2]);
     assert(largeImageOutcome.visionParts[0].image_url.url.length < 1024 && preparedVisionFiles.includes(largeKnowledgeImage), 'large local-document image was sent to the model without optimization');
     assert(assistant.resolveKnowledgeImage(session.id, largeImageOutcome.images[0].uri) === largeKnowledgeImage, 'optimized model input replaced the original full-resolution display image');
