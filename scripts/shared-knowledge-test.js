@@ -289,6 +289,7 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   }
   execFileSync(process.execPath, ['--check', path.join(templateRoot, 'scripts', 'validate-shared-docs.mjs')]);
   execFileSync(process.execPath, ['--check', path.join(templateRoot, 'scripts', 'build-catalog.mjs')]);
+  execFileSync(process.execPath, ['--check', path.join(templateRoot, 'scripts', 'publish-shared-catalog.mjs')]);
   execFileSync(process.execPath, [path.join(templateRoot, 'scripts', 'validate-shared-docs.mjs')], { cwd: templateRoot, stdio: 'pipe' });
   const templateSummary = path.join(templateRoot, stableOne.remoteRoot, 'summary.md');
   fs.appendFileSync(templateSummary, '\n被篡改的正文\n', 'utf8');
@@ -327,8 +328,19 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   const catalogWorkflow = trunkTemplate.find((file) => file.relative === '.github/workflows/build-catalog.yml')?.buffer.toString('utf8') || '';
   assert(catalogWorkflow.includes('name: build-shared-catalog'), '共享目录 Action 没有稳定的工作名称');
   const catalogScript = trunkTemplate.find((file) => file.relative === 'scripts/build-catalog.mjs')?.buffer.toString('utf8') || '';
+  const publishCatalogScript = trunkTemplate.find((file) => file.relative === 'scripts/publish-shared-catalog.mjs')?.buffer.toString('utf8') || '';
   assert(validatorTemplate.includes('event.pull_request?.user?.id') && !validatorTemplate.includes('GITHUB_ACTOR_ID'), '共享校验没有使用 Pull Request 真实作者 ID');
-  assert(catalogWorkflow.includes('concurrency:') && catalogWorkflow.includes('for attempt in 1 2 3'), '共享目录 Action 缺少并发串行或推送重试');
+  assert(catalogWorkflow.includes('concurrency:')
+    && catalogWorkflow.includes('name: build-shared-catalog')
+    && catalogWorkflow.includes('checks: read')
+    && catalogWorkflow.includes('pull-requests: write')
+    && catalogWorkflow.includes('statuses: write')
+    && catalogWorkflow.includes('GITHUB_TOKEN: ${{ github.token }}')
+    && catalogWorkflow.includes('publish-shared-catalog.mjs'), '共享目录 Action 缺少保护分支发布权限、令牌注入或发布脚本');
+  assert(publishCatalogScript.includes(':refs/heads/')
+    && publishCatalogScript.includes("context = 'validate-shared-docs'")
+    && publishCatalogScript.includes('GITHUB_API_URL')
+    && publishCatalogScript.includes('reportValidatedCommit'), '共享目录发布脚本没有先验证临时提交再推进保护分支');
   assert(catalogScript.includes('totalBytes:') && catalogScript.includes('fileCount:'), '共享目录没有提供挂载容量预检字段');
 
   const privateStore = await Store.open(path.join(root, 'private-repository.sqlite'));
