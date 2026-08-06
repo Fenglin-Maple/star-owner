@@ -1966,6 +1966,7 @@ function injectFrameGallery(markdown, frames) {
 function normalizeGeneratedMarkdown(markdown, task, materials) {
   let result = String(markdown || '').trim();
   result = repairGeneratedFrameReferences(result, materials.frames || []);
+  result = canonicalizeRequiredHeadings(result);
   result = normalizeLeadingSectionOrder(result);
   const mapBlock = `## 思维导图\n\n\`\`\`mermaid\nmindmap\n  root((${mermaidLabel(task.title || task.bvid || '视频知识')}))\n    核心内容\n    字幕核对\n    关键帧\n    评论反馈\n\`\`\``;
   const mapMatch = result.match(/^##\s+思维导图\s*$[\s\S]*?(?=^##\s+|$)/m);
@@ -1977,6 +1978,7 @@ function normalizeGeneratedMarkdown(markdown, task, materials) {
   } else if (!/```mermaid\s+[\s\S]*?```/i.test(mapMatch[0])) {
     result = `${result.slice(0, mapMatch.index)}${mapBlock}\n\n${result.slice(mapMatch.index + mapMatch[0].length).trimStart()}`;
   }
+  result = canonicalizeRequiredHeadings(result);
   result = normalizeLeadingSectionOrder(promoteMindMap(result)).trim();
   if (!/^##\s+评论分析\s*$/m.test(result)) {
     const comments = normalizeCommentItems(materials.comments).slice(0, 3);
@@ -2083,6 +2085,40 @@ function addUsage(current = {}, next = {}) {
   const output = Number(next.output ?? next.completion_tokens ?? 0);
   const total = Number(next.total ?? next.total_tokens ?? (input + output));
   return { input: Number(current.input || 0) + input, output: Number(current.output || 0) + output, total: Number(current.total || 0) + total };
+}
+
+function canonicalizeRequiredHeadings(markdown) {
+  const lines = String(markdown || '').split(/\r?\n/);
+  let fence = '';
+  return lines.map((line) => {
+    const fenceMatch = line.match(/^\s{0,3}(```+|~~~+)/);
+    if (fenceMatch) {
+      const marker = fenceMatch[1][0];
+      fence = fence === marker ? '' : (fence || marker);
+      return line;
+    }
+    if (fence) return line;
+    const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (!heading) return line;
+    const canonical = canonicalRequiredHeading(heading[2], heading[1].length);
+    return canonical ? `## ${canonical}` : line;
+  }).join('\n');
+}
+
+function canonicalRequiredHeading(value, level) {
+  let title = String(value || '')
+    .normalize('NFKC')
+    .replace(/[*_`~]/g, '')
+    .replace(/^\s*(?:第\s*)?(?:[0-9一二三四五六七八九十]+)\s*[.、:：)）-]\s*/, '')
+    .replace(/[（(]\s*(?:mind\s*map|summary|contents?)\s*[)）]/ig, '')
+    .replace(/\s+/g, '')
+    .replace(/[：:。.!！?？]+$/g, '');
+  const exactOnly = Number(level) === 1;
+  if (/^(?:思维导图|心智图|脑图|mindmap)$/i.test(title)) return '思维导图';
+  if (/^(?:目录|内容目录|章节目录|目录导航|章节导航|内容导航|tableofcontents|contents?)$/i.test(title)) return '目录';
+  if (/^(?:小结|内容小结|核心小结|视频小结|本期小结|摘要|内容摘要|核心摘要|概览|内容概览|概述|内容概述)$/.test(title)) return '小结';
+  if (!exactOnly && /^(?:总结|内容总结|核心总结|视频总结|本期总结)$/.test(title)) return '小结';
+  return '';
 }
 
 function calculateFrameBudget(duration, options = {}) {

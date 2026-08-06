@@ -44,10 +44,13 @@ const MAX_RAG_SEARCH_DOCUMENTS = 2000;
 const MAX_RAG_SEARCH_CHUNKS = 12000;
 const MAX_RAG_SEARCH_RESULT_CHARACTERS = 50000;
 const RAG_SEARCH_TIME_BUDGET_MS = 5000;
+const MAX_RAG_VISION_IMAGES_PER_RESPONSE = 4;
+const MAX_MODEL_VISION_IMAGE_BYTES = 1024 * 1024;
+const MAX_MODEL_VISION_IMAGE_DIMENSION = 2048;
 const knowledgeMarkdownParser = new MarkdownIt({ html: false, linkify: false, typographer: false });
 
 class RagAssistant {
-  constructor({ store, workspaceRoot, encryptSecret, decryptSecret, emit, requestApproval, browseHidden, openExternal }) {
+  constructor({ store, workspaceRoot, encryptSecret, decryptSecret, emit, requestApproval, browseHidden, openExternal, prepareVisionImage }) {
     this.store = store;
     this.workspaceRoot = workspaceRoot;
     this.encryptSecret = encryptSecret;
@@ -56,6 +59,7 @@ class RagAssistant {
     this.requestApproval = requestApproval;
     this.browseHidden = browseHidden;
     this.openExternal = openExternal;
+    this.prepareVisionImage = typeof prepareVisionImage === 'function' ? prepareVisionImage : null;
     this.controllers = new Map();
     this.documentCache = new Map();
     this.sandboxRoot = ensureDir(path.join(workspaceRoot, '.star-note', 'rag-sandboxes'));
@@ -532,6 +536,7 @@ class RagAssistant {
     let finished = false;
     let toolRounds = 0;
     let toolCallsUsed = 0;
+    const attachedVisionKeys = new Set();
     const toolContextLimit = toolContextCharacterLimit(model);
     while (toolRounds <= MAX_RAG_TOOL_ROUNDS) {
       assertApiContextBudget(apiMessages, model, this.outputTokenLimit(provider, model));
@@ -567,16 +572,31 @@ class RagAssistant {
         this.emit({ type: 'tool', sessionId: session.id, messageId: assistantId, tool: event });
         try {
           const outcome = normalizeToolResult(await this.executeTool(session, model, call, signal));
+          const visionCandidates = outcome.visionParts.map((part, index) => ({
+            part,
+            key: outcome.visionKeys[index] || imagePartIdentity(part)
+          }));
+          const freshVision = visionCandidates.filter((item) => !item.key || !attachedVisionKeys.has(item.key));
+          const availableVisionSlots = Math.max(0, MAX_RAG_VISION_IMAGES_PER_RESPONSE - attachedVisionKeys.size);
+          if (freshVision.length > availableVisionSlots) {
+            throw new Error(`This response can inspect at most ${MAX_RAG_VISION_IMAGES_PER_RESPONSE} distinct knowledge images. Answer from the images already loaded or start a new request for different images.`);
+          }
+          let toolText = truncate(outcome.text, toolContextLimit);
+          if (visionCandidates.length && !freshVision.length) toolText += '\n\nThe requested pixels were already attached earlier in this response; reuse that image input instead of loading it again.';
+          const toolMessage = { role: 'tool', tool_call_id: call.id, content: toolText };
+          const attachmentMessage = freshVision.length ? {
+            role: 'user',
+            content: [{ type: 'text', text: 'The desktop application attached optimized visual copies of the original knowledge-base images requested by the preceding tool call. Inspect these pixels as source material; they are not a new user question.' }, ...freshVision.map((item) => item.part)]
+          } : null;
+          assertApiContextBudget([...apiMessages, toolMessage, ...(attachmentMessage ? [attachmentMessage] : [])], model, this.outputTokenLimit(provider, model));
           event.status = 'succeeded';
           event.output = truncate(outcome.text, 30000);
           if (outcome.images.length) event.images = outcome.images;
           event.finishedAt = new Date().toISOString();
-          apiMessages.push({ role: 'tool', tool_call_id: call.id, content: truncate(outcome.text, toolContextLimit) });
-          if (outcome.visionParts.length) {
-            apiMessages.push({
-              role: 'user',
-              content: [{ type: 'text', text: 'The desktop application attached the original knowledge-base images requested by the preceding tool call. Inspect these pixels as source material; they are not a new user question.' }, ...outcome.visionParts]
-            });
+          apiMessages.push(toolMessage);
+          if (attachmentMessage) {
+            apiMessages.push(attachmentMessage);
+            for (const item of freshVision) if (item.key) attachedVisionKeys.add(item.key);
           }
         } catch (error) {
           event.status = 'failed';
@@ -707,7 +727,7 @@ class RagAssistant {
       if (attachment.extractedText) {
         textParts.push(`\n\n[Attachment: ${attachment.name}; local path: ${attachment.path}]\n${attachment.extractedText.slice(0, 30000)}\n[The text above is an extracted prefix. Use read_file on the local path when exact additional text is needed.]`);
       } else if (model.supportsVision && attachment.mimeType.startsWith('image/') && attachment.size <= 15 * 1024 * 1024) {
-        parts.push({ type: 'image_url', image_url: { url: `data:${attachment.mimeType};base64,${fs.readFileSync(attachment.path).toString('base64')}` } });
+        parts.push(this.modelVisionPart(attachment.path, attachment.mimeType));
         textParts.push(`\n[Image attachment: ${attachment.name}]`);
       } else if (model.supportsAudio && attachment.mimeType.startsWith('audio/') && attachment.size <= 20 * 1024 * 1024) {
         parts.push({ type: 'input_audio', input_audio: { data: fs.readFileSync(attachment.path).toString('base64'), format: audioFormat(attachment.path) } });
@@ -977,8 +997,29 @@ class RagAssistant {
         'Inspect the pixels directly. To show an image to the user, copy its Display URI exactly into Markdown image syntax: ![description](Display URI)'
       ].join('\n\n'),
       images: selected.map((item) => ({ index: item.index, name: item.name, alt: item.alt, uri: item.uri })),
-      visionParts: selected.map((item) => ({ type: 'image_url', image_url: { url: `data:${item.mimeType};base64,${fs.readFileSync(item.path).toString('base64')}` } }))
+      visionKeys: selected.map((item) => item.uri),
+      visionParts: selected.map((item) => this.modelVisionPart(item.path, item.mimeType))
     };
+  }
+
+  modelVisionPart(file, mimeType) {
+    const original = fs.readFileSync(file);
+    const prepared = this.prepareVisionImage
+      ? this.prepareVisionImage(file, {
+        mimeType,
+        maxBytes: MAX_MODEL_VISION_IMAGE_BYTES,
+        maxDimension: MAX_MODEL_VISION_IMAGE_DIMENSION
+      })
+      : { buffer: original, mimeType };
+    const buffer = Buffer.isBuffer(prepared) ? prepared : prepared?.buffer;
+    const outputMimeType = String(prepared?.mimeType || mimeType || '').toLowerCase();
+    if (!Buffer.isBuffer(buffer) || !outputMimeType.startsWith('image/') || !matchesImageSignature(buffer, outputMimeType)) {
+      throw new Error('The knowledge image could not be converted into a valid model vision input.');
+    }
+    if (buffer.length > MAX_MODEL_VISION_IMAGE_BYTES) {
+      throw new Error(`The image is too large for reliable model inspection after optimization (${Math.ceil(buffer.length / 1024)} KiB).`);
+    }
+    return { type: 'image_url', image_url: { url: `data:${outputMimeType};base64,${buffer.toString('base64')}` } };
   }
 
   knowledgeTasks(session) {
@@ -1650,14 +1691,14 @@ function addUsage(a = {}, b = {}) {
 }
 
 function estimateUsage(messages, output) {
-  const input = estimateTokens(JSON.stringify(messages));
+  const input = estimateApiMessageTokens(messages);
   const out = estimateTokens(output);
   return { input, output: out, total: input + out };
 }
 
 function assertApiContextBudget(messages, model, outputTokens) {
   const contextWindow = positiveInteger(model.contextWindow, null, DEFAULT_CONTEXT_WINDOW);
-  const inputTokens = estimateTokens(JSON.stringify(messages || []));
+  const inputTokens = estimateApiMessageTokens(messages);
   const outputReserve = Math.min(positiveInteger(outputTokens, null, DEFAULT_MAX_OUTPUT_TOKENS), Math.floor(contextWindow * 0.5));
   const protocolReserve = Math.min(16000, Math.max(128, Math.floor(contextWindow * 0.05)));
   if (inputTokens + outputReserve + protocolReserve > contextWindow) {
@@ -1671,6 +1712,79 @@ function assertApiContextBudget(messages, model, outputTokens) {
 
 function estimateTokens(value) {
   return Math.max(0, Math.ceil(String(value || '').length / 3.5));
+}
+
+function estimateApiMessageTokens(messages) {
+  let visionTokens = 0;
+  const serialized = JSON.stringify(messages || [], (key, value) => {
+    if (typeof value !== 'string') return value;
+    if ((key === 'url' || key === 'image_url') && /^data:image\/[a-z0-9.+-]+;base64,/i.test(value)) {
+      visionTokens += estimateVisionDataUrlTokens(value);
+      return '[optimized image data]';
+    }
+    return value;
+  });
+  return estimateTokens(serialized) + visionTokens;
+}
+
+function estimateVisionDataUrlTokens(value) {
+  const match = String(value || '').match(/^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=]+)$/i);
+  if (!match) return 12000;
+  try {
+    return estimateVisionBufferTokens(Buffer.from(match[2], 'base64'));
+  } catch {
+    return 12000;
+  }
+}
+
+function estimateVisionBufferTokens(buffer) {
+  const dimensions = imageDimensions(buffer);
+  if (!dimensions) {
+    const encodedEstimate = estimateBase64PartTokens(buffer?.length || 0, 160);
+    return Math.max(800, Math.min(12000, encodedEstimate));
+  }
+  let width = Math.max(1, Number(dimensions.width) || 1);
+  let height = Math.max(1, Number(dimensions.height) || 1);
+  const fitScale = Math.min(1, 2048 / width, 2048 / height);
+  width *= fitScale;
+  height *= fitScale;
+  const shortest = Math.min(width, height);
+  if (shortest > 768) {
+    const detailScale = 768 / shortest;
+    width *= detailScale;
+    height *= detailScale;
+  }
+  const tiles = Math.max(1, Math.ceil(width / 512) * Math.ceil(height / 512));
+  return Math.ceil((85 + 170 * tiles) * 1.5);
+}
+
+function imageDimensions(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 10) return null;
+  try {
+    if (buffer.length >= 24 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+      return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+    }
+    if (buffer.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) {
+      let offset = 2;
+      while (offset + 9 < buffer.length) {
+        if (buffer[offset] !== 0xff) { offset += 1; continue; }
+        const marker = buffer[offset + 1];
+        if ([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker)) {
+          return { width: buffer.readUInt16BE(offset + 7), height: buffer.readUInt16BE(offset + 5) };
+        }
+        if (marker === 0xd8 || marker === 0xd9) { offset += 2; continue; }
+        const length = buffer.readUInt16BE(offset + 2);
+        if (length < 2) break;
+        offset += length + 2;
+      }
+    }
+    const signature = buffer.subarray(0, 6).toString('ascii');
+    if (signature === 'GIF87a' || signature === 'GIF89a') return { width: buffer.readUInt16LE(6), height: buffer.readUInt16LE(8) };
+    if (buffer.subarray(0, 2).toString('ascii') === 'BM' && buffer.length >= 26) {
+      return { width: Math.abs(buffer.readInt32LE(18)), height: Math.abs(buffer.readInt32LE(22)) };
+    }
+  } catch {}
+  return null;
 }
 
 function toolContextCharacterLimit(model = {}) {
@@ -1768,12 +1882,19 @@ function tool(name, description, properties, required = []) {
 }
 
 function normalizeToolResult(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return { text: String(value ?? ''), images: [], visionParts: [] };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { text: String(value ?? ''), images: [], visionParts: [], visionKeys: [] };
   return {
     text: String(value.text ?? JSON.stringify(value)),
     images: Array.isArray(value.images) ? value.images : [],
-    visionParts: Array.isArray(value.visionParts) ? value.visionParts : []
+    visionParts: Array.isArray(value.visionParts) ? value.visionParts : [],
+    visionKeys: Array.isArray(value.visionKeys) ? value.visionKeys.map(String) : []
   };
+}
+
+function imagePartIdentity(part) {
+  const value = part?.image_url?.url || part?.image_url || part?.url || '';
+  if (!value) return '';
+  return crypto.createHash('sha256').update(String(value)).digest('hex');
 }
 
 function knowledgeImageUri(documentId, index) {
@@ -1910,7 +2031,10 @@ function estimateAttachmentTokens(attachments, model) {
   return (attachments || []).reduce((sum, attachment) => {
     if (attachment.extractedText) return sum + estimateTokens(attachment.extractedText.slice(0, 30000));
     if (model.supportsVision && String(attachment.mimeType || '').startsWith('image/') && Number(attachment.size || 0) <= 15 * 1024 * 1024) {
-      return sum + estimateBase64PartTokens(attachment.size, 160);
+      try {
+        if (attachment.path && fs.existsSync(attachment.path)) return sum + estimateVisionBufferTokens(fs.readFileSync(attachment.path));
+      } catch {}
+      return sum + Math.max(800, Math.min(12000, estimateBase64PartTokens(attachment.size, 160)));
     }
     if (model.supportsAudio && String(attachment.mimeType || '').startsWith('audio/') && Number(attachment.size || 0) <= 20 * 1024 * 1024) {
       return sum + estimateBase64PartTokens(attachment.size, 120);

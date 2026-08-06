@@ -184,9 +184,12 @@ async function startFakeProvider() {
     const store = await Store.open(path.join(root, 'rag-test.sqlite'));
     const markdown = path.join(root, 'knowledge.md');
     fs.writeFileSync(markdown, '# 星藏家测试文档\n\nRAG 助手可以检索收藏夹中的 Markdown 内容。\n', 'utf8');
+    const tinyPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
     const knowledgeImage = path.join(root, 'frame.png');
-    fs.writeFileSync(knowledgeImage, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'));
-    fs.appendFileSync(markdown, '\n![测试关键帧](frame.png)\n', 'utf8');
+    fs.writeFileSync(knowledgeImage, tinyPng);
+    const largeKnowledgeImage = path.join(root, 'large-frame.png');
+    fs.writeFileSync(largeKnowledgeImage, Buffer.concat([tinyPng, Buffer.alloc(4 * 1024 * 1024)]));
+    fs.appendFileSync(markdown, '\n![测试关键帧](frame.png)\n\n![大体积原图](large-frame.png)\n', 'utf8');
     store.upsertUser({ id: 'rag-user', mid: 'rag-user', name: '测试用户' });
     store.upsertCollection({ id: 'rag-collection', name: 'AI 收藏夹', userId: 'rag-user', userName: '测试用户' });
     store.upsertTask({ id: 'rag-task', collectionId: 'rag-collection', bvid: 'BVRAGTEST', title: '星藏家测试文档', owner: '测试 UP', status: 'done', outputMarkdown: markdown, publishedAt: '2026-06-18T08:00:00.000Z', favoriteAddedAt: '2026-06-20T09:30:00.000Z', completedAt: new Date().toISOString() });
@@ -208,6 +211,7 @@ async function startFakeProvider() {
 
     const events = [];
     const approvals = [];
+    const preparedVisionFiles = [];
     const assistant = new RagAssistant({
       store,
       workspaceRoot: root,
@@ -216,7 +220,11 @@ async function startFakeProvider() {
       emit: (event) => events.push(event),
       requestApproval: async (request) => { approvals.push(request); return { approved: false }; },
       browseHidden: async (url) => `BROWSED ${url}`,
-      openExternal: async () => {}
+      openExternal: async () => {},
+      prepareVisionImage: (file) => {
+        preparedVisionFiles.push(file);
+        return { buffer: tinyPng, mimeType: 'image/png', width: 1, height: 1 };
+      }
     });
 
     const migrated = assistant.rawProvider('legacy-provider');
@@ -236,7 +244,8 @@ async function startFakeProvider() {
     assert(tableHtml.includes('<div class="rag-table-wrap"><table>') && tableHtml.includes('<th>名称</th>') && tableHtml.includes('</table></div>'), 'RAG Markdown table wrapper was not rendered');
     const splitFixture = `${'第一段完整上下文。'.repeat(500)}\n${'second complete context line. '.repeat(500)}`;
     assert(splitTextByTokenBudget(splitFixture, 700).join('') === splitFixture, 'RAG context chunking dropped or reordered source text');
-    assert(estimateAttachmentTokens([{ mimeType: 'image/png', size: 15 * 1024 * 1024 }], { supportsVision: true }) > 5000000, 'RAG image context estimation did not account for the actual base64 payload');
+    const estimatedLargeImageTokens = estimateAttachmentTokens([{ mimeType: 'image/png', size: 15 * 1024 * 1024 }], { supportsVision: true });
+    assert(estimatedLargeImageTokens >= 800 && estimatedLargeImageTokens <= 12000, 'RAG image context estimation still treats Base64 transport characters as text tokens');
     const lineRangeFixture = path.join(root, 'line-range.md');
     fs.writeFileSync(lineRangeFixture, `第一行\n第二行-中间分页\n${'长文本'.repeat(30000)}`, 'utf8');
     const firstLinePage = readUtf8LineRange(lineRangeFixture, 1, 1, 0, 1000);
@@ -305,8 +314,13 @@ async function startFakeProvider() {
     assert(imageReply.toolEvents[0]?.name === 'knowledge_view_images' && imageReply.toolEvents[0]?.images?.length === 1, 'knowledge image tool did not expose a displayable original image');
     const imageRequest = [...fake.requests].reverse().find((item) => item.messages?.some((message) => Array.isArray(message.content) && message.content.some((part) => part.type === 'image_url')));
     assert(imageRequest, 'original knowledge image was not sent as multimodal model input');
+    const sentImageUrl = imageRequest.messages.flatMap((message) => Array.isArray(message.content) ? message.content : []).find((part) => part.type === 'image_url')?.image_url?.url || '';
+    assert(sentImageUrl.length < 1024 && preparedVisionFiles.includes(knowledgeImage), 'knowledge image model input was not passed through the bounded vision-image preparation path');
     const imageUri = imageReply.toolEvents[0].images[0].uri;
     assert(assistant.resolveKnowledgeImage(session.id, imageUri) === knowledgeImage, 'safe knowledge image URI did not resolve to the original file');
+    const largeImageOutcome = assistant.viewKnowledgeImages(assistant.requireSession(session.id), assistant.sessionModel(assistant.requireSession(session.id)), 'rag-task', [2]);
+    assert(largeImageOutcome.visionParts[0].image_url.url.length < 1024 && preparedVisionFiles.includes(largeKnowledgeImage), 'large local-document image was sent to the model without optimization');
+    assert(assistant.resolveKnowledgeImage(session.id, largeImageOutcome.images[0].uri) === largeKnowledgeImage, 'optimized model input replaced the original full-resolution display image');
 
     const clipboardImage = await assistant.importBuffer(session.id, {
       buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),

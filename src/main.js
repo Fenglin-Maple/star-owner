@@ -35,6 +35,7 @@ const { ToolRunner } = require('./core/tool-runner');
 const { UpdateManager } = require('./core/update-manager');
 const { recoverPendingUnavailableRemovals } = require('./core/unavailable-task');
 const { VideoCacheManager } = require('./core/video-cache-manager');
+const { prepareModelVisionImage } = require('./core/vision-image');
 const { assertSafeWindowsPath, ensureDir, evaluateWorkspacePathSafety, fitArtifactName, initWorkspace, safeName, timestampForFile, videoArtifactName, WORKSPACE_ROOT } = require('./core/workspace');
 
 const BILI_SESSION = projectBiliPartition(path.resolve(__dirname, '..'));
@@ -225,7 +226,8 @@ async function bootstrap() {
     emit: (event) => mainWindow?.webContents.send('rag:event', event),
     requestApproval: requestRagApproval,
     browseHidden,
-    openExternal: (url) => openExternalUrl(url)
+    openExternal: (url) => openExternalUrl(url),
+    prepareVisionImage: (file, options) => prepareModelVisionImage(nativeImage, file, options)
   });
   emitBootstrap('正在准备 B站会话…', 0.52);
   bili = new BiliClient(biliSession);

@@ -81,7 +81,9 @@
     const collectionId = elements.libraryCollection.value;
     const query = elements.librarySearch.value.trim().toLowerCase();
     const allForCollection = state.videos.filter((item) => !collectionId || item.collectionId === collectionId);
-    const maxDuration = Math.max(1, ...allForCollection.map((item) => Number(item.duration || 0)));
+    // Range inputs use whole-second steps. Round the boundary up so media with
+    // fractional probe durations is not hidden just beyond the slider maximum.
+    const maxDuration = Math.max(1, Math.ceil(Math.max(0, ...allForCollection.map((item) => Number(item.duration || 0)))));
     const oldMax = Number(elements.durationMax.max || 1);
     const wasAtMax = Number(elements.durationMax.value || oldMax) >= oldMax;
     elements.durationMin.max = String(maxDuration);
