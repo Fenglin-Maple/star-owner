@@ -1,4 +1,4 @@
-const { RequestGate, SerialQueue, runLatestRequest, streamMatches } = require('../src/renderer/renderer-guards');
+const { RequestGate, SerialQueue, planAssistantFlow, runLatestRequest, streamMatches } = require('../src/renderer/renderer-guards');
 const { activeDependencyPackages, aggregateDependencyProgress, dependencyStatusLabel } = require('../src/renderer/dependency-indicator');
 const fs = require('fs');
 const path = require('path');
@@ -59,6 +59,16 @@ function fakeButton(label) {
   const current = gate.next();
   assert(!gate.isCurrent(stale) && gate.isCurrent(current), 'request gate did not reject stale async results');
   assert(streamMatches({ id: 'new-message' }, 'new-message') && !streamMatches({ id: 'new-message' }, 'old-message'), 'stream guard did not reject an old message event');
+
+  const positionedFlow = planAssistantFlow('工具前。工具后。', [{ id: 'positioned-tool', sequence: 1, contentOffset: '工具前。'.length }]);
+  assert(positionedFlow.process.length === 2 && positionedFlow.process[0].text === '工具前。' && positionedFlow.process[1].tools[0].id === 'positioned-tool' && positionedFlow.finalText === '工具后。' && !positionedFlow.legacy, 'RAG flow planner did not separate transitional text from the final answer');
+  const multiRoundFlow = planAssistantFlow('甲乙丙丁最终回答', [
+    { id: 'tool-a', sequence: 1, contentOffset: 2 },
+    { id: 'tool-b', sequence: 2, contentOffset: 4 }
+  ]);
+  assert(multiRoundFlow.process.map((step) => step.type).join(',') === 'text,tools,text,tools' && multiRoundFlow.process[2].text === '丙丁' && multiRoundFlow.finalText === '最终回答', 'RAG flow planner lost multi-round tool ordering');
+  const legacyFlow = planAssistantFlow('历史最终回答', [{ id: 'legacy-tool' }, { id: 'legacy-null-tool', contentOffset: null }]);
+  assert(legacyFlow.legacy && legacyFlow.process.length === 1 && legacyFlow.process[0].tools.map((item) => item.id).join(',') === 'legacy-tool,legacy-null-tool' && legacyFlow.finalText === '历史最终回答', 'legacy RAG tools were not moved to the beginning without splitting historical text');
 
   const refreshButton = fakeButton('刷新本地目录');
   const buttonGate = new RequestGate();
@@ -139,6 +149,8 @@ function fakeButton(label) {
   assert(ragRenderer.includes('dataset.knowledgeUserKey') && ragRenderer.includes('dataset.knowledgeKindCode') && ragRenderer.includes('dataset.knowledgeCollectionId') && ragRenderer.includes('rag-knowledge-document-count'), 'RAG knowledge picker is missing semantic hierarchy or document count markers');
   assert(ragRenderer.includes('for (const kindGroup of menu.querySelectorAll') && ragRenderer.includes('for (const userGroup of menu.querySelectorAll'), 'RAG knowledge picker search does not collapse empty kind and user groups');
   assert(ragCss.includes('.rag-knowledge-user-group') && ragCss.includes('.rag-knowledge-kind-group') && ragCss.includes('.rag-knowledge-option { min-height: 40px; display: grid; grid-template-columns: 18px minmax(0, 1fr);') && ragCss.includes('.rag-knowledge-option-copy small') && ragCss.includes('white-space: nowrap'), 'RAG knowledge picker hierarchy or no-wrap document count layout is missing');
+  assert(ragRenderer.includes("details.className = 'rag-assistant-process'") && ragRenderer.includes("details.open = message.status === 'streaming'") && ragRenderer.includes('rendererGuards.planAssistantFlow(message.content, tools)') && ragRenderer.includes('按正文开头显示'), 'RAG transitional answers are not collapsible, auto-open while streaming, or legacy tools are not placed first');
+  assert(ragCss.includes('.rag-assistant-process') && ragCss.includes('.rag-message-intermediate { color: var(--muted); }'), 'RAG transitional answers are not visually distinguished from the final answer');
   const repositoryCardIndex = index.indexOf('<details class="shared-repository-card">');
   assert(repositoryCardIndex >= 0 && !index.slice(repositoryCardIndex, repositoryCardIndex + 120).includes(' open'), 'shared repository configuration must be collapsed by default');
   assert(index.includes('<summary class="shared-repository-summary"><strong>当前共享仓库</strong>') && index.includes('class="shared-repository-config"'), 'shared repository status summary or configuration body is missing');

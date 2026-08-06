@@ -541,47 +541,41 @@
     return { show: true, summary: `${duration === null ? '本轮耗时不可用' : `本轮耗时 ${formatDuration(duration)}`} · 调用工具 ${count} 次` };
   }
 
-  async function appendMarkdownSegment(fragment, text, sessionId) {
+  async function appendMarkdownSegment(fragment, text, sessionId, className = '') {
     if (!text) return;
     const segment = document.createElement('div');
-    segment.className = 'rag-message-segment';
+    segment.className = ['rag-message-segment', className].filter(Boolean).join(' ');
     segment.innerHTML = await window.orchestrator.ragRenderMarkdown(text, sessionId);
     enhanceCodeBlocks(segment);
     fragment.appendChild(segment);
   }
 
   async function renderAssistantFlow(content, message, tools) {
-    const text = String(message.content || '');
-    const ordered = tools.map((item, index) => {
-      const numericOffset = Number(item.contentOffset);
-      const anchored = Number.isFinite(numericOffset) && numericOffset >= 0;
-      return {
-        item,
-        index,
-        anchored,
-        offset: anchored ? Math.min(text.length, numericOffset) : text.length,
-        sequence: Number.isFinite(Number(item.sequence)) ? Number(item.sequence) : index
-      };
-    }).sort((left, right) => left.offset - right.offset || left.sequence - right.sequence || left.index - right.index);
+    const plan = rendererGuards.planAssistantFlow(message.content, tools);
     const fragment = document.createDocumentFragment();
-    let cursor = 0;
-    let index = 0;
-    while (index < ordered.length) {
-      const offset = ordered[index].offset;
-      await appendMarkdownSegment(fragment, text.slice(cursor, offset), message.sessionId);
-      const group = [];
-      while (index < ordered.length && ordered[index].offset === offset) group.push(ordered[index++].item);
-      fragment.appendChild(await toolList(group, message.sessionId));
-      cursor = offset;
+    let processBody = null;
+    if (plan.process.length) {
+      const details = document.createElement('details');
+      details.className = 'rag-assistant-process';
+      details.open = message.status === 'streaming';
+      const summary = document.createElement('summary');
+      summary.textContent = `过程内容 · ${tools.length} 次工具调用`;
+      processBody = document.createElement('div');
+      processBody.className = 'rag-assistant-process-body';
+      for (const step of plan.process) {
+        if (step.type === 'text') await appendMarkdownSegment(processBody, step.text, message.sessionId, 'rag-message-intermediate');
+        else if (step.type === 'tools') processBody.appendChild(await toolList(step.tools, message.sessionId));
+      }
+      if (plan.legacy) {
+        const note = document.createElement('div');
+        note.className = 'rag-tool-history-note';
+        note.textContent = '历史会话未记录工具调用的正文位置，相关工具列表按正文开头显示。';
+        processBody.appendChild(note);
+      }
+      details.append(summary, processBody);
+      fragment.appendChild(details);
     }
-    await appendMarkdownSegment(fragment, text.slice(cursor), message.sessionId);
-    const legacy = ordered.some((item) => !item.anchored);
-    if (legacy) {
-      const note = document.createElement('div');
-      note.className = 'rag-tool-history-note';
-      note.textContent = '历史会话未记录工具调用的正文位置，相关工具列表按正文末尾显示。';
-      fragment.appendChild(note);
-    }
+    await appendMarkdownSegment(fragment, plan.finalText, message.sessionId, 'rag-message-final');
     if (message.error) {
       const error = document.createElement('div');
       error.className = 'rag-message-error';
@@ -591,7 +585,8 @@
     if (message.status === 'streaming') {
       const caret = document.createElement('span');
       caret.className = 'rag-stream-caret';
-      fragment.appendChild(caret);
+      if (processBody && !plan.finalText) processBody.appendChild(caret);
+      else fragment.appendChild(caret);
     }
     content.replaceChildren(fragment);
   }
