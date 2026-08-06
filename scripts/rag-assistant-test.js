@@ -338,7 +338,12 @@ async function startFakeProvider() {
     const imageUri = imageReply.toolEvents[0].images[0].uri;
     assert(assistant.resolveKnowledgeImage(session.id, imageUri) === knowledgeImage, 'safe knowledge image URI did not resolve to the original file');
     const imageTool = assistant.toolDefinitions(assistant.requireSession(session.id), assistant.sessionModel(assistant.requireSession(session.id))).find((item) => item.function?.name === 'knowledge_view_images');
-    assert(imageTool?.function?.parameters?.properties?.image_indices?.maxItems === 4, 'knowledge image tool batch limit is not four images');
+    const imageIndicesSchema = imageTool?.function?.parameters?.properties?.image_indices;
+    assert(imageIndicesSchema?.maxItems === 4 && imageIndicesSchema?.items?.minimum === 1 && /one-based/i.test(imageIndicesSchema?.description || ''), 'knowledge image tool did not declare its four-image, one-based index contract');
+    const zeroBasedSingle = assistant.viewKnowledgeImages(assistant.requireSession(session.id), assistant.sessionModel(assistant.requireSession(session.id)), 'rag-task', [0]);
+    assert(zeroBasedSingle.images.length === 1 && zeroBasedSingle.images[0].index === 1, 'obvious zero-based first-image input was not normalized to image 1');
+    const zeroBasedBatch = assistant.viewKnowledgeImages(assistant.requireSession(session.id), assistant.sessionModel(assistant.requireSession(session.id)), 'rag-task', [0, 1, 2, 3]);
+    assert(zeroBasedBatch.images.map((item) => item.index).join(',') === '1,2,3,4', 'obvious zero-based image batch was not normalized as one index set');
     const multiBatchSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-tools', knowledgeCollectionIds: ['rag-collection'], title: 'Multi-batch vision test' });
     const multiBatchReply = await assistant.send(multiBatchSession.id, { content: 'IMAGE_MULTI_BATCH_TEST' });
     assert(multiBatchReply.content === '已分两批查看八张图片。' && multiBatchReply.toolEvents.length === 2 && multiBatchReply.toolEvents.every((event) => event.status === 'succeeded'), 'RAG could not inspect more than four images through repeated four-image batches in one response');

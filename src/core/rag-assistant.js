@@ -773,7 +773,7 @@ class RagAssistant {
         tool('knowledge_read_document', 'Read an exact, unsummarized range from one original Markdown document. Continue with both next_start_line and next_start_column until End of document.', { document_id: { type: 'string' }, start_line: { type: 'integer' }, start_column: { type: 'integer' }, line_count: { type: 'integer' } }, ['document_id']),
         tool('knowledge_search', 'Search selected local Markdown knowledge libraries. Results include document ids; use knowledge_read_document when exact wording or complete context matters.', { query: { type: 'string' }, limit: { type: 'integer' } }, ['query'])
       );
-      if (model.supportsVision) tools.unshift(tool('knowledge_view_images', 'Load up to four original local images from a selected Markdown document into this multimodal conversation. The tool may be called repeatedly while context and request-size budgets remain available. Returns safe image URIs that can be embedded in the answer.', { document_id: { type: 'string' }, image_indices: { type: 'array', items: { type: 'integer' }, maxItems: MAX_RAG_VISION_IMAGES_PER_TOOL_CALL } }, ['document_id']));
+      if (model.supportsVision) tools.unshift(tool('knowledge_view_images', 'Load up to four original local images from a selected Markdown document into this multimodal conversation. Image indices are one-based: the first image is 1. Omit image_indices to load the first available images. The tool may be called repeatedly while context and request-size budgets remain available. Returns safe image URIs that can be embedded in the answer.', { document_id: { type: 'string' }, image_indices: { type: 'array', description: 'One-based image numbers. The first image is 1, not 0.', items: { type: 'integer', minimum: 1 }, maxItems: MAX_RAG_VISION_IMAGES_PER_TOOL_CALL } }, ['document_id']));
     }
     if (model.supportsSubagents) tools.push(tool('spawn_subagent', 'Delegate one focused research or analysis subtask to an isolated call of the current model.', { task: { type: 'string' } }, ['task']));
     return tools;
@@ -991,8 +991,14 @@ class RagAssistant {
     const images = this.knowledgeDocumentImages(task);
     if (!images.length) return 'This Markdown document has no readable local images.';
     const requested = Array.isArray(imageIndices) && imageIndices.length ? imageIndices : images.slice(0, MAX_RAG_VISION_IMAGES_PER_TOOL_CALL).map((_, index) => index + 1);
-    const indices = [...new Set(requested.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value >= 1 && value <= images.length))].slice(0, MAX_RAG_VISION_IMAGES_PER_TOOL_CALL);
-    if (!indices.length) throw new Error(`No valid image index was supplied. This document has ${images.length} local images.`);
+    const numericIndices = requested.map((value) => {
+      if (typeof value === 'number') return value;
+      if (typeof value === 'string' && value.trim()) return Number(value);
+      return Number.NaN;
+    }).filter(Number.isInteger);
+    const normalizedIndices = numericIndices.includes(0) ? numericIndices.map((value) => value + 1) : numericIndices;
+    const indices = [...new Set(normalizedIndices.filter((value) => value >= 1 && value <= images.length))].slice(0, MAX_RAG_VISION_IMAGES_PER_TOOL_CALL);
+    if (!indices.length) throw new Error(`No valid image index was supplied. Image indices are one-based: the first image is 1, and this document accepts 1-${images.length}.`);
     const selected = indices.map((value) => ({ ...images[value - 1], index: value, uri: knowledgeImageUri(task.id, value) }));
     return {
       text: [
