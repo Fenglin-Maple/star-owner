@@ -436,26 +436,28 @@ ipcMain.handle('docs:open-project-path', async (_event, value) => {
 ipcMain.handle('documents:read', async (_event, taskId) => {
   assertBackendReady();
   const task = store.getTask(String(taskId || ''));
-  if (!task || task.status !== 'done' || !task.outputMarkdown) throw new Error('Completed Markdown document not found.');
-  if (!fs.existsSync(task.outputMarkdown)) throw new Error(`Markdown file does not exist: ${task.outputMarkdown}`);
-  const markdown = fs.readFileSync(task.outputMarkdown, 'utf8');
-  const taskView = { ...task, artifactExists: Boolean(task.artifactDir && fs.existsSync(task.artifactDir)), documentExists: true };
+  if (!task || task.status !== 'done') throw new Error('Completed Markdown document not found.');
+  const markdownPath = resolveTaskMarkdownPath(task);
+  if (!markdownPath) throw new Error(`Markdown file does not exist: ${task.outputMarkdown || task.artifactDir || task.id}`);
+  const markdown = fs.readFileSync(markdownPath, 'utf8');
+  const taskView = { ...task, outputMarkdown: markdownPath, artifactExists: Boolean(task.artifactDir && fs.existsSync(task.artifactDir)), documentExists: markdown.length > 0 };
   return {
     task: taskView,
     collection: store.getCollectionById(task.collectionId) || null,
-    path: task.outputMarkdown,
+    path: markdownPath,
     markdown,
-    html: renderMarkdownPreview(markdown, task.outputMarkdown)
+    html: renderMarkdownPreview(markdown, markdownPath)
   };
 });
 
 ipcMain.handle('documents:open', async (_event, taskId) => {
   assertBackendReady();
   const task = store.getTask(String(taskId || ''));
-  if (!task?.outputMarkdown || !fs.existsSync(task.outputMarkdown)) throw new Error('Completed Markdown document not found.');
-  const error = await shell.openPath(task.outputMarkdown);
+  const markdownPath = task ? resolveTaskMarkdownPath(task) : '';
+  if (!markdownPath) throw new Error('Completed Markdown document not found.');
+  const error = await shell.openPath(markdownPath);
   if (error) throw new Error(error);
-  return { path: task.outputMarkdown };
+  return { path: markdownPath };
 });
 
 ipcMain.handle('documents:open-folder', async (_event, taskId) => {
@@ -1460,9 +1462,27 @@ function buildTaskSnapshot(activeStore) {
   return tasks.map((task) => {
     if (task.status !== 'done') return task;
     const artifactExists = Boolean(task.artifactDir && fs.existsSync(task.artifactDir));
-    const documentExists = Boolean(task.outputMarkdown && fs.existsSync(task.outputMarkdown));
-    return { ...task, artifactExists, documentExists, displayCover: resolveTaskDisplayCover(task) };
+    const markdownPath = resolveTaskMarkdownPath(task);
+    let documentExists = false;
+    if (markdownPath) {
+      try { documentExists = fs.statSync(markdownPath).isFile() && fs.statSync(markdownPath).size > 0; } catch {}
+    }
+    return { ...task, outputMarkdown: markdownPath || task.outputMarkdown || '', artifactExists, documentExists, displayCover: resolveTaskDisplayCover({ ...task, outputMarkdown: markdownPath || task.outputMarkdown || '' }) };
   });
+}
+
+function resolveTaskMarkdownPath(task = {}) {
+  const preferred = task.multiPartRole === 'parent' ? 'index.md' : task.multiPartRole === 'part' ? 'summary.md' : '';
+  const pointer = String(task.outputMarkdown || '').trim();
+  const candidates = [(!preferred || path.basename(pointer).toLowerCase() === preferred) ? pointer : ''];
+  if (preferred && task.artifactDir) candidates.push(path.join(task.artifactDir, preferred));
+  if (preferred && task.preallocatedArtifactDir) candidates.push(path.join(task.preallocatedArtifactDir, preferred));
+  for (const candidate of [...new Set(candidates.map((value) => String(value || '').trim()).filter(Boolean))]) {
+    try {
+      if (fs.statSync(candidate).isFile()) return path.resolve(candidate);
+    } catch {}
+  }
+  return '';
 }
 
 function publishLocalToolboxEvent(event) {

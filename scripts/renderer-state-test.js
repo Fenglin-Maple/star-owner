@@ -182,7 +182,9 @@ function fakeButton(label) {
   assert(index.indexOf('dompurify/dist/purify.min.js') < index.indexOf('src="./app.js"') && app.includes('window.DOMPurify.sanitize') && app.includes('ALLOW_DATA_ATTR: false') && app.includes('normalizeReadmeLinks(template.content)') && app.includes('window.orchestrator.resolveReadmeImage(source)') && app.includes('link.dataset.readmeProjectLink = \'true\'') && app.includes("link.dataset.readmeProjectLink !== 'true'") && app.includes('window.orchestrator.openProjectPath(projectPath)'), 'project README HTML is not strictly sanitized before rendering, local images bypass the main-process resolver, or safe project links are not preserved');
   const preload = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
   const cacheRenderer = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'cache.js'), 'utf8');
+  const appRenderer = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
   assert(cacheRenderer.includes('Math.ceil(Math.max(0, ...allForCollection.map((item) => Number(item.duration || 0))))'), 'video-library duration filtering can still hide fractional-duration local imports at the slider maximum');
+  assert(appRenderer.includes('Math.ceil(Math.max(60, ...tasks.map((task) => Number(task.duration || 0))))'), 'document-library duration filtering can still hide fractional-duration local imports at the slider maximum');
   assert(preload.includes("multiPartStopPart: (payload) => ipcRenderer.invoke('multipart:stop-part', payload)"), 'multi-part per-P stop IPC was not exposed through the preload boundary');
   const ai = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'ai.js'), 'utf8');
   assert(ai.includes('event.replaceContent || session.contentIsNotice') && ai.includes('session.contentIsNotice = false'), 'Agent model output did not replace an empty-response or validation notice on the first real content delta');

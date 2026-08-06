@@ -24,6 +24,7 @@ const MAX_SHARED_REPOSITORY_BYTES = 10 * 1024 * 1024 * 1024;
 const REPOSITORY_MARKER_FILE = '_star-owner-repository.json';
 const REPOSITORY_SCHEMA_VERSION = 1;
 const REQUIRED_REPOSITORY_CAPABILITIES = Object.freeze(['bilibili-summary', 'single-video-summary', 'multipart-summary', 'catalog-v1']);
+const REQUIRED_VALIDATION_CONTEXT = 'validate-shared-docs';
 const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;
 const APPLICATION_VERSION = require('../../package.json').version;
 
@@ -87,11 +88,13 @@ class SharedKnowledgeManager {
         inspected = await this.inspectRepository(requested, token);
         this.reportOperation({ stage: 'contract', progress: 0.58, message: `正在验证 ${REPOSITORY_MARKER_FILE} 和共享能力...` }, true);
         const contract = await this.validateRepositoryContract(inspected, token);
-        this.saveVerifiedRepository(inspected, contract);
+        const protection = await this.ensureOwnerBranchProtection(inspected, token);
+        const verifiedContract = { ...contract, ...protection };
+        this.saveVerifiedRepository(inspected, verifiedContract);
         this.catalogCache.delete(repositoryIdentity(inspected));
         this.reportOperation({ stage: 'saved', progress: 0.96, message: '仓库符合星藏家共享规范，正在保存连接...' }, true);
         this.emitState('shared-repository-changed', { repository: inspected });
-        return { repository: inspected, contract, role: this.repositoryRole(inspected, this.state()) };
+        return { repository: inspected, contract: verifiedContract, role: this.repositoryRole(inspected, this.state()) };
       } catch (error) {
         this.updateRepositoryHealth(inspected || requested, 'unavailable', error);
         throw error;
@@ -109,9 +112,11 @@ class SharedKnowledgeManager {
         inspected = await this.inspectRepository(requested, token);
         this.reportOperation({ stage: 'contract', progress: 0.62, message: '正在核对共享仓库规范标记...' }, true);
         const contract = await this.validateRepositoryContract(inspected, token);
-        this.saveVerifiedRepository(inspected, contract);
+        const protection = await this.ensureOwnerBranchProtection(inspected, token);
+        const verifiedContract = { ...contract, ...protection };
+        this.saveVerifiedRepository(inspected, verifiedContract);
         this.reportOperation({ stage: 'available', progress: 0.96, message: '共享仓库连接正常。' }, true);
-        return { available: true, repository: inspected, contract };
+        return { available: true, repository: inspected, contract: verifiedContract };
       } catch (error) {
         this.updateRepositoryHealth(inspected || requested, 'unavailable', error);
         throw error;
@@ -164,11 +169,19 @@ class SharedKnowledgeManager {
       }
       this.reportOperation({ stage: 'validating', progress: 0.88, current: files.length, total: files.length, message: '初始化完成，正在复核共享仓库规范...' }, true);
       const contract = await this.validateRepositoryContract(repository, auth.token);
-      this.saveVerifiedRepository(repository, contract);
+      this.reportOperation({ stage: 'protection', progress: 0.94, current: files.length, total: files.length, message: `正在设置合并前必需检查 ${REQUIRED_VALIDATION_CONTEXT}...` }, true);
+      let protection;
+      try {
+        protection = await this.configureRequiredValidation(repository, auth.token);
+      } catch (error) {
+        throw new Error(`GitHub 仓库已创建且初始化文件已写入，但合并前必需检查配置失败：${error.message || String(error)}。请为当前 Token 增加该仓库的分支管理权限后，在共享工具中重新检查。仓库地址：${repository.htmlUrl}`);
+      }
+      const verifiedContract = { ...contract, ...protection };
+      this.saveVerifiedRepository(repository, verifiedContract);
       this.catalogCache.delete(repositoryIdentity(repository));
       this.reportOperation({ stage: 'ready', progress: 0.97, message: '仓库已创建并通过规范校验。' }, true);
       this.emitState('shared-repository-created', { repository });
-      return { repository, contract, created: true, initializedFiles: files.length };
+      return { repository, contract: verifiedContract, created: true, initializedFiles: files.length };
     });
   }
 
@@ -392,6 +405,10 @@ class SharedKnowledgeManager {
 
       const repository = await this.inspectRepository(this.repository, auth.token, controller.signal);
       await this.validateRepositoryContract(repository, auth.token, controller.signal);
+      // A repository may have been connected before required checks were
+      // introduced. Reconcile protection immediately before creating a PR so
+      // the owner path cannot silently bypass validation.
+      await this.ensureOwnerBranchProtection(repository, auth.token, controller.signal);
       const ownerMode = String(repository.ownerId || '') === String(auth.user.id || '');
       this.reportUpload({ stage: 'repository', progress: 0.27, current: tasks.length, message: ownerMode ? '已确认当前账户是仓库主人，正在创建临时分支...' : '已确认目标为他人仓库，正在准备 Fork 和 Pull Request...' }, true);
       const base = await this.githubRequest(`/repos/${repository.owner}/${repository.name}/git/ref/heads/${encodeURIComponent(repository.branch)}`, { token: auth.token, signal: controller.signal });
@@ -968,21 +985,31 @@ class SharedKnowledgeManager {
   }
 
   prepareDocument(task) {
-    if (task.status !== 'done' || !task.outputMarkdown || !fs.existsSync(task.outputMarkdown)) throw new Error(`文档未完成或文件不存在：${task.title || task.id}`);
     if (task.multiPartRole === 'part') throw new Error(`多P视频请从父任务目录上传，不能单独上传 P${task.page || ''}：${task.title || task.id}`);
+    const primaryArtifact = resolveShareableTaskMarkdown(task);
+    if (task.status !== 'done' || !primaryArtifact.ready) throw new Error(`文档未完成或文件不存在：${task.title || task.id}`);
+    const collection = this.store.getCollectionById(task.collectionId) || {};
     let multipartParts = [];
     if (task.multiPartRole === 'parent') {
       multipartParts = this.store.listTasks({ collectionId: task.collectionId }).filter((item) => item.multiPartParentId === task.id && item.multiPartRole === 'part' && item.pageState !== 'removed');
-      if (!multipartParts.length || multipartParts.some((item) => item.status !== 'done' || !item.outputMarkdown || !fs.existsSync(item.outputMarkdown))) {
-        throw new Error(`多P父任务尚未完成全部 P，暂不能上传共享：${task.title || task.bvid}`);
+      const incomplete = multipartParts.filter((item) => item.status !== 'done' || !resolveShareableTaskMarkdown(item).ready);
+      if (!multipartParts.length || incomplete.length) {
+        const details = incomplete.map((item) => `P${item.page || ''}${item.cid ? ` (CID ${item.cid})` : ''}`).join('、');
+        throw new Error(`多P父任务尚未完成全部 P，暂不能上传共享：${task.title || task.bvid}${details ? `；缺少或未完成：${details}` : ''}`);
       }
+      multipartParts = multipartParts.map((item) => {
+        const artifact = resolveShareableTaskMarkdown(item);
+        if (collection.collectionRoot) assertInside(collection.collectionRoot, artifact.root);
+        return { ...item, outputMarkdown: artifact.markdownFile, artifactDir: artifact.root || item.artifactDir };
+      });
     }
-    const collection = this.store.getCollectionById(task.collectionId) || {};
     if (!isShareableBilibiliTask(task, collection)) throw new Error(`只允许上传 B站视频总结产物：${task.title || task.id}`);
     const documentId = stableDocumentId(task, collection);
     const remoteRoot = remoteRootFor(task, collection, documentId);
-    const sourceRoot = path.resolve(task.multiPartRole === 'parent' ? task.artifactDir : path.dirname(task.outputMarkdown));
-    const files = buildSharedDocumentFiles(task, sourceRoot, multipartParts);
+    const normalizedTask = { ...task, outputMarkdown: primaryArtifact.markdownFile, artifactDir: primaryArtifact.root || task.artifactDir };
+    const sourceRoot = path.resolve(task.multiPartRole === 'parent' ? (primaryArtifact.root || task.artifactDir) : path.dirname(primaryArtifact.markdownFile));
+    if (collection.collectionRoot) assertInside(collection.collectionRoot, sourceRoot);
+    const files = buildSharedDocumentFiles(normalizedTask, sourceRoot, multipartParts);
     validateShareableFiles(files);
     const preferredMarkdown = task.multiPartRole === 'parent' ? 'index.md' : 'summary.md';
     const markdownFile = files.find((file) => file.relative.toLowerCase() === preferredMarkdown);
@@ -994,13 +1021,13 @@ class SharedKnowledgeManager {
       : task.singleTask
         ? `single:${collection.stableId || collection.id}`
         : `bilibili:${collection.mediaId || collection.id}`;
-      const metadata = {
+    const metadata = {
       schemaVersion: 3,
       documentId,
       sourceType: 'bilibili-video-summary',
       documentType: task.multiPartRole === 'parent' ? 'multipart-parent' : 'single-video',
-        contributorGithubId: String(task.githubUserId || ''),
-        contributorGithubLogin: String(task.githubUserLogin || ''),
+      contributorGithubId: String(task.githubUserId || ''),
+      contributorGithubLogin: String(task.githubUserLogin || ''),
       bilibiliUid: sourceBilibiliUid,
       remoteCollectionId,
       bvid: task.bvid || '',
@@ -1033,7 +1060,7 @@ class SharedKnowledgeManager {
     const metadataBuffer = Buffer.from(`${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
     files.push({ relative: DOCUMENT_META_FILE, buffer: metadataBuffer, size: metadataBuffer.length });
     validateShareableFiles(files);
-    return { task, documentId, remoteRoot, files, metadata, totalBytes: metadata.totalBytes };
+    return { task: normalizedTask, documentId, remoteRoot, files, metadata, totalBytes: metadata.totalBytes };
   }
 
   async importRemoteDocument(document, mount, { checkoutRoot = '', remoteTree = null, transaction = null } = {}) {
@@ -1344,7 +1371,9 @@ class SharedKnowledgeManager {
       contract: {
         schemaVersion: Number(contract?.schemaVersion || 0),
         type: String(contract?.type || ''),
-        capabilities: [...(contract?.capabilities || [])]
+        capabilities: [...(contract?.capabilities || [])],
+        requiredValidation: contract?.requiredValidation === true,
+        requiredValidationContext: String(contract?.requiredValidationContext || '')
       }
     };
     if (index >= 0) repositories[index] = record;
@@ -1400,6 +1429,86 @@ class SharedKnowledgeManager {
     const repository = repositoryFromApi(info, requested);
     if (repository.private && !token) throw new Error('该共享仓库不是公开仓库，请先授权有访问权限的 GitHub 账户。');
     return repository;
+  }
+
+  async ensureOwnerBranchProtection(repositoryInput, token = '', signal = null) {
+    const repository = normalizeRepository(repositoryInput);
+    if (!token) return { requiredValidation: false, requiredValidationContext: REQUIRED_VALIDATION_CONTEXT, requiredValidationOwnerOnly: true };
+    let user;
+    try {
+      user = await this.githubRequest('/user', { token, signal });
+    } catch (error) {
+      throw new Error(`无法确认当前 GitHub 授权账户身份，未设置合并前必需检查：${error.message || String(error)}`);
+    }
+    const isOwner = String(user?.id || '') === String(repository.ownerId || '')
+      || (user?.login && String(user.login).toLowerCase() === String(repository.owner || '').toLowerCase());
+    if (!isOwner) return { requiredValidation: false, requiredValidationContext: REQUIRED_VALIDATION_CONTEXT, requiredValidationOwnerOnly: true };
+    return this.configureRequiredValidation(repository, token, signal);
+  }
+
+  async configureRequiredValidation(repositoryInput, token = '', signal = null) {
+    const repository = normalizeRepository(repositoryInput);
+    if (!token) throw new Error('设置合并前必需检查需要已授权的 GitHub Token。');
+    const endpoint = `/repos/${repository.owner}/${repository.name}/branches/${encodeURIComponent(repository.branch)}/protection`;
+    let existing = null;
+    try {
+      existing = await this.githubRequest(endpoint, { token, signal });
+    } catch (error) {
+      if (Number(error.status) !== 404) {
+        if (Number(error.status) === 403) {
+          throw new Error(`GitHub 拒绝读取 ${repository.branch} 分支保护（HTTP 403）。当前 Token 需要该仓库的 Administration: Read and write（或经典 Token 的 repo 管理权限）。`);
+        }
+        throw error;
+      }
+    }
+    const currentChecks = existing?.required_status_checks || null;
+    const currentContexts = new Set([
+      ...(Array.isArray(currentChecks?.contexts) ? currentChecks.contexts : []),
+      ...(Array.isArray(currentChecks?.checks) ? currentChecks.checks.map((item) => item?.context) : [])
+    ].map((item) => String(item || '').trim()).filter(Boolean));
+    try {
+      if (existing) {
+        if (!currentContexts.has(REQUIRED_VALIDATION_CONTEXT)) {
+          // The context endpoint appends one check without reconstructing or
+          // weakening existing app-bound checks. If status checks were not yet
+          // enabled, create only that protection subresource.
+          const statusChecksEndpoint = `${endpoint}/required_status_checks`;
+          await this.githubRequest(currentChecks ? `${statusChecksEndpoint}/contexts` : statusChecksEndpoint, {
+            token,
+            method: currentChecks ? 'POST' : 'PUT',
+            body: currentChecks
+              ? { contexts: [REQUIRED_VALIDATION_CONTEXT] }
+              : { strict: true, contexts: [REQUIRED_VALIDATION_CONTEXT] },
+            signal
+          });
+        }
+      } else {
+        await this.githubRequest(endpoint, {
+          token,
+          method: 'PUT',
+          body: {
+            required_status_checks: { strict: true, contexts: [REQUIRED_VALIDATION_CONTEXT] },
+            enforce_admins: false,
+            required_pull_request_reviews: null,
+            restrictions: null,
+            required_linear_history: false,
+            allow_force_pushes: false,
+            allow_deletions: false,
+            block_creations: false,
+            required_conversation_resolution: false,
+            lock_branch: false,
+            allow_fork_syncing: true
+          },
+          signal
+        });
+      }
+    } catch (error) {
+      if ([403, 404].includes(Number(error.status))) {
+        throw new Error(`GitHub 拒绝设置 ${repository.branch} 分支保护（HTTP ${error.status}）。当前 Token 需要该仓库的 Administration: Read and write（或经典 Token 的 repo 管理权限）。`);
+      }
+      throw error;
+    }
+    return { requiredValidation: true, requiredValidationContext: REQUIRED_VALIDATION_CONTEXT };
   }
 
   async validateRepositoryContract(repositoryInput, token = '', signal = null) {
@@ -1977,12 +2086,40 @@ function collectCheckoutDocumentFiles(checkoutRoot, remoteRoot) {
   visit(sourceRoot);
   return files;
 }
+
+function resolveShareableTaskMarkdown(task = {}) {
+  const preferredName = task.multiPartRole === 'parent' ? 'index.md' : 'summary.md';
+  const roots = [...new Set([task.artifactDir, task.preallocatedArtifactDir, task.parentRoot]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .map((value) => path.resolve(value)))];
+  const pointer = String(task.outputMarkdown || '').trim();
+  const candidates = [];
+  if (pointer && (!task.multiPartRole || path.basename(pointer).toLowerCase() === preferredName)) candidates.push(path.resolve(pointer));
+  for (const root of roots) candidates.push(path.join(root, preferredName));
+  for (const markdownFile of [...new Set(candidates)]) {
+    try {
+      const root = roots.find((candidate) => isPathWithin(candidate, markdownFile));
+      if (roots.length && !root) continue;
+      const stat = fs.statSync(markdownFile);
+      if (!stat.isFile() || stat.size <= 0) continue;
+      return { ready: true, markdownFile, root: root || path.dirname(markdownFile) };
+    } catch {}
+  }
+  return { ready: false, markdownFile: '', root: roots[0] || '' };
+}
+
+function isPathWithin(root, target) {
+  const relative = path.relative(path.resolve(root), path.resolve(target));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
 function buildSharedDocumentFiles(task, sourceRoot, multipartParts = []) {
   const root = path.resolve(sourceRoot);
   const files = [];
   const seen = new Set();
-  const add = (sourcePath, relative) => {
-    const source = assertInside(root, path.resolve(sourcePath));
+  const add = (sourcePath, relative, allowedRoot = root) => {
+    const source = assertInside(allowedRoot, path.resolve(sourcePath));
     const normalized = String(relative || '').replace(/\\/g, '/');
     if (seen.has(normalized)) return;
     const stat = fs.lstatSync(source);
@@ -1990,17 +2127,32 @@ function buildSharedDocumentFiles(task, sourceRoot, multipartParts = []) {
     seen.add(normalized);
     files.push({ relative: normalized, sourcePath: source, size: stat.size });
   };
-  add(task.outputMarkdown, task.multiPartRole === 'parent' ? 'index.md' : 'summary.md');
+  const primary = resolveShareableTaskMarkdown(task);
+  if (!primary.ready) throw new Error(`共享文档缺少非空 ${task.multiPartRole === 'parent' ? 'index.md' : 'summary.md'}：${task.title || task.id}`);
+  add(primary.markdownFile, task.multiPartRole === 'parent' ? 'index.md' : 'summary.md');
   if (task.multiPartRole === 'parent') {
     for (const part of [...multipartParts].sort((a, b) => Number(a.page || 0) - Number(b.page || 0))) {
       const cid = String(part.cid || part.multiPartId || '').trim();
       if (!cid) throw new Error(`多P共享子任务缺少 CID：${part.title || part.id}`);
-      add(part.outputMarkdown, `parts/cid-${safeName(cid, 'part', 40)}/summary.md`);
+      const artifact = resolveShareableTaskMarkdown(part);
+      if (!artifact.ready) throw new Error(`多P共享子任务缺少非空 summary.md：P${part.page || ''} ${part.title || part.id}`);
+      const partPrefix = `parts/cid-${safeName(cid, 'part', 40)}`;
+      add(artifact.markdownFile, `${partPrefix}/summary.md`, artifact.root);
+      for (const file of collectShareableFiles(artifact.root)) {
+        if (!/\.(?:png|jpe?g|webp|avif|gif)$/i.test(file.relative)) continue;
+        add(file.path, `${partPrefix}/${file.relative}`, artifact.root);
+      }
     }
-  }
-  for (const file of collectShareableFiles(root)) {
-    if (!/\.(?:png|jpe?g|webp|avif|gif)$/i.test(file.relative)) continue;
-    add(file.path, file.relative);
+    for (const file of collectShareableFiles(root)) {
+      if (file.relative.split('/').includes('parts')) continue;
+      if (!/\.(?:png|jpe?g|webp|avif|gif)$/i.test(file.relative)) continue;
+      add(file.path, file.relative);
+    }
+  } else {
+    for (const file of collectShareableFiles(root)) {
+      if (!/\.(?:png|jpe?g|webp|avif|gif)$/i.test(file.relative)) continue;
+      add(file.path, file.relative);
+    }
   }
   return files;
 }

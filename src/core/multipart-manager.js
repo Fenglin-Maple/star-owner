@@ -25,10 +25,18 @@ class MultiPartManager {
   }
 
   state() {
+    const parents = this.store.list('multiPartParents').map((parent) => {
+      // A task can be changed by an Agent worker between renderer updates. Drop
+      // the short-lived cache before reconciling so completion never depends on
+      // which parent happened to be read first.
+      this.invalidatePartTaskCache(parent.id);
+      this.reconcileParentArtifacts(parent);
+      const current = this.store.get('multiPartParents', parent.id) || parent;
+      return this.publicParent(current, { reconcile: false });
+    });
     return {
       collections: this.collections().map(publicCollection),
-      parents: this.store.list('multiPartParents').map((parent) => this.publicParent(parent))
-        .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+      parents: parents.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
     };
   }
 
@@ -321,8 +329,17 @@ class MultiPartManager {
     const parent = this.store.get('multiPartParents', parentId);
     if (!parent) return;
     this.invalidatePartTaskCache(parent.id);
+    if (event.type === 'session-finished' && event.status === 'stopped') {
+      // Preserve an explicit user stop while the terminal Agent event is being
+      // reconciled. Other terminal failures are allowed to become retryable.
+      parent.status = 'stopped';
+      parent.updatedAt = new Date().toISOString();
+      this.store.set('multiPartParents', parent.id, parent);
+    }
+    this.reconcileParentArtifacts(parent, { writeIndex: false });
+    this.invalidatePartTaskCache(parent.id);
     const parts = this.partTasks(parent.id);
-    const done = parts.filter((item) => item.status === 'done').length;
+    const done = parts.filter((item) => item.status === 'done' && multipartArtifactReady(item)).length;
     const pending = parts.filter((item) => item.status !== 'done' && item.pageState !== 'removed').length;
     const sessionStopped = event.type === 'session-finished' && ['stopped', 'collection-unavailable', 'model-unavailable'].includes(String(event.status || ''));
     const activeSessions = this.activeSessions(parent.id).filter((session) => event.type !== 'session-finished' || session.id !== event.sessionId);
@@ -354,6 +371,90 @@ class MultiPartManager {
     return tasks;
   }
 
+  reconcileParentArtifacts(parentInput, { writeIndex = true } = {}) {
+    const parent = this.store.get('multiPartParents', String(parentInput?.id || '')) || parentInput;
+    if (!parent?.id) return { changed: false, parent };
+    this.invalidatePartTaskCache(parent.id);
+    const parts = this.partTasks(parent.id);
+    let changed = false;
+    let artifactChanged = false;
+    let missingArtifactDetected = false;
+    const now = new Date().toISOString();
+    for (const task of parts) {
+      if (task.status !== 'done') continue;
+      const artifact = resolveMultipartArtifact(task);
+      if (artifact.ready) {
+        if (artifact.markdownFile && task.outputMarkdown !== artifact.markdownFile) {
+          task.outputMarkdown = artifact.markdownFile;
+          task.updatedAt = now;
+          this.store.upsertTask(task);
+          changed = true;
+          artifactChanged = true;
+        }
+        continue;
+      }
+      const reason = `P${task.page || ''} 已完成状态对应的总结产物缺失或为空，请重试该 P。`;
+      Object.assign(task, {
+        status: 'pending',
+        enabled: false,
+        workId: '',
+        claimedBy: '',
+        claimedAt: '',
+        leaseExpiresAt: '',
+        completedAt: '',
+        outputMarkdown: '',
+        validatorErrors: [reason],
+        failureReason: reason,
+        multiPartFailed: true,
+        multiPartFailureReason: reason,
+        multiPartFailedAt: now,
+        multiPartStopped: false,
+        multiPartStopReason: '',
+        multiPartStoppedAt: '',
+        multiPartProgress: 0,
+        multiPartPhase: '完成状态与产物不一致，可重试',
+        updatedAt: now
+      });
+      this.store.upsertTask(task);
+      changed = true;
+      artifactChanged = true;
+      missingArtifactDetected = true;
+    }
+    this.invalidatePartTaskCache(parent.id);
+    const refreshedParts = this.partTasks(parent.id);
+    const active = this.activeSessions(parent.id);
+    const nextStatus = deriveMultipartParentStatus(parent, refreshedParts, active, { missingArtifactDetected });
+    const statusChanged = parent.status !== nextStatus;
+    if (statusChanged) {
+      parent.status = nextStatus;
+      changed = true;
+    }
+    const nextCompletedAt = nextStatus === 'completed' ? (parent.completedAt || now) : '';
+    const completedAtChanged = parent.completedAt !== nextCompletedAt;
+    if (completedAtChanged) {
+      parent.completedAt = nextCompletedAt;
+      changed = true;
+    }
+    const parentTask = this.store.getTask(parent.id) || {
+      multiPartRole: 'parent',
+      artifactDir: parent.parentRoot,
+      outputMarkdown: path.join(parent.parentRoot || '', 'index.md')
+    };
+    const indexReady = multipartArtifactReady(parentTask);
+    const indexNeedsRepair = Boolean(writeIndex && parent.parentRoot && fs.existsSync(parent.parentRoot) && !indexReady);
+    if (!changed && !indexNeedsRepair) return { changed: false, parent };
+    parent.updatedAt = now;
+    this.store.set('multiPartParents', parent.id, parent);
+    this.store.commit();
+    if (writeIndex && parent.parentRoot && fs.existsSync(parent.parentRoot) && (indexNeedsRepair || artifactChanged || statusChanged)) {
+      try {
+        this.writeIndex(parent);
+        this.store.commit();
+      } catch {}
+    }
+    return { changed: true, parent };
+  }
+
   invalidatePartTaskCache(parentId = '') {
     const key = String(parentId || '');
     if (key) this.partTaskCache.delete(key);
@@ -374,7 +475,8 @@ class MultiPartManager {
     for (const parent of this.store.list('multiPartParents')) {
       if (!parent?.parentRoot || !fs.existsSync(parent.parentRoot)) continue;
       try {
-        this.writeIndex(parent);
+        this.reconcileParentArtifacts(parent, { writeIndex: false });
+        this.writeIndex(this.store.get('multiPartParents', parent.id) || parent);
         refreshed += 1;
       } catch (error) {
         this.indexRefreshFailures.push({ parentId: parent.id, error: error.message });
@@ -544,10 +646,10 @@ class MultiPartManager {
     const lines = [
       `# ${parent.title} · 多P视频目录`, '',
       '## 小结', '',
-      `该父任务包含 ${parent.pages.length} 个 P，当前已完成 ${parts.filter((task) => task.status === 'done').length} 个。每个 P 的详细总结单独存放，并保留稳定 CID 标识。`, '',
+      `该父任务包含 ${parent.pages.length} 个 P，当前已完成 ${parts.filter((task) => task.status === 'done' && multipartArtifactReady(task)).length} 个。每个 P 的详细总结单独存放，并保留稳定 CID 标识。`, '',
       '## 思维导图', '', '```mermaid', 'flowchart TD', '  A[多P视频] --> B[逐P总结]', ...parts.map((task) => `  B --> P${task.page}[P${task.page} ${escapeMermaid(task.part)}]`), '```', '',
       '## 目录', '',
-      ...parts.map((task) => `- [P${task.page} ${task.part}](parts/cid-${safeName(task.cid, 'part', 40)}/summary.md) · ${task.status === 'done' ? '已完成' : task.pageState === 'removed' ? '远程已移除' : '待处理'}`), '',
+      ...parts.map((task) => `- [P${task.page} ${task.part}](parts/cid-${safeName(task.cid, 'part', 40)}/summary.md) · ${task.status === 'done' && multipartArtifactReady(task) ? '已完成' : task.pageState === 'removed' ? '远程已移除' : '待处理'}`), '',
       '## 每 P 小结', '',
       ...partSummaries,
       '## 字幕', '', '每个 P 的 ASR 时间戳和站内字幕位于对应 P 的产物目录。', '',
@@ -602,14 +704,16 @@ class MultiPartManager {
     return /^https?:\/\//i.test(String(parent.cover || '').trim()) ? String(parent.cover).trim() : '';
   }
 
-  publicParent(parent) {
+  publicParent(parent, { reconcile = true } = {}) {
+    if (reconcile) this.reconcileParentArtifacts(parent);
+    parent = this.store.get('multiPartParents', parent.id) || parent;
     const parts = this.partTasks(parent.id).sort((a, b) => Number(a.page || 0) - Number(b.page || 0));
     const active = this.activeSessions(parent.id);
     const sessionsByTask = new Map(active
       .filter((session) => session.currentTaskId)
       .map((session) => [String(session.currentTaskId), session]));
     const publicParts = parts.map((task) => publicPart(task, sessionsByTask.get(String(task.id))));
-    const completed = parts.filter((task) => task.status === 'done').length;
+    const completed = parts.filter((task) => task.status === 'done' && multipartArtifactReady(task)).length;
     const running = parts.filter((task) => sessionsByTask.has(String(task.id))).length;
     const stopped = parts.filter((task) => task.multiPartStopped === true).length;
     const failed = parts.filter((task) => isMultipartTaskFailed(task)).length;
@@ -727,6 +831,46 @@ function parentIdFor(bvid, collectionId) {
 }
 
 function extractBvid(value) { return String(value || '').match(/BV[0-9A-Za-z]{10}/i)?.[0] || ''; }
+function deriveMultipartParentStatus(parent = {}, parts = [], activeSessions = [], { missingArtifactDetected = false } = {}) {
+  if (activeSessions.length) return 'running';
+  const available = parts.filter((task) => task.pageState !== 'removed');
+  const completed = available.filter((task) => task.status === 'done' && multipartArtifactReady(task)).length;
+  if (available.length > 0 && completed === available.length) return 'completed';
+  // A user stop is a meaningful terminal UI state. Keep it until the user
+  // explicitly resumes the parent, unless reconciliation found a completed
+  // task whose artifact disappeared and needs to be made retryable.
+  if (parent.status === 'stopped' && !missingArtifactDetected) return 'stopped';
+  return completed > 0 ? 'partial' : 'pending';
+}
+
+function resolveMultipartArtifact(task = {}) {
+  const preferredName = task.multiPartRole === 'parent' ? 'index.md' : 'summary.md';
+  const roots = [...new Set([task.artifactDir, task.preallocatedArtifactDir, task.parentRoot]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .map((value) => path.resolve(value)))];
+  const pointer = String(task.outputMarkdown || '').trim();
+  const candidates = [];
+  if (pointer && path.basename(pointer).toLowerCase() === preferredName) candidates.push(path.resolve(pointer));
+  for (const root of roots) candidates.push(path.join(root, preferredName));
+  for (const markdownFile of [...new Set(candidates)]) {
+    try {
+      const containingRoot = roots.find((root) => isPathWithin(root, markdownFile));
+      if (roots.length && !containingRoot) continue;
+      const stat = fs.statSync(markdownFile);
+      if (!stat.isFile()) continue;
+      if (stat.size > 0) {
+        return { ready: true, markdownFile, root: containingRoot || path.dirname(markdownFile) };
+      }
+    } catch {}
+  }
+  return { ready: false, markdownFile: '', root: roots[0] || '' };
+}
+function multipartArtifactReady(task = {}) { return resolveMultipartArtifact(task).ready; }
+function isPathWithin(root, target) {
+  const relative = path.relative(path.resolve(root), path.resolve(target));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
 function assertMultipartVideoSupported(input, info) {
   const urlReason = unsupportedBilibiliUrlReason(input?.url || '');
   if (urlReason) throw new Error(urlReason);
@@ -738,12 +882,13 @@ function publicPage(page) { return { page: Number(page.page || 1), cid: String(p
 function publicPart(task, session = null) {
   if (!task) return null;
   const active = Boolean(session && session.currentTaskId === task.id);
-  const progress = task.status === 'done'
+  const completed = task.status === 'done' && multipartArtifactReady(task);
+  const progress = completed
     ? 1
     : active
       ? clampProgress(session.progress)
       : clampProgress(task.multiPartProgress);
-  const displayStatus = task.status === 'done'
+  const displayStatus = completed
     ? 'completed'
     : task.multiPartStopped
       ? 'stopped'
@@ -787,7 +932,7 @@ function partSummaryLines(parent, task) {
   const cid = safeName(task.cid, 'part', 40);
   const title = `P${Number(task.page || 1)} ${String(task.part || '').replace(/[\r\n]+/g, ' ').trim()}`.trim();
   const link = `parts/cid-${cid}/summary.md`;
-  const completed = task.status === 'done';
+  const completed = task.status === 'done' && multipartArtifactReady(task);
   const status = completed
     ? (task.pageState === 'removed' ? '已完成，远程页面已移除' : '已完成')
     : task.pageState === 'removed' ? '远程已移除'

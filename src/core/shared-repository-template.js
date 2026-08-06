@@ -6,6 +6,8 @@ function sharedRepositoryTemplate({ owner, name, branch = 'main' }) {
   return [
     textFile('README.md', `# ${name}
 
+Before merging any contribution, the required GitHub status check \`validate-shared-docs\` must pass. The repository owner should keep this check required on the default branch.
+
 这是由“星藏家”初始化的 B站视频总结共享仓库。仓库只接收已经完成的 B站视频 Markdown 总结、必要的脱敏元数据和 Markdown 引用的图片资源，不接收原始视频、音频、Cookie、API Key、ASR 缓存或应用数据库。
 
 ## 使用方式
@@ -51,6 +53,8 @@ function sharedRepositoryTemplate({ owner, name, branch = 'main' }) {
     textFile('.github/CODEOWNERS', `* @${owner}\n`),
     textFile('.github/pull_request_template.md', `## 星藏家共享文档
 
+- Required check before merge: \`validate-shared-docs\` must be green.
+
 - [ ] 只包含已完成的 B站视频总结、必要元数据和 Markdown 图片
 - [ ] 不包含原始音视频、Cookie、Token、API Key、数据库或绝对路径
 - [ ] 文档路径位于提交者自己的 GitHub 数字 ID 目录
@@ -71,6 +75,7 @@ permissions:
 
 jobs:
   validate:
+    name: validate-shared-docs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,6 +100,7 @@ permissions:
 
 jobs:
   catalog:
+    name: build-shared-catalog
     runs-on: ubuntu-latest
     concurrency:
       group: star-owner-catalog-${owner}-${name}

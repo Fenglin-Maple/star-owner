@@ -187,6 +187,66 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   assert(['102', '103'].every((cid) => store.getTask(`${created.id}:part:${cid}`).multiPartFailed === false), 'batch retry did not clear the previous failure marker');
   await manager.stop(created.id);
 
+  // Completion is derived from the real standard artifacts, not only from the
+  // database status. Exercise stale pointers, a missing child artifact, and multiple
+  // parents sharing one collection so one parent's incomplete P cannot affect
+  // the other parent's progress.
+  const consistencyRoot = path.join(root, 'consistency');
+  const completeParentId = 'multipart:consistency:complete';
+  const incompleteParentId = 'multipart:consistency:incomplete';
+  const stoppedParentId = 'multipart:consistency:stopped';
+  const completeParentRoot = path.join(consistencyRoot, 'complete');
+  const incompleteParentRoot = path.join(consistencyRoot, 'incomplete');
+  const stoppedParentRoot = path.join(consistencyRoot, 'stopped');
+  const completePartRoot = path.join(completeParentRoot, 'parts', 'cid-301');
+  const incompletePartRoot = path.join(incompleteParentRoot, 'parts', 'cid-401');
+  const stoppedPartRoot = path.join(stoppedParentRoot, 'parts', 'cid-501');
+  fs.mkdirSync(completePartRoot, { recursive: true });
+  fs.mkdirSync(incompletePartRoot, { recursive: true });
+  fs.mkdirSync(stoppedPartRoot, { recursive: true });
+  fs.writeFileSync(path.join(completePartRoot, 'summary.md'), '# 完整父任务 P1\n', 'utf8');
+  fs.writeFileSync(path.join(stoppedPartRoot, 'summary.md'), '# 已停止父任务 P1\n', 'utf8');
+  fs.writeFileSync(path.join(completeParentRoot, 'index.md'), '# 完整父任务目录\n', 'utf8');
+  fs.writeFileSync(path.join(incompleteParentRoot, 'index.md'), '# 不完整父任务目录\n', 'utf8');
+  fs.writeFileSync(path.join(stoppedParentRoot, 'index.md'), '# 已停止父任务目录\n', 'utf8');
+  const makeParent = (id, bvid, title, parentRoot, cid) => ({
+    id, parentDocumentId: id, bvid, title, owner: '测试作者', collectionId: created.collectionId,
+    collectionName: created.collectionName, collectionKind: 'bilibili-multipart', parentRoot,
+    pages: [{ page: 1, cid, part: `${title} P1`, duration: 120 }], selectedCids: [cid],
+    settings: {}, status: 'completed', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastRefreshedAt: new Date().toISOString()
+  });
+  store.set('multiPartParents', completeParentId, makeParent(completeParentId, 'BVCONSIST01', '完整父任务', completeParentRoot, '301'));
+  store.set('multiPartParents', incompleteParentId, makeParent(incompleteParentId, 'BVCONSIST02', '不完整父任务', incompleteParentRoot, '401'));
+  store.set('multiPartParents', stoppedParentId, {
+    ...makeParent(stoppedParentId, 'BVCONSIST03', '已停止父任务', stoppedParentRoot, '501'),
+    pages: [page(1, '501', '已完成 P'), page(2, '502', '待继续 P')],
+    selectedCids: ['501', '502'],
+    status: 'stopped'
+  });
+  store.upsertTask({ id: completeParentId, collectionId: created.collectionId, bvid: 'BVCONSIST01', title: '完整父任务 · 多P目录', status: 'done', outputMarkdown: path.join(completeParentRoot, 'stale-index.md'), artifactDir: completeParentRoot, multiPartRole: 'parent', multiPartParentId: completeParentId });
+  store.upsertTask({ id: `${completeParentId}:part:301`, collectionId: created.collectionId, bvid: 'BVCONSIST01', title: '完整父任务 P1', status: 'done', outputMarkdown: path.join(completePartRoot, 'stale-summary.md'), artifactDir: completePartRoot, preallocatedArtifactDir: completePartRoot, multiPartRole: 'part', multiPartParentId: completeParentId, cid: '301', multiPartId: '301', page: 1, pageState: 'active' });
+  store.upsertTask({ id: incompleteParentId, collectionId: created.collectionId, bvid: 'BVCONSIST02', title: '不完整父任务 · 多P目录', status: 'done', outputMarkdown: path.join(incompleteParentRoot, 'index.md'), artifactDir: incompleteParentRoot, multiPartRole: 'parent', multiPartParentId: incompleteParentId });
+  store.upsertTask({ id: `${incompleteParentId}:part:401`, collectionId: created.collectionId, bvid: 'BVCONSIST02', title: '不完整父任务 P1', status: 'done', outputMarkdown: path.join(incompletePartRoot, 'summary.md'), artifactDir: incompletePartRoot, preallocatedArtifactDir: incompletePartRoot, multiPartRole: 'part', multiPartParentId: incompleteParentId, cid: '401', multiPartId: '401', page: 1, pageState: 'active' });
+  store.upsertTask({ id: stoppedParentId, collectionId: created.collectionId, bvid: 'BVCONSIST03', title: '已停止父任务 · 多P目录', status: 'done', outputMarkdown: path.join(stoppedParentRoot, 'index.md'), artifactDir: stoppedParentRoot, multiPartRole: 'parent', multiPartParentId: stoppedParentId });
+  store.upsertTask({ id: `${stoppedParentId}:part:501`, collectionId: created.collectionId, bvid: 'BVCONSIST03', title: '已停止父任务 P1', status: 'done', outputMarkdown: path.join(stoppedPartRoot, 'stale-summary.md'), artifactDir: stoppedPartRoot, preallocatedArtifactDir: stoppedPartRoot, multiPartRole: 'part', multiPartParentId: stoppedParentId, cid: '501', multiPartId: '501', page: 1, pageState: 'active' });
+  store.upsertTask({ id: `${stoppedParentId}:part:502`, collectionId: created.collectionId, bvid: 'BVCONSIST03', title: '已停止父任务 P2', status: 'pending', outputMarkdown: '', artifactDir: '', preallocatedArtifactDir: path.join(stoppedParentRoot, 'parts', 'cid-502'), multiPartRole: 'part', multiPartParentId: stoppedParentId, cid: '502', multiPartId: '502', page: 2, pageState: 'active', multiPartStopped: true });
+  store.commit();
+  manager.invalidatePartTaskCache();
+  const consistencyState = manager.state();
+  const completeView = consistencyState.parents.find((item) => item.id === completeParentId);
+  const incompleteView = consistencyState.parents.find((item) => item.id === incompleteParentId);
+  const stoppedView = consistencyState.parents.find((item) => item.id === stoppedParentId);
+  assert(completeView && completeView.completed === 1 && completeView.progress === 1, '完整多P父任务在同收藏夹存在其它父任务时没有保持完成状态');
+  assert(store.getTask(`${completeParentId}:part:301`).outputMarkdown === path.join(completePartRoot, 'summary.md'), '多P完成子任务的失效 outputMarkdown 指针没有修正');
+  assert(incompleteView && incompleteView.completed === 0 && incompleteView.parts[0].displayStatus === 'failed', '缺少真实 summary.md 的多P子任务仍被错误显示为完成');
+  assert(store.get('multiPartParents', incompleteParentId).status !== 'completed', '产物缺失的多P父任务仍保留 completed 状态');
+  assert(stoppedView && stoppedView.status === 'stopped' && store.getTask(`${stoppedParentId}:part:501`).outputMarkdown === path.join(stoppedPartRoot, 'summary.md'), '修正失效产物指针时错误清除了父任务的手动停止状态');
+  for (const id of [completeParentId, incompleteParentId, stoppedParentId]) {
+    store.delete('multiPartParents', id);
+    for (const task of store.listTasks().filter((item) => item.id === id || item.multiPartParentId === id)) store.delete('tasks', task.id);
+  }
+  store.commit();
+
   await manager.delete(created.id);
   assert.strictEqual(store.get('multiPartParents', created.id), null, '多P父任务没有删除');
   assert.strictEqual(store.listTasks({ collectionId: created.collectionId }).length, 0, '多P父任务删除后仍残留任务');

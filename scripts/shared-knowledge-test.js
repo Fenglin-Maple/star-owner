@@ -124,6 +124,16 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   assert(multipartPackage.files.some((file) => file.relative === 'parts/cid-101/frames/frame-001.png'), '多P共享包遗漏 P 总结图片');
   assert(!multipartPackage.files.some((file) => /agent-draft|metadata\.json/i.test(file.relative)), '多P共享包包含过程草稿或本地元数据');
   assert.strictEqual(multipartPackage.metadata.entryMarkdown, 'index.md', '多P共享包入口不是 index.md');
+  const siblingParent = { ...multipartParent, id: 'multipart-sibling-parent', bvid: 'BV1MULTIP002', title: '同收藏夹未完成父任务', outputMarkdown: path.join(multipartRoot, 'missing-sibling-index.md') };
+  const siblingPart = { ...multipartPart, id: 'multipart-sibling-parent:part:201', bvid: siblingParent.bvid, cid: '201', multiPartId: '201', multiPartParentId: siblingParent.id, status: 'pending', outputMarkdown: '' };
+  store.upsertTask(siblingParent);
+  store.upsertTask(siblingPart);
+  store.upsertTask({ ...multipartPart, outputMarkdown: path.join(multipartPartRoot, 'stale-summary-pointer.md') });
+  store.commit();
+  const fallbackPackage = manager.prepareDocument({ ...multipartParent, outputMarkdown: path.join(multipartRoot, 'stale-index-pointer.md') });
+  assert(fallbackPackage.files.some((file) => file.relative === 'index.md' && file.sourcePath === path.join(multipartRoot, 'index.md')), '多P父任务没有从标准位置恢复失效的 index.md 指针');
+  assert(fallbackPackage.files.some((file) => file.relative === 'parts/cid-101/summary.md' && file.sourcePath === path.join(multipartPartRoot, 'summary.md')), '多P子任务没有从标准位置恢复失效的 summary.md 指针');
+  assert(!fallbackPackage.files.some((file) => file.relative.includes('cid-201')), '同收藏夹其它未完成父任务错误混入当前多P共享包');
   assert.strictEqual(MAX_SHARED_PR_DOCUMENTS, 1000, '共享上传单批数量没有提升到 1000 篇');
   assert.deepStrictEqual(parseRepositoryInput('https://github.com/example/shared-docs.git'), { owner: 'example', name: 'shared-docs', branch: '' }, '共享仓库 URL 解析失败');
   const upload = await manager.upload({ taskIds: [task.id] });
@@ -142,6 +152,10 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
     if (endpoint === '/user') return { login: 'Fenglin-Maple', id: 998877 };
     if (endpoint === '/repos/Fenglin-Maple/Blibili-Markdowns') return { name: 'Blibili-Markdowns', default_branch: 'main', private: false, html_url: 'https://github.com/Fenglin-Maple/Blibili-Markdowns', owner: { login: 'Fenglin-Maple', id: 998877 } };
     if (endpoint.includes('/git/ref/heads/')) return { object: { sha: 'owner-base-sha' } };
+    if (endpoint.endsWith('/branches/main/protection')) {
+      if (options.method === 'PUT') return { url: endpoint };
+      const error = new Error('not protected'); error.status = 404; throw error;
+    }
     if (options.method === 'POST' && endpoint.endsWith('/git/refs')) return { ref: options.body.ref };
     if (options.method === 'PUT' && endpoint.includes('/contents/')) return { content: { path: decodeContentPath(endpoint) } };
     if (endpoint.includes('/contents/')) {
@@ -182,6 +196,9 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   const repositoryStore = await Store.open(path.join(root, 'repository-settings.sqlite'));
   const initializedFiles = [];
   const initializedContents = new Map();
+  const protectionBodies = [];
+  const statusCheckBodies = [];
+  let existingProtection = null;
   const repositoryEvents = [];
   const repositoryManager = new SharedKnowledgeManager({
     store: repositoryStore,
@@ -204,6 +221,26 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
         if (initializedContents.has(remotePath)) return { content: initializedContents.get(remotePath).toString('base64'), encoding: 'base64', sha: `initialized-${remotePath}` };
         const error = new Error('not found'); error.status = 404; throw error;
       }
+      if (options.method === 'POST' && endpoint.endsWith('/branches/main/protection/required_status_checks/contexts')) {
+        statusCheckBodies.push({ method: options.method, body: options.body });
+        existingProtection = {
+          ...existingProtection,
+          required_status_checks: {
+            ...existingProtection.required_status_checks,
+            contexts: [...new Set([...(existingProtection.required_status_checks?.contexts || []), ...(options.body.contexts || [])])]
+          }
+        };
+        return options.body;
+      }
+      if (endpoint.endsWith('/branches/main/protection')) {
+        if (options.method !== 'PUT') {
+          if (existingProtection) return existingProtection;
+          const error = new Error('not protected'); error.status = 404; throw error;
+        }
+        protectionBodies.push(options.body);
+        existingProtection = options.body;
+        return { url: endpoint };
+      }
       throw new Error(`unexpected repository endpoint: ${endpoint}`);
     },
     gitRuntime: { state: () => ({ available: true, isolated: true, path: 'test-git' }) },
@@ -217,6 +254,19 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   await repositoryManager.setToken('repo-token');
   const createdRepository = await repositoryManager.createRepository({ name: 'star-owner-shared' });
   assert.strictEqual(createdRepository.repository.ownerId, '778899', '个人共享仓库没有绑定当前 GitHub 数字 ID');
+  assert(createdRepository.contract.requiredValidation === true && createdRepository.contract.requiredValidationContext === 'validate-shared-docs', '个人共享仓库没有启用合并前必需校验');
+  assert(protectionBodies.length === 1 && protectionBodies[0].required_status_checks?.contexts?.includes('validate-shared-docs'), '一键建仓没有通过 GitHub API 设置 validate-shared-docs 必需检查');
+  existingProtection = {
+    required_status_checks: { strict: false, contexts: ['existing-ci'] },
+    required_pull_request_reviews: { required_approving_review_count: 2, require_code_owner_reviews: true },
+    enforce_admins: { enabled: true }
+  };
+  await repositoryManager.configureRequiredValidation(createdRepository.repository, 'repo-token');
+  assert(statusCheckBodies.length === 1 && statusCheckBodies[0].method === 'POST' && statusCheckBodies[0].body.contexts.length === 1 && statusCheckBodies[0].body.contexts[0] === 'validate-shared-docs', '已有分支保护没有通过追加接口加入共享校验');
+  assert.strictEqual(protectionBodies.length, 1, '已有分支保护被整体 PUT 覆盖，可能清除审核或仓库限制规则');
+  assert.strictEqual(existingProtection.required_pull_request_reviews.required_approving_review_count, 2, '追加必需检查时破坏了已有 PR 审核规则');
+  await repositoryManager.configureRequiredValidation(createdRepository.repository, 'repo-token');
+  assert.strictEqual(statusCheckBodies.length, 1, '已经存在的共享必需检查被重复写入');
   assert(initializedFiles.includes('README.md') && initializedFiles.includes('.github/workflows/validate-shared-docs.yml') && initializedFiles.includes('scripts/build-catalog.mjs'), '个人共享仓库缺少 README、GitHub Action 或目录脚本');
   assert(repositoryManager.state().repositories.some((item) => item.owner === 'repo-owner' && item.name === 'star-owner-shared' && item.verified), '验证通过的共享仓库没有加入仓库下拉注册表');
   assert(repositoryEvents.some((event) => event.type === 'shared-operation-progress' && event.operation?.type === 'repository-create' && event.operation.progress > 0), '一键建仓没有发出可显示的进度事件');
@@ -272,8 +322,10 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   const trunkTemplate = sharedRepositoryTemplate({ owner: 'repo-owner', name: 'trunk-shared', branch: 'trunk' });
   const trunkWorkflow = trunkTemplate.find((file) => file.relative === '.github/workflows/validate-shared-docs.yml')?.buffer.toString('utf8') || '';
   assert(trunkWorkflow.includes('branches: ["trunk"]'), '一键建仓模板没有使用仓库实际默认分支');
+  assert(trunkWorkflow.includes('name: validate-shared-docs'), '共享校验 Action 没有稳定的必需检查名称');
   const validatorTemplate = trunkTemplate.find((file) => file.relative === 'scripts/validate-shared-docs.mjs')?.buffer.toString('utf8') || '';
   const catalogWorkflow = trunkTemplate.find((file) => file.relative === '.github/workflows/build-catalog.yml')?.buffer.toString('utf8') || '';
+  assert(catalogWorkflow.includes('name: build-shared-catalog'), '共享目录 Action 没有稳定的工作名称');
   const catalogScript = trunkTemplate.find((file) => file.relative === 'scripts/build-catalog.mjs')?.buffer.toString('utf8') || '';
   assert(validatorTemplate.includes('event.pull_request?.user?.id') && !validatorTemplate.includes('GITHUB_ACTOR_ID'), '共享校验没有使用 Pull Request 真实作者 ID');
   assert(catalogWorkflow.includes('concurrency:') && catalogWorkflow.includes('for attempt in 1 2 3'), '共享目录 Action 缺少并发串行或推送重试');
@@ -292,6 +344,10 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
     request: async (endpoint, options = {}) => {
       if (endpoint === '/user') return { login: 'private-user', id: 778899 };
       if (endpoint === '/repos/private-user/private-shared') return { name: 'private-shared', default_branch: 'main', private: true, html_url: 'https://github.com/private-user/private-shared', owner: { login: 'private-user', id: 778899 } };
+      if (endpoint.endsWith('/branches/main/protection')) {
+        if (options.method === 'PUT') return { url: endpoint };
+        const error = new Error('not protected'); error.status = 404; throw error;
+      }
       if (endpoint.includes('/git/trees/')) {
         privateTreeAuthorized = options.token === 'private-token';
         return { sha: 'private-tree', tree: [{ type: 'blob', path: `${privateRemoteRoot}/${DOCUMENT_META_FILE}`, sha: 'private-meta' }] };

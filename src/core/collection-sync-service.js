@@ -694,6 +694,7 @@ function cleanupTaskSnapshot(task = {}) {
   return {
     id: task.id,
     collectionId: task.collectionId,
+    workId: task.workId || '',
     bvid: task.bvid,
     artifactDir: task.artifactDir || '',
     allowedRoot: task.allowedRoot || '',

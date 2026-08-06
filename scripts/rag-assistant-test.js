@@ -59,6 +59,21 @@ async function startFakeProvider() {
     requests.push(body);
     const userText = latestUserText(body.messages || []);
     const toolResult = [...(body.messages || [])].reverse().find((item) => item.role === 'tool');
+    const fullConversationText = JSON.stringify(body.messages || []);
+    if (fullConversationText.includes('MULTI_TOOL_ORDER_TEST')) {
+      const toolMessages = (body.messages || []).filter((item) => item.role === 'tool');
+      if (toolMessages.length < 2) {
+        sse(response, [
+          { choices: [{ delta: { tool_calls: [
+            { index: 0, id: 'call-order-search', type: 'function', function: { name: 'knowledge_search', arguments: '{"query":"星藏家","limit":1}' } },
+            { index: 1, id: 'call-order-images', type: 'function', function: { name: 'knowledge_view_images', arguments: '{"document_id":"rag-task","image_indices":[1,2]}' } }
+          ] } }] }
+        ]);
+      } else {
+        sse(response, [{ choices: [{ delta: { content: '多工具调用顺序兼容测试完成。' } }] }]);
+      }
+      return;
+    }
     if (userText.includes('COMPAT_PARAMETERS')) {
       if (request.url === '/chat/completions') {
         response.writeHead(404, { 'content-type': 'application/json' });
@@ -169,7 +184,6 @@ async function startFakeProvider() {
       }
       return;
     }
-    const fullConversationText = JSON.stringify(body.messages || []);
     if (fullConversationText.includes('IMAGE_MULTI_BATCH_TEST')) {
       const loadedBatches = (body.messages || []).filter((message) => Array.isArray(message.content) && message.content.some((part) => part.type === 'image_url')).length;
       if (loadedBatches < 2) {
@@ -398,6 +412,19 @@ async function startFakeProvider() {
     const finalMultiBatchRequest = [...fake.requests].reverse().find((item) => JSON.stringify(item.messages || []).includes('IMAGE_MULTI_BATCH_TEST'));
     const finalMultiBatchImages = (finalMultiBatchRequest?.messages || []).flatMap((message) => Array.isArray(message.content) ? message.content : []).filter((part) => part.type === 'image_url');
     assert(finalMultiBatchImages.length === 8, 'RAG retained a fixed per-response image-count limit instead of dynamic budgets');
+    const multiToolOrderSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-tools', knowledgeCollectionIds: ['rag-collection'], title: 'Multi-tool protocol order test' });
+    const multiToolOrderReply = await assistant.send(multiToolOrderSession.id, { content: 'MULTI_TOOL_ORDER_TEST' });
+    assert(multiToolOrderReply.content === '多工具调用顺序兼容测试完成。' && multiToolOrderReply.toolEvents.length === 2, 'multiple tool calls were not completed in one RAG round');
+    const multiToolOrderRequest = [...fake.requests].reverse().find((item) => {
+      const messages = item.messages || [];
+      return messages.some((message) => message.role === 'tool' && message.tool_call_id === 'call-order-search')
+        && messages.some((message) => message.role === 'tool' && message.tool_call_id === 'call-order-images');
+    });
+    const orderedMessages = multiToolOrderRequest?.messages || [];
+    const assistantToolIndex = orderedMessages.findIndex((message) => message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length === 2);
+    const orderToolIndices = ['call-order-search', 'call-order-images'].map((id) => orderedMessages.findIndex((message) => message.role === 'tool' && message.tool_call_id === id));
+    const imageUserIndices = orderedMessages.map((message, index) => Array.isArray(message.content) && message.content.some((part) => part.type === 'image_url') ? index : -1).filter((index) => index >= 0);
+    assert(assistantToolIndex >= 0 && orderToolIndices.every((index) => index > assistantToolIndex) && Math.max(...orderToolIndices) < Math.min(...imageUserIndices) && imageUserIndices.length === 1, 'RAG interleaved an image user message between tool results or emitted more than one image batch');
     const largeImageOutcome = assistant.viewKnowledgeImages(assistant.requireSession(session.id), assistant.sessionModel(assistant.requireSession(session.id)), 'rag-task', [2]);
     assert(largeImageOutcome.visionParts[0].image_url.url.length < 1024 && preparedVisionFiles.includes(largeKnowledgeImage), 'large local-document image was sent to the model without optimization');
     assert(assistant.resolveKnowledgeImage(session.id, largeImageOutcome.images[0].uri) === largeKnowledgeImage, 'optimized model input replaced the original full-resolution display image');

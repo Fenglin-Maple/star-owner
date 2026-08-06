@@ -589,9 +589,12 @@ class RagAssistant {
         if (toolRounds >= MAX_RAG_TOOL_ROUNDS) break;
         toolRounds += 1;
         apiMessages.push({ role: 'assistant', content: result.content || null, tool_calls: result.toolCalls.map(toApiToolCall) });
+        const roundToolMessages = [];
+        const roundVision = [];
+        const roundVisionKeys = new Set();
         for (const call of result.toolCalls) {
           if (toolCallsUsed >= MAX_RAG_TOOL_CALLS) {
-            apiMessages.push({ role: 'tool', tool_call_id: call.id, content: `ERROR: This response reached the ${MAX_RAG_TOOL_CALLS}-tool-call safety limit.` });
+            roundToolMessages.push({ role: 'tool', tool_call_id: call.id, content: `ERROR: This response reached the ${MAX_RAG_TOOL_CALLS}-tool-call safety limit.` });
             continue;
           }
           toolCallsUsed += 1;
@@ -613,37 +616,58 @@ class RagAssistant {
               part,
               key: outcome.visionKeys[index] || imagePartIdentity(part)
             }));
-            const freshVision = visionCandidates.filter((item) => !item.key || !attachedVisionKeys.has(item.key));
+            const freshVision = visionCandidates.filter((item) => {
+              if (item.key && (attachedVisionKeys.has(item.key) || roundVisionKeys.has(item.key))) return false;
+              if (item.key) roundVisionKeys.add(item.key);
+              return true;
+            });
             let toolText = truncate(outcome.text, toolContextLimit);
             if (visionCandidates.length && !freshVision.length) toolText += '\n\nThe requested pixels were already attached earlier in this response; reuse that image input instead of loading it again.';
             const toolMessage = { role: 'tool', tool_call_id: call.id, content: toolText };
-            const attachmentMessage = freshVision.length ? {
-              role: 'user',
-              content: [{ type: 'text', text: 'The desktop application attached optimized visual copies of the original knowledge-base images requested by the preceding tool call. Inspect these pixels as source material; they are not a new user question.' }, ...freshVision.map((item) => item.part)]
-            } : null;
-            const candidateMessages = [...apiMessages, toolMessage, ...(attachmentMessage ? [attachmentMessage] : [])];
-            assertApiContextBudget(candidateMessages, model, this.outputTokenLimit(provider, model));
-            assertApiPayloadBudget(candidateMessages);
             event.status = 'succeeded';
             event.output = truncate(outcome.text, 30000);
             if (outcome.images.length) event.images = outcome.images;
             event.finishedAt = new Date().toISOString();
-            apiMessages.push(toolMessage);
-            if (attachmentMessage) {
-              apiMessages.push(attachmentMessage);
-              for (const item of freshVision) if (item.key) attachedVisionKeys.add(item.key);
-            }
+            roundToolMessages.push(toolMessage);
+            roundVision.push(...freshVision);
           } catch (error) {
             event.status = 'failed';
             event.output = error.message || String(error);
             event.finishedAt = new Date().toISOString();
-            apiMessages.push({ role: 'tool', tool_call_id: call.id, content: `ERROR: ${event.output}` });
+            roundToolMessages.push({ role: 'tool', tool_call_id: call.id, content: `ERROR: ${event.output}` });
             if (call.name === 'knowledge_view_images' && ['MODEL_CONTEXT_LIMIT', 'MODEL_REQUEST_PAYLOAD_LIMIT'].includes(error.code)) {
               visionBudgetExhausted = true;
-              apiMessages.push({ role: 'system', content: 'The safe image budget for this response is exhausted. Do not request more images in this response; answer now from the images and knowledge already loaded.' });
             }
           }
           this.emit({ type: 'tool', sessionId: session.id, messageId: assistantId, tool: event });
+        }
+        let attachmentMessage = roundVision.length ? {
+          role: 'user',
+          content: [{ type: 'text', text: 'The desktop application attached optimized visual copies of the original knowledge-base images requested by the preceding tool calls. Inspect these pixels as source material; they are not a new user question.' }, ...roundVision.map((item) => item.part)]
+        } : null;
+        let candidateMessages = [...apiMessages, ...roundToolMessages, ...(attachmentMessage ? [attachmentMessage] : [])];
+        try {
+          assertApiContextBudget(candidateMessages, model, this.outputTokenLimit(provider, model));
+          assertApiPayloadBudget(candidateMessages);
+        } catch (error) {
+          if (attachmentMessage && ['MODEL_CONTEXT_LIMIT', 'MODEL_REQUEST_PAYLOAD_LIMIT'].includes(error.code)) {
+            // Keep the protocol-valid tool results, but stop adding images when the
+            // combined batch would exceed the provider-safe request budget.
+            attachmentMessage = null;
+            roundVision.length = 0;
+            visionBudgetExhausted = true;
+            candidateMessages = [...apiMessages, ...roundToolMessages];
+            assertApiContextBudget(candidateMessages, model, this.outputTokenLimit(provider, model));
+            assertApiPayloadBudget(candidateMessages);
+            roundToolMessages.push({ role: 'system', content: 'The safe image budget for this response is exhausted. Do not request more images in this response; answer from the evidence already loaded.' });
+          } else {
+            throw error;
+          }
+        }
+        apiMessages.push(...roundToolMessages);
+        if (attachmentMessage) {
+          apiMessages.push(attachmentMessage);
+          for (const item of roundVision) if (item.key) attachedVisionKeys.add(item.key);
         }
         if (toolCallsUsed >= MAX_RAG_TOOL_CALLS) {
           apiMessages.push({ role: 'system', content: `The ${MAX_RAG_TOOL_CALLS}-tool-call budget is exhausted. Answer now from the evidence already collected; do not request more tools.` });

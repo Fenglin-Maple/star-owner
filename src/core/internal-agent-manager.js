@@ -1639,6 +1639,7 @@ class InternalAgentManager {
       if (fs.existsSync(finalMarkdown)) fs.rmSync(finalMarkdown, { force: true });
       fs.renameSync(markdownFile, finalMarkdown);
     }
+    assertMultipartFinalArtifact(finalMarkdown, metadataFile);
     const metadata = readJson(metadataFile);
     const completedTask = {
       ...task,
@@ -2274,6 +2275,16 @@ function emptyModelResponseError({ retryLimit, retryCount, finishReason = '', re
     reasoningOnly ? '模型只返回了推理内容，没有给出最终正文' : '模型与供应商的流式响应格式暂不兼容'
   ];
   return error;
+}
+
+function assertMultipartFinalArtifact(markdownFile, metadataFile) {
+  let markdownStat;
+  try { markdownStat = fs.statSync(markdownFile); } catch { throw new Error('多P总结提交失败：最终 summary.md 在校验后消失。'); }
+  if (!markdownStat.isFile() || markdownStat.size <= 0) throw new Error('多P总结提交失败：最终 summary.md 为空或不是普通文件。');
+  let metadataStat;
+  try { metadataStat = fs.statSync(metadataFile); } catch { throw new Error('多P总结提交失败：视频元数据 info.json 在提交前消失。'); }
+  if (!metadataStat.isFile() || metadataStat.size <= 0) throw new Error('多P总结提交失败：视频元数据 info.json 为空或不是普通文件。');
+  return true;
 }
 
 function clamp(value, min, max, fallback) {

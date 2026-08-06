@@ -113,6 +113,20 @@ function recoverPendingAttemptCleanups(store) {
   const results = [];
   for (const record of store.list('attemptCleanupQueue')) {
     try {
+      const currentTask = store.getTask(record.taskId || record.cleanupTask?.id || record.id);
+      const cleanupWorkId = String(record.cleanupTask?.workId || '');
+      const currentWorkId = String(currentTask?.workId || '');
+      const stale = currentTask && (
+        currentTask.status === 'done'
+        || (cleanupWorkId && currentWorkId && cleanupWorkId !== currentWorkId)
+        || (!cleanupWorkId && currentWorkId)
+        || (currentTask.artifactDir && record.cleanupTask?.artifactDir && path.resolve(currentTask.artifactDir) !== path.resolve(record.cleanupTask.artifactDir))
+      );
+      if (stale) {
+        store.delete('attemptCleanupQueue', record.id);
+        results.push({ id: record.id, ok: true, skipped: true, cleanup: { mode: 'stale-attempt-skipped', deleted: [], preserved: [] } });
+        continue;
+      }
       const cleanup = cleanupAttemptFiles(store, record.cleanupTask || {});
       store.delete('attemptCleanupQueue', record.id);
       results.push({ id: record.id, ok: true, cleanup });
@@ -134,6 +148,7 @@ function cleanupTaskSnapshot(task = {}) {
   return {
     id: task.id || '',
     collectionId: task.collectionId || '',
+    workId: task.workId || '',
     bvid: task.bvid || '',
     artifactDir: task.artifactDir || '',
     allowedRoot: task.allowedRoot || '',

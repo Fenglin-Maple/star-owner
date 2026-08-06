@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { Store } = require('../src/core/store');
 const { ToolRunner } = require('../src/core/tool-runner');
-const { abortTaskAttempt, cleanupAttemptFiles } = require('../src/core/task-attempt');
+const { abortTaskAttempt, cleanupAttemptFiles, recoverPendingAttemptCleanups } = require('../src/core/task-attempt');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -65,6 +65,24 @@ function assert(condition, message) {
   } catch (error) {
     if (!['EPERM', 'EACCES', 'UNKNOWN'].includes(error.code)) throw error;
   }
+
+  const raceRoot = path.join(root, 'cleanup-race-root');
+  const raceArtifact = path.join(raceRoot, 'same-artifact');
+  fs.mkdirSync(raceArtifact, { recursive: true });
+  fs.writeFileSync(path.join(raceArtifact, 'new-attempt-output.md'), '# new attempt\n', 'utf8');
+  store.upsertTask({ id: 'task-cleanup-race', collectionId: 'collection-race', status: 'claimed', workId: 'work-new', claimedBy: 'worker-new', artifactDir: raceArtifact, allowedRoot: raceRoot, workspaceRoot: raceRoot });
+  store.set('attemptCleanupQueue', 'task-cleanup-race', {
+    id: 'task-cleanup-race',
+    taskId: 'task-cleanup-race',
+    cleanupTask: { id: 'task-cleanup-race', collectionId: 'collection-race', workId: 'work-old', artifactDir: raceArtifact, allowedRoot: raceRoot, workspaceRoot: raceRoot },
+    attempts: 1,
+    createdAt: new Date().toISOString()
+  });
+  store.commit();
+  const raceRecovery = recoverPendingAttemptCleanups(store);
+  const raceResult = raceRecovery.find((item) => item.id === 'task-cleanup-race');
+  assert(raceResult?.skipped === true && fs.existsSync(path.join(raceArtifact, 'new-attempt-output.md')), '旧尝试的延迟清理删除了复用相同目录的新多P/普通任务产物');
+  assert(!store.get('attemptCleanupQueue', 'task-cleanup-race'), '跳过过期清理后仍残留队列记录');
 
   const restartRoot = path.join(root, 'restart-root');
   const restartArtifact = path.join(restartRoot, 'attempt');

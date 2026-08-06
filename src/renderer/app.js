@@ -2508,7 +2508,7 @@ function syncDocumentSelectors() {
 
 function resetDocumentDurationRange(tasks) {
   if (!documentDurationMin || !documentDurationMax) return;
-  const maximum = Math.max(60, ...tasks.map((task) => Number(task.duration || 0)));
+  const maximum = Math.ceil(Math.max(60, ...tasks.map((task) => Number(task.duration || 0))));
   documentDurationMin.max = String(maximum);
   documentDurationMax.max = String(maximum);
   documentDurationMin.value = '0';
