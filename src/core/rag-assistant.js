@@ -41,7 +41,7 @@ const MAX_EXTRACTABLE_DOCUMENT_BYTES = 64 * 1024 * 1024;
 const MAX_DOCUMENT_CACHE_ENTRIES = 128;
 const MAX_INDEX_DOCUMENT_CHARACTERS = 4 * 1024 * 1024;
 const MAX_RAG_SEARCH_DOCUMENTS = 2000;
-const MAX_RAG_SEARCH_CHUNKS = 12000;
+const MAX_RAG_SEARCH_CHUNKS = 60000;
 const MAX_RAG_SEARCH_RESULT_CHARACTERS = 50000;
 const RAG_SEARCH_TIME_BUDGET_MS = 5000;
 const MAX_RAG_VISION_IMAGES_PER_TOOL_CALL = 4;
@@ -477,12 +477,15 @@ class RagAssistant {
     this.emit({ type: 'message', sessionId, message: userMessage });
 
     const assistantId = `message-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+    const assistantStartedAt = new Date().toISOString();
     const controller = new AbortController();
     this.controllers.set(sessionId, controller);
-    this.emit({ type: 'assistant-start', sessionId, messageId: assistantId });
+    this.emit({ type: 'assistant-start', sessionId, messageId: assistantId, startedAt: assistantStartedAt });
     try {
       await this.maybeAutoCompact(session, userMessage.id, attachments, controller.signal);
-      const result = await this.runConversation(this.requireSession(session.id), { ...userMessage, attachments }, assistantId, controller.signal);
+      const result = await this.runConversation(this.requireSession(session.id), { ...userMessage, attachments }, assistantId, controller.signal, assistantStartedAt);
+      const assistantFinishedAt = new Date().toISOString();
+      const durationMs = Math.max(0, Date.parse(assistantFinishedAt) - Date.parse(assistantStartedAt));
       const assistant = this.saveMessage({
         id: assistantId,
         sessionId,
@@ -491,15 +494,34 @@ class RagAssistant {
         reasoning: result.reasoning,
         toolEvents: result.toolEvents,
         usage: result.usage,
+        startedAt: assistantStartedAt,
+        finishedAt: assistantFinishedAt,
+        durationMs,
+        toolCallCount: result.toolCallCount ?? result.toolEvents.length,
         status: 'complete'
       });
       this.recordUsage(session, result.usage);
-      this.emit({ type: 'assistant-complete', sessionId, message: assistant, detail: this.sessionDetail(sessionId) });
+      this.emit({ type: 'assistant-complete', sessionId, messageId: assistant.id, message: assistant, detail: this.sessionDetail(sessionId) });
       return assistant;
     } catch (error) {
       const message = error.name === 'AbortError' ? '生成已停止。' : (error.message || String(error));
-      const failed = this.saveMessage({ id: assistantId, sessionId, role: 'assistant', content: '', reasoning: '', toolEvents: [], status: error.name === 'AbortError' ? 'cancelled' : 'failed', error: message });
-      this.emit({ type: 'assistant-error', sessionId, message: failed, error: message });
+      const assistantFinishedAt = new Date().toISOString();
+      const failed = this.saveMessage({
+        id: assistantId,
+        sessionId,
+        role: 'assistant',
+        content: error.ragContent || '',
+        reasoning: error.ragReasoning || '',
+        toolEvents: error.ragToolEvents || [],
+        usage: error.ragUsage || undefined,
+        startedAt: error.ragStartedAt || assistantStartedAt,
+        finishedAt: error.ragFinishedAt || assistantFinishedAt,
+        durationMs: error.ragDurationMs ?? Math.max(0, Date.parse(assistantFinishedAt) - Date.parse(assistantStartedAt)),
+        toolCallCount: error.ragToolCallCount ?? (error.ragToolEvents?.length || 0),
+        status: error.name === 'AbortError' ? 'cancelled' : 'failed',
+        error: message
+      });
+      this.emit({ type: 'assistant-error', sessionId, messageId: failed.id, message: failed, error: message });
       if (error.name !== 'AbortError') throw error;
       return failed;
     } finally {
@@ -519,7 +541,7 @@ class RagAssistant {
     return { cancelled };
   }
 
-  async runConversation(session, userMessage, assistantId, signal) {
+  async runConversation(session, userMessage, assistantId, signal, startedAt = new Date().toISOString()) {
     const provider = this.rawProvider(session.providerId);
     const model = this.sessionModel(session);
     const history = await this.hydrateHistoryAttachments(this.buildHistory(session, model, userMessage.id), model);
@@ -540,86 +562,108 @@ class RagAssistant {
     let visionBudgetExhausted = false;
     const attachedVisionKeys = new Set();
     const toolContextLimit = toolContextCharacterLimit(model);
-    while (toolRounds <= MAX_RAG_TOOL_ROUNDS) {
-      assertApiContextBudget(apiMessages, model, this.outputTokenLimit(provider, model));
-      assertApiPayloadBudget(apiMessages);
-      const availableTools = toolCallsUsed < MAX_RAG_TOOL_CALLS
-        ? tools.filter((item) => !visionBudgetExhausted || item.function?.name !== 'knowledge_view_images')
-        : [];
-      const result = await this.streamCompletion(provider, {
-        model: session.modelId,
-        messages: apiMessages,
-        tools: availableTools.length ? availableTools : undefined,
-        tool_choice: availableTools.length ? 'auto' : undefined,
-        temperature: provider.temperature,
-        max_tokens: this.outputTokenLimit(provider, model)
-      }, signal, (delta) => {
-        if (delta.content) content += delta.content;
-        if (delta.reasoning) reasoning += delta.reasoning;
-        this.emit({ type: 'assistant-delta', sessionId: session.id, messageId: assistantId, ...delta });
-      });
-      usage = addUsage(usage, result.usage || estimateUsage(apiMessages, result.content));
-      if (!result.toolCalls.length) {
-        finished = true;
-        break;
-      }
-      if (toolRounds >= MAX_RAG_TOOL_ROUNDS) break;
-      toolRounds += 1;
-      apiMessages.push({ role: 'assistant', content: result.content || null, tool_calls: result.toolCalls.map(toApiToolCall) });
-      for (const call of result.toolCalls) {
+    try {
+      while (toolRounds <= MAX_RAG_TOOL_ROUNDS) {
+        assertApiContextBudget(apiMessages, model, this.outputTokenLimit(provider, model));
+        assertApiPayloadBudget(apiMessages);
+        const availableTools = toolCallsUsed < MAX_RAG_TOOL_CALLS
+          ? tools.filter((item) => !visionBudgetExhausted || item.function?.name !== 'knowledge_view_images')
+          : [];
+        const result = await this.streamCompletion(provider, {
+          model: session.modelId,
+          messages: apiMessages,
+          tools: availableTools.length ? availableTools : undefined,
+          tool_choice: availableTools.length ? 'auto' : undefined,
+          temperature: provider.temperature,
+          max_tokens: this.outputTokenLimit(provider, model)
+        }, signal, (delta) => {
+          if (delta.content) content += delta.content;
+          if (delta.reasoning) reasoning += delta.reasoning;
+          this.emit({ type: 'assistant-delta', sessionId: session.id, messageId: assistantId, ...delta });
+        });
+        usage = addUsage(usage, result.usage || estimateUsage(apiMessages, result.content));
+        if (!result.toolCalls.length) {
+          finished = true;
+          break;
+        }
+        if (toolRounds >= MAX_RAG_TOOL_ROUNDS) break;
+        toolRounds += 1;
+        apiMessages.push({ role: 'assistant', content: result.content || null, tool_calls: result.toolCalls.map(toApiToolCall) });
+        for (const call of result.toolCalls) {
+          if (toolCallsUsed >= MAX_RAG_TOOL_CALLS) {
+            apiMessages.push({ role: 'tool', tool_call_id: call.id, content: `ERROR: This response reached the ${MAX_RAG_TOOL_CALLS}-tool-call safety limit.` });
+            continue;
+          }
+          toolCallsUsed += 1;
+          const event = {
+            id: call.id,
+            name: call.name,
+            status: 'running',
+            arguments: call.arguments,
+            sequence: toolCallsUsed,
+            contentOffset: content.length,
+            reasoningOffset: reasoning.length,
+            startedAt: new Date().toISOString()
+          };
+          toolEvents.push(event);
+          this.emit({ type: 'tool', sessionId: session.id, messageId: assistantId, tool: event });
+          try {
+            const outcome = normalizeToolResult(await this.executeTool(session, model, call, signal));
+            const visionCandidates = outcome.visionParts.map((part, index) => ({
+              part,
+              key: outcome.visionKeys[index] || imagePartIdentity(part)
+            }));
+            const freshVision = visionCandidates.filter((item) => !item.key || !attachedVisionKeys.has(item.key));
+            let toolText = truncate(outcome.text, toolContextLimit);
+            if (visionCandidates.length && !freshVision.length) toolText += '\n\nThe requested pixels were already attached earlier in this response; reuse that image input instead of loading it again.';
+            const toolMessage = { role: 'tool', tool_call_id: call.id, content: toolText };
+            const attachmentMessage = freshVision.length ? {
+              role: 'user',
+              content: [{ type: 'text', text: 'The desktop application attached optimized visual copies of the original knowledge-base images requested by the preceding tool call. Inspect these pixels as source material; they are not a new user question.' }, ...freshVision.map((item) => item.part)]
+            } : null;
+            const candidateMessages = [...apiMessages, toolMessage, ...(attachmentMessage ? [attachmentMessage] : [])];
+            assertApiContextBudget(candidateMessages, model, this.outputTokenLimit(provider, model));
+            assertApiPayloadBudget(candidateMessages);
+            event.status = 'succeeded';
+            event.output = truncate(outcome.text, 30000);
+            if (outcome.images.length) event.images = outcome.images;
+            event.finishedAt = new Date().toISOString();
+            apiMessages.push(toolMessage);
+            if (attachmentMessage) {
+              apiMessages.push(attachmentMessage);
+              for (const item of freshVision) if (item.key) attachedVisionKeys.add(item.key);
+            }
+          } catch (error) {
+            event.status = 'failed';
+            event.output = error.message || String(error);
+            event.finishedAt = new Date().toISOString();
+            apiMessages.push({ role: 'tool', tool_call_id: call.id, content: `ERROR: ${event.output}` });
+            if (call.name === 'knowledge_view_images' && ['MODEL_CONTEXT_LIMIT', 'MODEL_REQUEST_PAYLOAD_LIMIT'].includes(error.code)) {
+              visionBudgetExhausted = true;
+              apiMessages.push({ role: 'system', content: 'The safe image budget for this response is exhausted. Do not request more images in this response; answer now from the images and knowledge already loaded.' });
+            }
+          }
+          this.emit({ type: 'tool', sessionId: session.id, messageId: assistantId, tool: event });
+        }
         if (toolCallsUsed >= MAX_RAG_TOOL_CALLS) {
-          apiMessages.push({ role: 'tool', tool_call_id: call.id, content: `ERROR: This response reached the ${MAX_RAG_TOOL_CALLS}-tool-call safety limit.` });
-          continue;
+          apiMessages.push({ role: 'system', content: `The ${MAX_RAG_TOOL_CALLS}-tool-call budget is exhausted. Answer now from the evidence already collected; do not request more tools.` });
         }
-        toolCallsUsed += 1;
-        const event = { id: call.id, name: call.name, status: 'running', arguments: call.arguments, startedAt: new Date().toISOString() };
-        toolEvents.push(event);
-        this.emit({ type: 'tool', sessionId: session.id, messageId: assistantId, tool: event });
-        try {
-          const outcome = normalizeToolResult(await this.executeTool(session, model, call, signal));
-          const visionCandidates = outcome.visionParts.map((part, index) => ({
-            part,
-            key: outcome.visionKeys[index] || imagePartIdentity(part)
-          }));
-          const freshVision = visionCandidates.filter((item) => !item.key || !attachedVisionKeys.has(item.key));
-          let toolText = truncate(outcome.text, toolContextLimit);
-          if (visionCandidates.length && !freshVision.length) toolText += '\n\nThe requested pixels were already attached earlier in this response; reuse that image input instead of loading it again.';
-          const toolMessage = { role: 'tool', tool_call_id: call.id, content: toolText };
-          const attachmentMessage = freshVision.length ? {
-            role: 'user',
-            content: [{ type: 'text', text: 'The desktop application attached optimized visual copies of the original knowledge-base images requested by the preceding tool call. Inspect these pixels as source material; they are not a new user question.' }, ...freshVision.map((item) => item.part)]
-          } : null;
-          const candidateMessages = [...apiMessages, toolMessage, ...(attachmentMessage ? [attachmentMessage] : [])];
-          assertApiContextBudget(candidateMessages, model, this.outputTokenLimit(provider, model));
-          assertApiPayloadBudget(candidateMessages);
-          event.status = 'succeeded';
-          event.output = truncate(outcome.text, 30000);
-          if (outcome.images.length) event.images = outcome.images;
-          event.finishedAt = new Date().toISOString();
-          apiMessages.push(toolMessage);
-          if (attachmentMessage) {
-            apiMessages.push(attachmentMessage);
-            for (const item of freshVision) if (item.key) attachedVisionKeys.add(item.key);
-          }
-        } catch (error) {
-          event.status = 'failed';
-          event.output = error.message || String(error);
-          event.finishedAt = new Date().toISOString();
-          apiMessages.push({ role: 'tool', tool_call_id: call.id, content: `ERROR: ${event.output}` });
-          if (call.name === 'knowledge_view_images' && ['MODEL_CONTEXT_LIMIT', 'MODEL_REQUEST_PAYLOAD_LIMIT'].includes(error.code)) {
-            visionBudgetExhausted = true;
-            apiMessages.push({ role: 'system', content: 'The safe image budget for this response is exhausted. Do not request more images in this response; answer now from the images and knowledge already loaded.' });
-          }
-        }
-        this.emit({ type: 'tool', sessionId: session.id, messageId: assistantId, tool: event });
       }
-      if (toolCallsUsed >= MAX_RAG_TOOL_CALLS) {
-        apiMessages.push({ role: 'system', content: `The ${MAX_RAG_TOOL_CALLS}-tool-call budget is exhausted. Answer now from the evidence already collected; do not request more tools.` });
-      }
+      if (!finished && toolEvents.length) throw new Error(`The model exceeded the ${MAX_RAG_TOOL_CALLS}-tool-call limit. Refine the request and try again.`);
+      if (!content.trim() && !reasoning.trim()) throw new Error('The model returned an empty response. Check the model and provider compatibility settings.');
+      const finishedAt = new Date().toISOString();
+      return { content, reasoning, usage, toolEvents, toolCallCount: toolCallsUsed, startedAt, finishedAt, durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)) };
+    } catch (error) {
+      error.ragToolEvents = toolEvents;
+      error.ragContent = content;
+      error.ragReasoning = reasoning;
+      error.ragUsage = usage;
+      error.ragToolCallCount = toolCallsUsed;
+      error.ragStartedAt = startedAt;
+      error.ragFinishedAt = new Date().toISOString();
+      error.ragDurationMs = Math.max(0, Date.parse(error.ragFinishedAt) - Date.parse(startedAt));
+      throw error;
     }
-    if (!finished && toolEvents.length) throw new Error(`The model exceeded the ${MAX_RAG_TOOL_CALLS}-tool-call limit. Refine the request and try again.`);
-    if (!content.trim() && !reasoning.trim()) throw new Error('The model returned an empty response. Check the model and provider compatibility settings.');
-    return { content, reasoning, usage, toolEvents };
   }
 
   buildHistory(session, model, excludeMessageId = '') {
@@ -660,19 +704,30 @@ class RagAssistant {
   }
 
   systemPrompt(session, model) {
+    const selectedCollections = this.selectedCollectionPrompt(session);
     return [
       'You are the built-in RAG assistant of 星藏家. Help the user inspect, compare, organize, and analyze their accepted Bilibili Markdown knowledge library.',
-      'Use knowledge_search before making claims about selected local libraries. Cite the source title and collection in the answer. Never fabricate missing facts.',
-      model.supportsTools ? 'You can inspect selected knowledge without summarization: use knowledge_list_documents to discover document ids, knowledge_read_document to read the exact original Markdown in line ranges, and knowledge_view_images to inspect original local images when vision is enabled.' : '',
+      'Use the knowledge tools before making claims about selected local libraries. Cite the source title, BVID, user, and collection in the answer. Never fabricate missing facts.',
+      model.supportsTools ? 'When the user asks how many collections or documents are selected, or asks about a named collection, first use knowledge_list_collections. Then pass the exact collection_id or collection_ids to knowledge_list_documents and knowledge_search. A collection ID identifies a collection, not a document; only use a complete document ID returned by a listing or search with knowledge_read_document or knowledge_view_images.' : '',
+      model.supportsTools ? 'Use knowledge_list_documents for exhaustive inventory and pagination. Use knowledge_search for topic discovery; it can inspect up to 60,000 chunks per request but may still return a budget notice as partial evidence. When that happens, narrow by collection_ids, BVID, or a more specific query before concluding that a collection has no matching content.' : '',
+      model.supportsTools ? 'You can inspect selected knowledge without summarization: use knowledge_read_document to read the exact original Markdown in line ranges, and knowledge_view_images to inspect original local images when vision is enabled.' : '',
       model.supportsTools ? 'Knowledge document metadata includes both the Bilibili publish date and the date when the user added the video to favorites. Preserve the distinction and use these fields when the user asks about chronology or freshness.' : '',
       model.supportsTools ? 'Knowledge metadata also states whether a completed document is still in Bilibili favorites, was removed from the favorites folder, or belongs to a Bilibili folder that was deleted. Archived documents remain valid knowledge; never describe an archived item as currently favorited.' : '',
       model.supportsTools && model.supportsVision ? 'When an inspected knowledge image is useful to the user, include the exact star-rag-image URI returned by knowledge_view_images in Markdown image syntax so the desktop app can display it. Do not claim that only an index is available.' : '',
       `Your working sandbox is: ${session.sandboxDir}`,
       session.permissionMode === 'full' ? 'The user enabled full filesystem and command access.' : 'You have restricted access. Operations outside the sandbox or command execution require explicit user approval.',
-      session.knowledgeCollectionIds.length ? `Selected collection ids: ${session.knowledgeCollectionIds.join(', ')}` : 'No local knowledge collection is selected.',
+      selectedCollections ? `Selected collection directory (these are collection IDs, never document IDs):\n${selectedCollections}` : 'No local knowledge collection is selected.',
       session.systemPrompt,
       session.compressedSummary ? `Compressed earlier context:\n${session.compressedSummary}` : ''
     ].filter(Boolean).join('\n\n');
+  }
+
+  selectedCollectionPrompt(session) {
+    return (session.knowledgeCollectionIds || []).map((id) => {
+      const collection = this.store.getCollectionById(id) || {};
+      const kind = collectionKindInfo(collection);
+      return `- collection_id=${id} | user=${collection.userName || collection.userId || '-'} | collection=${collection.name || '-'} | type=${kind.label || kind.code || 'other'}`;
+    }).join('\n');
   }
 
   activeHistoryMessages(session, messagesInput) {
@@ -768,10 +823,15 @@ class RagAssistant {
       tool('open_browser', 'Open an HTTP(S) URL in the user default browser.', { url: { type: 'string' } }, ['url'])
     ];
     if (session.knowledgeCollectionIds.length) {
+      const collectionScopeProperties = {
+        collection_ids: { type: 'array', description: 'Optional exact IDs of one or more selected collections. Omit to search all selected collections.', items: { type: 'string' }, maxItems: 100 },
+        collection_id: { type: 'string', description: 'Optional exact ID of one selected collection; an alias for a one-item collection_ids filter.' }
+      };
       tools.unshift(
-        tool('knowledge_list_documents', 'List original Markdown documents in the selected libraries. Returns stable document ids for exact reading and image inspection.', { query: { type: 'string' }, offset: { type: 'integer' }, limit: { type: 'integer' } }),
+        tool('knowledge_list_collections', 'List the selected knowledge collections with their exact collection IDs, user names, types, and available document counts. Use this before collection-specific retrieval.', { query: { type: 'string', description: 'Optional name, user, type, or ID filter.' } }),
+        tool('knowledge_list_documents', 'List original Markdown documents in the selected libraries. Use collection_ids or collection_id for exact collection scope; returns stable document ids for exact reading and image inspection. Page with offset and limit.', { query: { type: 'string' }, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 200 }, ...collectionScopeProperties }),
         tool('knowledge_read_document', 'Read an exact, unsummarized range from one original Markdown document. Continue with both next_start_line and next_start_column until End of document.', { document_id: { type: 'string' }, start_line: { type: 'integer' }, start_column: { type: 'integer' }, line_count: { type: 'integer' } }, ['document_id']),
-        tool('knowledge_search', 'Search selected local Markdown knowledge libraries. Results include document ids; use knowledge_read_document when exact wording or complete context matters.', { query: { type: 'string' }, limit: { type: 'integer' } }, ['query'])
+        tool('knowledge_search', 'Search selected local Markdown knowledge libraries. Use collection_ids or collection_id when the user names a collection. Results include document ids; use knowledge_read_document when exact wording or complete context matters.', { query: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 20 }, ...collectionScopeProperties }, ['query'])
       );
       if (model.supportsVision) tools.unshift(tool('knowledge_view_images', 'Load up to four original local images from a selected Markdown document into this multimodal conversation. Image indices are one-based: the first image is 1. Omit image_indices to load the first available images. The tool may be called repeatedly while context and request-size budgets remain available. Returns safe image URIs that can be embedded in the answer.', { document_id: { type: 'string' }, image_indices: { type: 'array', description: 'One-based image numbers. The first image is 1, not 0.', items: { type: 'integer', minimum: 1 }, maxItems: MAX_RAG_VISION_IMAGES_PER_TOOL_CALL } }, ['document_id']));
     }
@@ -781,8 +841,9 @@ class RagAssistant {
 
   async executeTool(session, model, call, signal) {
     const args = parseJson(call.arguments || '{}', `Invalid arguments for ${call.name}.`);
-    if (call.name === 'knowledge_search') return this.searchKnowledge(session, args.query, args.limit);
-    if (call.name === 'knowledge_list_documents') return this.listKnowledgeDocuments(session, args.query, args.offset, args.limit);
+    if (call.name === 'knowledge_list_collections') return this.listKnowledgeCollections(session, args.query);
+    if (call.name === 'knowledge_search') return this.searchKnowledge(session, args.query, args.limit, args.collection_ids || args.collection_id);
+    if (call.name === 'knowledge_list_documents') return this.listKnowledgeDocuments(session, args.query, args.offset, args.limit, args.collection_ids || args.collection_id);
     if (call.name === 'knowledge_read_document') return this.readKnowledgeDocument(session, args.document_id, args.start_line, args.line_count, args.start_column, toolContextCharacterLimit(model));
     if (call.name === 'knowledge_view_images') return this.viewKnowledgeImages(session, model, args.document_id, args.image_indices);
     if (call.name === 'list_files') {
@@ -891,8 +952,41 @@ class RagAssistant {
     });
   }
 
-  async searchKnowledge(session, query, limit = 8) {
-    const selected = new Set(session.knowledgeCollectionIds || []);
+  listKnowledgeCollections(session, query = '') {
+    const selected = this.resolveKnowledgeCollectionIds(session);
+    if (!selected.length) return 'No knowledge library is selected.';
+    const terms = queryTerms(String(query || ''));
+    const collections = new Map(this.store.listCollections().map((item) => [item.id, item]));
+    const counts = new Map();
+    for (const task of this.store.listTasks()) {
+      if (selected.includes(task.collectionId) && knowledgeEligible(task)) counts.set(task.collectionId, (counts.get(task.collectionId) || 0) + 1);
+    }
+    const rows = selected.map((id) => {
+      const collection = collections.get(id) || {};
+      const kind = collectionKindInfo(collection);
+      return {
+        id,
+        userName: collection.userName || collection.userId || '-',
+        name: collection.name || '-',
+        type: kind.label || kind.code || 'other',
+        count: counts.get(id) || 0
+      };
+    }).filter((item) => {
+      if (!terms.length) return true;
+      const value = `${item.id} ${item.userName} ${item.name} ${item.type}`.toLowerCase();
+      return terms.every((term) => value.includes(term));
+    });
+    return [
+      `Selected collections: ${rows.length}/${selected.length}.`,
+      'Collection IDs below are exact scope identifiers, not document IDs.',
+      '',
+      ...rows.map((item, index) => `[${index + 1}] Collection ID: ${item.id}\nUser: ${item.userName} | Collection: ${item.name} | Type: ${item.type}\nAvailable completed documents: ${item.count}`)
+    ].join('\n\n') || 'No matching selected collections.';
+  }
+
+  async searchKnowledge(session, query, limit = 8, requestedCollectionIds = undefined) {
+    const scopedIds = this.resolveKnowledgeCollectionIds(session, requestedCollectionIds);
+    const selected = new Set(scopedIds);
     if (!selected.size) return 'No knowledge library is selected.';
     const terms = queryTerms(String(query || ''));
     const tasks = this.store.listTasks().filter((task) => selected.has(task.collectionId) && knowledgeEligible(task));
@@ -917,14 +1011,15 @@ class RagAssistant {
         continue;
       }
       for (const chunk of chunks) {
-        inspectedChunks += 1;
-        if (Date.now() - startedAt >= RAG_SEARCH_TIME_BUDGET_MS || inspectedChunks > MAX_RAG_SEARCH_CHUNKS) {
+        if (Date.now() - startedAt >= RAG_SEARCH_TIME_BUDGET_MS || inspectedChunks >= MAX_RAG_SEARCH_CHUNKS) {
           truncatedByBudget = true;
           break;
         }
+        inspectedChunks += 1;
         const collection = collections.get(task.collectionId);
         const membership = knowledgeFavoriteMetadata(task, collection);
-        const haystack = `${task.title || ''}\n${task.owner || ''}\n${task.publishedAt || ''}\n${task.favoriteAddedAt || ''}\n${membership}\n${chunk}`.toLowerCase();
+        const collectionIdentity = `${task.id}\n${collection?.id || task.collectionId || ''}\n${collection?.name || ''}\n${collection?.userName || collection?.userId || ''}`;
+        const haystack = `${collectionIdentity}\n${task.title || ''}\n${task.owner || ''}\n${task.publishedAt || ''}\n${task.favoriteAddedAt || ''}\n${membership}\n${chunk}`.toLowerCase();
         const score = terms.reduce((sum, term) => sum + countOccurrences(haystack, term), 0) + (terms.some((term) => String(task.title || '').toLowerCase().includes(term)) ? 6 : 0);
         if (score > 0 || !terms.length) scored.push({ score, task, chunk, collection });
       }
@@ -936,15 +1031,16 @@ class RagAssistant {
       skippedDocuments ? `Skipped ${skippedDocuments} unavailable or unreadable document(s).` : '',
       truncatedByBudget || tasks.length > inspectedDocuments ? `Search budget reached; inspected ${inspectedDocuments}/${tasks.length} document(s) and ${inspectedChunks} chunk(s).` : ''
     ].filter(Boolean).join('\n');
-    if (!results.length) return `${notice}${notice ? '\n' : ''}No matching passages found across ${tasks.length} selected documents.`;
+    const scopeNotice = `Collection scope: ${scopedIds.length} selected collection(s); ${tasks.length} eligible document(s).`;
+    if (!results.length) return `${scopeNotice}\n${notice}${notice ? '\n' : ''}No matching passages found across ${tasks.length} selected documents.`;
     const resultText = results.map((item, index) => `[#${index + 1}] Document ID: ${item.task.id}\nUser: ${item.collection?.userName || '-'} | Collection: ${item.collection?.name || '-'} | Title: ${item.task.title || item.task.bvid}\nBVID: ${item.task.bvid || '-'} | UP: ${item.task.owner || '-'}\nPublished at: ${item.task.publishedAt || '-'}\nFavorited at: ${item.task.favoriteAddedAt || '-'}\n${knowledgeFavoriteMetadata(item.task, item.collection)}\n${item.chunk}`).join('\n\n---\n\n');
-    return truncate(`${notice}${notice ? '\n\n' : ''}${resultText}`, MAX_RAG_SEARCH_RESULT_CHARACTERS);
+    return truncate(`${scopeNotice}\n${notice}${notice ? '\n\n' : ''}${resultText}`, MAX_RAG_SEARCH_RESULT_CHARACTERS);
   }
 
-  listKnowledgeDocuments(session, query = '', offset = 0, limit = 50) {
+  listKnowledgeDocuments(session, query = '', offset = 0, limit = 50, requestedCollectionIds = undefined) {
     const terms = queryTerms(String(query || ''));
     const collections = new Map(this.store.listCollections().map((item) => [item.id, item]));
-    const all = this.knowledgeTasks(session).filter((task) => {
+    const all = this.knowledgeTasks(session, requestedCollectionIds).filter((task) => {
       if (!terms.length) return true;
       const collection = collections.get(task.collectionId);
       const value = `${task.id} ${task.bvid || ''} ${task.title || ''} ${task.owner || ''} ${task.publishedAt || ''} ${task.favoriteAddedAt || ''} ${collection?.name || ''} ${knowledgeFavoriteMetadata(task, collection)}`.toLowerCase();
@@ -957,7 +1053,8 @@ class RagAssistant {
       const collection = collections.get(task.collectionId);
       return `[${start + index + 1}] Document ID: ${task.id}\nTitle: ${task.title || task.bvid} | BVID: ${task.bvid || '-'} | UP: ${task.owner || '-'}\nUser: ${collection?.userName || '-'} | Collection: ${collection?.name || '-'}\nPublished at: ${task.publishedAt || '-'} | Favorited at: ${task.favoriteAddedAt || '-'}\n${knowledgeFavoriteMetadata(task, collection)}`;
     });
-    return `Selected documents: ${all.length}. Showing ${page.length} from offset ${start}.\n\n${rows.join('\n\n') || 'No matching documents.'}`;
+    const scope = this.resolveKnowledgeCollectionIds(session, requestedCollectionIds);
+    return `Selected collections: ${scope.length}. Selected documents: ${all.length}. Showing ${page.length} from offset ${start}.\n\n${rows.join('\n\n') || 'No matching documents.'}`;
   }
 
   readKnowledgeDocument(session, documentId, startLine = 1, lineCount = 300, startColumn = 0, maximumCharactersInput = MAX_KNOWLEDGE_READ_CHARACTERS) {
@@ -1035,8 +1132,18 @@ class RagAssistant {
     return { type: 'image_url', image_url: { url: `data:${outputMimeType};base64,${buffer.toString('base64')}` } };
   }
 
-  knowledgeTasks(session) {
-    const selected = new Set(session.knowledgeCollectionIds || []);
+  resolveKnowledgeCollectionIds(session, requestedCollectionIds = undefined) {
+    const available = uniqueStrings(session.knowledgeCollectionIds || []);
+    const requested = Array.isArray(requestedCollectionIds)
+      ? uniqueStrings(requestedCollectionIds)
+      : (requestedCollectionIds ? [String(requestedCollectionIds)] : []);
+    const unavailable = requested.filter((id) => !available.includes(id));
+    if (unavailable.length) throw new Error(`The requested collection is not selected in this session: ${unavailable.join(', ')}`);
+    return requested.length ? requested : available;
+  }
+
+  knowledgeTasks(session, requestedCollectionIds = undefined) {
+    const selected = new Set(this.resolveKnowledgeCollectionIds(session, requestedCollectionIds));
     return this.store.listTasks().filter((task) => selected.has(task.collectionId) && knowledgeEligible(task));
   }
 
@@ -2258,6 +2365,7 @@ function killProcessTree(child) {
 module.exports = {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
+  MAX_RAG_SEARCH_CHUNKS,
   MAX_RAG_TOOL_ROUNDS,
   RAG_AUTO_COMPACT_TRIGGER,
   RagAssistant,

@@ -21,7 +21,7 @@
 
 **Built with OpenAI Codex.**
 
-## 从 1.0.3 到 1.5.5
+## 从 1.0.3 到 1.5.6
 
 - **1.0.3 稳定基线**：完善模型配置的后台刷新，RAG 无知识库问答、Agent 工作流和单视频总结不再受前端旧缓存影响；视频处理固定由应用内 Agent 执行，外部 Agent 只读访问已完成知识库。
 - **1.0.4 - 1.1.x**：补强 Windows 路径与日志编码、项目内运行时隔离、ASR 本地导入和断点下载；加入低显存 `large-v3-turbo`、独立 CPU ASR、主题与设置界面优化，以及应用更新、数据迁移、收藏夹变化提醒和任务筛选启用。
@@ -32,6 +32,7 @@
 - **1.5.3**：RAG 单批最多查看 4 张知识库图片，不再设置每轮累计张数上限；继续按模型上下文和请求体大小动态保护，并避免重复上传同一图片。
 - **1.5.4**：标题栏新增依赖下载进度环和正在处理列表，可直接跳转到设置页对应依赖；下载事件按动画帧合并并原位更新节点，不触发页面刷新或依赖列表重建。
 - **1.5.5**：明确 RAG 知识库图片使用从 1 开始的编号，并兼容模型误传的明显零基索引，避免图片实际可读却连续调用失败。
+- **1.5.6**：RAG 检索预算提高到每次最多 60000 个分块，并支持在会话内按精确收藏夹 ID 定向列出和检索；系统提示词与外部 Agent 示例统一强调收藏夹 ID、文档 ID、部分扫描结果和同 BVID 多来源的区别。会话顶部只显示本轮耗时与工具调用次数，工具事件按实际正文位置插入，失败时也保留已发生的工具时间线。
 
 > **当前功能边界**：普通“视频总结（单个）”和批量 Agent 工作流只处理 BV 单 P 视频；多 P、番剧、电影、纪录片、综艺、互动视频和其它特殊页面会被明确拒绝。多 P 请使用 `B站之外 -> B站多P视频总结`。外部 Codex、Claude Code、OpenCode 等 Agent 只能通过本机只读 HTTP API 访问已完成知识库，不能领取视频任务、调用媒体工具或提交产物。
 
@@ -244,11 +245,11 @@ GET /api/knowledge/documents/<documentId>/assets/<assetId>
 GET /api/knowledge/search?q=<query>&limit=20
 ```
 
-目录接口默认覆盖全量已完成 Markdown，可按 `userId`、`collectionId`、`bvid`、`title`、`owner`、`tag`、发布日期和收藏日期筛选。`publishedAt` 是视频发布日期，`favoriteAddedAt` 是收藏日期，`favoriteMembership` 表示仍在收藏夹、已移出或原收藏夹已删除。
+目录接口默认覆盖全量已完成 Markdown，可按 `userId`、`collectionId`、`bvid`、`title`、`owner`、`tag`、发布日期和收藏日期筛选。用户指定收藏夹时，必须先从 catalog 解析精确的 `collectionId`，并在后续目录和搜索请求中持续携带它；`collectionId` 是收藏夹 ID，不能当作 `documentId` 使用。`publishedAt` 是视频发布日期，`favoriteAddedAt` 是收藏日期，`favoriteMembership` 表示仍在收藏夹、已移出或原收藏夹已删除。
 
 目录 `limit` 支持 1～500。排序参数使用 `字段-方向` 格式，例如 `favorite-desc`、`published-asc` 或 `completed-desc`，不能写成下划线格式。所有筛选值和 `documentId` 都应进行 URL 编码。
 
-原文接口按 1 基行号分页，`lineCount` 单次支持 1～1000 行，默认 400 行，并返回 `nextStartLine`、总行数和 SHA-256。需要完整原文时持续读取到 `nextStartLine=null`。搜索摘要只用于定位，`partial=true` 表示触及扫描预算；精确 Markdown 原文始终是事实来源。
+原文接口按 1 基行号分页，`lineCount` 单次支持 1～1000 行，默认 400 行，并返回 `nextStartLine`、总行数和 SHA-256。需要完整原文时持续读取到 `nextStartLine=null`。搜索摘要只用于定位，`partial=true` 表示触及扫描预算；此时要缩小收藏夹、用户、BV 或标签范围，不能据此断言整个收藏夹没有内容。精确 Markdown 原文始终是事实来源；不同收藏夹中的相同 BVID 视为独立来源，不自动去重。
 
 图片接口只返回产物目录内经过签名与大小校验的 PNG、JPEG、GIF、WebP 或 AVIF。资产 ID 是文档内不透明标识，外部 Agent 不应推测本机路径。支持视觉输入的 Agent 应先列出资产并真实请求图片二进制，再分析像素或将图片作为附件/Markdown 图片返回；不能仅根据文件名或图注声称看过原图。
 
@@ -272,7 +273,8 @@ RAG 助手支持多个 OpenAI/NewAPI 兼容供应商和多会话：
 - 对支持视觉输入的模型提供原图；
 - 显示流式内容、供应商返回的 reasoning、工具状态和 Token 用量；兼容 SSE 分块、非流式 JSON，以及正文中的 `<think>`、`<thinking>`、`<analysis>` 推理标签，推理标签不会混入正文；
 - 按实际发送的 JSON 消息预检上下文，图片/音频附件按实际 base64 载荷估算；会话达到模型窗口 75% 或安全输入边界时自动压缩，也可手动压缩。不支持压缩的模型会在发送前给出切换模型或新建会话提示；
-- 知识库检索有文档数、分块数、结果字符数和耗时预算，单个损坏/缺失文档会跳过并提示，不会让整次检索静默失败；
+- 知识库检索支持会话已选收藏夹的精确范围：模型可先调用 `knowledge_list_collections` 获取 ID，再把 `collection_id` 或 `collection_ids` 传给目录/搜索工具；每次搜索最多检查 60000 个分块，并同时受文档数、结果字符数和耗时预算约束。单个损坏/缺失文档会跳过并提示，不会让整次检索静默失败；
+- 会话消息顶部显示本轮耗时和工具调用次数；工具调用记录按实际发生的正文位置插入上下文，历史消息没有位置记录时才回退到正文末尾。供应商在工具调用后失败时，已发生的工具记录和部分输出仍会保留。
 - 上传图片、PDF、Markdown、Word、音频、视频等附件，能力按模型声明降级；
 - 每个会话使用独立沙盒；CMD、沙盒外文件和私网访问在有限权限下请求批准。
 
@@ -330,7 +332,7 @@ Windows 10/11 x64 用户可从 [GitHub Releases](https://github.com/Fenglin-Mapl
 4. 首次启动若提示缺少 ASR 模型，可允许应用自动下载；也可在设置的“项目依赖包”中点击模型名称打开正确 Release，下载完整 ZIP 后直接“从本地导入”。下载中的按钮会变成“暂停”，暂停会保留 `.partial` 断点缓存，之后可继续下载；下载中或暂停时点击“从本地导入”会先中止自动下载并清理受管缓存。默认使用 `large-v3-turbo`，资源不足时可切换 `small`；如果没有 NVIDIA/CUDA，可在设置中改用独立 CPU ASR。
 5. 按启动页“第一次上手”依次完成模型配置、B站登录、收藏夹同步、任务检查和 Agent 工作流创建。
 
-运行时和模型 ZIP 是应用内依赖管理器使用的独立资产。设置页可以重新检查、下载或修复依赖，并可导入手动下载的 `small`、`large-v3-turbo` ZIP。`1.5.5` 继续使用 `v1.0.0` 依赖基线，接受精确名称 `Star-Owner-v1.0.0-model-small.zip` 和 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`；旧版 `medium` ZIP 仍保留在该 Release 供旧应用使用。依赖管理器核对 GitHub Release SHA-256、模型类型和目录结构，并把包 ID、依赖版本、资产名、SHA-256 与 probes 写入受管清单；旧版已安装的官方 `v1.0.0` 依赖只做一次兼容认领，之后清单缺失或不匹配都会要求重新安装。清单与 runtime/model 目录共用 `installing -> committed` journal，中断不会留下身份与文件不一致或新旧混合版本。
+运行时和模型 ZIP 是应用内依赖管理器使用的独立资产。设置页可以重新检查、下载或修复依赖，并可导入手动下载的 `small`、`large-v3-turbo` ZIP。`1.5.6` 继续使用 `v1.0.0` 依赖基线，接受精确名称 `Star-Owner-v1.0.0-model-small.zip` 和 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`；旧版 `medium` ZIP 仍保留在该 Release 供旧应用使用。依赖管理器核对 GitHub Release SHA-256、模型类型和目录结构，并把包 ID、依赖版本、资产名、SHA-256 与 probes 写入受管清单；旧版已安装的官方 `v1.0.0` 依赖只做一次兼容认领，之后清单缺失或不匹配都会要求重新安装。清单与 runtime/model 目录共用 `installing -> committed` journal，中断不会留下身份与文件不一致或新旧混合版本。
 
 每个项目副本根据其绝对项目根目录派生独立的 B 站 WebView partition。空白目录不会读取另一份星藏家的登录 Cookie；从旧版本升级时，仅当当前目录已有用户数据库记录，才会把旧固定 partition 的 B 站 Cookie 做一次兼容迁移。部分 Cookie 写入失败会标记为待重试，下次启动只补目标 partition 中缺失的 Cookie，不覆盖已有登录信息；旧 partition 不会被清空。
 

@@ -210,7 +210,7 @@ GET /api/knowledge/search
 
 Directory filters include user, collection, BV, title, owner, tag, publish date, favorite date, and sort order. Responses expose semantic metadata but no local paths, cookies, keys, work IDs, or mutable task internals.
 
-Content reads are exact UTF-8 Markdown, paged by 1-based lines with a maximum page size and SHA-256. Search scans at most 128 MiB per request and reports partial results. A snippet is never presented as full source.
+Content reads are exact UTF-8 Markdown, paged by 1-based lines with a maximum page size and SHA-256. The external API search scans at most 128 MiB per request and reports partial results. A snippet is never presented as full source.
 
 Assets are document-scoped raster images. The server validates artifact root, regular file, real path, size, raster signature and opaque asset ID; supported formats are PNG, JPEG, GIF, WebP and AVIF. ETag supports repeat reads.
 
@@ -283,7 +283,7 @@ RAG sessions retain conversation history. At 75% of the model window or a lower 
 
 ## 15. RAG Assistant
 
-RAG sessions share provider/model configuration with video Agents but have separate conversation state, sandbox, permissions and usage counters. Knowledge tools provide catalog search, exact Markdown, metadata dates and images. Restricted mode requires approval for shell commands, sandbox-external paths, default-browser opening and private-network browsing. Hidden-browser traffic uses a loopback-only, short-lived HTTP/HTTPS tunnel proxy that validates every hostname and connects directly to the selected DNS answer; redirects and subresources cannot trigger a second unvalidated resolution. Remote clipboard images use the same connection-time DNS binding principle.
+RAG sessions share provider/model configuration with video Agents but have separate conversation state, sandbox, permissions and usage counters. Knowledge tools first expose `knowledge_list_collections`, then accept exact `collection_id`/`collection_ids` scope on document listing and search; collection IDs are never accepted as document IDs, and a requested scope must already be selected in the session. Internal search inspects at most 60000 chunks per request in addition to document, result-character and time budgets, and reports partial coverage rather than implying an empty collection. Same-BVID documents in different collections remain independent sources. Exact Markdown, metadata dates and images remain available through separate tools. Each assistant message records start/end timestamps, duration and tool-call count; tool events carry sequence and response offsets so the Renderer inserts them at their actual call position, while legacy events fall back to the end. A failed provider call retains any partial text and completed tool timeline. Restricted mode requires approval for shell commands, sandbox-external paths, default-browser opening and private-network browsing. Hidden-browser traffic uses a loopback-only, short-lived HTTP/HTTPS tunnel proxy that validates every hostname and connects directly to the selected DNS answer; redirects and subresources cannot trigger a second unvalidated resolution. Remote clipboard images use the same connection-time DNS binding principle.
 
 The UI displays only reasoning text returned by the provider. Unsupported vision, tools, reasoning, image output, compression or subagent capabilities degrade honestly.
 

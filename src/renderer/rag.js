@@ -445,17 +445,28 @@
 
   async function fillMessage(article, message) {
     const extras = article.querySelector('.rag-message-extras');
-    const extrasSignature = JSON.stringify({ reasoning: message.reasoning || '', tools: message.toolEvents || [], attachments: message.attachments || [] });
+    const tools = Array.isArray(message.toolEvents) ? message.toolEvents : [];
+    const stats = runStats(message, tools);
+    const extrasSignature = JSON.stringify({
+      reasoning: message.reasoning || '',
+      attachments: message.attachments || [],
+      summary: stats.summary
+    });
     if (article.ragExtrasSignature !== extrasSignature) {
       article.ragExtrasSignature = extrasSignature;
       extras.innerHTML = '';
+      if (stats.show) {
+        const summary = document.createElement('div');
+        summary.className = 'rag-run-summary';
+        summary.textContent = stats.summary;
+        extras.appendChild(summary);
+      }
       if (message.reasoning) {
         const details = document.createElement('details');
         details.className = 'rag-reasoning';
         details.innerHTML = `<summary>模型推理流</summary><pre>${escapeHtml(message.reasoning)}</pre>`;
         extras.appendChild(details);
       }
-      if (message.toolEvents?.length) extras.appendChild(await toolList(message.toolEvents, message.sessionId));
       if (message.attachments?.length) {
         const attachments = document.createElement('div');
         attachments.className = 'rag-message-attachments';
@@ -466,10 +477,123 @@
       }
     }
     const content = article.querySelector('.rag-message-content');
-    if (message.error) content.textContent = message.error;
-    else content.innerHTML = await window.orchestrator.ragRenderMarkdown(message.content || '', message.sessionId);
-    enhanceCodeBlocks(content);
-    if (message.status === 'streaming') content.insertAdjacentHTML('beforeend', '<span class="rag-stream-caret"></span>');
+    const flowSignature = JSON.stringify({
+      status: message.status || '',
+      error: message.error || '',
+      content: message.content || '',
+      tools: tools.map(toolRenderSignature)
+    });
+    if (article.ragFlowSignature === flowSignature) return;
+    article.ragFlowSignature = flowSignature;
+    if (message.error && message.role !== 'assistant') {
+      content.textContent = message.error;
+      return;
+    }
+    if (message.role === 'assistant' && (tools.length || message.content)) await renderAssistantFlow(content, message, tools);
+    else if (message.error) content.textContent = message.error;
+    else {
+      content.innerHTML = await window.orchestrator.ragRenderMarkdown(message.content || '', message.sessionId);
+      enhanceCodeBlocks(content);
+      if (message.status === 'streaming') content.insertAdjacentHTML('beforeend', '<span class="rag-stream-caret"></span>');
+    }
+  }
+
+  function toolRenderSignature(item) {
+    return {
+      id: item.id || '',
+      name: item.name || '',
+      status: item.status || '',
+      contentOffset: item.contentOffset,
+      sequence: item.sequence,
+      startedAt: item.startedAt || '',
+      finishedAt: item.finishedAt || '',
+      images: (item.images || []).map((image) => `${image.index || ''}:${image.uri || ''}`)
+    };
+  }
+
+  function runDurationMs(message, tools = []) {
+    const stored = Number(message.durationMs);
+    if (Number.isFinite(stored) && stored >= 0) return stored;
+    const started = tools.map((item) => Date.parse(item.startedAt || '')).filter(Number.isFinite).sort((a, b) => a - b)[0];
+    const finished = tools.map((item) => Date.parse(item.finishedAt || '')).filter(Number.isFinite).sort((a, b) => b - a)[0] || Date.parse(message.createdAt || '');
+    return Number.isFinite(started) && Number.isFinite(finished) ? Math.max(0, finished - started) : null;
+  }
+
+  function formatDuration(value) {
+    const milliseconds = Math.max(0, Number(value) || 0);
+    if (milliseconds < 1000) return '不足 1 秒';
+    const seconds = milliseconds / 1000;
+    if (seconds < 60) return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} 秒`;
+    const minutes = Math.floor(seconds / 60);
+    const remaining = Math.round(seconds % 60);
+    return `${minutes} 分 ${String(remaining).padStart(2, '0')} 秒`;
+  }
+
+  function runStats(message, tools) {
+    const count = Number.isFinite(Number(message.toolCallCount)) ? Number(message.toolCallCount) : tools.length;
+    const duration = runDurationMs(message, tools);
+    if (message.role !== 'assistant' || (!message.startedAt && !message.finishedAt && !tools.length)) return { show: false, summary: '' };
+    if (message.status === 'streaming') {
+      const started = Date.parse(message.startedAt || '');
+      const liveDuration = Number.isFinite(started) ? Math.max(0, Date.now() - started) : null;
+      return { show: true, summary: `本轮进行中${liveDuration === null ? '' : ` · 已用时 ${formatDuration(liveDuration)}`} · 已调用工具 ${count} 次` };
+    }
+    return { show: true, summary: `${duration === null ? '本轮耗时不可用' : `本轮耗时 ${formatDuration(duration)}`} · 调用工具 ${count} 次` };
+  }
+
+  async function appendMarkdownSegment(fragment, text, sessionId) {
+    if (!text) return;
+    const segment = document.createElement('div');
+    segment.className = 'rag-message-segment';
+    segment.innerHTML = await window.orchestrator.ragRenderMarkdown(text, sessionId);
+    enhanceCodeBlocks(segment);
+    fragment.appendChild(segment);
+  }
+
+  async function renderAssistantFlow(content, message, tools) {
+    const text = String(message.content || '');
+    const ordered = tools.map((item, index) => {
+      const numericOffset = Number(item.contentOffset);
+      const anchored = Number.isFinite(numericOffset) && numericOffset >= 0;
+      return {
+        item,
+        index,
+        anchored,
+        offset: anchored ? Math.min(text.length, numericOffset) : text.length,
+        sequence: Number.isFinite(Number(item.sequence)) ? Number(item.sequence) : index
+      };
+    }).sort((left, right) => left.offset - right.offset || left.sequence - right.sequence || left.index - right.index);
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+    let index = 0;
+    while (index < ordered.length) {
+      const offset = ordered[index].offset;
+      await appendMarkdownSegment(fragment, text.slice(cursor, offset), message.sessionId);
+      const group = [];
+      while (index < ordered.length && ordered[index].offset === offset) group.push(ordered[index++].item);
+      fragment.appendChild(await toolList(group, message.sessionId));
+      cursor = offset;
+    }
+    await appendMarkdownSegment(fragment, text.slice(cursor), message.sessionId);
+    const legacy = ordered.some((item) => !item.anchored);
+    if (legacy) {
+      const note = document.createElement('div');
+      note.className = 'rag-tool-history-note';
+      note.textContent = '历史会话未记录工具调用的正文位置，相关工具列表按正文末尾显示。';
+      fragment.appendChild(note);
+    }
+    if (message.error) {
+      const error = document.createElement('div');
+      error.className = 'rag-message-error';
+      error.textContent = `生成失败：${message.error}`;
+      fragment.appendChild(error);
+    }
+    if (message.status === 'streaming') {
+      const caret = document.createElement('span');
+      caret.className = 'rag-stream-caret';
+      fragment.appendChild(caret);
+    }
+    content.replaceChildren(fragment);
   }
 
   function enhanceCodeBlocks(content) {
@@ -884,7 +1008,7 @@
     } else if (event.type === 'assistant-start') {
       const previousId = streamingBySession.get(eventSessionId)?.id;
       if (active && previousId && previousId !== event.messageId) elements.messages.querySelector(`[data-message-id="${cssEscape(previousId)}"]`)?.remove();
-      streamingBySession.set(eventSessionId, { id: event.messageId, sessionId: eventSessionId, role: 'assistant', content: '', reasoning: '', toolEvents: [], status: 'streaming', pending: false, createdAt: new Date().toISOString() });
+      streamingBySession.set(eventSessionId, { id: event.messageId, sessionId: eventSessionId, role: 'assistant', content: '', reasoning: '', toolEvents: [], status: 'streaming', pending: false, createdAt: new Date().toISOString(), startedAt: event.startedAt || new Date().toISOString(), toolCallCount: 0 });
       if (visible) renderSessions();
       if (active && visible) {
         setGenerating(true, '模型正在思考');
@@ -905,6 +1029,7 @@
       const index = streaming.toolEvents.findIndex((item) => item.id === event.tool.id);
       if (index >= 0) streaming.toolEvents[index] = event.tool;
       else streaming.toolEvents.push(event.tool);
+      streaming.toolCallCount = streaming.toolEvents.length;
       if (active && visible) {
         setGenerating(true, `正在调用 ${toolLabel(event.tool.name)}`);
         scheduleStreamRender();
@@ -1181,7 +1306,7 @@
   }
   function groupBy(items, key) { const map = new Map(); for (const item of items || []) { const value = key(item); if (!map.has(value)) map.set(value, []); map.get(value).push(item); } return map; }
   function mergeModels(...lists) { const map = new Map(); for (const item of lists.flat()) map.set(item.id, { ...(map.get(item.id) || {}), ...item }); return [...map.values()].sort((a, b) => String(a.id).localeCompare(String(b.id))); }
-  function toolLabel(name) { return ({ knowledge_search: '检索知识库', knowledge_list_documents: '列出知识库原文', knowledge_read_document: '读取原始 Markdown', knowledge_view_images: '查看知识库原图', list_files: '列出文件', read_file: '读取文件', write_file: '写入文件', run_command: '执行 CMD', web_search: '联网搜索', browse_url: '读取网页', open_browser: '打开浏览器', spawn_subagent: '调用子 Agent' })[name] || name || '工具'; }
+  function toolLabel(name) { return ({ knowledge_list_collections: '列出已选收藏夹', knowledge_search: '检索知识库', knowledge_list_documents: '列出知识库原文', knowledge_read_document: '读取原始 Markdown', knowledge_view_images: '查看知识库原图', list_files: '列出文件', read_file: '读取文件', write_file: '写入文件', run_command: '执行 CMD', web_search: '联网搜索', browse_url: '读取网页', open_browser: '打开浏览器', spawn_subagent: '调用子 Agent' })[name] || name || '工具'; }
   function toolStatus(status) { return ({ running: '进行中', succeeded: '已完成', failed: '失败' })[status] || status || '进行中'; }
   function formatNumber(value) { return new Intl.NumberFormat('zh-CN', { notation: Number(value) > 999999 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(Number(value || 0)); }
   function formatBytes(value) { const bytes = Number(value || 0); return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`; }

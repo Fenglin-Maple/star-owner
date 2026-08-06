@@ -3,7 +3,7 @@ const http = require('http');
 const path = require('path');
 const MarkdownIt = require('markdown-it');
 const { Store } = require('../src/core/store');
-const { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, MAX_RAG_TOOL_ROUNDS, RAG_AUTO_COMPACT_TRIGGER, RagAssistant, normalizeModel, splitTextByTokenBudget, readUtf8LineRange, estimateAttachmentTokens } = require('../src/core/rag-assistant');
+const { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, MAX_RAG_SEARCH_CHUNKS, MAX_RAG_TOOL_ROUNDS, RAG_AUTO_COMPACT_TRIGGER, RagAssistant, normalizeModel, splitTextByTokenBudget, readUtf8LineRange, estimateAttachmentTokens } = require('../src/core/rag-assistant');
 const { wrapMarkdownTables } = require('../src/core/markdown');
 
 function assert(condition, message) {
@@ -146,6 +146,29 @@ async function startFakeProvider() {
       ]);
       return;
     }
+    if (userText.includes('TOOL_POSITION_TEST')) {
+      if (!toolResult) {
+        sse(response, [
+          { choices: [{ delta: { content: '工具前。' } }] },
+          { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-position', type: 'function', function: { name: 'knowledge_search', arguments: '{"query":"星藏家","limit":1}' } }] } }] }
+        ]);
+      } else {
+        sse(response, [{ choices: [{ delta: { content: '工具后。' } }] }]);
+      }
+      return;
+    }
+    if (userText.includes('TOOL_THEN_FAILURE')) {
+      if (!toolResult) {
+        sse(response, [
+          { choices: [{ delta: { content: '失败前。' } }] },
+          { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-before-failure', type: 'function', function: { name: 'knowledge_search', arguments: '{"query":"星藏家","limit":1}' } }] } }] }
+        ]);
+      } else {
+        response.writeHead(503, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'upstream resource pool exhausted after tool call' } }));
+      }
+      return;
+    }
     const fullConversationText = JSON.stringify(body.messages || []);
     if (fullConversationText.includes('IMAGE_MULTI_BATCH_TEST')) {
       const loadedBatches = (body.messages || []).filter((message) => Array.isArray(message.content) && message.content.some((part) => part.type === 'image_url')).length;
@@ -258,7 +281,7 @@ async function startFakeProvider() {
     assert(catalogItem(initialCatalog, 'rag-shared-collection').userKindInfo?.code === 'shared', 'shared catalog entries did not expose the user type');
     assert(migrated.maxOutputTokens === DEFAULT_MAX_OUTPUT_TOKENS && migrated.enabledModels[0].contextWindow === 400000 && migrated.enabledModels[0].maxOutputTokens === 128000, 'legacy token defaults were not migrated');
     assert(normalizeModel({ id: 'unknown-modern-model' }).contextWindow === DEFAULT_CONTEXT_WINDOW, 'modern default context window is incorrect');
-    assert(MAX_RAG_TOOL_ROUNDS === 24 && RAG_AUTO_COMPACT_TRIGGER === 0.75, 'RAG tool/auto-compression limits are incorrect');
+    assert(MAX_RAG_SEARCH_CHUNKS === 60000 && MAX_RAG_TOOL_ROUNDS === 24 && RAG_AUTO_COMPACT_TRIGGER === 0.75, 'RAG search/tool/auto-compression limits are incorrect');
     const tableHtml = wrapMarkdownTables(new MarkdownIt()).render('| 名称 | 日期 |\n| --- | --- |\n| 测试 | 2026-06-18 |');
     assert(tableHtml.includes('<div class="rag-table-wrap"><table>') && tableHtml.includes('<th>名称</th>') && tableHtml.includes('</table></div>'), 'RAG Markdown table wrapper was not rendered');
     const splitFixture = `${'第一段完整上下文。'.repeat(500)}\n${'second complete context line. '.repeat(500)}`;
@@ -293,6 +316,20 @@ async function startFakeProvider() {
     const session = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', knowledgeCollectionIds: ['rag-collection'] });
     assert(assistant.state('rag-session-that-no-longer-exists').activeSession?.id === session.id, 'stale RAG session id did not fall back to the first available session');
 
+    const scopedSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', knowledgeCollectionIds: ['rag-collection', 'rag-shared-collection'], title: 'Collection scope test' });
+    const scopedCollections = assistant.listKnowledgeCollections(assistant.requireSession(scopedSession.id));
+    assert(scopedCollections.includes('Collection ID: rag-collection') && scopedCollections.includes('Collection ID: rag-shared-collection') && /Available completed documents: 1/.test(scopedCollections), 'collection listing did not expose exact selected IDs and counts');
+    const sharedDocuments = assistant.listKnowledgeDocuments(assistant.requireSession(scopedSession.id), '', 0, 50, ['rag-shared-collection']);
+    assert(sharedDocuments.includes('Selected documents: 1') && sharedDocuments.includes('Document ID: rag-shared-task') && !sharedDocuments.includes('Document ID: rag-task\n'), 'collection-scoped document listing leaked another collection');
+    const sharedSearch = await assistant.searchKnowledge(assistant.requireSession(scopedSession.id), '用于验证目录层级', 20, ['rag-shared-collection']);
+    assert(sharedSearch.includes('Collection scope: 1 selected collection(s); 1 eligible document(s).') && sharedSearch.includes('Document ID: rag-shared-task') && !sharedSearch.includes('rag-same-name-task'), 'collection-scoped search did not isolate the requested collection');
+    let unavailableCollectionError = null;
+    try { await assistant.searchKnowledge(assistant.requireSession(scopedSession.id), '资料', 8, ['rag-multimodal-collection']); }
+    catch (error) { unavailableCollectionError = error; }
+    assert(/not selected in this session/.test(unavailableCollectionError?.message || ''), 'collection scope accepted an ID outside the current session');
+    const collectionTool = assistant.toolDefinitions(assistant.requireSession(scopedSession.id), assistant.sessionModel(assistant.requireSession(scopedSession.id))).find((item) => item.function?.name === 'knowledge_list_collections');
+    assert(collectionTool?.function?.parameters?.properties?.query?.type === 'string', 'collection discovery tool schema was not exposed');
+
     const attachmentFile = path.join(root, 'attachment.md');
     fs.writeFileSync(attachmentFile, '# 附件\n\n附件文字。', 'utf8');
     const attachments = await assistant.importFiles(session.id, [attachmentFile]);
@@ -305,11 +342,22 @@ async function startFakeProvider() {
     assert(first.reasoning.includes('先检索'), 'reasoning stream was not captured');
     assert(first.toolEvents[0]?.name === 'knowledge_search' && first.toolEvents[0]?.status === 'succeeded', 'streamed tool call was not assembled');
     assert(first.toolEvents[0].output.includes('星藏家测试文档'), 'knowledge retrieval did not return the selected document');
+    assert(first.startedAt && first.finishedAt && Number(first.durationMs) >= 0 && first.toolCallCount === first.toolEvents.length, 'assistant run statistics were not persisted');
+    assert(first.toolEvents[0].sequence === 1 && Number.isInteger(first.toolEvents[0].contentOffset) && first.toolEvents[0].startedAt && first.toolEvents[0].finishedAt, 'tool event position and timing metadata were not persisted');
     const firstApiRequest = fake.requests.find((item) => item.stream === true);
     assert(firstApiRequest.messages.filter((item) => item.role === 'user').length === 1, 'current user message was duplicated in model history');
     assert(firstApiRequest.max_tokens === 2048, 'model-specific output token limit was not used');
     const storedUser = store.list('ragMessages').find((item) => item.role === 'user');
     assert(!storedUser.attachments[0].extractedText && !storedUser.attachments[0].path, 'message storage duplicated private attachment content');
+
+    const positionedReply = await assistant.send(session.id, { content: 'TOOL_POSITION_TEST' });
+    assert(positionedReply.content === '工具前。工具后。' && positionedReply.toolEvents.length === 1 && positionedReply.toolEvents[0].contentOffset === '工具前。'.length, 'tool event was not anchored to the actual response position');
+    const toolFailureSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', knowledgeCollectionIds: ['rag-collection'], title: 'Tool failure timeline test' });
+    let toolFailure = null;
+    try { await assistant.send(toolFailureSession.id, { content: 'TOOL_THEN_FAILURE' }); }
+    catch (error) { toolFailure = error; }
+    const persistedToolFailure = assistant.sessionDetail(toolFailureSession.id).messages.at(-1);
+    assert(toolFailure?.code === 'MODEL_PROVIDER_FAILURE' && persistedToolFailure?.status === 'failed' && persistedToolFailure.content === '失败前。' && persistedToolFailure.toolEvents?.[0]?.name === 'knowledge_search' && persistedToolFailure.toolCallCount === 1, 'tool timeline or partial output was lost when the provider failed after a tool call');
 
     const documentList = assistant.listKnowledgeDocuments(assistant.requireSession(session.id));
     assert(documentList.includes('Document ID: rag-task'), 'knowledge document ids were not listed');

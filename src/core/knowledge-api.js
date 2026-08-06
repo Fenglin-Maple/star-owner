@@ -39,11 +39,12 @@ class KnowledgeApi {
       recommendedFlow: [
         'Read this manifest first.',
         'List the catalog or paginated document directory and filter by user, collection, BV, title, owner, tag, or date metadata.',
+        'When a user names a collection, resolve its exact collectionId from the catalog and include collectionId in every subsequent directory or search request. A collectionId is never a documentId.',
         'Read one selected document in bounded line pages. Follow nextStartLine until null when the complete source is required.',
         'For multi-part videos, list the parent directory document first, then use parentDocumentId and partId/cid to select individual P documents.',
         'Shared mounted documents expose sharedRemotePath and remoteState; remote-deleted documents remain readable locally but should be treated as stale.',
         'List document assets before requesting an image. Asset identifiers are opaque and document-scoped.',
-        'Use search only as a convenience index. Treat exact Markdown reads as the source of truth and cite document title, BV, and collection.'
+        'Use search only as a convenience index. If partial is true, narrow the collection or other filters before drawing a corpus-wide conclusion. Treat exact Markdown reads as the source of truth and cite document title, BV, and collection. Same-BVID documents in different collections remain separate sources.'
       ],
       endpoints: [
         { method: 'GET', path: '/api/manifest', purpose: 'Return this complete read-only knowledge protocol.' },
