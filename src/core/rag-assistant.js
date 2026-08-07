@@ -154,6 +154,30 @@ class RagAssistant {
     return models;
   }
 
+  // 测试供应商连通性：对每个候选 API root 发一次最小的 chat/completions 请求。
+  // 不写 store（无副作用），成功/失败都以返回值表达，方便 UI 直接展示。
+  async testProvider(providerId, modelId) {
+    const provider = this.rawProvider(providerId);
+    const model = String(modelId || provider?.enabledModels?.[0]?.id || provider?.remoteModels?.[0]?.id || '');
+    if (!model) return { ok: false, model: '', error: '该供应商还没有可用模型，请先启用或手动添加模型' };
+    const headers = this.providerHeaders(provider);
+    const body = JSON.stringify({ model, messages: [{ role: 'user', content: '请回复OK' }], max_tokens: 16, temperature: 0 });
+    const errors = [];
+    for (const root of candidateApiRoots(provider)) {
+      const startedAt = Date.now();
+      try {
+        const response = await fetch(`${root}/chat/completions`, { method: 'POST', headers, body, signal: AbortSignal.timeout(30000) });
+        const text = await response.text();
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 500)}`);
+        parseJson(text, 'non-JSON response');
+        return { ok: true, model, latencyMs: Date.now() - startedAt, baseUrl: root };
+      } catch (error) {
+        errors.push(`${root}/chat/completions: ${readableProviderError(error)}`);
+      }
+    }
+    return { ok: false, model, error: errors.join(' | ').slice(0, 1600) };
+  }
+
   updateProviderModels(providerId, models) {
     const provider = this.rawProvider(providerId);
     provider.enabledModels = (models || []).map(normalizeModel).filter((item) => item.id);
@@ -1525,6 +1549,15 @@ async function providerFetch(url, options, signal) {
   const timeout = AbortSignal.timeout(PROVIDER_REQUEST_TIMEOUT_MS);
   const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
   return fetch(url, { ...options, signal: requestSignal });
+}
+
+// 把 provider 请求的错误转成可读文本：超时给出中文提示，网络错误附底层错误码（ECONNREFUSED 等）。
+function readableProviderError(error) {
+  const message = error?.message || String(error);
+  if (error?.name === 'TimeoutError') return '请求超时（30 秒）';
+  const cause = error?.cause;
+  if (cause?.code) return `${message} (${cause.code} ${cause.message || ''})`;
+  return message;
 }
 
 function providerHttpError(status, body) {

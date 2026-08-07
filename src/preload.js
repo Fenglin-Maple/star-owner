@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld('orchestrator', {
   ragSaveProvider: (payload) => ipcRenderer.invoke('rag:provider-save', payload),
   ragDeleteProvider: (providerId) => ipcRenderer.invoke('rag:provider-delete', providerId),
   ragFetchModels: (providerId) => ipcRenderer.invoke('rag:models-fetch', providerId),
+  ragTestProvider: (providerId, modelId) => ipcRenderer.invoke('rag:provider-test', providerId, modelId),
   ragUpdateModels: (payload) => ipcRenderer.invoke('rag:models-update', payload),
   ragCreateSession: (payload) => ipcRenderer.invoke('rag:session-create', payload),
   ragUpdateSession: (payload) => ipcRenderer.invoke('rag:session-update', payload),

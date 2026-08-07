@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const { spawn } = require('child_process');
-const { projectRuntimeEnvironment, readUtf8 } = require('./child-process-io');
+const { projectRuntimeEnvironment, readUtf8, findVenvSitePackages } = require('./child-process-io');
 const { PROJECT_ROOT } = require('./workspace');
 
 class AsrService {
@@ -223,6 +223,11 @@ class AsrService {
 }
 
 function findRuntimePython(projectRoot = PROJECT_ROOT) {
+  if (process.platform !== 'win32') {
+    // macOS/Linux：优先使用 faster-whisper venv 内的 Python（可 import mlx_whisper）
+    const venvPython = path.join(projectRoot, 'runtime', 'faster-whisper', 'bin', 'python');
+    if (fs.existsSync(venvPython)) return venvPython;
+  }
   const root = path.join(projectRoot, 'runtime', 'python');
   if (!fs.existsSync(root)) return '';
   for (const item of fs.readdirSync(root, { withFileTypes: true })) {
@@ -235,14 +240,13 @@ function findRuntimePython(projectRoot = PROJECT_ROOT) {
 
 function serviceEnvironment(projectRoot = PROJECT_ROOT) {
   const venv = path.join(projectRoot, 'runtime', 'faster-whisper');
-  const sitePackages = process.platform === 'win32'
-    ? path.join(venv, 'Lib', 'site-packages')
-    : path.join(venv, 'lib', 'python3', 'site-packages');
-  return {
+  const sitePackages = findVenvSitePackages(venv);
+  const environment = {
     ...projectRuntimeEnvironment(process.env, projectRoot),
-    VIRTUAL_ENV: venv,
-    PYTHONPATH: sitePackages
+    VIRTUAL_ENV: venv
   };
+  if (sitePackages) environment.PYTHONPATH = sitePackages;
+  return environment;
 }
 
 module.exports = { AsrService, findRuntimePython, serviceEnvironment };
