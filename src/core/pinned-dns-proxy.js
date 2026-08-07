@@ -1,26 +1,35 @@
 const http = require('http');
 const net = require('net');
+const { pipeline } = require('stream');
 const { isPrivateNetworkHost, parseHttpUrl } = require('./network-policy');
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 20000;
+const EXPECTED_DISCONNECT_CODES = new Set([
+  'ECONNABORTED',
+  'ECONNRESET',
+  'EPIPE',
+  'ERR_STREAM_DESTROYED',
+  'ERR_STREAM_PREMATURE_CLOSE',
+  'ERR_SOCKET_CLOSED'
+]);
 
 async function startPinnedDnsProxy(options = {}) {
   const sockets = new Set();
   const server = http.createServer((request, response) => {
+    consumeSocketError(response, 'HTTP client response');
     proxyHttpRequest(request, response, options).catch((error) => {
-      if (!response.headersSent) response.writeHead(502, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
-      response.end(`Blocked by Star Owner network policy: ${error.message || String(error)}`);
+      writeProxyErrorResponse(response, error);
     });
   });
   server.on('connect', (request, clientSocket, head) => {
+    consumeSocketError(clientSocket, 'HTTPS client socket');
     proxyHttpsTunnel(request, clientSocket, head, options).catch((error) => {
-      if (!clientSocket.destroyed) {
-        clientSocket.end(`HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nBlocked by Star Owner network policy: ${error.message || String(error)}`);
-      }
+      writeTunnelErrorResponse(clientSocket, error);
     });
   });
   server.on('connection', (socket) => {
     sockets.add(socket);
+    consumeSocketError(socket, 'proxy client socket');
     socket.once('close', () => sockets.delete(socket));
   });
   server.on('clientError', (_error, socket) => socket.destroy());
@@ -50,7 +59,38 @@ async function proxyHttpRequest(request, response, options) {
   if (url.username || url.password) throw new Error('URLs cannot contain embedded credentials.');
   const target = await resolveConnectionTarget(url.hostname, options);
   await new Promise((resolve, reject) => {
-    const upstream = http.request({
+    let settled = false;
+    let upstream = null;
+    const finish = (error = null) => {
+      if (settled) return;
+      settled = true;
+      request.off('aborted', onClientAbort);
+      response.off('close', onResponseClose);
+      if (error) reject(error);
+      else resolve();
+    };
+    const abortError = () => {
+      const error = new Error('The HTTP client closed the proxy connection.');
+      error.code = 'ECONNABORTED';
+      return error;
+    };
+    const abortUpstream = () => {
+      if (settled) return;
+      if (upstream && !upstream.destroyed) upstream.destroy(abortError());
+      finish(abortError());
+    };
+    const onClientAbort = () => abortUpstream();
+    const onResponseClose = () => {
+      if (!response.writableEnded && !response.writableFinished) abortUpstream();
+    };
+    const onRequestError = (error) => finish(error);
+    const onResponseError = (error) => finish(error);
+    const onUpstreamError = (error) => finish(error);
+    request.once('aborted', onClientAbort);
+    request.once('error', onRequestError);
+    response.once('close', onResponseClose);
+    response.once('error', onResponseError);
+    upstream = http.request({
       protocol: 'http:',
       hostname: url.hostname,
       port: Number(url.port || 80),
@@ -64,14 +104,26 @@ async function proxyHttpRequest(request, response, options) {
     });
     upstream.once('socket', (socket) => verifyConnectedSocket(socket, target, options));
     upstream.once('timeout', () => upstream.destroy(new Error('Pinned HTTP connection timed out.')));
-    upstream.once('error', reject);
+    upstream.once('error', onUpstreamError);
     upstream.once('response', (upstreamResponse) => {
-      response.writeHead(upstreamResponse.statusCode || 502, sanitizeResponseHeaders(upstreamResponse.headers));
-      upstreamResponse.once('error', reject);
-      upstreamResponse.pipe(response);
-      upstreamResponse.once('end', resolve);
+      if (settled || response.destroyed || response.writableEnded || response.writableFinished) {
+        upstreamResponse.resume();
+        abortUpstream();
+        return;
+      }
+      try {
+        response.writeHead(upstreamResponse.statusCode || 502, sanitizeResponseHeaders(upstreamResponse.headers));
+      } catch (error) {
+        finish(error);
+        return;
+      }
+      pipeline(upstreamResponse, response, (error) => finish(error));
     });
-    upstream.end();
+    try {
+      upstream.end();
+    } catch (error) {
+      finish(error);
+    }
   });
 }
 
@@ -79,24 +131,100 @@ async function proxyHttpsTunnel(request, clientSocket, head, options) {
   const authority = parseAuthority(request.url);
   const target = await resolveConnectionTarget(authority.hostname, options);
   await new Promise((resolve, reject) => {
+    let connected = false;
+    let settled = false;
+    let closing = false;
     const upstream = net.connect({ host: target.address, port: authority.port, family: target.family });
     const timeout = setTimeout(() => upstream.destroy(new Error('Pinned HTTPS connection timed out.')), Number(options.connectTimeoutMs || DEFAULT_CONNECT_TIMEOUT_MS));
-    upstream.once('error', reject);
-    upstream.once('connect', () => {
+    const closePair = () => {
+      if (closing) return;
+      closing = true;
+      if (!clientSocket.destroyed) clientSocket.destroy();
+      if (!upstream.destroyed) upstream.destroy();
+    };
+    const finish = (error = null) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onClientClose = () => {
+      closePair();
+      if (!connected) {
+        const error = new Error('The HTTPS client closed the proxy connection.');
+        error.code = 'ECONNABORTED';
+        finish(error);
+      }
+    };
+    const onClientError = (error) => {
+      closePair();
+      if (!connected) finish(error);
+    };
+    const onUpstreamClose = () => {
+      closePair();
+      if (!connected) {
+        const error = new Error('The pinned HTTPS connection closed before the tunnel was established.');
+        error.code = 'ECONNRESET';
+        finish(error);
+      }
+    };
+    const onUpstreamError = (error) => {
+      closePair();
+      if (!connected) finish(error);
+    };
+    clientSocket.once('close', onClientClose);
+    clientSocket.on('error', onClientError);
+    upstream.once('close', onUpstreamClose);
+    upstream.on('error', onUpstreamError);
+    upstream.once('connect', () => {
       try {
         assertConnectedAddress(upstream.remoteAddress, target, options);
+        if (clientSocket.destroyed || clientSocket.writableEnded || clientSocket.writableFinished) throw Object.assign(new Error('The HTTPS client closed the proxy connection.'), { code: 'ECONNABORTED' });
         clientSocket.write('HTTP/1.1 200 Connection Established\r\nProxy-Agent: StarOwner\r\n\r\n');
         if (head?.length) upstream.write(head);
         upstream.pipe(clientSocket);
         clientSocket.pipe(upstream);
-        resolve();
+        connected = true;
+        finish();
       } catch (error) {
-        upstream.destroy();
-        reject(error);
+        closePair();
+        finish(error);
       }
     });
   });
+}
+
+function writeProxyErrorResponse(response, error) {
+  if (!response || response.destroyed || response.writableEnded || response.writableFinished) return;
+  try {
+    if (!response.headersSent) response.writeHead(502, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    response.end(`Blocked by Star Owner network policy: ${error.message || String(error)}`);
+  } catch (writeError) {
+    if (!isExpectedDisconnect(writeError) && !response.destroyed) response.destroy();
+  }
+}
+
+function writeTunnelErrorResponse(socket, error) {
+  if (!socket || socket.destroyed || socket.writableEnded || socket.writableFinished) return;
+  try {
+    socket.end(`HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nBlocked by Star Owner network policy: ${error.message || String(error)}`);
+  } catch (writeError) {
+    if (!isExpectedDisconnect(writeError) && !socket.destroyed) socket.destroy();
+  }
+}
+
+function consumeSocketError(socket, label) {
+  if (!socket || socket.listenerCount('error')) return;
+  socket.on('error', (error) => {
+    if (!isExpectedDisconnect(error)) console.warn(`[pinned-dns-proxy] ${label}: ${error.message || String(error)}`);
+  });
+}
+
+function isExpectedDisconnect(error) {
+  if (!error) return false;
+  if (EXPECTED_DISCONNECT_CODES.has(error.code)) return true;
+  return /aborted|closed|connection reset|broken pipe|premature close/i.test(String(error.message || error));
 }
 
 async function resolveConnectionTarget(hostname, options = {}) {

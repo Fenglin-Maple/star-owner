@@ -1,9 +1,12 @@
 const fs = require('fs');
 const http = require('http');
+const net = require('net');
 const path = require('path');
+const vm = require('vm');
 const { ApiServer } = require('../src/core/api-server');
 const { isAllowedBilibiliNavigation, isBilibiliVideoNavigation } = require('../src/core/desktop-security');
 const { assertHiddenBrowserUrl } = require('../src/core/hidden-browser-policy');
+const { buildHiddenPageExtractionScript } = require('../src/core/hidden-page-extractor');
 const { assertBilibiliUrl, isAllowedApiOrigin, isPrivateNetworkHost } = require('../src/core/network-policy');
 const { startPinnedDnsProxy } = require('../src/core/pinned-dns-proxy');
 const { resolveReadmeImage } = require('../src/core/readme-assets');
@@ -33,6 +36,63 @@ function requestThroughProxy(proxy, target) {
   });
 }
 
+function abortRequestThroughProxy(proxy, target) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => finish(new Error('Timed out waiting for the aborted proxy request to close.')), 5000);
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+    const request = http.request({ host: proxy.host, port: proxy.port, path: target, method: 'GET', agent: false }, (response) => {
+      response.once('data', () => request.destroy());
+      response.once('close', () => finish());
+      response.once('error', (error) => {
+        if (!['ECONNRESET', 'ECONNABORTED', 'ERR_STREAM_PREMATURE_CLOSE'].includes(error.code)) finish(error);
+        else finish();
+      });
+    });
+    request.once('error', (error) => {
+      if (!['ECONNRESET', 'ECONNABORTED'].includes(error.code)) finish(error);
+      else finish();
+    });
+    request.end();
+  });
+}
+
+function openAndAbortTunnel(proxy, target) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let established = false;
+    const timer = setTimeout(() => finish(new Error('Timed out waiting for the aborted HTTPS tunnel to close.')), 5000);
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+    const socket = net.connect(proxy.port, proxy.host);
+    socket.on('error', (error) => {
+      if (!['ECONNRESET', 'ECONNABORTED', 'EPIPE'].includes(error.code)) finish(error);
+      else finish();
+    });
+    socket.on('close', () => finish());
+    socket.on('data', (chunk) => {
+      const text = chunk.toString('latin1');
+      if (!established && text.includes('200 Connection Established')) {
+        established = true;
+        socket.write('abort-test');
+        setTimeout(() => socket.destroy(), 20);
+      }
+    });
+    socket.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\nConnection: keep-alive\r\n\r\n`);
+  });
+}
+
 (async () => {
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
   const preloadSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
@@ -40,6 +100,7 @@ function requestThroughProxy(proxy, target) {
   const rendererIndex = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
   const readmeAllowedAttributes = /const README_ALLOWED_ATTRIBUTES = \[([^\]]*)\]/.exec(rendererSource)?.[1] || '';
   assert(mainSource.includes("readmeMarkdownRenderer = new MarkdownIt({ html: true") && (mainSource.match(/new MarkdownIt\(\{ html: false/g) || []).length >= 2, 'README HTML support weakened document or RAG raw-HTML isolation');
+  assert(mainSource.includes('buildHiddenPageExtractionScript') && mainSource.includes('executeJavaScript(buildHiddenPageExtractionScript'), 'hidden browser stopped using the bounded dynamic-page extraction path');
   assert(rendererSource.includes('window.DOMPurify.sanitize') && rendererSource.includes('FORBID_TAGS') && rendererSource.includes('ALLOW_DATA_ATTR: false') && !readmeAllowedAttributes.includes("'class'") && rendererIndex.indexOf('dompurify/dist/purify.min.js') < rendererIndex.indexOf('src="./app.js"'), 'README HTML is inserted without a strict tag and attribute sanitizer');
   assert(mainSource.includes("ipcMain.handle('docs:resolve-readme-image'") && preloadSource.includes("ipcRenderer.invoke('docs:resolve-readme-image', source)") && rendererSource.includes('window.orchestrator.resolveReadmeImage(source)'), 'README local images bypass the main-process resolver');
   const readmeAssetRoot = path.join(__dirname, '..', '.cache', 'security-readme-assets');
@@ -114,6 +175,49 @@ function requestThroughProxy(proxy, target) {
     await blockedProxy.close();
     await new Promise((resolve) => origin.close(resolve));
   }
+
+  let uncaughtProxyError = null;
+  const onUncaughtProxyError = (error) => { uncaughtProxyError = error; };
+  process.on('uncaughtException', onUncaughtProxyError);
+  const slowOrigin = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.write('first chunk');
+    const interval = setInterval(() => response.write('next chunk'), 10);
+    response.once('close', () => clearInterval(interval));
+  });
+  const slowOriginAddress = await listen(slowOrigin);
+  const tunnelOrigin = net.createServer((socket) => socket.on('data', (chunk) => socket.write(chunk)));
+  const tunnelOriginAddress = await listen(tunnelOrigin);
+  const abortProxy = await startPinnedDnsProxy({ allowPrivate: true, allowedPrivateHosts: ['slow.internal', 'tunnel.internal'], resolve: async () => [{ address: '127.0.0.1', family: 4 }] });
+  try {
+    await abortRequestThroughProxy(abortProxy, `http://slow.internal:${slowOriginAddress.port}/slow`);
+    await openAndAbortTunnel(abortProxy, `tunnel.internal:${tunnelOriginAddress.port}`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert(!uncaughtProxyError, `proxy client disconnect raised an uncaught exception: ${uncaughtProxyError?.message || uncaughtProxyError}`);
+  } finally {
+    process.off('uncaughtException', onUncaughtProxyError);
+    await abortProxy.close();
+    await new Promise((resolve) => slowOrigin.close(resolve));
+    await new Promise((resolve) => tunnelOrigin.close(resolve));
+  }
+
+  let dynamicText = 'shell content';
+  const dynamicDocument = {
+    title: 'Delayed page',
+    body: { get innerText() { return dynamicText; }, childElementCount: 1 },
+    querySelectorAll: () => []
+  };
+  setTimeout(() => { dynamicText = 'shell content\nloaded async content'; }, 1500);
+  const dynamicResult = await vm.runInNewContext(buildHiddenPageExtractionScript(), {
+    document: dynamicDocument,
+    location: { href: 'https://dynamic.example/page' },
+    performance: { getEntriesByType: () => [] },
+    Promise,
+    Date,
+    setTimeout
+  });
+  assert(dynamicResult.text.includes('loaded async content'), 'hidden-page extraction returned the shell before delayed DOM content stabilized');
+
   assert(isAllowedApiOrigin('', 'http://127.0.0.1:17391'), 'origin-less Agent request was rejected');
   assert(!isAllowedApiOrigin('https://example.com', 'http://127.0.0.1:17391'), 'cross-origin browser request was accepted');
 

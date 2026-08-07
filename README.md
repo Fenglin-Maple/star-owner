@@ -23,7 +23,7 @@ GitHub 文档共享工具的完整设计、数据契约、Fork/PR 流程、挂�
 
 **Built with OpenAI Codex.**
 
-## 从 1.0.3 到 1.6.0
+## 从 1.0.3 到 1.6.1
 
 - **1.0.3 稳定基线**：完善模型配置的后台刷新，RAG 无知识库问答、Agent 工作流和单视频总结不再受前端旧缓存影响；视频处理固定由应用内 Agent 执行，外部 Agent 只读访问已完成知识库。
 - **1.0.4 - 1.1.x**：补强 Windows 路径与日志编码、项目内运行时隔离、ASR 本地导入和断点下载；加入低显存 `large-v3-turbo`、独立 CPU ASR、主题与设置界面优化，以及应用更新、数据迁移、收藏夹变化提醒和任务筛选启用。
@@ -40,6 +40,7 @@ GitHub 文档共享工具的完整设计、数据契约、Fork/PR 流程、挂�
 - **1.5.9**：修复共享仓库目录 Action 在 `main` 受保护且要求校验时无法提交 `catalog.json` 的问题。目录提交会先在临时分支上完成完整校验并报告稳定的 `validate-shared-docs` 状态，再在检测到 `main` 未发生竞争更新后推进；同步修正 Action 令牌注入和校验任务名称，保留既有分支保护规则。
 - **1.5.10**：将 GitHub 文档共享整理为独立权威设计文档，明确稳定文档身份、仓主与普通贡献者的分支路径、每个账户对每个仓库复用单一 Fork 但每次上传新建贡献分支的规则，以及 PR 校验、审核合并、目录 Action 和异常恢复的完整生命周期。同步补充共享功能文档入口和外部 Agent/部署说明；不改变共享仓库数据契约或运行时资产。
 - **1.6.0**：完成运行时依赖隔离审计与补强。应用运行期固定使用项目自带 Electron/Node、Python、faster-whisper、FFmpeg、yt-dlp、Portable Git 和 JS 依赖；GPU 探测与 Windows 系统工具使用受控的绝对路径，不读取用户全局应用依赖。更新包安装前强制校验 portable manifest、lockfile、事务脚本、Electron、Python、FFmpeg、VC++ 和 Portable Git；稳定版更新仍只接受 GitHub `latest`，Workspace、ASR/runtime 与模型目录的保留和失败回滚规则不变。
+- **1.6.1**：修复 RAG 隐藏浏览器在页面请求提前结束时的代理 Socket 未捕获异常；客户端断开会主动收尾上游 HTTP/HTTPS 连接，不再弹出主进程 `ECONNABORTED`。网页正文提取增加有上限的动态内容稳定等待，减少 SPA 只返回页面壳子的情况；不改变网页安全策略和本地知识库流程。
 
 > **当前功能边界**：普通“视频总结（单个）”和批量 Agent 工作流只处理 BV 单 P 视频；多 P、番剧、电影、纪录片、综艺、互动视频和其它特殊页面会被明确拒绝。多 P 请使用 `B站之外 -> B站多P视频总结`。外部 Codex、Claude Code、OpenCode 等 Agent 只能通过本机只读 HTTP API 访问已完成知识库，不能领取视频任务、调用媒体工具或提交产物。
 
@@ -339,7 +340,7 @@ Windows 10/11 x64 用户可从 [GitHub Releases](https://github.com/Fenglin-Mapl
 4. 首次启动若提示缺少 ASR 模型，可允许应用自动下载；也可在设置的“项目依赖包”中点击模型名称打开正确 Release，下载完整 ZIP 后直接“从本地导入”。下载中的按钮会变成“暂停”，暂停会保留 `.partial` 断点缓存，之后可继续下载；下载中或暂停时点击“从本地导入”会先中止自动下载并清理受管缓存。默认使用 `large-v3-turbo`，资源不足时可切换 `small`；如果没有 NVIDIA/CUDA，可在设置中改用独立 CPU ASR。
 5. 按启动页“第一次上手”依次完成模型配置、B站登录、收藏夹同步、任务检查和 Agent 工作流创建。
 
-运行时和模型 ZIP 是应用内依赖管理器使用的独立资产。设置页可以重新检查、下载或修复依赖，并可导入手动下载的 `small`、`large-v3-turbo` ZIP。`1.6.0` 继续使用 `v1.0.0` 依赖基线，接受精确名称 `Star-Owner-v1.0.0-model-small.zip` 和 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`；旧版 `medium` ZIP 仍保留在该 Release 供旧应用使用。依赖管理器核对 GitHub Release SHA-256、模型类型和目录结构，并把包 ID、依赖版本、资产名、SHA-256 与 probes 写入受管清单；旧版已安装的官方 `v1.0.0` 依赖只做一次兼容认领，之后清单缺失或不匹配都会要求重新安装。核心包本身包含完整运行时（不含模型权重），新版本更新包还会在安装前核对 portable manifest、lockfile、事务脚本和关键运行时文件。清单与 runtime/model 目录共用 `installing -> committed` journal，中断不会留下身份与文件不一致或新旧混合版本。
+运行时和模型 ZIP 是应用内依赖管理器使用的独立资产。设置页可以重新检查、下载或修复依赖，并可导入手动下载的 `small`、`large-v3-turbo` ZIP。`1.6.1` 继续使用 `v1.0.0` 依赖基线，接受精确名称 `Star-Owner-v1.0.0-model-small.zip` 和 `Star-Owner-v1.0.0-model-large-v3-turbo.zip`；旧版 `medium` ZIP 仍保留在该 Release 供旧应用使用。依赖管理器核对 GitHub Release SHA-256、模型类型和目录结构，并把包 ID、依赖版本、资产名、SHA-256 与 probes 写入受管清单；旧版已安装的官方 `v1.0.0` 依赖只做一次兼容认领，之后清单缺失或不匹配都会要求重新安装。核心包本身包含完整运行时（不含模型权重），新版本更新包还会在安装前核对 portable manifest、lockfile、事务脚本和关键运行时文件。清单与 runtime/model 目录共用 `installing -> committed` journal，中断不会留下身份与文件不一致或新旧混合版本。
 
 每个项目副本根据其绝对项目根目录派生独立的 B 站 WebView partition。空白目录不会读取另一份星藏家的登录 Cookie；从旧版本升级时，仅当当前目录已有用户数据库记录，才会把旧固定 partition 的 B 站 Cookie 做一次兼容迁移。部分 Cookie 写入失败会标记为待重试，下次启动只补目标 partition 中缺失的 Cookie，不覆盖已有登录信息；旧 partition 不会被清空。
 

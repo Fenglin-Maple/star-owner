@@ -16,6 +16,7 @@ const { isAllowedBilibiliNavigation, secureMainWindow } = require('./core/deskto
 const { deleteCompletedDocument, recoverPendingDocumentDeletions } = require('./core/document-lifecycle');
 const { ensurePortableDesktopShortcut } = require('./core/desktop-shortcut');
 const { assertHiddenBrowserUrl, installHiddenBrowserRequestGuard } = require('./core/hidden-browser-policy');
+const { buildHiddenPageExtractionScript } = require('./core/hidden-page-extractor');
 const { InternalAgentManager } = require('./core/internal-agent-manager');
 const { loadClipboardImage } = require('./core/image-clipboard');
 const { LocalToolboxManager } = require('./core/local-toolbox-manager');
@@ -1364,12 +1365,12 @@ async function browseHidden(value, options = {}) {
         timeout = setTimeout(() => reject(new Error('Hidden browser timed out.')), 25000);
       })
     ]);
-    const result = await browser.webContents.executeJavaScript(`(() => {
-      const title = document.title || '';
-      const text = (document.body?.innerText || '').replace(/\\n{3,}/g, '\\n\\n').slice(0, 50000);
-      const links = [...document.querySelectorAll('a[href]')].slice(0, 40).map((a) => ({ text: (a.innerText || '').trim().slice(0, 160), href: a.href })).filter((item) => item.text && /^https?:/.test(item.href));
-      return { title, url: location.href, text, links };
-    })()`, true);
+    const result = await browser.webContents.executeJavaScript(buildHiddenPageExtractionScript({
+      minimumWaitMs: options.minimumWaitMs,
+      quietWaitMs: options.quietWaitMs,
+      maximumWaitMs: options.maximumWaitMs,
+      sampleIntervalMs: options.sampleIntervalMs
+    }), true);
     return JSON.stringify(result, null, 2);
   } finally {
     if (timeout) clearTimeout(timeout);
