@@ -1,11 +1,13 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { projectRuntimeEnvironment } = require('./child-process-io');
+const { projectRuntimeEnvironment, resolveRuntimeBinaries } = require('./child-process-io');
 const { assertSafeWindowsPath, ensureDir, safeName } = require('./workspace');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
-const IMAGEIO_BINARIES = path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'Lib', 'site-packages', 'imageio_ffmpeg', 'binaries');
+// 跨平台解析 imageio_ffmpeg 二进制目录（win32: Lib/site-packages；POSIX: lib 下 python* 子目录的 site-packages），
+// 替代原先硬编码的 Windows 路径，macOS 上也能正确找到 ffmpeg-macos-*。
+const { imageioBinaries: IMAGEIO_BINARIES } = resolveRuntimeBinaries(PROJECT_ROOT);
 const LOCAL_IMPORT_MB_PER_BLOCK = 30;
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4v', '.flv', '.wmv', '.ts', '.mts', '.m2ts']);
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wma']);

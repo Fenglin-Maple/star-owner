@@ -337,6 +337,7 @@ async function bootstrap() {
   emitBootstrap('正在启动资源池和知识库接口…', 0.92);
   apiServer = new ApiServer({
     store,
+    projectRoot: path.resolve(__dirname, '..'),
     toolRunner,
     getToolHealth: () => toolHealth,
     onEvent: publishEvent
@@ -1468,7 +1469,8 @@ function emitBootstrap(message, progress, phase = 'loading') {
 
 function sendBootstrap() {
   if (!mainWindow || mainWindow.webContents.isLoading()) return;
-  mainWindow.webContents.send('app:bootstrap', bootstrapState);
+  // 统一走 safeSend：覆盖窗口销毁竞态（isDestroyed + try/catch）
+  safeSend('app:bootstrap', bootstrapState);
 }
 
 
@@ -1483,7 +1485,8 @@ function safeSend(channel, payload) {
 
 function sendRuntime() {
   if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed() || mainWindow.webContents.isLoading()) return;
-  mainWindow.webContents.send('app:runtime', {
+  // 统一走 safeSend：覆盖窗口销毁竞态（isDestroyed + try/catch）
+  safeSend('app:runtime', {
     version: PACKAGE_VERSION,
     apiUrl: apiServer?.url(),
     workspaceRoot: store?.getDefaultWorkspace()?.root || WORKSPACE_ROOT,

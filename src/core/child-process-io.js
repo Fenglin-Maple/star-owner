@@ -49,6 +49,44 @@ function findVenvSitePackages(venv) {
   return '';
 }
 
+/**
+ * 跨平台解析项目内置运行时二进制，统一收敛 FFmpeg / Python / site-packages 的解析逻辑：
+ * - whisperPython: win32 -> runtime/faster-whisper/Scripts/python.exe；POSIX -> runtime/faster-whisper/bin/python（不存在返回 ''）
+ * - imageioBinaries: win32 -> Lib/site-packages/imageio_ffmpeg/binaries；POSIX -> 扫描 lib 下 python* 子目录的 site-packages 中的 imageio_ffmpeg/binaries
+ * - sitePackages: 复用 findVenvSitePackages（win32: Lib/site-packages；POSIX: lib 下 python* 子目录的 site-packages）
+ * - venvRoot: runtime/faster-whisper
+ */
+function resolveRuntimeBinaries(projectRoot = PROJECT_ROOT) {
+  const root = path.resolve(projectRoot);
+  const venvRoot = path.join(root, 'runtime', 'faster-whisper');
+  let whisperPython;
+  let imageioBinaries = '';
+  if (process.platform === 'win32') {
+    whisperPython = path.join(venvRoot, 'Scripts', 'python.exe');
+    imageioBinaries = path.join(venvRoot, 'Lib', 'site-packages', 'imageio_ffmpeg', 'binaries');
+  } else {
+    const posixPython = path.join(venvRoot, 'bin', 'python');
+    whisperPython = fs.existsSync(posixPython) ? posixPython : '';
+    const lib = path.join(venvRoot, 'lib');
+    if (fs.existsSync(lib)) {
+      for (const entry of fs.readdirSync(lib, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !entry.name.startsWith('python')) continue;
+        const candidate = path.join(lib, entry.name, 'site-packages', 'imageio_ffmpeg', 'binaries');
+        if (fs.existsSync(candidate)) {
+          imageioBinaries = candidate;
+          break;
+        }
+      }
+    }
+  }
+  return {
+    whisperPython,
+    imageioBinaries,
+    sitePackages: findVenvSitePackages(venvRoot),
+    venvRoot
+  };
+}
+
 function projectRuntimeEnvironment(environment = process.env, projectRoot = PROJECT_ROOT) {
   const source = environment || {};
   const env = {};
@@ -57,11 +95,8 @@ function projectRuntimeEnvironment(environment = process.env, projectRoot = PROJ
   }
 
   const root = path.resolve(projectRoot);
-  const venv = path.join(root, 'runtime', 'faster-whisper');
+  const { venvRoot: venv, sitePackages, imageioBinaries: ffmpegBinaries } = resolveRuntimeBinaries(root);
   const pythonRoot = path.join(root, 'runtime', 'python');
-  const venvSitePackages = findVenvSitePackages(venv);
-  const ffmpegBinaries = path.join(venvSitePackages, 'imageio_ffmpeg', 'binaries');
-  const sitePackages = venvSitePackages;
   const localPaths = [
     path.join(root, 'node_modules', '.bin'),
     path.join(root, 'runtime', 'vc-runtime'),
@@ -151,4 +186,4 @@ function nodeChildProcessSpec(environment = process.env) {
   return { executable: process.execPath, env };
 }
 
-module.exports = { findVenvSitePackages, nodeChildProcessSpec, projectRuntimeEnvironment, readUtf8, resolveNvidiaSmi, resolveSystemExecutable, utf8ChildEnvironment };
+module.exports = { findVenvSitePackages, nodeChildProcessSpec, projectRuntimeEnvironment, readUtf8, resolveNvidiaSmi, resolveRuntimeBinaries, resolveSystemExecutable, utf8ChildEnvironment };

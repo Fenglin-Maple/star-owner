@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
-const { projectRuntimeEnvironment } = require('../src/core/child-process-io');
+const { projectRuntimeEnvironment, resolveRuntimeBinaries } = require('../src/core/child-process-io');
 const { repairPortablePythonHome } = require('../src/core/portable-runtime');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -11,21 +11,13 @@ try {
 } catch (error) {
   console.warn(`[video-tool] portable Python repair failed: ${error.message || String(error)}`);
 }
+// 与 child-process-io.resolveRuntimeBinaries 收敛：whisper Python 与 imageio_ffmpeg 二进制目录
+// 的跨平台解析统一由 helper 提供（win32/POSIX 行为与原实现一致）。
 function resolveWhisperPython() {
-  if (process.platform === 'win32') return path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'Scripts', 'python.exe');
-  const posix = path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'bin', 'python');
-  return fs.existsSync(posix) ? posix : '';
+  return resolveRuntimeBinaries(PROJECT_ROOT).whisperPython;
 }
 function resolveImageIoBinaries() {
-  if (process.platform === 'win32') return path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'Lib', 'site-packages', 'imageio_ffmpeg', 'binaries');
-  const lib = path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'lib');
-  if (!fs.existsSync(lib)) return '';
-  for (const entry of fs.readdirSync(lib)) {
-    if (!entry.startsWith('python')) continue;
-    const candidate = path.join(lib, entry, 'site-packages', 'imageio_ffmpeg', 'binaries');
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  return '';
+  return resolveRuntimeBinaries(PROJECT_ROOT).imageioBinaries;
 }
 const WHISPER_PYTHON = resolveWhisperPython();
 const WHISPER_CLI = path.join(PROJECT_ROOT, 'tools', 'faster-whisper-cli.py');
@@ -213,6 +205,30 @@ async function writeSubtitles(videoUrl, outDir, args) {
   console.log(file);
 }
 
+// 下载完成标记文件：staging 目录内写入，确认下载完整后再原子安装到正式目标。
+const DOWNLOAD_COMPLETE_MARKER = '.download-complete';
+
+// staging 下载：素材/视频先写入 <target>.staging-<pid>，完成后校验再原子改名，
+// 避免中断下载留下的半成品被识别为可用；残留 staging 在下次下载前清理。
+function stagingPath(target) {
+  return `${target}.staging-${process.pid}`;
+}
+
+function cleanStaleStaging(directory, pattern) {
+  if (!fs.existsSync(directory)) return;
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    if (!/\.staging-\d+$/.test(entry.name)) continue;
+    if (pattern && !pattern.test(entry.name)) continue;
+    fs.rmSync(path.join(directory, entry.name), { recursive: true, force: true });
+  }
+}
+
+function verifyStagedFile(file, expectedBytes = 0) {
+  if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return false;
+  const size = fs.statSync(file).size;
+  return size > 0 && (expectedBytes <= 0 || size === expectedBytes);
+}
+
 async function downloadMerged(videoUrl, outDir, args) {
   requireCommand('yt-dlp');
   requireCommand('ffmpeg');
@@ -222,8 +238,13 @@ async function downloadMerged(videoUrl, outDir, args) {
     console.log(existing);
     return existing;
   }
+  // 清理上次中断遗留的 staging 下载目录，避免半成品被识别为可用缓存。
+  cleanStaleStaging(outDir, /^merged\.staging-\d+$/);
+  const stagingDir = path.join(outDir, `merged.staging-${process.pid}`);
+  fs.rmSync(stagingDir, { recursive: true, force: true });
+  fs.mkdirSync(stagingDir, { recursive: true });
   const height = Number(args.height || 720);
-  const output = path.join(outDir, 'merged.%(ext)s');
+  const output = path.join(stagingDir, 'merged.%(ext)s');
   const format = `bv*[height<=${height}]+ba/b[height<=${height}]/best`;
   const cliArgs = [
     '-f', format,
@@ -236,11 +257,24 @@ async function downloadMerged(videoUrl, outDir, args) {
   if (ffmpeg) cliArgs.push('--ffmpeg-location', ffmpeg);
   if (args.cookies) cliArgs.push('--cookies', path.resolve(args.cookies));
   cliArgs.push(videoUrl);
-  run('yt-dlp', cliArgs);
-  const merged = findFirst(outDir, /^merged\.(mp4|mkv|webm)$/i);
-  if (!merged) throw new Error('yt-dlp 已结束，但未找到 merged.mp4/mkv/webm。');
-  console.log(merged);
-  return merged;
+  try {
+    run('yt-dlp', cliArgs);
+  } catch (error) {
+    fs.rmSync(stagingDir, { recursive: true, force: true });
+    throw error;
+  }
+  const merged = findFirst(stagingDir, /^merged\.(mp4|mkv|webm)$/i);
+  if (!merged || !verifyStagedFile(merged)) {
+    fs.rmSync(stagingDir, { recursive: true, force: true });
+    throw new Error('yt-dlp 已结束，但未找到完整可用的 merged.mp4/mkv/webm（下载可能被中断，残留 staging 已清理）。');
+  }
+  // 校验通过后写入完成标记并原子改名为正式目标；正式目录里只可能出现完整文件。
+  fs.writeFileSync(path.join(stagingDir, DOWNLOAD_COMPLETE_MARKER), `${JSON.stringify({ file: path.basename(merged), size: fs.statSync(merged).size, completedAt: new Date().toISOString() })}\n`, 'utf8');
+  const finalPath = path.join(outDir, path.basename(merged));
+  fs.renameSync(merged, finalPath);
+  fs.rmSync(stagingDir, { recursive: true, force: true });
+  console.log(finalPath);
+  return finalPath;
 }
 
 async function runAsr(videoUrl, outDir, args) {
@@ -444,7 +478,7 @@ function emitMediaProgress(progress, phase) {
 
 function runFfmpegAsync(args, options = {}) {
   const executable = resolveCommand('ffmpeg');
-  if (!executable) throw new Error('Bundled FFmpeg is unavailable; repair the runtime-base dependency.');
+  if (!executable) throw new Error('缺少项目内置 ffmpeg，媒体处理无法继续（参见上方安装提示）。');
   return new Promise((resolve, reject) => {
     let settled = false;
     let stdout = '';
@@ -505,6 +539,7 @@ function extractFramesLegacy(outDir, count) {
   const duration = Math.max(0, Number(info.duration || 0));
   const interval = duration > 0 ? Math.max(0.5, duration / (wanted + 1)) : 30;
   const executable = resolveCommand('ffmpeg');
+  if (!executable) throw new Error('缺少项目内置 ffmpeg，无法抽帧。');
   const result = spawnSync(executable, [
     '-hide_banner', '-loglevel', 'error', '-i', merged,
     '-vf', `fps=1/${interval.toFixed(3)}`,
@@ -687,6 +722,9 @@ async function downloadCover(source, outDir, args) {
   if (type && !type.startsWith('image/')) throw new Error(`Unexpected Bilibili cover type: ${type}.`);
   const content = await readLimitedResponse(response, maximumBytes);
   if (!content.length || content.length > maximumBytes) throw new Error('Bilibili cover is empty or too large.');
+  if (declaredLength > 0 && content.length !== declaredLength) {
+    throw new Error(`Bilibili cover download is incomplete (${content.length}/${declaredLength} bytes).`);
+  }
   const detected = detectRasterImage(content);
   if (!detected) throw new Error('Bilibili cover bytes are not a supported raster image.');
   if (type && type !== detected.mimeType && !(type === 'image/jpg' && detected.mimeType === 'image/jpeg')) {
@@ -694,7 +732,15 @@ async function downloadCover(source, outDir, args) {
   }
   const extension = detected.extension;
   const file = path.join(outDir, `cover${extension}`);
-  fs.writeFileSync(file, content);
+  // staging 写入 + 大小校验后原子改名，避免中断留下半成品封面。
+  cleanStaleStaging(outDir, /^cover/i);
+  const staged = stagingPath(file);
+  fs.writeFileSync(staged, content);
+  if (!verifyStagedFile(staged, declaredLength)) {
+    fs.rmSync(staged, { force: true });
+    throw new Error('Bilibili cover staged write is incomplete.');
+  }
+  fs.renameSync(staged, file);
   return file;
 }
 
@@ -882,15 +928,29 @@ function dependencyStatus(command) {
   }
 }
 
+// 内置工具缺失时的明确中文提示（按平台区分文案），保持项目 runtime 隔离，不回退系统 PATH。
+const MISSING_COMMAND_HINTS = {
+  ffmpeg: (platform) => (platform === 'win32'
+    ? '缺少项目内置 ffmpeg，请运行 npm run setup:asr 修复（scripts/setup-faster-whisper.ps1）。'
+    : '缺少项目内置 ffmpeg，请运行 npm run setup:mac 安装（scripts/setup-macos-runtime.sh）。'),
+  'yt-dlp': (platform) => (platform === 'win32'
+    ? '缺少项目内置 yt-dlp（随 faster-whisper 运行时提供），请运行 npm run setup:asr 修复（scripts/setup-faster-whisper.ps1）。'
+    : '缺少项目内置 yt-dlp（随 faster-whisper 运行时提供），请运行 npm run setup:mac 安装（scripts/setup-macos-runtime.sh）。'),
+  'faster-whisper': (platform) => (platform === 'win32'
+    ? '缺少项目内置 faster-whisper 运行时，请运行 npm run setup:asr 修复（scripts/setup-faster-whisper.ps1）。'
+    : '缺少项目内置 faster-whisper 运行时，请运行 npm run setup:mac 安装（scripts/setup-macos-runtime.sh）。')
+};
+
+function missingCommandHint(command) {
+  const hint = MISSING_COMMAND_HINTS[command];
+  return hint ? hint(process.platform) : `缺少应用内置 ${command}，请修复运行时依赖后重试。`;
+}
+
 function resolveCommand(command) {
   const local = LOCAL_BINARIES[command];
   if (local && fs.existsSync(local)) return local;
-  if (process.platform !== 'win32') {
-    try {
-      const probe = spawnSync('sh', ['-c', `command -v ${command}`], { encoding: 'utf8' });
-      if (probe.status === 0 && String(probe.stdout || '').trim()) return String(probe.stdout).trim();
-    } catch { /* fall through */ }
-  }
+  // 不再回退系统 PATH：本地缺失即明确提示（POSIX 与 win32 一致），由调用方抛出缺命令错误。
+  console.error(`[video-tool] ${missingCommandHint(command)}`);
   return '';
 }
 

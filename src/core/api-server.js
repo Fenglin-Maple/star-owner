@@ -1,4 +1,6 @@
+const fs = require('fs');
 const http = require('http');
+const path = require('path');
 const { KnowledgeApi } = require('./knowledge-api');
 const { isAllowedApiOrigin } = require('./network-policy');
 
@@ -16,10 +18,12 @@ const DISABLED_VIDEO_PREFIXES = [
 ];
 
 class ApiServer {
-  constructor({ store }) {
+  constructor({ store, projectRoot } = {}) {
     this.knowledgeApi = new KnowledgeApi({ store });
     this.server = null;
     this.port = 0;
+    // 端口落盘的项目根：默认取进程工作目录（启动脚本会 cd 到项目根），主进程显式传入项目根兜底
+    this.projectRoot = projectRoot || process.cwd();
   }
 
   async start(preferredPort = 17391) {
@@ -33,6 +37,7 @@ class ApiServer {
     this.server.maxHeadersCount = 100;
     await listenLocal(this.server, preferredPort);
     this.port = Number(this.server.address()?.port || 0);
+    this.writePortFile();
     return this.url();
   }
 
@@ -41,10 +46,30 @@ class ApiServer {
     this.server.close();
     this.server = null;
     this.port = 0;
+    this.removePortFile();
   }
 
   url() {
     return `http://127.0.0.1:${this.port}`;
+  }
+
+  // 把实际监听端口落盘到 runtime/.api-port，供启动脚本做防双开与启动成功判断
+  writePortFile() {
+    try {
+      const dir = path.join(this.projectRoot, 'runtime');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, '.api-port'), String(this.port), 'utf8');
+    } catch (error) {
+      console.warn(`[api-server] 端口落盘失败：${error?.message || String(error)}`);
+    }
+  }
+
+  removePortFile() {
+    try {
+      fs.rmSync(path.join(this.projectRoot, 'runtime', '.api-port'), { force: true });
+    } catch (error) {
+      console.warn(`[api-server] 端口文件清理失败：${error?.message || String(error)}`);
+    }
   }
 
   async route(req, res) {

@@ -50,12 +50,14 @@ function evaluateAsrHardware(input = {}) {
   const runtimeHealth = input.runtimeHealth || {};
   const runtimeReady = Boolean(input.pythonAvailable && runtimeHealth.ok && runtimeHealth.modelReady);
   const isDarwin = input.platform === 'darwin';
-  const mlxAvailable = isDarwin && Boolean(runtimeHealth.mlxAvailable);
+  // Apple Silicon（darwin + arm64）才可能有 MLX；Intel Mac 走 faster-whisper CPU 语义（mlxAvailable 恒 false，preferredMode 落 cpu）。
+  const isAppleSilicon = isDarwin && input.arch === 'arm64';
+  const mlxAvailable = isAppleSilicon && Boolean(runtimeHealth.mlxAvailable);
   const nvidiaDetected = Boolean(input.gpu?.available);
   const cudaDeviceCount = Number(runtimeHealth.cudaDevices || 0);
   const requirement = modelDefinition;
-  // darwin：MLX Whisper 使用 Apple Metal GPU；其余平台保持原有 NVIDIA/CUDA 判定
-  const gpuSupported = isDarwin
+  // darwin(Apple Silicon)：MLX Whisper 使用 Apple Metal GPU；其余平台保持原有 NVIDIA/CUDA 判定
+  const gpuSupported = isAppleSilicon
     ? runtimeReady && mlxAvailable
     : runtimeReady && nvidiaDetected && cudaDeviceCount > 0 && Number(input.gpu.totalMiB || 0) >= requirement.gpuTotalMiB;
   const cpuArchitectureSupported = isDarwin || (input.platform === 'win32' && input.arch === 'x64');

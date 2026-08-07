@@ -34,6 +34,9 @@ class DependencyManager {
     this.pendingPackages = new Map();
     this.pendingImports = new Map();
     this.downloadControllers = new Map();
+    // macOS 健康检查缓存：指纹（探针文件 mtime+size + manifest mtime）未变化时直接复用
+    // SHA-256 结果，避免每次启动同步重算大模型目录（如 1.5G+ 权重文件）造成主进程卡顿。
+    this.healthCache = new Map();
     this.queue = Promise.resolve();
     this.installJournal = path.join(this.projectRoot, 'runtime', '.install-transaction.json');
     this.manifestRoot = ensureDir(path.join(this.projectRoot, 'runtime', '.dependency-manifests'));
@@ -66,6 +69,8 @@ class DependencyManager {
           assetName: '',
           assetPattern: '',
           fallbackAssetPattern: '',
+          // macOS 不使用 GitHub Release 下载，下载按钮不可用；给出本地安装指引
+          installHint: '请运行 npm run setup:mac 完成本地运行时安装（scripts/setup-macos-runtime.sh）',
           probes: [
             'runtime/faster-whisper/bin/python',
             'runtime/faster-whisper/lib/python3.12/site-packages/mlx_whisper',
@@ -80,6 +85,8 @@ class DependencyManager {
           required: model.required,
           assetName: '',
           assetPattern: '',
+          // macOS 模型由 HuggingFace mlx-community 仓库下载，不提供 Release 下载按钮
+          installHint: '请运行 npm run setup:mac 完成本地运行时安装（scripts/setup-macos-runtime.sh）',
           probes: [`runtime/models/${model.id}/config.json`, modelWeightsProbe(model)]
         }))
       ];
@@ -186,7 +193,7 @@ class DependencyManager {
       if (!validation.valid) {
         return { available: false, manifest: loaded.manifest, manifestStatus: validation.status, message: `macOS 本地配置清单无效：${validation.message}` };
       }
-      const checksum = contentChecksumForProbes(this.projectRoot, definition.probes);
+      const checksum = this.cachedContentChecksumForProbes(definition);
       if (!checksum || checksum !== String(loaded.manifest.checksum || '').toLowerCase()) {
         return { available: false, manifest: loaded.manifest, manifestStatus: 'checksum-mismatch', message: 'macOS 本地运行时内容与清单 SHA-256 不一致（可能被更新或修改）；请重新运行 npm run manifest:mac 生成新清单。' };
       }
@@ -201,6 +208,19 @@ class DependencyManager {
       return { available: false, manifest: loaded.manifest, manifestStatus: validation.status, message: `依赖文件存在，但版本或包身份不匹配：${validation.message}` };
     }
     return { available: true, manifest: loaded.manifest, manifestStatus: 'valid', message: '已安装并通过版本与路径检查' };
+  }
+
+  cachedContentChecksumForProbes(definition) {
+    // 缓存版内容校验和：指纹 = 探针文件 mtime+size 摘要 + manifest 文件 mtime；
+    // 指纹未变直接复用上次 SHA-256 结果（低频、可缓存），指纹变化才重新同步哈希。
+    const manifestFile = this.packageManifestPath(definition);
+    const fingerprint = probeFingerprint(this.projectRoot, definition.probes, manifestFile);
+    if (fingerprint === null) return null;
+    const cached = this.healthCache.get(definition.id);
+    if (cached && cached.fingerprint === fingerprint) return cached.checksum;
+    const checksum = contentChecksumForProbes(this.projectRoot, definition.probes);
+    this.healthCache.set(definition.id, { fingerprint, checksum });
+    return checksum;
   }
 
   createPackageManifest(definition, metadata = {}) {
@@ -1008,6 +1028,42 @@ function contentChecksumForProbes(projectRoot, probes) {
   }
   entries.sort((a, b) => (a.probe < b.probe ? -1 : a.probe > b.probe ? 1 : 0));
   return crypto.createHash('sha256').update(entries.map((item) => `${item.probe}\u0000${item.probeHash}`).join('\n')).digest('hex');
+}
+
+function probeFingerprint(projectRoot, probes, manifestFile) {
+  // 健康检查缓存指纹：manifest 的 mtime+size 与每个探针（文件本身，或目录内全部文件——
+  // 已排除 __pycache__/.pyc/.DS_Store，与 collectProbeFilesSync 一致）的 mtime+size 摘要。
+  // 文件未变化 → 指纹不变 → 复用缓存；manifest 更新（mtime 变化）也会触发重算。
+  const parts = [];
+  try {
+    const manifestStat = fs.statSync(manifestFile);
+    parts.push(`manifest\u0000${manifestStat.mtimeMs}\u0000${manifestStat.size}`);
+  } catch (error) {
+    return null;
+  }
+  for (const probe of probes || []) {
+    const relative = String(probe || '').replaceAll('\\', '/');
+    const absolute = path.resolve(projectRoot, relative);
+    let stat;
+    try { stat = fs.statSync(absolute); }
+    catch (error) { return null; }
+    if (stat.isFile()) {
+      parts.push(`${relative}\u0000${stat.mtimeMs}\u0000${stat.size}`);
+    } else if (stat.isDirectory()) {
+      const files = collectProbeFilesSync(absolute);
+      if (!files.length) return null;
+      const lines = files
+        .map((file) => {
+          const fileStat = fs.statSync(file);
+          return `${path.relative(projectRoot, file).split(path.sep).join('/')}\u0000${fileStat.mtimeMs}\u0000${fileStat.size}`;
+        })
+        .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      parts.push(`${relative}\u0000dir:${lines.join('\n')}`);
+    } else {
+      return null;
+    }
+  }
+  return crypto.createHash('sha256').update(parts.join('\n')).digest('hex');
 }
 
 function managedRuntimePaths(packageId) {
