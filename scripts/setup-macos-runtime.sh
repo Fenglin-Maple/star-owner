@@ -35,7 +35,7 @@ for arg in "$@"; do
       exit 1
       ;;
     *)
-      echo "未知参数：$arg（支持 --model <id>、--skip-models）" >&2
+      echo "未知参数：${arg}（支持 --model <id>、--skip-models）" >&2
       exit 1
       ;;
   esac
@@ -45,7 +45,7 @@ done
 case "$MODEL" in
   small | large-v3-turbo) ;;
   *)
-    echo "不支持的模型：$MODEL（支持 small、large-v3-turbo）" >&2
+    echo "不支持的模型：${MODEL}（支持 small、large-v3-turbo）" >&2
     exit 1
     ;;
 esac
@@ -54,7 +54,7 @@ step() { printf '\n\033[1;36m[%s/%s] %s\033[0m\n' "$1" "$2" "$3"; }
 ok() { printf '\033[32m✓ %s\033[0m\n' "$1"; }
 info() { printf '\033[33m%s\033[0m\n' "$1"; }
 
-echo "星藏家 macOS 本地运行时安装（项目根目录：$ROOT）"
+echo "星藏家 macOS 本地运行时安装（项目根目录：${ROOT}）"
 if [[ "$(uname -s)" != "Darwin" ]]; then
   info "警告：当前系统不是 macOS，MLX Whisper 依赖 Apple Silicon 生态，后续步骤可能失败。"
 fi
