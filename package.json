@@ -48,7 +48,8 @@
     "verify:release": "powershell -ExecutionPolicy Bypass -File scripts/verify-release.ps1",
     "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle all -SeparateModelAsset",
     "package:core": "powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle all -SeparateModelAsset -CoreOnly",
-    "package:model:turbo": "powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle large-v3-turbo -SeparateModelAsset -ModelOnly"
+    "package:model:turbo": "powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle large-v3-turbo -SeparateModelAsset -ModelOnly",
+    "setup:mac": "bash scripts/setup-macos-runtime.sh"
   },
   "engines": {
     "node": ">=22"
