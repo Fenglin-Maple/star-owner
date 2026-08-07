@@ -93,14 +93,13 @@ let bootstrapState = {
 };
 
 function createWindow() {
-  mainWindow = new BrowserWindow({
+  const windowOptions = {
     ...DEFAULT_WINDOW,
     minWidth: 980,
     minHeight: 680,
     show: false,
     title: PRODUCT_NAME,
     icon: path.join(__dirname, '..', 'assets', 'star-note.ico'),
-    frame: false,
     backgroundColor: '#0d1117',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -109,7 +108,15 @@ function createWindow() {
       sandbox: true,
       webviewTag: true
     }
-  });
+  };
+  if (process.platform === 'darwin') {
+    // macOS：原生红绿灯（隐藏标题栏内容、保留原生窗口控件）
+    windowOptions.titleBarStyle = 'hiddenInset';
+    windowOptions.trafficLightPosition = { x: 14, y: 12 };
+  } else {
+    windowOptions.frame = false;
+  }
+  mainWindow = new BrowserWindow(windowOptions);
   secureMainWindow(mainWindow, RENDERER_FILE, {
     openBilibiliVideo: (url) => openBilibiliVideoWindow(url)
   });

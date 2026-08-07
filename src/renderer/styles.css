@@ -388,6 +388,10 @@ svg {
 .window-left { gap: 10px; padding-left: 14px; }
 .window-status { gap: 12px; padding: 0 12px; color: var(--muted); font-size: 12px; -webkit-app-region: no-drag; }
 
+/* macOS 原生红绿灯：隐藏自绘窗口按钮，左侧留出红绿灯空间 */
+.platform-darwin .window-controls { display: none; }
+.platform-darwin .window-left { padding-left: 76px; }
+
 .dependency-download-indicator {
   position: relative;
   flex: 0 0 34px;
