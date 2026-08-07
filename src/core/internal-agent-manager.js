@@ -421,8 +421,11 @@ class InternalAgentManager {
     if (hardware?.checkedAt && !hardware.localAsrSupported) {
       throw new Error(`当前硬件环境无法运行本地 ASR：${hardware.issues?.join(' ') || hardware.recommendation || '请在设置中检查运行时、模型、显卡与内存。'}`);
     }
-    if (hardware?.checkedAt && !hardware.nvidia?.supported && hardware.cpu?.supported && scheduler.config?.asrExecutionMode !== 'cpu') {
-      throw new Error('未检测到可用 NVIDIA/CUDA ASR；本机可使用 CPU ASR，但该通道默认关闭。请先在“设置 → 资源调度”中手动开启 CPU ASR。');
+    const gpuChannelReady = process.platform === 'darwin' ? Boolean(hardware.mlxAvailable) : Boolean(hardware.nvidia?.supported);
+    if (hardware?.checkedAt && !gpuChannelReady && hardware.cpu?.supported && scheduler.config?.asrExecutionMode !== 'cpu') {
+      throw new Error(process.platform === 'darwin'
+        ? '未检测到可用的 MLX Whisper（Apple Metal）加速；本机可使用 CPU ASR，但该通道默认关闭。请先在“设置 → 资源调度”中手动开启 CPU ASR。'
+        : '未检测到可用 NVIDIA/CUDA ASR；本机可使用 CPU ASR，但该通道默认关闭。请先在“设置 → 资源调度”中手动开启 CPU ASR。');
     }
     if (session.status === 'waiting-login') {
       const user = this.getCurrentUser();
@@ -742,6 +745,32 @@ class InternalAgentManager {
           this.saveSession(latest);
           continue;
         }
+        if (isContentRejectedError(error)) {
+          const reason = error.message || String(error);
+          latest.failed = Number(latest.failed || 0) + 1;
+          latest.status = 'error';
+          latest.phase = '任务失败（内容被模型供应商审核拒绝）';
+          latest.lastError = reason;
+          latest.currentTaskId = '';
+          latest.currentRunId = '';
+          this.abortAttempt(task.id, latest.workerId, reason, 'content-rejected');
+          const current = this.store.getTask(task.id);
+          if (current && current.status !== 'done') {
+            this.store.upsertTask({
+              ...current,
+              enabled: false,
+              failureReason: '内容被模型供应商审核拒绝，已自动跳过；可在任务总览重新启用后重试',
+              contentRejected: true,
+              updatedAt: new Date().toISOString()
+            });
+            this.store.commit();
+          }
+          this.saveSession(latest);
+          this.log(latest, `内容审核拒绝，已跳过：${reason}`, 'error');
+          this.emit({ type: 'content-rejected', sessionId: latest.id, taskId: task.id, bvid: task.bvid, title: task.title, reason });
+          if (latest.mode === 'single') return;
+          continue;
+        }
         if (error.code === 'ASR_INFRASTRUCTURE_FAILURE' || error.failureKind === 'infrastructure') {
           const possibleCauses = Array.isArray(error.possibleCauses) ? error.possibleCauses : [];
           const modelInfrastructure = String(error.code || '').startsWith('MODEL_PROVIDER_');
@@ -773,7 +802,7 @@ class InternalAgentManager {
           this.markMultipartTaskFailed(task, latest.lastError, 'infrastructure-failure');
           this.store.updateWorker(latest.workerId, { status: 'paused', pauseReason: report, pausedAt: new Date().toISOString() });
           this.saveSession(latest);
-          this.log(latest, `基础设施故障，Agent 已停止：${latest.lastError}`);
+          this.log(latest, `基础设施故障，Agent 已停止：${latest.lastError}`, 'error');
           this.emit({ type: 'infrastructure-stopped', sessionId: latest.id, taskId: task.id, report, possibleCauses });
           return;
         }
@@ -800,7 +829,7 @@ class InternalAgentManager {
         this.abortAttempt(task.id, latest.workerId, latest.lastError, 'internal-agent-error');
         this.markMultipartTaskFailed(task, latest.lastError, 'internal-agent-error');
         this.saveSession(latest);
-        this.log(latest, `任务失败：${latest.lastError}`);
+        this.log(latest, `任务失败：${latest.lastError}`, 'error');
         if (latest.mode === 'single' || !latest.acceptNewTasks) return;
         latest.status = 'running';
         this.saveSession(latest);
@@ -924,7 +953,7 @@ class InternalAgentManager {
     latest.lastOutput = finalized.artifactDir;
     latest.updatedAt = new Date().toISOString();
     this.saveSession(latest);
-    this.log(latest, `完成 ${task.bvid}，产物已通过应用校验。`);
+    this.log(latest, `完成 ${task.bvid}，产物已通过应用校验。`, 'success');
     } finally {
       stopLeaseHeartbeat();
     }
@@ -1483,9 +1512,9 @@ class InternalAgentManager {
     this.store.upsertTask(task);
   }
 
-  log(session, message) {
+  log(session, message, level = 'info') {
     const latest = this.sessionCache.get(session.id) || this.store.get('internalAgentSessions', session.id) || session;
-    latest.logs = [...(latest.logs || []), { at: new Date().toISOString(), message: String(message) }].slice(-200);
+    latest.logs = [...(latest.logs || []), { at: new Date().toISOString(), message: String(message), level: level === 'info' ? undefined : String(level) }].slice(-200);
     latest.updatedAt = new Date().toISOString();
     Object.assign(session, latest);
     this.touchSession(latest);
@@ -1955,6 +1984,11 @@ function isInside(root, target) {
 
 function isContextLimitError(value) {
   return /context(?:[_ -]?(?:length|window))?|maximum context|too many tokens|token limit|上下文.{0,8}(?:超|长|限)|请求.{0,8}过长/i.test(String(value || ''));
+}
+
+function isContentRejectedError(value) {
+  // 模型供应商内容安全审核拒绝（如火山方舟 "input may contain sensitive information"）
+  return /sensitive information|content filter|content_filter|内容(?:安全|审核).{0,10}(?:拒绝|拦截)|审核.{0,6}(?:未通过|拦截|拒绝)/i.test(String(value || ''));
 }
 
 function injectFrameGallery(markdown, frames) {

@@ -1,4 +1,7 @@
-﻿const pages = document.querySelectorAll('.page');
+﻿// macOS 使用原生红绿灯标题栏：隐藏自绘窗口按钮，左侧为红绿灯留出空间
+if (window.orchestrator?.platform === 'darwin') document.body.classList.add('platform-darwin');
+
+const pages = document.querySelectorAll('.page');
 const navItems = document.querySelectorAll('.nav-item');
 const navGroups = document.querySelectorAll('.nav-group');
 const navSubgroups = document.querySelectorAll('.nav-subgroup');

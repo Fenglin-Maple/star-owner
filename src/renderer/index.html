@@ -615,9 +615,9 @@
                   <label><span>默认最大输出 Token</span><input id="aiModelProviderMaxTokens" type="number" min="256" max="1000000" step="1024" value="128000" title="模型没有单独配置时使用；与上下文窗口不同" /></label>
                   <label class="wide"><span>额外请求头 JSON</span><textarea id="aiModelProviderHeaders" rows="2" placeholder='{"X-Header":"value"}'></textarea></label>
                 </div>
-                <div class="ai-model-actions"><button id="aiModelDeleteProvider" class="secondary-button danger-button" type="button">删除</button><span></span><button id="aiModelSaveProvider" class="secondary-button" type="button">保存配置</button><button id="aiModelFetchModels" class="primary-button" type="button">拉取远程模型</button></div>
+                <div class="ai-model-actions" style="grid-template-columns: auto 1fr auto auto auto;"><button id="aiModelDeleteProvider" class="secondary-button danger-button" type="button">删除</button><span></span><button id="aiModelSaveProvider" class="secondary-button" type="button">保存配置</button><button id="rag-model-test-button" class="secondary-button" type="button">测试连接</button><button id="aiModelFetchModels" class="primary-button" type="button">拉取远程模型</button></div>
                 <div class="rag-model-select-head"><div><strong>可用模型</strong><span>启用后可分配给 RAG 与视频总结 Agent</span></div><span id="aiModelRemoteCount">0 个</span></div>
-                <div id="aiModelRemoteModels" class="rag-remote-models"></div>
+                <div id="aiModelRemoteModels" class="rag-remote-models"><div class="rag-model-custom-add" style="grid-column: 1 / -1; display: flex; gap: 7px; align-items: center; padding: 6px 2px;"><input id="ragModelCustomId" type="text" placeholder="输入自定义模型 ID，如 ark-code-latest" style="flex: 1; min-width: 0;" /><button id="ragModelCustomAdd" class="secondary-button compact-button" type="button">添加模型</button></div></div>
               </div>
             </section>
           </section>

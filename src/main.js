@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, safeStorage, session, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, Notification, safeStorage, session, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -93,14 +93,13 @@ let bootstrapState = {
 };
 
 function createWindow() {
-  mainWindow = new BrowserWindow({
+  const windowOptions = {
     ...DEFAULT_WINDOW,
     minWidth: 980,
     minHeight: 680,
     show: false,
     title: PRODUCT_NAME,
     icon: path.join(__dirname, '..', 'assets', 'star-note.ico'),
-    frame: false,
     backgroundColor: '#0d1117',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -109,7 +108,15 @@ function createWindow() {
       sandbox: true,
       webviewTag: true
     }
-  });
+  };
+  if (process.platform === 'darwin') {
+    // macOS：原生红绿灯（隐藏标题栏内容、保留原生窗口控件）
+    windowOptions.titleBarStyle = 'hiddenInset';
+    windowOptions.trafficLightPosition = { x: 14, y: 12 };
+  } else {
+    windowOptions.frame = false;
+  }
+  mainWindow = new BrowserWindow(windowOptions);
   secureMainWindow(mainWindow, RENDERER_FILE, {
     openBilibiliVideo: (url) => openBilibiliVideoWindow(url)
   });
@@ -207,7 +214,7 @@ async function bootstrap() {
   updateManager = new UpdateManager({
     projectRoot: path.resolve(__dirname, '..'),
     version: PACKAGE_VERSION,
-    emit: (event) => mainWindow?.webContents.send('update:event', event)
+    emit: (event) => safeSend('update:event', event)
   });
   if (store.portableRelocation) {
     console.info(`[portable-workspace] relocated ${store.portableRelocation.updatedRecords} records from ${store.portableRelocation.oldRoot} to ${store.portableRelocation.newRoot}`);
@@ -224,7 +231,7 @@ async function bootstrap() {
     workspaceRoot: store.getDefaultWorkspace()?.root || WORKSPACE_ROOT,
     encryptSecret,
     decryptSecret,
-    emit: (event) => mainWindow?.webContents.send('rag:event', event),
+    emit: (event) => safeSend('rag:event', event),
     requestApproval: requestRagApproval,
     browseHidden,
     openExternal: (url) => openExternalUrl(url),
@@ -360,7 +367,9 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   apiServer?.stop();
-  if (process.platform !== 'darwin') app.quit();
+  // macOS 适配：本项目无 Dock 图标重建窗口机制（无 activate 处理），
+  // 关窗口即完整退出，避免后台僵尸进程占用 API 端口。
+  app.quit();
 });
 
 app.on('before-quit', () => {
@@ -991,7 +1000,7 @@ ipcMain.handle('tools:list', async () => store ? store.listTools() : []);
 ipcMain.handle('tools:update', async (_event, payload) => {
   assertBackendReady();
   const tool = store.updateTool(payload.id, payload.patch || {});
-  mainWindow?.webContents.send('app:event', { type: 'tool-updated', tool });
+  safeSend('app:event', { type: 'tool-updated', tool });
   return tool;
 });
 
@@ -1026,6 +1035,11 @@ ipcMain.handle('rag:provider-delete', async (_event, providerId) => {
 ipcMain.handle('rag:models-fetch', async (_event, providerId) => {
   assertBackendReady();
   return ragAssistant.fetchModels(providerId);
+});
+
+ipcMain.handle('rag:provider-test', async (_event, providerId, modelId) => {
+  assertBackendReady();
+  return ragAssistant.testProvider(providerId, modelId);
 });
 
 ipcMain.handle('rag:models-update', async (_event, payload) => {
@@ -1304,7 +1318,7 @@ function requestRagApproval(request, signal) {
     pending.onAbort = () => settleRagApproval(id, null, ragAbortError());
     pendingRagApprovals.set(id, pending);
     signal?.addEventListener('abort', pending.onAbort, { once: true });
-    mainWindow?.webContents.send('rag:event', { type: 'approval-request', approval: { id, ...request } });
+    safeSend('rag:event', { type: 'approval-request', approval: { id, ...request } });
   });
 }
 
@@ -1457,8 +1471,18 @@ function sendBootstrap() {
   mainWindow.webContents.send('app:bootstrap', bootstrapState);
 }
 
+
+function safeSend(channel, payload) {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+  try {
+    mainWindow.webContents.send(channel, payload);
+  } catch {
+    // 窗口销毁竞态：忽略发送失败，避免主进程未捕获异常弹窗
+  }
+}
+
 function sendRuntime() {
-  if (!mainWindow || mainWindow.webContents.isLoading()) return;
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed() || mainWindow.webContents.isLoading()) return;
   mainWindow.webContents.send('app:runtime', {
     version: PACKAGE_VERSION,
     apiUrl: apiServer?.url(),
@@ -1515,7 +1539,7 @@ function publishEvent(event) {
     const { cacheState, localToolbox, ...activity } = record;
     store.recordActivity(activity);
   }
-  mainWindow?.webContents.send('app:event', record);
+  safeSend('app:event', record);
 }
 
 function buildTaskSnapshot(activeStore) {
@@ -1552,17 +1576,17 @@ function resolveTaskMarkdownPath(task = {}) {
 
 function publishLocalToolboxEvent(event) {
   publishEvent(event);
-  if (event.type === 'local-knowledge-catalog-changed') mainWindow?.webContents.send('rag:event', { type: 'knowledge-catalog-changed', collectionId: event.collectionId || '' });
+  if (event.type === 'local-knowledge-catalog-changed') safeSend('rag:event', { type: 'knowledge-catalog-changed', collectionId: event.collectionId || '' });
 }
 
 function publishMultipartEvent(event) {
   publishEvent(event);
-  mainWindow?.webContents.send('multipart:event', event);
+  safeSend('multipart:event', event);
 }
 
 function publishSharedEvent(event) {
   publishEvent(event);
-  mainWindow?.webContents.send('shared:event', event);
+  safeSend('shared:event', event);
 }
 
 function publicCurrentUser(user) {
@@ -1628,11 +1652,19 @@ function publishInternalAgentEvent(event) {
   const multipartMode = event.mode === 'multipart' || event.session?.mode === 'multipart';
   const multipartHotEvent = multipartMode && ['stream', 'multipart-progress', 'session-updated'].includes(event.type);
   if (!multipartHotEvent) {
-    mainWindow?.webContents.send('internal-agent:event', record);
+    safeSend('internal-agent:event', record);
   }
   if (!multipartHotEvent || event.type !== 'stream') multiPartManager?.handleAgentEvent(record);
-  if (['task-completed', 'task-attempt-aborted', 'video-unavailable'].includes(event.type)) {
-    mainWindow?.webContents.send('app:event', {
+  if (event.type === 'content-rejected') {
+    try {
+      new Notification({
+        title: '星藏家',
+        body: `视频「${event.title || event.bvid || '未知视频'}」内容审核未通过，已自动跳过并继续处理其它视频。`
+      }).show();
+    } catch { /* 系统通知失败不影响主流程 */ }
+  }
+  if (['task-completed', 'task-attempt-aborted', 'video-unavailable', 'content-rejected'].includes(event.type)) {
+    safeSend('app:event', {
       createdAt: record.createdAt,
       type: 'snapshot-invalidated',
       reason: event.type,
@@ -1645,7 +1677,7 @@ function publishInternalAgentEvent(event) {
 
 function publishDependencyEvent(event) {
   const record = { createdAt: new Date().toISOString(), ...event };
-  mainWindow?.webContents.send('dependency:event', record);
+  safeSend('dependency:event', record);
   if (event.type === 'dependency-error') publishEvent(event);
 }
 

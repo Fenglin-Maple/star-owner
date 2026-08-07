@@ -22,6 +22,7 @@
     "test:collection-sync": "node scripts/collection-sync-test.js",
     "test:bili-session": "node scripts/bili-session-test.js",
     "test:dependency-manifest": "node scripts/dependency-manifest-test.js",
+    "manifest:mac": "node scripts/generate-mac-manifest.js",
     "test:update-migration": "node scripts/update-manager-test.js",
     "test:bili-client": "node scripts/bili-client-test.js",
     "test:asr-format": "node scripts/asr-format-test-runner.js",

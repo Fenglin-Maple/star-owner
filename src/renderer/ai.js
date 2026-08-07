@@ -8,7 +8,7 @@
     agentTitle: $('#aiAgentTitle'), agentProvider: $('#aiAgentProvider'), agentModel: $('#aiAgentModel'), agentCollection: $('#aiAgentCollection'), agentRequirements: $('#aiAgentRequirements'), agentMinimumFrames: $('#aiAgentMinimumFrames'), agentFrameInterval: $('#aiAgentFrameInterval'), agentRetainCache: $('#aiAgentRetainCache'),
     collectionModal: $('#aiCollectionModal'), collectionName: $('#aiCollectionName'), closeCollection: $('#aiCloseCollection'), cancelCollection: $('#aiCancelCollection'), saveCollection: $('#aiSaveCollection'),
     singleVideo: $('#singleVideoInput'), singleCollection: $('#singleCollectionSelect'), singleCreateCollection: $('#singleCreateCollection'), singleOpenCollection: $('#singleOpenCollection'), singleProvider: $('#singleProviderSelect'), singleModel: $('#singleModelSelect'), singleFrames: $('#singleFrames'), singleComments: $('#singleComments'), singleRequirements: $('#singleRequirements'), singleKeepVideoCache: $('#singleKeepVideoCache'), singleStart: $('#singleStart'), singleSession: $('#singleSessionSelect'), singleDetail: $('#singleAgentDetail'),
-    modelNew: $('#aiModelNewProvider'), modelProviderList: $('#aiModelProviderList'), modelProviderId: $('#aiModelProviderId'), modelProviderName: $('#aiModelProviderName'), modelProviderType: $('#aiModelProviderType'), modelProviderBaseUrl: $('#aiModelProviderBaseUrl'), modelProviderApiKey: $('#aiModelProviderApiKey'), modelProviderTemperature: $('#aiModelProviderTemperature'), modelProviderMaxTokens: $('#aiModelProviderMaxTokens'), modelProviderHeaders: $('#aiModelProviderHeaders'), modelDelete: $('#aiModelDeleteProvider'), modelSave: $('#aiModelSaveProvider'), modelFetch: $('#aiModelFetchModels'), modelCount: $('#aiModelRemoteCount'), modelRemote: $('#aiModelRemoteModels'),
+    modelNew: $('#aiModelNewProvider'), modelProviderList: $('#aiModelProviderList'), modelProviderId: $('#aiModelProviderId'), modelProviderName: $('#aiModelProviderName'), modelProviderType: $('#aiModelProviderType'), modelProviderBaseUrl: $('#aiModelProviderBaseUrl'), modelProviderApiKey: $('#aiModelProviderApiKey'), modelProviderTemperature: $('#aiModelProviderTemperature'), modelProviderMaxTokens: $('#aiModelProviderMaxTokens'), modelProviderHeaders: $('#aiModelProviderHeaders'), modelDelete: $('#aiModelDeleteProvider'), modelSave: $('#aiModelSaveProvider'), modelFetch: $('#aiModelFetchModels'), modelTestButton: $('#rag-model-test-button'), modelCount: $('#aiModelRemoteCount'), modelRemote: $('#aiModelRemoteModels'),
     dependencyList: $('#dependencyList'), dependencyRefresh: $('#dependencyRefresh'), dependencyModal: $('#dependencyPromptModal'), dependencyMissing: $('#dependencyPromptMissing'), dependencyLater: $('#dependencyPromptLater'), dependencyDownload: $('#dependencyPromptDownload'),
     pathSafetyModal: $('#pathSafetyModal'), pathSafetySummary: $('#pathSafetySummary'), pathSafetyMessage: $('#pathSafetyMessage'), pathSafetyPath: $('#pathSafetyPath'), pathSafetyMoveStep: $('#pathSafetyMoveStep'), pathSafetyOpenProject: $('#pathSafetyOpenProject'), pathSafetyAcknowledge: $('#pathSafetyAcknowledge'),
     loginRequiredModal: $('#singleLoginRequiredModal'), loginRequiredVideo: $('#singleLoginRequiredVideo'), loginRequiredReason: $('#singleLoginRequiredReason'), loginLater: $('#singleLoginLater'), goLogin: $('#singleGoLogin'),
@@ -156,7 +156,10 @@
     const modelUnavailable = session.modelAvailable === false;
     const collectionUnavailable = session.collectionAvailable === false;
     const canStart = !active && session.status !== 'completed' && !modelUnavailable && !collectionUnavailable;
-    const logs = (session.logs || []).slice().reverse().map((entry) => `<div class="ai-log-entry"><time>${time(entry.at)}</time><span>${html(entry.message)}</span></div>`).join('') || '<div class="rag-list-empty">暂无工作记录</div>';
+    const logs = (session.logs || []).slice().reverse().map((entry) => {
+      const levelClass = entry.level === 'success' ? ' success' : entry.level === 'error' ? ' error' : '';
+      return `<div class="ai-log-entry${levelClass}"><time>${time(entry.at)}</time><span>${html(entry.message)}</span></div>`;
+    }).join('') || '<div class="rag-list-empty">暂无工作记录</div>';
     const output = session.lastOutput || '';
     const pending = [...pendingSessionActions].some((key) => key.startsWith(`${session.id}:`));
     container.innerHTML = `<div class="ai-session-view" data-agent-session-view="${esc(session.id)}">
@@ -460,6 +463,42 @@
       elements.modelRemote.appendChild(row);
     }
     if (!source.length) elements.modelRemote.innerHTML = '<div class="rag-list-empty">保存配置后拉取远程模型</div>';
+    appendCustomModelAdder(provider);
+  }
+
+  // 手动添加自定义模型：远程模型列表拉取失败的兜底，直接写入 enabledModels 由后端规范化
+  function appendCustomModelAdder(provider) {
+    const wrap = document.createElement('div');
+    wrap.className = 'rag-model-custom-add';
+    wrap.style.cssText = 'grid-column: 1 / -1; display: flex; gap: 7px; align-items: center; padding: 6px 2px;';
+    wrap.innerHTML = '<input id="ragModelCustomId" type="text" placeholder="输入自定义模型 ID，如 ark-code-latest" style="flex: 1; min-width: 0;" /><button id="ragModelCustomAdd" class="secondary-button compact-button" type="button">添加模型</button>';
+    elements.modelRemote.appendChild(wrap);
+    const input = wrap.querySelector('#ragModelCustomId');
+    const button = wrap.querySelector('#ragModelCustomAdd');
+    const add = () => addCustomModel(input, button);
+    button.addEventListener('click', add);
+    input.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); add(); } });
+  }
+
+  async function addCustomModel(input, button) {
+    const modelId = String(input.value || '').trim();
+    if (!modelId) { notify('请输入模型 ID', '模型 ID 不能为空。', 'error'); return; }
+    const providerId = editingProviderId;
+    if (!providerId || providerId === '__new__') { notify('请先保存供应商', '新建供应商需先保存配置，再手动添加模型。', 'error'); return; }
+    const provider = (modelState.providers || []).find((item) => item.id === providerId);
+    const exists = [...(provider?.remoteModels || []), ...(provider?.enabledModels || [])].some((item) => item.id === modelId);
+    if (exists) { notify('模型已存在', `“${modelId}”已在列表中，无需重复添加。`, 'error'); input.select(); return; }
+    button.disabled = true;
+    try {
+      // 追加进 enabledModels，其余字段（上下文窗口/输出上限/能力）由后端 normalizeModel 默认推断
+      await window.orchestrator.ragUpdateModels({ providerId, models: [...(provider?.enabledModels || []), { id: modelId }] });
+      input.value = '';
+      notify('模型已添加', `“${modelId}”已加入可用模型，可勾选启用。`, 'success');
+      await refreshAll({ quiet: true });
+      if (editingProviderId === providerId) renderModelPage();
+      dispatchModelConfigChanged();
+    } catch (error) { notify('添加模型失败', error.message || String(error), 'error'); }
+    finally { button.disabled = false; }
   }
 
   async function saveProviderForm() {
@@ -523,6 +562,24 @@
       notify('模型列表已更新', '请选择允许 RAG 知识库助手和视频总结 Agent 使用的模型。', 'success');
     } catch (error) { notify('模型拉取失败', error.message || String(error), 'error'); }
     finally { elements.modelFetch.disabled = false; }
+  }
+
+  async function testProviderConnection(button) {
+    const providerId = editingProviderId;
+    if (!providerId || providerId === '__new__') { notify('请先保存供应商', '新建供应商需先保存配置，再测试连接。', 'error'); return; }
+    const provider = (modelState.providers || []).find((item) => item.id === providerId);
+    const checkedRow = elements.modelRemote.querySelector('.rag-remote-model .rag-model-enabled:checked')?.closest('.rag-remote-model');
+    const modelId = checkedRow?.dataset.modelId || provider?.enabledModels?.[0]?.id || provider?.remoteModels?.[0]?.id || '';
+    if (!modelId) { notify('没有可用模型', '该供应商还没有可用模型，请先启用或手动添加模型。', 'error'); return; }
+    button.disabled = true;
+    const originalText = button.textContent;
+    button.textContent = '测试中…';
+    try {
+      const result = await window.orchestrator.ragTestProvider(providerId, modelId);
+      if (result?.ok) notify('连接成功', `模型 ${result.model} 响应延迟 ${result.latencyMs}ms`, 'success');
+      else notify('连接失败', result?.error || '未知错误', 'error');
+    } catch (error) { notify('连接失败', error.message || String(error), 'error'); }
+    finally { button.disabled = false; button.textContent = originalText; }
   }
 
   async function deleteProvider(button) {
@@ -717,6 +774,10 @@
       elements.loginRequiredReason.textContent = event.reason || '登录完成后回到“视频总结（单个）”，点击“登录后重试”即可重新处理。';
       elements.loginRequiredModal.hidden = false;
     }
+    if (event.type === 'content-rejected') {
+      notify('视频内容审核未通过', `已自动跳过：${event.title || event.bvid || ''}${event.reason ? `（${event.reason.slice(0, 120)}）` : ''}`, 'error');
+      structural = true;
+    }
     scheduleStreamRender(structural);
   }
 
@@ -840,7 +901,10 @@
     const logNode = container.querySelector('[data-agent-role="logs"]');
     if (logNode) {
       const previousScroll = logNode.scrollTop;
-      const logs = (session.logs || []).slice().reverse().map((entry) => `<div class="ai-log-entry"><time>${time(entry.at)}</time><span>${html(entry.message)}</span></div>`).join('') || '<div class="rag-list-empty">暂无工作记录</div>';
+      const logs = (session.logs || []).slice().reverse().map((entry) => {
+        const levelClass = entry.level === 'success' ? ' success' : entry.level === 'error' ? ' error' : '';
+        return `<div class="ai-log-entry${levelClass}"><time>${time(entry.at)}</time><span>${html(entry.message)}</span></div>`;
+      }).join('') || '<div class="rag-list-empty">暂无工作记录</div>';
       if (logNode.innerHTML !== logs) {
         logNode.innerHTML = logs;
         logNode.scrollTop = previousScroll;
@@ -906,6 +970,7 @@
   elements.modelNew.addEventListener('click', () => { editingProviderId = '__new__'; renderModelPage(); elements.modelProviderName.focus(); });
   elements.modelSave.addEventListener('click', async () => { try { await saveProviderForm(); notify('供应商已保存', '配置已供 RAG 和应用内 Agent 共用。', 'success'); } catch (error) { notify('保存失败', error.message || String(error), 'error'); } });
   elements.modelFetch.addEventListener('click', fetchModels);
+  elements.modelTestButton.addEventListener('click', (event) => testProviderConnection(event.currentTarget));
   elements.modelDelete.addEventListener('click', () => deleteProvider(elements.modelDelete));
   elements.dependencyList.addEventListener('click', (event) => {
     const download = event.target.closest('[data-download-dependency]');

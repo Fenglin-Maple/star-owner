@@ -34,6 +34,21 @@ function utf8ChildEnvironment(environment = process.env) {
   };
 }
 
+function findVenvSitePackages(venv) {
+  if (process.platform === 'win32') {
+    const windowsSitePackages = path.join(venv, 'Lib', 'site-packages');
+    return fs.existsSync(windowsSitePackages) ? windowsSitePackages : '';
+  }
+  const lib = path.join(venv, 'lib');
+  if (!fs.existsSync(lib)) return '';
+  for (const entry of fs.readdirSync(lib, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith('python')) continue;
+    const candidate = path.join(lib, entry.name, 'site-packages');
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return '';
+}
+
 function projectRuntimeEnvironment(environment = process.env, projectRoot = PROJECT_ROOT) {
   const source = environment || {};
   const env = {};
@@ -44,8 +59,9 @@ function projectRuntimeEnvironment(environment = process.env, projectRoot = PROJ
   const root = path.resolve(projectRoot);
   const venv = path.join(root, 'runtime', 'faster-whisper');
   const pythonRoot = path.join(root, 'runtime', 'python');
-  const ffmpegBinaries = path.join(venv, process.platform === 'win32' ? 'Lib' : 'lib/python3', 'site-packages', 'imageio_ffmpeg', 'binaries');
-  const sitePackages = path.join(venv, process.platform === 'win32' ? 'Lib' : 'lib/python3', 'site-packages');
+  const venvSitePackages = findVenvSitePackages(venv);
+  const ffmpegBinaries = path.join(venvSitePackages, 'imageio_ffmpeg', 'binaries');
+  const sitePackages = venvSitePackages;
   const localPaths = [
     path.join(root, 'node_modules', '.bin'),
     path.join(root, 'runtime', 'vc-runtime'),
@@ -135,4 +151,4 @@ function nodeChildProcessSpec(environment = process.env) {
   return { executable: process.execPath, env };
 }
 
-module.exports = { nodeChildProcessSpec, projectRuntimeEnvironment, readUtf8, resolveNvidiaSmi, resolveSystemExecutable, utf8ChildEnvironment };
+module.exports = { findVenvSitePackages, nodeChildProcessSpec, projectRuntimeEnvironment, readUtf8, resolveNvidiaSmi, resolveSystemExecutable, utf8ChildEnvironment };

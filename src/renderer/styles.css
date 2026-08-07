@@ -388,6 +388,10 @@ svg {
 .window-left { gap: 10px; padding-left: 14px; }
 .window-status { gap: 12px; padding: 0 12px; color: var(--muted); font-size: 12px; -webkit-app-region: no-drag; }
 
+/* macOS 原生红绿灯：隐藏自绘窗口按钮，左侧留出红绿灯空间 */
+.platform-darwin .window-controls { display: none; }
+.platform-darwin .window-left { padding-left: 76px; }
+
 .dependency-download-indicator {
   position: relative;
   flex: 0 0 34px;
@@ -2263,3 +2267,6 @@ body.theme-endfield *::-webkit-scrollbar-thumb:hover { background: #191919; back
 .outside-placeholder-icon { width: 52px; height: 52px; display: grid; place-items: center; border: 1px solid var(--border-strong); color: var(--accent); }
 .outside-placeholder-icon svg { width: 28px; height: 28px; fill: none; stroke: currentColor; stroke-width: 1.7; }
 .document-preview-actions { display: flex; gap: 8px; }
+/* Agent 工作记录日志着色：完成绿 / 失败红 */
+.ai-log-entry.success span { color: var(--green); }
+.ai-log-entry.error span { color: var(--red); }
