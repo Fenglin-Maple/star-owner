@@ -5,10 +5,14 @@ import json
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CLI_FILE = PROJECT_ROOT / "tools" / "faster-whisper-cli.py"
+
+# 与 cli 保持一致的平台判断：Apple Silicon 用 MLX，其它平台用 faster-whisper。
+IS_APPLE_SILICON = sys.platform == "darwin" and __import__("platform").machine().lower() == "arm64"
 
 
 def load_cli_module():
@@ -19,20 +23,26 @@ def load_cli_module():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Persistent Xing Cang Jia faster-whisper service")
-    parser.add_argument("--device", choices=["cuda", "cpu"], required=True)
+    parser = argparse.ArgumentParser(description="Persistent Xing Cang Jia Whisper service (MLX on Apple Silicon)")
+    parser.add_argument("--device", choices=["cuda", "cpu", "mlx"], required=True)
     parser.add_argument("--compute-type", required=True)
     parser.add_argument("--model", default="large-v3-turbo")
     args = parser.parse_args()
 
     cli = load_cli_module()
-    from faster_whisper import WhisperModel
-
     model_path = cli.model_dir(args.model)
     if not cli.model_ready(model_path):
         raise RuntimeError(f"model is not installed: {model_path}")
+
     started = time.perf_counter()
-    model = WhisperModel(str(model_path), device=args.device, compute_type=args.compute_type)
+    if IS_APPLE_SILICON:
+        # mlx_whisper 0.4.x 无模型缓存：模型在每次 transcribe 时加载（约 2-3s）。
+        # 这里只校验模型就绪并立即报告 ready，不预加载（避免无意义地占用显存/时间）。
+        model = None
+    else:
+        from faster_whisper import WhisperModel
+
+        model = WhisperModel(str(model_path), device=args.device, compute_type=args.compute_type)
     emit({
         "event": "ready",
         "device": args.device,
@@ -80,31 +90,65 @@ def transcribe(model, cli, args, request_id, request):
     started = time.perf_counter()
     emit({"event": "progress", "id": request_id, "phase": "audio-loading", "progress": 0})
     requested_language = str(request.get("language") or "auto")
-    segments, info = model.transcribe(str(source), **cli.transcription_options(
-        requested_language,
-        request.get("beamSize", 5),
-        request.get("conditionOnPreviousText", True),
-        request.get("maxNewTokens"),
-        request.get("vadMinSilenceDurationMs", 500),
-        request.get("vadSpeechPadMs", 400),
-        request.get("hallucinationSilenceThreshold", 2.0),
-    ))
-    total_duration = max(0.0, float(getattr(info, "duration", 0.0) or 0.0))
-    emit({"event": "progress", "id": request_id, "phase": "audio-loaded", "progress": 0, "totalSeconds": total_duration})
-    recognized = []
-    for segment_index, segment in enumerate(segments):
-        recognized.append(segment)
-        processed_seconds = min(total_duration, max(0.0, float(getattr(segment, "end", 0.0) or 0.0))) if total_duration else 0.0
+
+    if IS_APPLE_SILICON:
+        import mlx_whisper
+
+        audio = mlx_whisper.audio.load_audio(str(source))
+        total_duration = max(0.0, float(len(audio)) / 16000.0)
+        emit({"event": "progress", "id": request_id, "phase": "audio-loaded", "progress": 0, "totalSeconds": total_duration})
+        options = cli.transcription_options(
+            requested_language,
+            request.get("beamSize", 5),
+            request.get("conditionOnPreviousText", True),
+            request.get("maxNewTokens"),
+            request.get("vadMinSilenceDurationMs", 500),
+            request.get("vadSpeechPadMs", 400),
+            request.get("hallucinationSilenceThreshold", 2.0),
+        )
+        # mlx_whisper 0.4.x 无模型对象 transcribe 方法，模型在顶层函数内加载。
+        result = mlx_whisper.transcribe(audio, path_or_hf_repo=str(cli.model_dir(args.model)), **options)
+        recognized = [cli.to_segment(entry) for entry in result.get("segments") or []]
+        language = str(result.get("language") or "")
+        language_probability = 1.0
         emit({
             "event": "progress",
             "id": request_id,
-            "phase": "segment-completed",
-            "segmentIndex": segment_index,
+            "phase": "transcription-completed",
             "segmentCount": len(recognized),
-            "audioSeconds": processed_seconds,
+            "audioSeconds": total_duration,
             "totalSeconds": total_duration,
-            "progress": min(1, processed_seconds / total_duration) if total_duration else 1,
+            "progress": 1,
         })
+    else:
+        segments, info = model.transcribe(str(source), **cli.transcription_options(
+            requested_language,
+            request.get("beamSize", 5),
+            request.get("conditionOnPreviousText", True),
+            request.get("maxNewTokens"),
+            request.get("vadMinSilenceDurationMs", 500),
+            request.get("vadSpeechPadMs", 400),
+            request.get("hallucinationSilenceThreshold", 2.0),
+        ))
+        total_duration = max(0.0, float(getattr(info, "duration", 0.0) or 0.0))
+        emit({"event": "progress", "id": request_id, "phase": "audio-loaded", "progress": 0, "totalSeconds": total_duration})
+        recognized = []
+        for segment_index, segment in enumerate(segments):
+            recognized.append(segment)
+            processed_seconds = min(total_duration, max(0.0, float(getattr(segment, "end", 0.0) or 0.0))) if total_duration else 0.0
+            emit({
+                "event": "progress",
+                "id": request_id,
+                "phase": "segment-completed",
+                "segmentIndex": segment_index,
+                "segmentCount": len(recognized),
+                "audioSeconds": processed_seconds,
+                "totalSeconds": total_duration,
+                "progress": min(1, processed_seconds / total_duration) if total_duration else 1,
+            })
+        language = str(getattr(info, "language", "") or "")
+        language_probability = float(getattr(info, "language_probability", 0.0) or 0.0)
+
     try:
         materialized, normalization = cli.normalize_sentence_segments(cli.sentence_segments(recognized))
     except Exception as error:
@@ -112,15 +156,7 @@ def transcribe(model, cli, args, request_id, request):
         error.code = getattr(error, "code", "ASR_OUTPUT_INVALID")
         error.failure_kind = getattr(error, "failure_kind", "task")
         raise
-    emit({
-        "event": "progress",
-        "id": request_id,
-        "phase": "transcription-completed",
-        "segmentCount": len(materialized),
-        "audioSeconds": total_duration,
-        "totalSeconds": total_duration,
-        "progress": 1,
-    })
+
     srt_file = output_dir / "transcript.srt"
     text_file = output_dir / "asr-transcript.txt"
     json_file = output_dir / "asr-result.json"
@@ -130,8 +166,8 @@ def transcribe(model, cli, args, request_id, request):
     payload = {
         "model": args.model,
         "source": str(source),
-        "language": info.language,
-        "languageProbability": info.language_probability,
+        "language": language,
+        "languageProbability": language_probability,
         "requestedLanguage": requested_language,
         "duration": total_duration,
         "device": args.device,
@@ -150,8 +186,8 @@ def transcribe(model, cli, args, request_id, request):
         "computeType": args.compute_type,
         "duration": total_duration,
         "segments": len(materialized),
-        "language": info.language,
-        "languageProbability": info.language_probability,
+        "language": language,
+        "languageProbability": language_probability,
         "diagnostics": diagnostics,
         "elapsedMs": round((time.perf_counter() - started) * 1000),
         "srt": str(srt_file),

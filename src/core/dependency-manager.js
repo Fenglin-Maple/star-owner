@@ -43,6 +43,47 @@ class DependencyManager {
   }
 
   definitions() {
+    const isDarwin = process.platform === 'darwin';
+    if (isDarwin) {
+      // macOS：本地配置模式（MLX Whisper + 系统/本地 Python），模型由 HuggingFace mlx-community 仓库下载，
+      // 不通过 GitHub Release 资源安装，因此 assetName/assetPattern 置空。
+      const modelWeightsProbe = (model) => {
+        const relativeDir = `runtime/models/${model.id}`;
+        const absoluteDir = path.join(this.projectRoot, relativeDir);
+        if (fs.existsSync(path.join(absoluteDir, 'weights.npz'))) return `${relativeDir}/weights.npz`;
+        if (fs.existsSync(absoluteDir)) {
+          const safetensors = fs.readdirSync(absoluteDir).find((name) => name.endsWith('.safetensors'));
+          if (safetensors) return `${relativeDir}/${safetensors}`;
+        }
+        return `${relativeDir}/weights.npz`;
+      };
+      return [
+        {
+          id: 'runtime-base',
+          name: '媒体与 ASR 基础运行时',
+          description: 'macOS 本地配置模式（MLX Whisper + 系统/本地 Python）',
+          required: true,
+          assetName: '',
+          assetPattern: '',
+          fallbackAssetPattern: '',
+          probes: [
+            'runtime/faster-whisper/bin/python',
+            'runtime/faster-whisper/lib/python3.12/site-packages/mlx_whisper',
+            'runtime/faster-whisper/lib/python3.12/site-packages/yt_dlp'
+          ]
+        },
+        ...ASR_MODELS.map((model) => ({
+          id: model.packageId,
+          modelId: model.id,
+          name: `faster-whisper ${model.id} 模型`,
+          description: model.description,
+          required: model.required,
+          assetName: '',
+          assetPattern: '',
+          probes: [`runtime/models/${model.id}/config.json`, modelWeightsProbe(model)]
+        }))
+      ];
+    }
     return [
       {
         id: 'runtime-base',
@@ -135,6 +176,9 @@ class DependencyManager {
     const missingProbes = definition.probes.filter((probe) => !fs.existsSync(path.join(this.projectRoot, probe)));
     if (missingProbes.length) {
       return { available: false, manifestStatus: 'probes-missing', message: `未检测到完整依赖：缺少 ${missingProbes.join(', ')}` };
+    }
+    if (process.platform === 'darwin') {
+      return { available: true, manifestStatus: 'local-config', message: 'macOS 本地配置模式：运行时与模型探测全部通过' };
     }
     const loaded = this.readPackageManifest(definition);
     if (!loaded.manifest) {
@@ -518,7 +562,7 @@ class DependencyManager {
     for (const release of candidates) {
       const assets = Array.isArray(release.assets) ? release.assets : [];
       const asset = assets.find((item) => item.name === definition.assetName)
-        || (allowVersionFallback && assets.find((item) => definition.assetPattern.test(item.name)));
+        || (allowVersionFallback && definition.assetPattern && assets.find((item) => definition.assetPattern.test(item.name)));
       if (asset) return { release, asset, fallback: false };
       const fallback = allowVersionFallback && definition.fallbackAssetPattern && assets.find((item) => definition.fallbackAssetPattern.test(item.name));
       if (fallback) return { release, asset: fallback, fallback: true };

@@ -3,6 +3,7 @@ import argparse
 import json
 import math
 import os
+import platform
 import re
 import sys
 import unicodedata
@@ -16,10 +17,23 @@ MODELS_ROOT = RUNTIME_ROOT / "models"
 HF_CACHE_ROOT = RUNTIME_ROOT / "cache" / "huggingface"
 VC_RUNTIME_ROOT = RUNTIME_ROOT / "vc-runtime"
 DEFAULT_MODEL = "large-v3-turbo"
+
+# Apple Silicon 上使用 MLX 推理后端（GPU 加速）；其它平台保持 faster-whisper/CTranslate2。
+IS_APPLE_SILICON = sys.platform == "darwin" and platform.machine().lower() == "arm64"
+
 GPU_COMPUTE_TYPES = {
     "large-v3-turbo": "int8_float16",
     "turbo": "int8_float16",
 }
+
+# MLX 版模型仓库（HuggingFace mlx-community）
+MLX_MODEL_REPOS = {
+    "small": "mlx-community/whisper-small-mlx",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "turbo": "mlx-community/whisper-large-v3-turbo",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+}
+
 DLL_HANDLES = []
 
 
@@ -63,18 +77,18 @@ def main():
     if args.download_model:
         return download_model(args.model)
     if not args.audio:
-        parser.error("audio file is required unless --health or --download-model is used")
+        parser.error("audio path is required unless --health or --download-model is used")
     return transcribe(args)
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Project-local faster-whisper CLI")
+    parser = argparse.ArgumentParser(description="Project-local Whisper CLI (MLX on Apple Silicon, faster-whisper elsewhere)")
     parser.add_argument("audio", nargs="?", help="Input audio or video file")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--language", default="auto")
     parser.add_argument("--output_dir", default=".")
     parser.add_argument("--output_format", choices=["srt", "txt", "all"], default="all")
-    parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
+    parser.add_argument("--device", choices=["auto", "cuda", "cpu", "mlx"], default="auto")
     parser.add_argument("--compute_type", default="auto")
     parser.add_argument("--beam_size", type=int, default=5)
     parser.add_argument("--health", action="store_true")
@@ -90,10 +104,28 @@ def model_dir(model_name):
 
 
 def model_ready(path):
-    return path.is_dir() and (path / "model.bin").is_file() and (path / "config.json").is_file()
+    if not path.is_dir() or not (path / "config.json").is_file():
+        return False
+    # faster-whisper: model.bin；MLX: weights.npz 或 safetensors 分片
+    if (path / "model.bin").is_file():
+        return True
+    if (path / "weights.npz").is_file():
+        return True
+    return any(path.glob("*.safetensors"))
 
 
 def versions():
+    if IS_APPLE_SILICON:
+        import importlib.metadata as metadata
+        import mlx
+        import mlx_whisper
+
+        return {
+            "fasterWhisper": mlx_whisper.__version__,
+            "ctranslate2": metadata.version("mlx"),
+            "cudaDevices": 0,
+            "mlxAvailable": True,
+        }
     import ctranslate2
     import faster_whisper
 
@@ -135,22 +167,26 @@ def print_health(model_name):
 
 
 def download_model(model_name):
-    from faster_whisper.utils import download_model as fetch_model
-
     target = model_dir(model_name)
     target.mkdir(parents=True, exist_ok=True)
     HF_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     print(f"Downloading {model_name} to {target}", file=sys.stderr)
-    resolved = fetch_model(model_name, output_dir=str(target), cache_dir=str(HF_CACHE_ROOT))
+    if IS_APPLE_SILICON:
+        from huggingface_hub import snapshot_download
+
+        repository = MLX_MODEL_REPOS.get(str(model_name).lower()) or f"mlx-community/whisper-{model_name}"
+        snapshot_download(repository, local_dir=str(target))
+    else:
+        from faster_whisper.utils import download_model as fetch_model
+
+        fetch_model(model_name, output_dir=str(target), cache_dir=str(HF_CACHE_ROOT))
     if not model_ready(target):
-        raise RuntimeError(f"model download finished but required files are missing: {resolved}")
+        raise RuntimeError(f"model download finished but required files are missing: {target}")
     print(json.dumps({"ok": True, "model": model_name, "modelPath": str(target)}, ensure_ascii=False))
     return 0
 
 
 def transcribe(args):
-    from faster_whisper import WhisperModel
-
     source = Path(args.audio).resolve()
     if not source.is_file():
         raise FileNotFoundError(f"input file does not exist: {source}")
@@ -164,14 +200,14 @@ def transcribe(args):
     print(f"Loading {target_model.name} on {device} ({compute_type})", file=sys.stderr)
 
     try:
-        segments, info = run_model(WhisperModel, target_model, source, args, device, compute_type)
+        segments, info = run_model(target_model, source, args, device, compute_type)
         materialized, normalization = normalize_sentence_segments(sentence_segments(list(segments)))
     except Exception as error:
-        if args.device != "auto" or device == "cpu":
+        if IS_APPLE_SILICON or args.device != "auto" or device == "cpu":
             raise
         print(f"CUDA inference failed, retrying on CPU int8: {error}", file=sys.stderr)
         device, compute_type = "cpu", "int8"
-        segments, info = run_model(WhisperModel, target_model, source, args, device, compute_type)
+        segments, info = run_model(target_model, source, args, device, compute_type)
         materialized, normalization = normalize_sentence_segments(sentence_segments(list(segments)))
 
     srt_file = output_dir / "transcript.srt"
@@ -201,6 +237,9 @@ def transcribe(args):
 
 
 def choose_runtime(requested_device, requested_compute, model_name=DEFAULT_MODEL):
+    if IS_APPLE_SILICON:
+        # MLX 只运行在 Apple Silicon 上，自动使用 Metal GPU。
+        return "mlx", "fp16"
     import ctranslate2
 
     device = requested_device
@@ -212,9 +251,36 @@ def choose_runtime(requested_device, requested_compute, model_name=DEFAULT_MODEL
     return device, compute_type
 
 
-def run_model(model_class, model_path, source, args, device, compute_type):
-    model = model_class(str(model_path), device=device, compute_type=compute_type)
+def run_model(model_path, source, args, device, compute_type):
+    options = transcription_options(args.language, args.beam_size, True)
+    if IS_APPLE_SILICON:
+        import mlx_whisper
+
+        # 先加载音频获取真实时长，再交给 MLX 推理（GPU）。
+        audio = mlx_whisper.audio.load_audio(str(source))
+        duration = max(0.0, float(len(audio)) / 16000.0)
+        result = mlx_whisper.transcribe(audio, path_or_hf_repo=str(model_path), **options)
+        segments = [to_segment(entry) for entry in result.get("segments") or []]
+        info = SimpleNamespace(
+            language=str(result.get("language") or ""),
+            language_probability=1.0,
+            duration=duration,
+        )
+        return segments, info
+    from faster_whisper import WhisperModel
+
+    model = WhisperModel(str(model_path), device=device, compute_type=compute_type)
     return model.transcribe(str(source), **transcription_options(args.language, args.beam_size, True))
+
+
+def to_segment(entry):
+    """把 MLX 的 dict 段包装成与原 faster-whisper segment 对象兼容的结构。"""
+    wrapped = {key: value for key, value in entry.items() if key != "words"}
+    # mlx_whisper 0.4.x 的 words 不含标点（引擎不输出标点 token），且段边界由时间戳驱动、
+    # 本身就是句子级粒度；置空 words 让 sentence_segments 直接采用段边界，
+    # 避免无标点时按 24s/180 字兜底造成长句不切分。
+    wrapped["words"] = None
+    return SimpleNamespace(**wrapped)
 
 
 def transcription_options(
@@ -227,6 +293,19 @@ def transcription_options(
     hallucination_silence_threshold=2.0,
 ):
     requested = str(language or "auto").strip().lower()
+    if IS_APPLE_SILICON:
+        # MLX 0.4.x：language/beam_size/temperature 走 decode_options（DecodingOptions），
+        # condition_on_previous_text/word_timestamps/hallucination_silence_threshold 是 transcribe 层参数；
+        # 不支持 faster-whisper 的 repetition_penalty/no_repeat_ngram_size/VAD，跳过以免 TypeError。
+        return {
+            "language": None if requested in ("", "auto") else requested,
+            # mlx_whisper 0.4.x：beam_size 传任何值都会触发未实现的 beam search，
+            # 必须不传（None）才走 GreedyDecoder。
+            "temperature": 0.0,
+            "condition_on_previous_text": bool(condition_on_previous_text),
+            "word_timestamps": True,
+            "hallucination_silence_threshold": max(0.1, min(5.0, float(hallucination_silence_threshold or 2.0))),
+        }
     normalized_max_new_tokens = None
     if max_new_tokens not in (None, ""):
         # Previous-text prompts can occupy roughly half of Whisper's 448-token window.
@@ -259,51 +338,16 @@ def transcript_diagnostics(segments, duration, normalization=None):
             merged[-1][1] = max(merged[-1][1], end)
         else:
             merged.append([start, end])
-    speech_seconds = sum(max(0.0, end - start) for start, end in merged)
-    gaps = []
-    for index in range(1, len(merged)):
-        gap = merged[index][0] - merged[index - 1][1]
-        if gap >= 8.0:
-            gaps.append({"start": round(merged[index - 1][1], 3), "end": round(merged[index][0], 3), "seconds": round(gap, 3)})
-    warnings = []
-    if not intervals:
-        warnings.append("No speech segments were recognized; verify that the source contains audible speech and retry with the correct audio track.")
-    elif total_duration >= 60 and speech_seconds / total_duration < 0.04:
-        warnings.append("Recognized speech occupies less than 4% of the audio. This may be music/silence, a wrong audio track, or incomplete recognition.")
-    diagnostics = {
-        "sentenceCount": len(segments),
-        "speechSeconds": round(speech_seconds, 3),
-        "speechCoverage": round(speech_seconds / total_duration, 4) if total_duration else 0,
-        "firstSpeechAt": round(intervals[0][0], 3) if intervals else None,
-        "lastSpeechAt": round(intervals[-1][1], 3) if intervals else None,
-        "largeGapCount": len(gaps),
-        "largestGaps": sorted(gaps, key=lambda item: item["seconds"], reverse=True)[:8],
-        "warnings": warnings,
+    covered = sum(end - start for start, end in merged)
+    payload = {
+        "duration": total_duration,
+        "segmentCount": len(segments),
+        "coveredSeconds": covered,
+        "coverageRatio": round(covered / total_duration, 4) if total_duration > 0 else 0.0,
     }
-    if normalization is not None:
-        diagnostics["normalization"] = normalization
-    return diagnostics
-
-
-def write_srt(file, segments):
-    lines = []
-    for index, segment in enumerate(segments, start=1):
-        lines.extend([
-            str(index),
-            f"{srt_time(segment.start)} --> {srt_time(segment.end)}",
-            segment.text.strip(),
-            "",
-        ])
-    file.write_text("\n".join(lines), encoding="utf-8")
-
-
-def write_timestamped_text(file, segments):
-    lines = [
-        f"[{srt_time(segment.start)} --> {srt_time(segment.end)}] {segment.text.strip()}"
-        for segment in segments
-        if segment.text.strip()
-    ]
-    file.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
+    if isinstance(normalization, dict) and normalization:
+        payload["normalization"] = normalization
+    return payload
 
 
 def sentence_segments(segments, offset=0.0, starting_id=0):
@@ -515,6 +559,21 @@ def srt_time(seconds):
     minutes, remainder = divmod(remainder, 60_000)
     secs, milliseconds = divmod(remainder, 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
+
+
+def write_srt(file, segments):
+    lines = []
+    for index, segment in enumerate(segments):
+        lines.append(str(index + 1))
+        lines.append(f"{srt_time(segment.start)} --> {srt_time(segment.end)}")
+        lines.append(str(segment.text).strip())
+        lines.append("")
+    file.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_timestamped_text(file, segments):
+    lines = [f"[{srt_time(segment.start)} --> {srt_time(segment.end)}] {segment.text.strip()}" for segment in segments]
+    file.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
 
 
 if __name__ == "__main__":

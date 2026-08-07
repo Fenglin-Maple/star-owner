@@ -49,23 +49,34 @@ function evaluateAsrHardware(input = {}) {
   const modelDefinition = getAsrModel(selectedModel);
   const runtimeHealth = input.runtimeHealth || {};
   const runtimeReady = Boolean(input.pythonAvailable && runtimeHealth.ok && runtimeHealth.modelReady);
+  const isDarwin = input.platform === 'darwin';
+  const mlxAvailable = isDarwin && Boolean(runtimeHealth.mlxAvailable);
   const nvidiaDetected = Boolean(input.gpu?.available);
   const cudaDeviceCount = Number(runtimeHealth.cudaDevices || 0);
   const requirement = modelDefinition;
-  const gpuSupported = runtimeReady && nvidiaDetected && cudaDeviceCount > 0 && Number(input.gpu.totalMiB || 0) >= requirement.gpuTotalMiB;
-  const cpuArchitectureSupported = input.platform === 'win32' && input.arch === 'x64';
+  // darwin：MLX Whisper 使用 Apple Metal GPU；其余平台保持原有 NVIDIA/CUDA 判定
+  const gpuSupported = isDarwin
+    ? runtimeReady && mlxAvailable
+    : runtimeReady && nvidiaDetected && cudaDeviceCount > 0 && Number(input.gpu.totalMiB || 0) >= requirement.gpuTotalMiB;
+  const cpuArchitectureSupported = isDarwin || (input.platform === 'win32' && input.arch === 'x64');
   const cpuSupported = runtimeReady && cpuArchitectureSupported && totalMemoryMiB >= requirement.cpuMemoryMiB && Number(input.cpuThreads || 0) >= 2;
   const issues = [];
   if (!input.pythonAvailable) issues.push('缺少项目内 Python/ASR 运行时。');
   else if (!runtimeHealth.ok) issues.push(`ASR 运行时健康检查失败：${input.runtimeError || runtimeHealth.error || '未知错误'}`);
   else if (!runtimeHealth.modelReady) issues.push(`所选 ${selectedModel} 模型未完整安装。`);
-  if (!nvidiaDetected) issues.push('未检测到可由 nvidia-smi 管理的 NVIDIA 显卡。');
-  else if (cudaDeviceCount < 1) issues.push('CTranslate2 未检测到可用 CUDA 设备，可能是驱动或 CUDA 运行库不兼容。');
-  else if (Number(input.gpu.totalMiB || 0) < requirement.gpuTotalMiB) issues.push(`${selectedModel} 模型建议至少 ${requirement.gpuTotalMiB} MiB 显存。`);
+  if (isDarwin) {
+    if (!mlxAvailable) issues.push('未检测到可用的 MLX Whisper（Apple Metal）加速，可在设置中手动开启 CPU ASR。');
+  } else {
+    if (!nvidiaDetected) issues.push('未检测到可由 nvidia-smi 管理的 NVIDIA 显卡。');
+    else if (cudaDeviceCount < 1) issues.push('CTranslate2 未检测到可用 CUDA 设备，可能是驱动或 CUDA 运行库不兼容。');
+    else if (Number(input.gpu.totalMiB || 0) < requirement.gpuTotalMiB) issues.push(`${selectedModel} 模型建议至少 ${requirement.gpuTotalMiB} MiB 显存。`);
+  }
   if (!cpuArchitectureSupported) issues.push('当前内置 CPU ASR 运行时仅支持 Windows x64。');
   else if (totalMemoryMiB < requirement.cpuMemoryMiB) issues.push(`${selectedModel} 模型的 CPU ASR 建议至少 ${requirement.cpuMemoryMiB} MiB 系统内存。`);
   if (Number(input.cpuThreads || 0) < 2) issues.push('CPU ASR 至少需要 2 个逻辑处理器线程。');
-  const preferredMode = gpuSupported ? 'cuda' : cpuSupported ? 'cpu' : 'unavailable';
+  const preferredMode = isDarwin
+    ? (gpuSupported ? 'mlx' : cpuSupported ? 'cpu' : 'unavailable')
+    : gpuSupported ? 'cuda' : cpuSupported ? 'cpu' : 'unavailable';
   return {
     checkedAt: new Date().toISOString(),
     selectedModel,
@@ -80,6 +91,7 @@ function evaluateAsrHardware(input = {}) {
     },
     localAsrSupported: gpuSupported || cpuSupported,
     preferredMode,
+    mlxAvailable,
     runtime: {
       ready: runtimeReady,
       pythonAvailable: Boolean(input.pythonAvailable),
@@ -94,15 +106,21 @@ function evaluateAsrHardware(input = {}) {
       name: String(input.gpu?.name || ''),
       totalMiB: Number(input.gpu?.totalMiB || 0),
       cudaDeviceCount,
-      supported: gpuSupported
+      supported: isDarwin ? false : gpuSupported
     },
     cpu: { supported: cpuSupported, architectureSupported: cpuArchitectureSupported, minimumMemoryMiB: requirement.cpuMemoryMiB },
     issues,
-    recommendation: gpuSupported
-      ? '使用 NVIDIA CUDA 常驻 ASR。'
-      : cpuSupported
-        ? '未找到可用 CUDA 通道，可在设置中手动开启 CPU ASR；速度会明显降低。'
-        : '当前硬件或项目运行时不满足本地 ASR 条件，请修复依赖、显卡驱动或切换更小模型。'
+    recommendation: isDarwin
+      ? (gpuSupported
+        ? '使用 MLX Whisper（Apple Metal）常驻 ASR。'
+        : cpuSupported
+          ? '未检测到可用 MLX 加速，可在设置中手动开启 CPU ASR；速度会明显降低。'
+          : '当前硬件或项目运行时不满足本地 ASR 条件，请修复依赖或切换更小模型。')
+      : gpuSupported
+        ? '使用 NVIDIA CUDA 常驻 ASR。'
+        : cpuSupported
+          ? '未找到可用 CUDA 通道，可在设置中手动开启 CPU ASR；速度会明显降低。'
+          : '当前硬件或项目运行时不满足本地 ASR 条件，请修复依赖、显卡驱动或切换更小模型。'
   };
 }
 

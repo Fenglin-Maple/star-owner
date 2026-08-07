@@ -16,6 +16,8 @@ const { assertDiskSpace } = require('./disk-space');
 const { PROJECT_ROOT, TOOL_ID_PATH_LENGTH, assertInside, assertSafeWindowsPath, ensureDir, safeName } = require('./workspace');
 
 const execFileAsync = promisify(execFile);
+// macOS 上 GPU ASR 走 MLX Whisper（Apple Metal），其余平台保持 CUDA
+const ASR_GPU_DEVICE = process.platform === 'darwin' ? 'mlx' : 'cuda';
 const DEFAULT_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_STATUSES = new Set(['queued', 'running']);
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'timeout', 'skipped']);
@@ -59,8 +61,8 @@ class ToolRunner {
     this.maintenance = null;
     this.gpuAsr = new AsrService({
       id: 'asr-gpu',
-      device: 'cuda',
-      computeType: asrComputeType(DEFAULT_ASR_MODEL, 'cuda'),
+      device: ASR_GPU_DEVICE,
+      computeType: asrComputeType(DEFAULT_ASR_MODEL, ASR_GPU_DEVICE),
       model: DEFAULT_ASR_MODEL,
       onEvent: (event) => this.publish(event),
       onLog: (id, message) => this.onEvent({ type: 'asr-service-log', serviceId: id, message: String(message).trim().slice(0, 500) })
@@ -84,7 +86,8 @@ class ToolRunner {
     const cleanupRecovery = recoverPendingAttemptCleanups(this.store);
     await this.refreshGpuState();
     this.hardware = await detectAsrHardware({ gpu: this.gpu, model: this.config.asrModel });
-    this.scheduler.setLaneEnabled('asr', 'gpu', this.config.asrExecutionMode === 'cuda' && this.hardware.nvidia.supported);
+    const gpuChannelReady = process.platform === 'darwin' ? Boolean(this.hardware.mlxAvailable) : Boolean(this.hardware.nvidia.supported);
+    this.scheduler.setLaneEnabled('asr', 'gpu', this.config.asrExecutionMode === 'cuda' && gpuChannelReady);
     this.scheduler.setLaneEnabled('asr', 'cpu', this.config.asrExecutionMode === 'cpu' && this.hardware.cpu.supported);
     if (this.config.asrExecutionMode === 'cpu' && !this.hardware.cpu.supported) {
       this.config.asrExecutionMode = 'cuda';
@@ -93,7 +96,10 @@ class ToolRunner {
       this.scheduler.setLaneEnabled('asr', 'cpu', false);
       this.persistConfig();
     }
-    if (startGpuService && this.config.asrExecutionMode === 'cuda' && this.hardware.nvidia.supported && this.gpu.freeMiB >= this.config.gpuStartupReserveMiB) {
+    const gpuStartupReady = process.platform === 'darwin'
+      ? this.config.asrExecutionMode === 'cuda' && gpuChannelReady
+      : this.config.asrExecutionMode === 'cuda' && this.hardware.nvidia.supported && this.gpu.freeMiB >= this.config.gpuStartupReserveMiB;
+    if (startGpuService && gpuStartupReady) {
       try {
         await this.gpuAsr.start();
         await this.refreshGpuState();
@@ -102,9 +108,13 @@ class ToolRunner {
         this.publish({ type: 'asr-gpu-start-failed', error: error.message });
       }
     } else if (startGpuService) {
-      this.gpuAsr.lastError = this.hardware.nvidia.supported
-        ? `GPU free memory ${this.gpu.freeMiB} MiB is below startup reserve ${this.config.gpuStartupReserveMiB} MiB.`
-        : (this.hardware.issues.join(' ') || this.gpu.error || 'NVIDIA CUDA ASR is unavailable.');
+      if (process.platform === 'darwin') {
+        this.gpuAsr.lastError = this.hardware.issues.join(' ') || this.gpu.error || '未检测到可用的 MLX Whisper（Apple Metal）加速';
+      } else {
+        this.gpuAsr.lastError = this.hardware.nvidia.supported
+          ? `GPU free memory ${this.gpu.freeMiB} MiB is below startup reserve ${this.config.gpuStartupReserveMiB} MiB.`
+          : (this.hardware.issues.join(' ') || this.gpu.error || 'NVIDIA CUDA ASR is unavailable.');
+      }
     }
     if (this.config.asrExecutionMode === 'cpu') {
       try {
@@ -159,10 +169,13 @@ class ToolRunner {
     this.configureAsrServices(this.config.asrModel);
     await this.refreshGpuState();
     this.hardware = await detectAsrHardware({ gpu: this.gpu, model: this.config.asrModel });
-    this.scheduler.setLaneEnabled('asr', 'gpu', this.hardware.nvidia.supported);
+    const gpuChannelReady = process.platform === 'darwin' ? Boolean(this.hardware.mlxAvailable) : Boolean(this.hardware.nvidia.supported);
+    this.scheduler.setLaneEnabled('asr', 'gpu', gpuChannelReady);
     this.scheduler.setLaneEnabled('asr', 'cpu', false);
-    if (!this.hardware.nvidia.supported) throw new Error(this.hardware.issues.join(' ') || this.gpu.error || 'NVIDIA CUDA ASR is unavailable.');
-    if (this.gpu.freeMiB < this.config.gpuStartupReserveMiB) throw new Error(`GPU free memory ${this.gpu.freeMiB} MiB is below startup reserve ${this.config.gpuStartupReserveMiB} MiB.`);
+    if (!gpuChannelReady) throw new Error(process.platform === 'darwin'
+      ? (this.hardware.issues.join(' ') || this.gpu.error || 'MLX Whisper（Apple Metal）ASR 不可用。')
+      : (this.hardware.issues.join(' ') || this.gpu.error || 'NVIDIA CUDA ASR is unavailable.'));
+    if (process.platform !== 'darwin' && this.gpu.freeMiB < this.config.gpuStartupReserveMiB) throw new Error(`GPU free memory ${this.gpu.freeMiB} MiB is below startup reserve ${this.config.gpuStartupReserveMiB} MiB.`);
     await this.gpuAsr.start();
     await this.refreshGpuState();
     this.notifyState(true);
@@ -484,6 +497,7 @@ class ToolRunner {
       state.asrService = service;
       this.appendLog(run.id, `[${new Date().toISOString()}] transcribe on ${service.id}, pid=${service.child?.pid || '-'}\n`);
       let diskTimer = null;
+      let diskError = null;
       try {
         let lastProgressWrite = 0;
         const request = {
@@ -497,7 +511,6 @@ class ToolRunner {
         };
         const maxNewTokens = optionalAsrMaxNewTokens(run.options?.maxNewTokens);
         if (maxNewTokens !== undefined) request.maxNewTokens = maxNewTokens;
-        let diskError = null;
         diskTimer = setInterval(() => {
           try { assertDiskSpace(PROJECT_ROOT); }
           catch (error) { diskError = error; service.cancel(run.id); }
@@ -1030,7 +1043,18 @@ class ToolRunner {
     if (this.config.asrExecutionMode !== 'cuda') return { ready: false, reason: 'ASR_CUDA_DISABLED', retryAfterMs: 5000 };
     await this.refreshGpuState();
     this.syncHardwareGpuState();
-    if (!this.hardware.nvidia.supported) {
+    if (!(process.platform === 'darwin' ? this.hardware.mlxAvailable : this.hardware.nvidia.supported)) {
+      if (process.platform === 'darwin') {
+        return {
+          ready: false,
+          fatal: true,
+          reason: 'ASR_INFRASTRUCTURE_FAILURE',
+          code: 'ASR_INFRASTRUCTURE_FAILURE',
+          failureKind: 'infrastructure',
+          message: `GPU ASR 不可用且 CPU ASR 已关闭：${this.hardware.issues.join(' ') || this.gpu.error || '未检测到可用的 MLX Whisper（Apple Metal）加速环境。'}`,
+          possibleCauses: ['当前 Mac 不是 Apple Silicon，或 MLX 运行库/模型未安装', 'MLX Whisper（Apple Metal）运行时健康检查失败', this.hardware.cpu.supported ? '可在设置中手动启用 CPU ASR' : '当前 CPU/内存环境也不满足本地 ASR 条件']
+        };
+      }
       return {
         ready: false,
         fatal: true,
@@ -1042,7 +1066,7 @@ class ToolRunner {
       };
     }
     if (!this.gpuAsr.ready) {
-      if (this.gpu.freeMiB < this.config.gpuStartupReserveMiB) {
+      if (process.platform !== 'darwin' && this.gpu.freeMiB < this.config.gpuStartupReserveMiB) {
         return {
           ready: false,
           reason: 'GPU_CAPACITY_WAIT',
@@ -1059,7 +1083,7 @@ class ToolRunner {
         return failure || { ready: false, reason: 'GPU_SERVICE_UNAVAILABLE', message: error.message, retryAfterMs: Number(error.retryAfterMs || 5000) };
       }
     }
-    if (this.gpu.freeMiB < this.config.gpuReserveMiB) {
+    if (process.platform !== 'darwin' && this.gpu.freeMiB < this.config.gpuReserveMiB) {
       return {
         ready: false,
         reason: 'GPU_CAPACITY_WAIT',
@@ -1083,7 +1107,7 @@ class ToolRunner {
       if (Number(this.cpuAsr.consecutiveFailures || 0) >= 3) {
         this.config.asrExecutionMode = 'cuda';
         this.config.cpuAsrEnabled = false;
-        this.scheduler.setLaneEnabled('asr', 'gpu', this.config.asrExecutionMode === 'cuda' && this.hardware.nvidia.supported);
+        this.scheduler.setLaneEnabled('asr', 'gpu', this.config.asrExecutionMode === 'cuda' && (process.platform === 'darwin' ? Boolean(this.hardware.mlxAvailable) : Boolean(this.hardware.nvidia.supported)));
         this.scheduler.setLaneEnabled('asr', 'cpu', false);
         this.persistConfig();
         this.publish({ type: 'asr-cpu-disabled-after-failures', error: error.message || String(error) });
@@ -1127,6 +1151,12 @@ class ToolRunner {
   }
 
   async refreshGpuState() {
+    if (process.platform === 'darwin') {
+      this.gpu = { ...emptyGpuState(), available: false, error: '', checkedAt: new Date().toISOString() };
+      if (this.hardware?.checkedAt) this.syncHardwareGpuState();
+      this.notifyState();
+      return this.gpu;
+    }
     try {
       const nvidiaSmi = resolveNvidiaSmi();
       if (!nvidiaSmi) throw new Error('未在 NVIDIA 驱动标准目录中找到 nvidia-smi.exe。');
@@ -1183,7 +1213,7 @@ class ToolRunner {
       try {
         await waitForServicesStopped([this.gpuAsr, this.cpuAsr]);
       } catch (error) {
-        this.scheduler.setLaneEnabled('asr', 'gpu', this.config.asrExecutionMode === 'cuda' && this.hardware.nvidia.supported);
+        this.scheduler.setLaneEnabled('asr', 'gpu', this.config.asrExecutionMode === 'cuda' && (process.platform === 'darwin' ? Boolean(this.hardware.mlxAvailable) : Boolean(this.hardware.nvidia.supported)));
         this.scheduler.setLaneEnabled('asr', 'cpu', this.config.asrExecutionMode === 'cpu' && this.hardware.cpu.supported);
         this.notifyState(true);
         throw error;
@@ -1217,7 +1247,7 @@ class ToolRunner {
         cpuStartError = error;
       }
     }
-    this.scheduler.setLaneEnabled('asr', 'gpu', this.config.asrExecutionMode === 'cuda' && this.hardware.nvidia.supported);
+    this.scheduler.setLaneEnabled('asr', 'gpu', this.config.asrExecutionMode === 'cuda' && (process.platform === 'darwin' ? Boolean(this.hardware.mlxAvailable) : Boolean(this.hardware.nvidia.supported)));
     this.scheduler.setLaneEnabled('asr', 'cpu', this.config.asrExecutionMode === 'cpu' && this.hardware.cpu.supported);
     this.persistConfig();
     if (!this.config.cpuAsrEnabled) this.stopCpuWhenIdle();
@@ -1248,7 +1278,7 @@ class ToolRunner {
   configureAsrServices(model) {
     const selected = normalizeAsrModel(model);
     this.gpuAsr.model = selected;
-    this.gpuAsr.computeType = asrComputeType(selected, 'cuda');
+    this.gpuAsr.computeType = asrComputeType(selected, ASR_GPU_DEVICE);
     this.cpuAsr.model = selected;
     this.cpuAsr.computeType = asrComputeType(selected, 'cpu');
   }
@@ -1289,6 +1319,15 @@ class ToolRunner {
 
   syncHardwareGpuState() {
     if (!this.hardware?.nvidia) return;
+    if (process.platform === 'darwin') {
+      this.hardware.localAsrSupported = Boolean(this.hardware.mlxAvailable || this.hardware.cpu?.supported);
+      this.hardware.preferredMode = this.hardware.mlxAvailable ? 'mlx' : (this.hardware.cpu?.supported ? 'cpu' : 'unavailable');
+      if (this.scheduler.pools?.has?.('asr')) {
+        this.scheduler.setLaneEnabled('asr', 'gpu', this.config.asrExecutionMode === 'cuda' && Boolean(this.hardware.mlxAvailable));
+        this.scheduler.setLaneEnabled('asr', 'cpu', this.config.asrExecutionMode === 'cpu' && this.hardware.cpu?.supported === true);
+      }
+      return;
+    }
     const minimum = getAsrModel(this.config.asrModel).gpuTotalMiB;
     this.hardware.nvidia.detected = Boolean(this.gpu.available);
     this.hardware.nvidia.name = String(this.gpu.name || '');

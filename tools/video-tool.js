@@ -11,9 +11,25 @@ try {
 } catch (error) {
   console.warn(`[video-tool] portable Python repair failed: ${error.message || String(error)}`);
 }
-const WHISPER_PYTHON = path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'Scripts', 'python.exe');
+function resolveWhisperPython() {
+  if (process.platform === 'win32') return path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'Scripts', 'python.exe');
+  const posix = path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'bin', 'python');
+  return fs.existsSync(posix) ? posix : '';
+}
+function resolveImageIoBinaries() {
+  if (process.platform === 'win32') return path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'Lib', 'site-packages', 'imageio_ffmpeg', 'binaries');
+  const lib = path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'lib');
+  if (!fs.existsSync(lib)) return '';
+  for (const entry of fs.readdirSync(lib)) {
+    if (!entry.startsWith('python')) continue;
+    const candidate = path.join(lib, entry, 'site-packages', 'imageio_ffmpeg', 'binaries');
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return '';
+}
+const WHISPER_PYTHON = resolveWhisperPython();
 const WHISPER_CLI = path.join(PROJECT_ROOT, 'tools', 'faster-whisper-cli.py');
-const IMAGEIO_BINARIES = path.join(PROJECT_ROOT, 'runtime', 'faster-whisper', 'Lib', 'site-packages', 'imageio_ffmpeg', 'binaries');
+const IMAGEIO_BINARIES = resolveImageIoBinaries();
 const LOCAL_BINARIES = {
   ffmpeg: findFirst(IMAGEIO_BINARIES, process.platform === 'win32' ? /^ffmpeg-.*\.exe$/i : /^ffmpeg-/i),
   'yt-dlp': WHISPER_PYTHON,
@@ -869,6 +885,12 @@ function dependencyStatus(command) {
 function resolveCommand(command) {
   const local = LOCAL_BINARIES[command];
   if (local && fs.existsSync(local)) return local;
+  if (process.platform !== 'win32') {
+    try {
+      const probe = spawnSync('sh', ['-c', `command -v ${command}`], { encoding: 'utf8' });
+      if (probe.status === 0 && String(probe.stdout || '').trim()) return String(probe.stdout).trim();
+    } catch { /* fall through */ }
+  }
   return '';
 }
 
