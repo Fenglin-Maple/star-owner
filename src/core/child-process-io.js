@@ -107,6 +107,20 @@ function resolveSystemExecutable(name, environment = process.env) {
   return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || '';
 }
 
+function resolveNvidiaSmi(environment = process.env) {
+  const source = environment || {};
+  const systemRoot = source.SystemRoot || source.WINDIR || '';
+  const programRoots = [source.ProgramW6432, source.ProgramFiles, source['ProgramFiles(x86)']].filter(Boolean);
+  const candidates = process.platform === 'win32'
+    ? [
+      systemRoot && path.join(systemRoot, 'System32', 'nvidia-smi.exe'),
+      systemRoot && path.join(systemRoot, 'Sysnative', 'nvidia-smi.exe'),
+      ...programRoots.map((root) => path.join(root, 'NVIDIA Corporation', 'NVSMI', 'nvidia-smi.exe'))
+    ]
+    : ['/usr/bin/nvidia-smi', '/bin/nvidia-smi', '/usr/local/bin/nvidia-smi'];
+  return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || '';
+}
+
 function readUtf8(stream, onData) {
   if (!stream) return stream;
   stream.setEncoding('utf8');
@@ -121,4 +135,4 @@ function nodeChildProcessSpec(environment = process.env) {
   return { executable: process.execPath, env };
 }
 
-module.exports = { nodeChildProcessSpec, projectRuntimeEnvironment, readUtf8, resolveSystemExecutable, utf8ChildEnvironment };
+module.exports = { nodeChildProcessSpec, projectRuntimeEnvironment, readUtf8, resolveNvidiaSmi, resolveSystemExecutable, utf8ChildEnvironment };

@@ -4,7 +4,7 @@ const { execFile, spawn, spawnSync } = require('child_process');
 const { promisify } = require('util');
 const { AsrService } = require('./asr-service');
 const { DEFAULT_ASR_MODEL, asrComputeType, getAsrModel, normalizeAsrModel, publicAsrModels } = require('./asr-models');
-const { nodeChildProcessSpec, readUtf8, resolveSystemExecutable } = require('./child-process-io');
+const { nodeChildProcessSpec, projectRuntimeEnvironment, readUtf8, resolveNvidiaSmi, resolveSystemExecutable } = require('./child-process-io');
 const { detectAsrHardware } = require('./hardware-capabilities');
 const { isVideoUnavailableMessage, unsupportedVideoError, videoUnavailableError } = require('./media-errors');
 const { ResourceScheduler } = require('./resource-scheduler');
@@ -1128,10 +1128,12 @@ class ToolRunner {
 
   async refreshGpuState() {
     try {
-      const { stdout } = await execFileAsync('nvidia-smi', [
+      const nvidiaSmi = resolveNvidiaSmi();
+      if (!nvidiaSmi) throw new Error('未在 NVIDIA 驱动标准目录中找到 nvidia-smi.exe。');
+      const { stdout } = await execFileAsync(nvidiaSmi, [
         '--query-gpu=index,name,memory.total,memory.used,memory.free',
         '--format=csv,noheader,nounits'
-      ], { windowsHide: true, timeout: 5000 });
+      ], { env: projectRuntimeEnvironment(), windowsHide: true, timeout: 5000 });
       const line = String(stdout || '').trim().split(/\r?\n/).find(Boolean);
       if (!line) throw new Error('nvidia-smi returned no GPU rows.');
       const [index, name, total, used, free] = line.split(',').map((value) => value.trim());
@@ -1860,7 +1862,7 @@ function killProcessTree(child) {
   if (process.platform === 'win32' && child.pid) {
     const taskkill = resolveSystemExecutable('taskkill.exe');
     if (taskkill) {
-      const result = spawnSync(taskkill, ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
+      const result = spawnSync(taskkill, ['/pid', String(child.pid), '/T', '/F'], { env: projectRuntimeEnvironment(), windowsHide: true, stdio: 'ignore', timeout: 5000 });
       if (result.status === 0) return;
     }
   }

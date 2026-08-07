@@ -5,7 +5,7 @@ const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
-const { resolveSystemExecutable } = require('./child-process-io');
+const { projectRuntimeEnvironment, resolveSystemExecutable } = require('./child-process-io');
 const { ensureDir } = require('./workspace');
 
 const REPOSITORY = 'Fenglin-Maple/star-owner';
@@ -131,6 +131,7 @@ class UpdateManager {
 
   launchPreparedUpdate() {
     if (!this.prepared || !fs.existsSync(this.prepared.packageRoot)) throw new Error('没有可安装的已校验更新包，请重新检查更新。');
+    validateStagedPackage(this.prepared.packageRoot, this.prepared.release.version);
     return this.launchOperation({
       mode: 'update',
       stagedRoot: this.prepared.packageRoot,
@@ -190,7 +191,7 @@ class UpdateManager {
     ];
     const powershell = resolveSystemExecutable('powershell.exe');
     if (!powershell) throw new Error('Windows 系统缺少 PowerShell，无法执行更新或迁移。');
-    const child = spawn(powershell, args, { detached: true, windowsHide: true, stdio: 'ignore' });
+    const child = spawn(powershell, args, { detached: true, env: projectRuntimeEnvironment(), windowsHide: true, stdio: 'ignore' });
     child.unref();
     this.publish({ status: 'applying', progress: 1, message: mode === 'update' ? '应用即将退出并安装更新，Workspace 与依赖会保留。' : '应用即将退出并迁移旧版本数据，完成后会自动重启。' });
     return { scheduled: true, mode, targetVersion };
@@ -360,10 +361,55 @@ function locatePackageRoot(stagingRoot, prefix) {
 }
 
 function validateStagedPackage(packageRoot, version) {
-  const required = ['package.json', 'src/main.js', 'Start-StarOwner.cmd', 'node_modules/electron/dist/electron.exe'];
+  const required = [
+    'package.json',
+    'package-lock.json',
+    'portable-manifest.json',
+    'src/main.js',
+    'Start-StarOwner.cmd',
+    'scripts/apply-portable-operation.ps1',
+    'scripts/recover-portable-operation.ps1',
+    'tools/faster-whisper-cli.py',
+    'node_modules/electron/dist/electron.exe',
+    'node_modules/mammoth/package.json',
+    'node_modules/pdf-parse/package.json',
+    'node_modules/sql.js/package.json',
+    'node_modules/mermaid/dist/mermaid.min.js',
+    'runtime/git/cmd/git.exe',
+    'runtime/python',
+    'runtime/faster-whisper/Scripts/python.exe',
+    'runtime/faster-whisper/Lib/site-packages/faster_whisper',
+    'runtime/faster-whisper/Lib/site-packages/yt_dlp',
+    'runtime/faster-whisper/Lib/site-packages/imageio_ffmpeg/binaries',
+    'runtime/vc-runtime/concrt140.dll',
+    'runtime/vc-runtime/msvcp140.dll',
+    'runtime/vc-runtime/msvcp140_codecvt_ids.dll',
+    'runtime/vc-runtime/vcruntime140.dll',
+    'runtime/vc-runtime/vcruntime140_1.dll'
+  ];
   for (const relative of required) if (!fs.existsSync(path.join(packageRoot, relative))) throw new Error(`更新包缺少必需文件：${relative}`);
   const packageJson = readJsonIfPresent(path.join(packageRoot, 'package.json'));
+  const packageLock = readJsonIfPresent(path.join(packageRoot, 'package-lock.json'));
+  const manifest = readJsonIfPresent(path.join(packageRoot, 'portable-manifest.json'));
+  if (packageJson?.name !== 'star-owner') throw new Error('更新包 package.json 的应用标识不正确。');
   if (String(packageJson?.version || '') !== String(version)) throw new Error(`更新包版本校验失败：期望 v${version}。`);
+  if (!/^\d+\.\d+\.\d+$/.test(String(packageJson?.dependencyReleaseVersion || ''))) throw new Error('更新包缺少有效的依赖基线版本。');
+  if (String(packageLock?.version || '') !== String(version) || String(packageLock?.packages?.['']?.version || '') !== String(version)) {
+    throw new Error('更新包 package-lock.json 与应用版本不一致。');
+  }
+  if (String(manifest?.version || '') !== String(version)) throw new Error(`更新包 portable-manifest.json 版本校验失败：期望 v${version}。`);
+  if (String(manifest?.platform || '') !== 'win-x64') throw new Error('更新包平台不是受支持的 win-x64。');
+  if (String(manifest?.dependencyReleaseVersion || '') !== String(packageJson.dependencyReleaseVersion)) throw new Error('更新包依赖基线与 portable manifest 不一致。');
+  if (String(manifest?.launcher || '') !== 'Start-StarOwner.cmd') throw new Error('更新包 portable manifest 的启动器声明不正确。');
+
+  const basePythonRoot = path.join(packageRoot, 'runtime', 'python');
+  const hasBasePython = fs.readdirSync(basePythonRoot, { withFileTypes: true }).some((entry) => (
+    entry.isDirectory() && fs.existsSync(path.join(basePythonRoot, entry.name, process.platform === 'win32' ? 'python.exe' : 'bin/python'))
+  ));
+  if (!hasBasePython) throw new Error('更新包缺少项目内置基础 Python。');
+  const ffmpegRoot = path.join(packageRoot, 'runtime', 'faster-whisper', 'Lib', 'site-packages', 'imageio_ffmpeg', 'binaries');
+  const hasFfmpeg = fs.readdirSync(ffmpegRoot, { withFileTypes: true }).some((entry) => entry.isFile() && /^ffmpeg-.*\.exe$/i.test(entry.name));
+  if (!hasFfmpeg) throw new Error('更新包缺少项目内置 FFmpeg。');
 }
 
 function readJsonIfPresent(file) {
@@ -542,7 +588,7 @@ function sha256(file) {
 
 function runCommand(file, args, cwd) {
   return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(file, args, { cwd, env: projectRuntimeEnvironment(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');

@@ -5,7 +5,7 @@ const { spawn, spawnSync } = require('child_process');
 const JSZip = require('jszip');
 const { XMLParser } = require('fast-xml-parser');
 const mammoth = require('mammoth');
-const { nodeChildProcessSpec, resolveSystemExecutable } = require('./child-process-io');
+const { nodeChildProcessSpec, projectRuntimeEnvironment, resolveSystemExecutable } = require('./child-process-io');
 const { assertInside, assertSafeWindowsPath, ensureDir, safeName } = require('./workspace');
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp']);
@@ -483,7 +483,7 @@ function terminateChildProcess(child) {
     const taskkill = resolveSystemExecutable('taskkill.exe');
     if (taskkill) {
       try {
-        const result = spawnSync(taskkill, ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
+        const result = spawnSync(taskkill, ['/pid', String(child.pid), '/T', '/F'], { env: projectRuntimeEnvironment(), windowsHide: true, stdio: 'ignore', timeout: 5000 });
         if (result.status === 0) return;
       } catch {}
     }

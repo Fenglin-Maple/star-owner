@@ -3,7 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
-const { UpdateManager, cleanupManagedUpdateArtifacts, commandLineContainsProjectRoot, findRunningProjectProcesses, validateArchiveEntries } = require('../src/core/update-manager');
+const { UpdateManager, cleanupManagedUpdateArtifacts, commandLineContainsProjectRoot, findRunningProjectProcesses, resolveCoreRelease, validateArchiveEntries, validateStagedPackage } = require('../src/core/update-manager');
 
 function runPowerShell(script, args) {
   const result = runPowerShellResult(script, args);
@@ -46,6 +46,40 @@ function waitForSpawn(child) {
     child.once('spawn', resolve);
     child.once('error', reject);
   });
+}
+
+function createValidStagedPackage(packageRoot, version = '9.9.9') {
+  const files = [
+    'src/main.js',
+    'Start-StarOwner.cmd',
+    'scripts/apply-portable-operation.ps1',
+    'scripts/recover-portable-operation.ps1',
+    'tools/faster-whisper-cli.py',
+    'node_modules/electron/dist/electron.exe',
+    'node_modules/mammoth/package.json',
+    'node_modules/pdf-parse/package.json',
+    'node_modules/sql.js/package.json',
+    'node_modules/mermaid/dist/mermaid.min.js',
+    'runtime/git/cmd/git.exe',
+    'runtime/faster-whisper/Scripts/python.exe',
+    'runtime/faster-whisper/Lib/site-packages/faster_whisper/__init__.py',
+    'runtime/faster-whisper/Lib/site-packages/yt_dlp/__init__.py',
+    'runtime/faster-whisper/Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-fixture.exe',
+    'runtime/vc-runtime/concrt140.dll',
+    'runtime/vc-runtime/msvcp140.dll',
+    'runtime/vc-runtime/msvcp140_codecvt_ids.dll',
+    'runtime/vc-runtime/vcruntime140.dll',
+    'runtime/vc-runtime/vcruntime140_1.dll',
+    'runtime/python/cpython-3.12.13-windows-x86_64-none/python.exe'
+  ];
+  for (const relative of files) {
+    const target = path.join(packageRoot, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, 'fixture');
+  }
+  fs.writeFileSync(path.join(packageRoot, 'package.json'), JSON.stringify({ name: 'star-owner', version, dependencyReleaseVersion: '1.0.0' }));
+  fs.writeFileSync(path.join(packageRoot, 'package-lock.json'), JSON.stringify({ name: 'star-owner', version, packages: { '': { name: 'star-owner', version } } }));
+  fs.writeFileSync(path.join(packageRoot, 'portable-manifest.json'), JSON.stringify({ version, dependencyReleaseVersion: '1.0.0', platform: 'win-x64', launcher: 'Start-StarOwner.cmd' }));
 }
 
 (async () => {
@@ -94,6 +128,29 @@ function waitForSpawn(child) {
     assert.throws(() => validateArchiveEntries(['Star-Owner/package.json', unsafeEntry]), /不安全|路径|Win32|控制字符|数据流|保留设备名|尾随字符/);
   }
   assert.throws(() => validateArchiveEntries(['Star-Owner/package.json', 'star-owner/PACKAGE.JSON']), /重复路径/);
+  const stagedValidationRoot = path.join(root, 'validated-stage');
+  createValidStagedPackage(stagedValidationRoot);
+  assert.doesNotThrow(() => validateStagedPackage(stagedValidationRoot, '9.9.9'), 'a complete portable core package was rejected');
+  const stableAsset = {
+    name: 'Star-Owner-v9.9.9-win-x64-core.zip',
+    browser_download_url: 'https://example.invalid/core.zip',
+    size: 123,
+    digest: `sha256:${'a'.repeat(64)}`
+  };
+  const stableRelease = resolveCoreRelease({ id: 99, tag_name: 'v9.9.9', draft: false, prerelease: false, assets: [stableAsset, { name: `${stableAsset.name}.sha256`, browser_download_url: 'https://example.invalid/core.sha256' }] });
+  assert.strictEqual(stableRelease.version, '9.9.9', 'stable core release was not resolved');
+  assert.throws(() => resolveCoreRelease({ tag_name: 'v9.9.10', draft: false, prerelease: true, assets: [] }), /稳定|stable/, 'pre-release was accepted as an automatic update');
+  fs.rmSync(path.join(stagedValidationRoot, 'runtime', 'git'), { recursive: true, force: true });
+  assert.throws(() => validateStagedPackage(stagedValidationRoot, '9.9.9'), /runtime\\git|runtime\/git/, 'package without Portable Git passed staged validation');
+  createValidStagedPackage(stagedValidationRoot);
+  const manifest = readJson(path.join(stagedValidationRoot, 'portable-manifest.json'));
+  manifest.version = '9.9.8';
+  fs.writeFileSync(path.join(stagedValidationRoot, 'portable-manifest.json'), JSON.stringify(manifest));
+  assert.throws(() => validateStagedPackage(stagedValidationRoot, '9.9.9'), /manifest|portable/, 'manifest version mismatch passed staged validation');
+  createValidStagedPackage(stagedValidationRoot);
+  fs.rmSync(path.join(stagedValidationRoot, 'runtime', 'python'), { recursive: true, force: true });
+  assert.throws(() => validateStagedPackage(stagedValidationRoot, '9.9.9'), /基础 Python|Python|必需文件/, 'package without base Python passed staged validation');
+  createValidStagedPackage(stagedValidationRoot);
   assert(commandLineContainsProjectRoot('"D:\\Old Star Owner\\node_modules\\electron\\dist\\electron.exe" "D:\\Old Star Owner"', 'D:\\Old Star Owner'), 'project process command line was not recognized');
   assert(!commandLineContainsProjectRoot('"D:\\Old Star Owner 2\\electron.exe"', 'D:\\Old Star Owner'), 'a sibling project command line was treated as the migration source');
 
@@ -140,10 +197,33 @@ function waitForSpawn(child) {
   fs.writeFileSync(path.join(projectRoot, 'templates', 'video-summary-template.md'), 'old-template');
   fs.writeFileSync(path.join(projectRoot, 'DESIGN_SHARED_KNOWLEDGE.md'), 'old-shared-design');
   fs.writeFileSync(path.join(projectRoot, 'runtime', 'git', 'cmd', 'git.exe'), 'old-portable-git');
+  const preservedRuntime = [
+    ['runtime/python/cpython-3.12.13-windows-x86_64-none/python.exe', 'old-python'],
+    ['runtime/faster-whisper/marker.txt', 'old-faster-whisper'],
+    ['runtime/vc-runtime/msvcp140.dll', 'old-vc-runtime'],
+    ['runtime/models/large-v3-turbo/model.bin', 'old-model']
+  ];
+  const stagedRuntime = [
+    ['runtime/python/cpython-3.12.13-windows-x86_64-none/python.exe', 'new-python'],
+    ['runtime/faster-whisper/marker.txt', 'new-faster-whisper'],
+    ['runtime/vc-runtime/msvcp140.dll', 'new-vc-runtime'],
+    ['runtime/models/large-v3-turbo/model.bin', 'new-model']
+  ];
+  for (const [relative, content] of preservedRuntime) {
+    fs.mkdirSync(path.dirname(path.join(projectRoot, relative)), { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, relative), content);
+  }
+  for (const [relative, content] of stagedRuntime) {
+    fs.mkdirSync(path.dirname(path.join(stage, relative)), { recursive: true });
+    fs.writeFileSync(path.join(stage, relative), content);
+  }
   runPowerShell(helper, helperArgs('update', projectRoot, { stagedRoot: stage, targetVersion: '9.9.9', operationId: 'update-fixture' }));
   assert.strictEqual(fs.readFileSync(path.join(projectRoot, 'templates', 'video-summary-template.md'), 'utf8'), 'new-template', 'portable update did not replace templates');
   assert.strictEqual(fs.readFileSync(path.join(projectRoot, 'DESIGN_SHARED_KNOWLEDGE.md'), 'utf8'), 'new-shared-design', 'portable update did not replace shared design documentation');
   assert.strictEqual(fs.readFileSync(path.join(projectRoot, 'runtime', 'git', 'cmd', 'git.exe'), 'utf8'), 'new-portable-git', 'portable update did not install the project-local Git runtime');
+  for (const [relative, content] of preservedRuntime) {
+    assert.strictEqual(fs.readFileSync(path.join(projectRoot, relative), 'utf8'), content, `portable update unexpectedly replaced preserved runtime path: ${relative}`);
+  }
   assert.strictEqual(readJson(path.join(projectRoot, '.updates', 'operation-result.json')).status, 'succeeded', 'portable update helper did not write a success result');
 
   const failedRoot = path.join(root, 'backup-failure-project');

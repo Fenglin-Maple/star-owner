@@ -2379,7 +2379,7 @@ function killProcessTree(child) {
   if (process.platform === 'win32' && child.pid) {
     const taskkill = resolveSystemExecutable('taskkill.exe');
     if (taskkill) {
-      const result = spawnSync(taskkill, ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
+      const result = spawnSync(taskkill, ['/pid', String(child.pid), '/T', '/F'], { env: projectRuntimeEnvironment(), windowsHide: true, stdio: 'ignore', timeout: 5000 });
       if (result.status === 0) return;
     }
   }

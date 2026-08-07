@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.5.10`
+Version: `1.6.0`
 
 ## 1. Portable Release for Users
 
@@ -34,7 +34,7 @@ Star-Owner-v<dependency-version>-model-large-v3-turbo.zip
 Star-Owner-v<dependency-version>-model-large-v3-turbo.zip.sha256
 ```
 
-The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.5.1` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. Existing official v1.0.0 probe-only installations are adopted once using the published asset checksums; the persistent adoption marker prevents a later missing, damaged, wrong-version or wrong-package manifest from being silently accepted. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads and read-only mount snapshots.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.6.0` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. Existing official v1.0.0 probe-only installations are adopted once using the published asset checksums; the persistent adoption marker prevents a later missing, damaged, wrong-version or wrong-package manifest from being silently accepted. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads and read-only mount snapshots. At runtime, application child processes never resolve Node, Python, FFmpeg, yt-dlp or Git from the user's PATH; the GPU probe and Windows utility calls use known absolute paths plus the controlled project environment.
 
 `1.4.17` remains a code-only update and keeps the published `v1.0.0` runtime/model dependency assets unchanged. It reorganizes the shared-tool hierarchy without changing repository, mount or upload persistence contracts; no new Release asset is required.
 
@@ -45,6 +45,8 @@ The application version and dependency version are independent. `package.json.de
 `1.5.1` is a code-only update and keeps the published `v1.0.0` runtime/model dependency assets unchanged. It refines overview sizing, local-tool navigation, shared-tool layout and mount-target interaction, and adds a theme-aware randomized startup wordmark. It does not require new runtime, model or Git assets.
 
 `1.5.10` is a code/documentation-only update and keeps the published `v1.0.0` runtime/model dependency assets unchanged. The complete GitHub document-sharing contract is maintained in `DESIGN_SHARED_KNOWLEDGE.md`: a contributor reuses one valid Fork per upstream repository, creates a fresh branch from the latest upstream target branch for each upload, and relies on the required `validate-shared-docs` check before merge. After the maintainer merges a PR, the catalog Action normally updates `catalog.json` automatically; manually running it is reserved for recovery or historical repositories whose catalog is stale. No new runtime, model or Git asset is required.
+
+`1.6.0` is a code/documentation-only update and keeps the published `v1.0.0` runtime/model dependency assets unchanged. The core package still bundles the complete runtime, while the updater now rejects a staged package that lacks its portable manifest, lockfile, transaction helpers, Electron, Python, FFmpeg, VC++ or Portable Git. Automatic update discovery continues to use only the stable GitHub `latest` Release; pre-releases are never installed by that path. Workspace, existing ASR/runtime and model directories remain protected by the update transaction and rollback logic.
 
 ### Updating and migrating an existing installation
 

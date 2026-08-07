@@ -6,7 +6,7 @@ const { Readable, Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const { recoverAtomicFile, writeFileRecoverable } = require('./atomic-file');
 const { ASR_MODELS, getAsrModelByPackage, isAsrModelPackage } = require('./asr-models');
-const { readUtf8, resolveSystemExecutable, utf8ChildEnvironment } = require('./child-process-io');
+const { projectRuntimeEnvironment, readUtf8, resolveSystemExecutable } = require('./child-process-io');
 const { ensureDir } = require('./workspace');
 
 const REPOSITORY = 'Fenglin-Maple/star-owner';
@@ -1072,7 +1072,7 @@ function directDependencyReleaseAsset(version, definition) {
 
 function run(file, args, cwd) {
   return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { cwd, env: utf8ChildEnvironment(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(file, args, { cwd, env: projectRuntimeEnvironment(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     readUtf8(child.stdout, (text) => { stdout += text; });

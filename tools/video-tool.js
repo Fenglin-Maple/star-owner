@@ -496,6 +496,7 @@ function extractFramesLegacy(outDir, count) {
     '-f', 'image2pipe', '-c:v', 'mjpeg', 'pipe:1'
   ], {
     encoding: null,
+    env: projectRuntimeEnvironment(),
     maxBuffer: 256 * 1024 * 1024,
     shell: false,
     windowsHide: true
@@ -823,7 +824,7 @@ function readNetscapeCookies(file) {
 }
 
 function requireCommand(command) {
-  if (!dependencyStatus(command).available) throw new Error(`未找到 ${command}，请先运行 npm run setup:asr。`);
+  if (!dependencyStatus(command).available) throw new Error(`应用内置 ${command} 不可用，请在“设置”的依赖下载区域检查并修复运行时依赖。`);
 }
 
 function dependencyStatus(command) {
@@ -873,7 +874,7 @@ function resolveCommand(command) {
 
 function run(command, args, options = {}) {
   const executable = resolveCommand(command);
-  if (!executable) throw new Error(`未找到 ${command}，请先安装并加入 PATH。`);
+  if (!executable) throw new Error(`应用内置 ${command} 不可用，请在“设置”的依赖下载区域检查并修复运行时依赖。`);
   let finalArgs = args;
   if (command === 'faster-whisper' && executable === WHISPER_PYTHON && fs.existsSync(WHISPER_CLI)) finalArgs = [WHISPER_CLI, ...args];
   if (command === 'yt-dlp' && executable === WHISPER_PYTHON) finalArgs = ['-m', 'yt_dlp', ...args];

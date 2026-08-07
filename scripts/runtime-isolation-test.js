@@ -1,7 +1,9 @@
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { nodeChildProcessSpec, projectRuntimeEnvironment, resolveSystemExecutable } = require('../src/core/child-process-io');
+const { nodeChildProcessSpec, projectRuntimeEnvironment, resolveNvidiaSmi, resolveSystemExecutable } = require('../src/core/child-process-io');
 const { serviceEnvironment } = require('../src/core/asr-service');
 const { resolveCommand } = require('../tools/video-tool');
 
@@ -38,6 +40,28 @@ assert(!String(asr.PATH).toLowerCase().includes('global-tools'), 'ASR service in
 assert.strictEqual(asr.FASTER_WHISPER_BIN, undefined);
 
 if (process.platform === 'win32') {
+  const nvidiaFixture = fs.mkdtempSync(path.join(os.tmpdir(), 'star-owner-nvidia-path-test-'));
+  try {
+    const systemNvidia = path.join(nvidiaFixture, 'System32', 'nvidia-smi.exe');
+    fs.mkdirSync(path.dirname(systemNvidia), { recursive: true });
+    fs.writeFileSync(systemNvidia, 'fixture');
+    const nvidiaEnvironment = {
+      ...poisonedEnvironment,
+      SystemRoot: nvidiaFixture,
+      WINDIR: nvidiaFixture,
+      ProgramFiles: path.join(nvidiaFixture, 'Program Files')
+    };
+    assert.strictEqual(path.resolve(resolveNvidiaSmi(nvidiaEnvironment)), path.resolve(systemNvidia), 'nvidia-smi was not resolved from the Windows driver directory');
+    fs.rmSync(systemNvidia, { force: true });
+    const programNvidia = path.join(nvidiaFixture, 'Program Files', 'NVIDIA Corporation', 'NVSMI', 'nvidia-smi.exe');
+    fs.mkdirSync(path.dirname(programNvidia), { recursive: true });
+    fs.writeFileSync(programNvidia, 'fixture');
+    assert.strictEqual(path.resolve(resolveNvidiaSmi(nvidiaEnvironment)), path.resolve(programNvidia), 'nvidia-smi did not use the standard NVIDIA NVSMI directory fallback');
+    fs.rmSync(programNvidia, { force: true });
+    assert.strictEqual(resolveNvidiaSmi(nvidiaEnvironment), '', 'nvidia-smi fell back to a PATH executable');
+  } finally {
+    fs.rmSync(nvidiaFixture, { recursive: true, force: true });
+  }
   for (const command of ['cmd.exe', 'powershell.exe', 'taskkill.exe', 'tar.exe']) {
     const executable = resolveSystemExecutable(command);
     assert(executable && path.isAbsolute(executable) && /\\(?:System32|Sysnative)\\/i.test(executable), `${command} was not resolved from the Windows system directory`);
