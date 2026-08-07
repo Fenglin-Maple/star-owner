@@ -974,6 +974,9 @@ function collectProbeFilesSync(probeDirectory) {
     const current = stack.pop();
     for (const entry of fs.readdirSync(current)) {
       if (entry === '.DS_Store') continue;
+      // Python 运行时缓存不参与校验：pyc 内容随解释器/优化级别变化，会破坏清单稳定性
+      if (entry === '__pycache__') continue;
+      if (entry.endsWith('.pyc') || entry.endsWith('.pyo')) continue;
       const full = path.join(current, entry);
       const entryStat = fs.lstatSync(full);
       if (entryStat.isSymbolicLink()) continue;
