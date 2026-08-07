@@ -178,7 +178,19 @@ class DependencyManager {
       return { available: false, manifestStatus: 'probes-missing', message: `未检测到完整依赖：缺少 ${missingProbes.join(', ')}` };
     }
     if (process.platform === 'darwin') {
-      return { available: true, manifestStatus: 'local-config', message: 'macOS 本地配置模式：运行时与模型探测全部通过' };
+      const loaded = this.readPackageManifest(definition);
+      if (!loaded.manifest) {
+        return { available: false, manifestStatus: 'missing', message: 'macOS 本地运行时已探测到，但缺少安装清单；请运行 npm run manifest:mac 生成后重试。' };
+      }
+      const validation = validatePackageManifest(loaded.manifest, definition, this.dependencyVersion);
+      if (!validation.valid) {
+        return { available: false, manifest: loaded.manifest, manifestStatus: validation.status, message: `macOS 本地配置清单无效：${validation.message}` };
+      }
+      const checksum = contentChecksumForProbes(this.projectRoot, definition.probes);
+      if (!checksum || checksum !== String(loaded.manifest.checksum || '').toLowerCase()) {
+        return { available: false, manifest: loaded.manifest, manifestStatus: 'checksum-mismatch', message: 'macOS 本地运行时内容与清单 SHA-256 不一致（可能被更新或修改）；请重新运行 npm run manifest:mac 生成新清单。' };
+      }
+      return { available: true, manifest: loaded.manifest, manifestStatus: 'local-config-valid', message: 'macOS 本地配置模式：探针与 SHA-256 校验全部通过' };
     }
     const loaded = this.readPackageManifest(definition);
     if (!loaded.manifest) {
@@ -940,6 +952,61 @@ function normalizeReleaseVersion(value) {
   return String(value || '').trim().replace(/^v/i, '');
 }
 
+function sha256FileSync(file) {
+  const hash = crypto.createHash('sha256');
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buffer = Buffer.alloc(1024 * 1024);
+    let bytesRead;
+    while ((bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest('hex');
+}
+
+function collectProbeFilesSync(probeDirectory) {
+  const files = [];
+  const stack = [probeDirectory];
+  while (stack.length) {
+    const current = stack.pop();
+    for (const entry of fs.readdirSync(current)) {
+      if (entry === '.DS_Store') continue;
+      const full = path.join(current, entry);
+      const entryStat = fs.lstatSync(full);
+      if (entryStat.isSymbolicLink()) continue;
+      if (entryStat.isDirectory()) { stack.push(full); continue; }
+      if (entryStat.isFile()) files.push(full);
+    }
+  }
+  return files;
+}
+
+function contentChecksumForProbes(projectRoot, probes) {
+  const entries = [];
+  for (const probe of probes || []) {
+    const relative = String(probe || '').replaceAll('\\', '/');
+    const absolute = path.resolve(projectRoot, relative);
+    if (!fs.existsSync(absolute)) return null;
+    let probeHash;
+    if (fs.statSync(absolute).isFile()) {
+      probeHash = sha256FileSync(absolute);
+    } else {
+      const files = collectProbeFilesSync(absolute);
+      if (!files.length) return null;
+      const lines = files
+        .map((file) => `${path.relative(projectRoot, file).split(path.sep).join('/')}\u0000${sha256FileSync(file)}`)
+        .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      probeHash = crypto.createHash('sha256').update(lines.join('\n')).digest('hex');
+    }
+    entries.push({ probe: relative, probeHash });
+  }
+  entries.sort((a, b) => (a.probe < b.probe ? -1 : a.probe > b.probe ? 1 : 0));
+  return crypto.createHash('sha256').update(entries.map((item) => `${item.probe}\u0000${item.probeHash}`).join('\n')).digest('hex');
+}
+
 function managedRuntimePaths(packageId) {
   if (packageId === 'runtime-base') return ['runtime/python', 'runtime/faster-whisper', 'runtime/vc-runtime'];
   const model = getAsrModelByPackage(packageId);
@@ -1148,4 +1215,4 @@ function escapeRegex(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-module.exports = { DependencyManager, REPOSITORY };
+module.exports = { DependencyManager, REPOSITORY, contentChecksumForProbes };
