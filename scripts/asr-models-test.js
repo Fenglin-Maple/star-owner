@@ -31,7 +31,13 @@ try {
   const dependencyState = manager.state();
   const turboPackage = dependencyState.packages.find((item) => item.id === 'model-large-v3-turbo');
   assert(turboPackage && turboPackage.localImport && turboPackage.required, 'Turbo required dependency contract is missing');
-  assert.strictEqual(turboPackage.assetName, 'Star-Owner-v1.0.0-model-large-v3-turbo.zip');
+  if (process.platform === 'darwin' && process.arch === 'arm64') {
+    // macOS 本地配置模式：assetName 为空（不走 GitHub Release 资产），须带 installHint 引导
+    assert.strictEqual(turboPackage.assetName, '');
+    assert(String(turboPackage.installHint || '').includes('setup:mac'), 'darwin 缺少 installHint 部署引导');
+  } else {
+    assert.strictEqual(turboPackage.assetName, 'Star-Owner-v1.0.0-model-large-v3-turbo.zip');
+  }
   assert(dependencyState.missingRequired.includes(turboPackage.id), 'Missing Turbo model did not block first launch');
 
   const runner = new ToolRunner({ store });
