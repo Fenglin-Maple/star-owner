@@ -1,6 +1,6 @@
 # macOS 适配记录（MLX Whisper ASR 替换）
 
-> 状态：进行中 · 更新于 2026-08-05 · 目标平台：Apple Silicon (M4) · 基线版本：1.5.0
+> 状态：已完成（PR 就绪） · 更新于 2026-08-07 · 目标平台：Apple Silicon (M4) · 基线版本：1.6.2
 
 ## 目标
 
@@ -24,18 +24,45 @@ Node 侧 AsrService ──spawn──▶ tools/faster-whisper-service.py ──�
 | Python 3.12.12 | `runtime/python/cpython-3.12.12-macos-aarch64-none/` | uv 安装，自带 bin/python |
 | venv | `runtime/faster-whisper/` | uv venv，mlx-whisper / yt-dlp / imageio-ffmpeg / huggingface_hub |
 | ASR 模型 | `runtime/models/<id>/` | HF `mlx-community/whisper-large-v3-turbo` 等 |
+| 安装清单 | `runtime/.dependency-manifests/<id>.json` | `npm run manifest:mac` 生成，含 SHA-256 |
 
-## 已改动文件
+## 改动清单（22 个文件）
 
-| 文件 | 改动 | 角色 |
-|---|---|---|
-| `tools/faster-whisper-cli.py` | 双平台重写：darwin 走 `mlx_whisper.transcribe`（含 word_timestamps → 句子级分段复用原逻辑），模型下载改 `huggingface_hub.snapshot_download`（mlx-community 仓库）；health 输出新增 `mlxAvailable` | Hermes 初始实现 |
-| `tools/faster-whisper-service.py` | 双平台：darwin 用 `mlx_whisper.load_model` 常驻加载，transcribe 适配 dict 返回（duration 用 load_audio 计算，languageProbability 无则 1.0） | Hermes 初始实现 |
-| `src/core/child-process-io.js` | 新增导出 `findVenvSitePackages(venv)`：win32 → Lib/site-packages，POSIX → 扫描 lib/python*/；`projectRuntimeEnvironment` 使用之（修掉硬编码 lib/python3） | Hermes 初始实现 |
-| `src/core/asr-service.js` | [待 builder] findRuntimePython 非 win32 优先 venv python；serviceEnvironment 用 findVenvSitePackages | Codex builder |
-| `src/core/hardware-capabilities.js` | [待 builder] darwin 分支：mlxAvailable → gpuSupported；cpuArchitectureSupported darwin 为真；preferredMode='mlx' | Codex builder |
-| `src/core/dependency-manager.js` | [待 builder] definitions() 平台化：darwin 不查 python.exe/msvcp140.dll，probes 指向 venv 结构；模型 probes 兼容 weights.npz/*.safetensors | Codex builder |
-| `src/core/tool-runner.js` | [待 builder] gpuAsr device 在 darwin 用 'mlx'（ASR_GPU_DEVICE 常量），computeType 随之 | Codex builder |
+### Python 侧
+
+| 文件 | 改动 |
+|---|---|
+| `tools/faster-whisper-cli.py` | 双平台重写：darwin 走 `mlx_whisper.transcribe`（word_timestamps → 句子级分段复用原逻辑），模型下载改 `huggingface_hub.snapshot_download`（mlx-community 仓库）；health 输出新增 `mlxAvailable` |
+| `tools/faster-whisper-service.py` | 双平台：stdio JSON 协议不变；darwin 每次 transcribe 顶层调用 `mlx_whisper.transcribe`（模型无缓存，不预加载） |
+
+### JS 核心
+
+| 文件 | 改动 |
+|---|---|
+| `src/core/child-process-io.js` | 新增导出 `findVenvSitePackages(venv)`：win32 → Lib/site-packages，POSIX → 扫描 lib/python*/；`projectRuntimeEnvironment` 使用之（修掉硬编码 lib/python3） |
+| `src/core/asr-service.js` | `findRuntimePython` 非 win32 优先 venv python；serviceEnvironment 用 findVenvSitePackages |
+| `src/core/hardware-capabilities.js` | darwin 分支：mlxAvailable → gpuSupported；cpuArchitectureSupported darwin 为真；preferredMode='mlx'；文案平台化 |
+| `src/core/tool-runner.js` | 调度层 MLX 通道：lane 门控/gpuGate/syncHardwareGpuState/refreshGpuState 平台化（darwin 用 mlxAvailable 替代 nvidia 判定，配置枚举不变）；修复原项目 diskError 作用域 bug |
+| `src/core/internal-agent-manager.js` | 单视频闸门 darwin 放行（mlxAvailable）；新增「内容审核拒绝自动跳过」分支（任务 enabled=false 不再自动派发、emit content-rejected 事件、会话不阻塞） |
+| `src/core/dependency-manager.js` | darwin definitions 平台化（probes 指向 venv/MLX 模型，assetName 置空）；packageHealth darwin 三重校验（probes + manifest + SHA-256 重算，符合 SECURITY.md L41）；562 行 assetPattern 空串守卫修复 |
+| `src/main.js` | window-all-closed 关窗口即完整退出（darwin）；sendRuntime/safeSend 统一 webContents 销毁保护（退出无崩溃弹窗）；rag:provider-test IPC；content-rejected 系统通知 |
+| `src/preload.js` | 暴露 ragTestProvider |
+
+### 渲染进程
+
+| 文件 | 改动 |
+|---|---|
+| `src/renderer/ai.js` | 模型配置「测试连接」按钮 + 「手动添加自定义模型」（拉取接口不可用时的兜底）；content-rejected 红色 toast 通知 |
+| `src/renderer/index.html` / `styles.css` / `app.js` | 对应 UI 元素与样式（含 macOS 窗口红绿灯 titleBarStyle hiddenInset） |
+
+### 工具与脚本
+
+| 文件 | 改动 |
+|---|---|
+| `tools/video-tool.js` | 路径平台化（resolveWhisperPython / resolveImageIoBinaries）+ POSIX 系统命令回退 |
+| `scripts/generate-mac-manifest.js` | 生成 darwin 依赖安装清单（SHA-256），`npm run manifest:mac` |
+| `Start-StarOwner.command` / `Start-StarOwner.cmd` | macOS/Windows 双击启动器（防双开 + 后台启动） |
+| `MAC_ADAPTATION.md` | 本文档 |
 
 ## 模型清单（MLX 版，HuggingFace）
 
@@ -43,15 +70,21 @@ Node 侧 AsrService ──spawn──▶ tools/faster-whisper-service.py ──�
 - `mlx-community/whisper-small-mlx`（可选，约 150MB）
 - `mlx-community/whisper-medium-mlx`（保留映射，UI 不展示）
 
-## 验证步骤
+## 验证结果
 
-1. [x] venv 装包完成，`import mlx_whisper` + Metal 设备可用（`Device(gpu, 0)`）
-2. [x] 模型下载完成，`runtime/models/large-v3-turbo/` 含 config.json + weights.safetensors（1.5G）
-3. [x] `tools/faster-whisper-cli.py --health` 输出 mlxAvailable: true
-4. [x] CLI 模式真实语音转录：14.3s 中文 → 5.6s（含模型加载）/ 7 句 SRT 时间轴正确，产物三件套正常
-5. [x] Service 模式（stdio JSON 协议）：READY → transcribe ok=true → shutdown 正常
-6. [ ] `npm start` 应用启动，任务总览 → 单视频总结全流程
-7. [ ] OpenCode 独立复核全部改动（Windows 行为未破坏）
+| 项 | 结果 |
+|---|---|
+| venv 装包 + Metal 设备可用（`Device(gpu, 0)`） | ✅ |
+| 模型下载（config.json + weights.safetensors 1.5G） | ✅ |
+| `cli.py --health` 输出 mlxAvailable: true | ✅ |
+| CLI 真实语音转录：14.3s 中文 → 5.6s（含加载）/ 7 句 SRT 正确 | ✅ |
+| Service 模式：READY → transcribe ok=true → shutdown 正常 | ✅ |
+| Python 侧 ad-hoc 全量（py_compile/health/CLI/Service 协议） | ✅ 8/8 |
+| JS 侧验收（调度层/依赖/平台化契约） | ✅ 9/9 |
+| OpenCode 独立复核两轮（win32 保真 A 组 7/10 + 二阶段 4 项） | ✅ |
+| manifest 校验（正常/篡改/删除/恢复） | ✅ 10/10 |
+| 集成：npm start 启动 + 单视频总结 + 收藏夹工作流真实跑通 | ✅ |
+| 退出行为（关窗口干净退出、无崩溃弹窗） | ✅ |
 
 ## MLX 0.4.x 已知差异（已适配）
 
@@ -63,30 +96,19 @@ Node 侧 AsrService ──spawn──▶ tools/faster-whisper-service.py ──�
 | 输出不含标点 token | 句子切分失效、文本无标点 | segment 边界即句子粒度（时间戳驱动），words 置空直接采用段边界；无标点为引擎行为，列为已知限制 |
 | 模型无缓存，每次 transcribe 重新加载（约 3s） | 每次请求多 3s | 接受（长视频推理占大头）；后续可加 lru_cache 包一层 |
 | DecodingOptions 不支持 repetition_penalty / no_repeat_ngram_size / VAD | 防幻觉参数缺失 | 跳过；用 hallucination_silence_threshold 兜底 |
-| mlx_whisper.audio.load_audio 硬编码 subprocess 'ffmpeg'，应用内 PATH 重建后找不到（imageio 二进制名带架构后缀） | `[Errno 2] No such file or directory: 'ffmpeg'` | 在 `runtime/faster-whisper/bin/ffmpeg` 建 symlink 指向 imageio_ffmpeg 二进制（venv/bin 本就在应用 PATH 里） |
+| mlx_whisper.audio.load_audio 硬编码 subprocess 'ffmpeg'，应用内 PATH 重建后找不到 | `[Errno 2] No such file or directory: 'ffmpeg'` | 在 `runtime/faster-whisper/bin/ffmpeg` 建 symlink 指向 imageio_ffmpeg 二进制（venv/bin 本就在应用 PATH 里） |
 
 ## 原项目 bug 修复记录
 
 | bug | 现象 | 修复 |
 |---|---|---|
 | tool-runner.js ASR 路径 `let diskError` 声明在 try 块内、catch 块引用（块级作用域不可见） | 任务失败时抛 `diskError is not defined` ReferenceError，掩盖真实错误 | 声明移到 try 外（win32 同样受益） |
+| 退出时 ToolRunner 定时器向已销毁的 webContents 发送事件 | 关闭窗口后弹出「Object has been destroyed」未捕获异常 | main.js 统一 safeSend（isDestroyed + try/catch 保护），所有 webContents.send 走安全通道 |
 
 ## 边界与暂缓项
 
 - GitHub 文档共享依赖内置 Portable Git（Windows 打包物 `runtime/git/cmd/git.exe`），macOS 暂不可用（应用会优雅降级），后续补 mac 版 git 运行时与 osxkeychain 凭据。
 - 应用内更新（PowerShell 恢复脚本）仅 Windows，mac 暂不支持自更新。
-- MLX 无 faster-whisper 的 VAD 参数；若长视频静音段产生幻觉文本，后续可加 mlx-whisper 的 VAD 支持或 hallucination_silence_threshold 等价处理。
+- MLX 无 faster-whisper 的 VAD 参数；若长视频静音段产生幻觉文本，后续可加 VAD 支持。
 - 服务模式（service.py）下 MLX 无法逐段流式进度，进度直接跳到完成（不影响产物）。
-
-## 复核与二阶段修复记录
-
-OpenCode 独立复核结论：Python 侧 + 硬件检测质量高、win32 保真（A 组 7/10），但衔接层未适配。三处必修：
-
-| 问题 | 级别 | 修复方案 | 状态 |
-|---|---|---|---|
-| tool-runner 调度层 cuda 独占：lane 门控/gpuGate/ensureSelectedAsr/syncHardwareGpuState 全按 nvidia 判断，mac 上 GPU 通道永不启用且被显式阻断 | 高 | darwin 上把 'cuda' 配置语义映射为 MLX 通道（mlxAvailable 门控），配置枚举不变 | Codex builder 进行中 |
-| internal-agent-manager:424 在 darwin 默认配置下抛『未检测到 NVIDIA/CUDA』拦截单视频主流程 | 高 | darwin 上 mlxAvailable 时放行，文案平台化 | Codex builder 进行中 |
-| tools/video-tool.js 硬编码 `Scripts/python.exe`/`Lib/site-packages`，mac 上 ffmpeg/yt-dlp/faster-whisper 全解析为空，媒体链路在 ASR 前断裂 | 高 | 平台化解析（bin/python + lib/python*/ 扫描）+ POSIX 系统 PATH 回退 | Codex builder 进行中 |
-| darwin 依赖面板失效（packageHealth 要求 archive 安装清单，本地搭建无清单 → 恒显示未安装、模型下拉禁用） | 中 | darwin 分支：probes 全过即 available（local-config 模式） | Codex builder 进行中 |
-
-低危项（随集成测试观察，暂缓）：A8 win32 缺最终进度事件、A9 txt 空行过滤、A10 diagnostics schema 键名变更（无 JS 消费者）、B5 失败诊断错位（device='mlx' 归 GPU 归因，误导排障）、B12 nvidia-smi 每 60s 噪音（darwin 已跳过）、C3 rag-assistant cmd.exe 工具、C4-C8 各降级路径。
+- 低危观察项（随集成测试观察，暂缓）：A8 win32 缺最终进度事件、A9 txt 空行过滤、A10 diagnostics schema 键名变更（无 JS 消费者）、B5 失败诊断错位（device='mlx' 归 GPU 归因）、C3 rag-assistant cmd.exe 工具、C4-C8 各降级路径。
