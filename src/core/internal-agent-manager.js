@@ -1988,7 +1988,16 @@ function isContextLimitError(value) {
 
 function isContentRejectedError(value) {
   // 模型供应商内容安全审核拒绝（如火山方舟 "input may contain sensitive information"）
-  return /sensitive information|content filter|content_filter|内容(?:安全|审核).{0,10}(?:拒绝|拦截)|审核.{0,6}(?:未通过|拦截|拒绝)/i.test(String(value || ''));
+  // 优先读取供应商结构化错误码（rag-assistant providerHttpError 已解析 error.supplierCode / providerCode），
+  // 避免把临时服务故障（如限流、超时）误判为内容拒绝；无码时回退 message 文本正则。
+  const supplierCode = value && typeof value === 'object' ? String(value.supplierCode || value.providerCode || '') : '';
+  if (supplierCode) {
+    return /content_filter|contentfilter|contentrisk|risk_control|datainspectionfailed|sensitive|moderation|policy_violation|inappropriatecontent|safetyerror/i.test(supplierCode);
+  }
+  const text = value instanceof Error
+    ? String(value.message || '')
+    : (value && typeof value === 'object' && value.message != null ? String(value.message) : String(value || ''));
+  return /sensitive information|content filter|content_filter|内容(?:安全|审核).{0,10}(?:拒绝|拦截)|审核.{0,6}(?:未通过|拦截|拒绝)/i.test(text);
 }
 
 function injectFrameGallery(markdown, frames) {
