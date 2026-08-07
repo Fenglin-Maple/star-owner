@@ -2267,3 +2267,6 @@ body.theme-endfield *::-webkit-scrollbar-thumb:hover { background: #191919; back
 .outside-placeholder-icon { width: 52px; height: 52px; display: grid; place-items: center; border: 1px solid var(--border-strong); color: var(--accent); }
 .outside-placeholder-icon svg { width: 28px; height: 28px; fill: none; stroke: currentColor; stroke-width: 1.7; }
 .document-preview-actions { display: flex; gap: 8px; }
+/* Agent 工作记录日志着色：完成绿 / 失败红 */
+.ai-log-entry.success span { color: var(--green); }
+.ai-log-entry.error span { color: var(--red); }

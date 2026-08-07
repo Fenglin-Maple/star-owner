@@ -156,7 +156,10 @@
     const modelUnavailable = session.modelAvailable === false;
     const collectionUnavailable = session.collectionAvailable === false;
     const canStart = !active && session.status !== 'completed' && !modelUnavailable && !collectionUnavailable;
-    const logs = (session.logs || []).slice().reverse().map((entry) => `<div class="ai-log-entry"><time>${time(entry.at)}</time><span>${html(entry.message)}</span></div>`).join('') || '<div class="rag-list-empty">暂无工作记录</div>';
+    const logs = (session.logs || []).slice().reverse().map((entry) => {
+      const levelClass = entry.level === 'success' ? ' success' : entry.level === 'error' ? ' error' : '';
+      return `<div class="ai-log-entry${levelClass}"><time>${time(entry.at)}</time><span>${html(entry.message)}</span></div>`;
+    }).join('') || '<div class="rag-list-empty">暂无工作记录</div>';
     const output = session.lastOutput || '';
     const pending = [...pendingSessionActions].some((key) => key.startsWith(`${session.id}:`));
     container.innerHTML = `<div class="ai-session-view" data-agent-session-view="${esc(session.id)}">
@@ -898,7 +901,10 @@
     const logNode = container.querySelector('[data-agent-role="logs"]');
     if (logNode) {
       const previousScroll = logNode.scrollTop;
-      const logs = (session.logs || []).slice().reverse().map((entry) => `<div class="ai-log-entry"><time>${time(entry.at)}</time><span>${html(entry.message)}</span></div>`).join('') || '<div class="rag-list-empty">暂无工作记录</div>';
+      const logs = (session.logs || []).slice().reverse().map((entry) => {
+        const levelClass = entry.level === 'success' ? ' success' : entry.level === 'error' ? ' error' : '';
+        return `<div class="ai-log-entry${levelClass}"><time>${time(entry.at)}</time><span>${html(entry.message)}</span></div>`;
+      }).join('') || '<div class="rag-list-empty">暂无工作记录</div>';
       if (logNode.innerHTML !== logs) {
         logNode.innerHTML = logs;
         logNode.scrollTop = previousScroll;

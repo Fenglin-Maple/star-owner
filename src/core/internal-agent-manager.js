@@ -766,7 +766,7 @@ class InternalAgentManager {
             this.store.commit();
           }
           this.saveSession(latest);
-          this.log(latest, `内容审核拒绝，已跳过：${reason}`);
+          this.log(latest, `内容审核拒绝，已跳过：${reason}`, 'error');
           this.emit({ type: 'content-rejected', sessionId: latest.id, taskId: task.id, bvid: task.bvid, title: task.title, reason });
           if (latest.mode === 'single') return;
           continue;
@@ -802,7 +802,7 @@ class InternalAgentManager {
           this.markMultipartTaskFailed(task, latest.lastError, 'infrastructure-failure');
           this.store.updateWorker(latest.workerId, { status: 'paused', pauseReason: report, pausedAt: new Date().toISOString() });
           this.saveSession(latest);
-          this.log(latest, `基础设施故障，Agent 已停止：${latest.lastError}`);
+          this.log(latest, `基础设施故障，Agent 已停止：${latest.lastError}`, 'error');
           this.emit({ type: 'infrastructure-stopped', sessionId: latest.id, taskId: task.id, report, possibleCauses });
           return;
         }
@@ -829,7 +829,7 @@ class InternalAgentManager {
         this.abortAttempt(task.id, latest.workerId, latest.lastError, 'internal-agent-error');
         this.markMultipartTaskFailed(task, latest.lastError, 'internal-agent-error');
         this.saveSession(latest);
-        this.log(latest, `任务失败：${latest.lastError}`);
+        this.log(latest, `任务失败：${latest.lastError}`, 'error');
         if (latest.mode === 'single' || !latest.acceptNewTasks) return;
         latest.status = 'running';
         this.saveSession(latest);
@@ -953,7 +953,7 @@ class InternalAgentManager {
     latest.lastOutput = finalized.artifactDir;
     latest.updatedAt = new Date().toISOString();
     this.saveSession(latest);
-    this.log(latest, `完成 ${task.bvid}，产物已通过应用校验。`);
+    this.log(latest, `完成 ${task.bvid}，产物已通过应用校验。`, 'success');
     } finally {
       stopLeaseHeartbeat();
     }
@@ -1512,9 +1512,9 @@ class InternalAgentManager {
     this.store.upsertTask(task);
   }
 
-  log(session, message) {
+  log(session, message, level = 'info') {
     const latest = this.sessionCache.get(session.id) || this.store.get('internalAgentSessions', session.id) || session;
-    latest.logs = [...(latest.logs || []), { at: new Date().toISOString(), message: String(message) }].slice(-200);
+    latest.logs = [...(latest.logs || []), { at: new Date().toISOString(), message: String(message), level: level === 'info' ? undefined : String(level) }].slice(-200);
     latest.updatedAt = new Date().toISOString();
     Object.assign(session, latest);
     this.touchSession(latest);
