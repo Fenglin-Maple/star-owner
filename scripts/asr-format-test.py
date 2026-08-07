@@ -1,4 +1,6 @@
 import importlib.util
+import platform
+import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,9 +23,18 @@ def main():
     assert defaults.language == "auto" and defaults.beam_size == 5
     options = cli.transcription_options()
     assert options["language"] is None
-    assert options["beam_size"] == 5 and options["max_new_tokens"] is None
+    if platform.machine() == "arm64" and sys.platform == "darwin":
+        # MLX 0.4.x：beam_size 不传（GreedyDecoder），max_new_tokens 也由 transcribe 层处理，均不得出现在 options 中
+        assert "beam_size" not in options, "MLX 不应携带 beam_size"
+        assert "max_new_tokens" not in options, "MLX 不应携带 max_new_tokens"
+    else:
+        assert options["beam_size"] == 5 and options["max_new_tokens"] is None
     assert options["condition_on_previous_text"] is True
-    assert cli.transcription_options(max_new_tokens=448)["max_new_tokens"] == 220
+    if platform.machine() == "arm64" and sys.platform == "darwin":
+        # MLX 分支不处理 max_new_tokens（由 transcribe 层管理），传入亦被忽略
+        assert "max_new_tokens" not in cli.transcription_options(max_new_tokens=448)
+    else:
+        assert cli.transcription_options(max_new_tokens=448)["max_new_tokens"] == 220
     raw = [SimpleNamespace(
         start=1.2,
         end=5.6,
@@ -115,8 +126,12 @@ def main():
         hallucination_silence_threshold=1.2,
     )
     assert fallback_options["condition_on_previous_text"] is False
-    assert fallback_options["vad_parameters"]["min_silence_duration_ms"] == 350
-    assert fallback_options["vad_parameters"]["speech_pad_ms"] == 250
+    if platform.machine() == "arm64" and sys.platform == "darwin":
+        # MLX 0.4.x DecodingOptions 不支持 VAD 参数，适配时跳过；但该分支会保留 VAD 入参语义（不报错）
+        assert "vad_parameters" not in fallback_options, "MLX 不应携带 vad_parameters"
+    else:
+        assert fallback_options["vad_parameters"]["min_silence_duration_ms"] == 350
+        assert fallback_options["vad_parameters"]["speech_pad_ms"] == 250
     assert fallback_options["hallucination_silence_threshold"] == 1.2
 
     diagnostics = cli.transcript_diagnostics([
