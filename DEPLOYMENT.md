@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.5.1`
+Version: `1.5.10`
 
 ## 1. Portable Release for Users
 
@@ -43,6 +43,8 @@ The application version and dependency version are independent. `package.json.de
 `1.5.0` is a code-only update and keeps the published `v1.0.0` runtime/model dependency assets unchanged. It refines the GitHub sharing and local-tool layouts, safely renders README inline HTML and local raster assets, and groups RAG knowledge sources by stable user identity and collection kind. It does not require new runtime or model assets.
 
 `1.5.1` is a code-only update and keeps the published `v1.0.0` runtime/model dependency assets unchanged. It refines overview sizing, local-tool navigation, shared-tool layout and mount-target interaction, and adds a theme-aware randomized startup wordmark. It does not require new runtime, model or Git assets.
+
+`1.5.10` is a code/documentation-only update and keeps the published `v1.0.0` runtime/model dependency assets unchanged. The complete GitHub document-sharing contract is maintained in `DESIGN_SHARED_KNOWLEDGE.md`: a contributor reuses one valid Fork per upstream repository, creates a fresh branch from the latest upstream target branch for each upload, and relies on the required `validate-shared-docs` check before merge. After the maintainer merges a PR, the catalog Action normally updates `catalog.json` automatically; manually running it is reserved for recovery or historical repositories whose catalog is stale. No new runtime, model or Git asset is required.
 
 ### Updating and migrating an existing installation
 
