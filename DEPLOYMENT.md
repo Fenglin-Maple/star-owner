@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.6.2`
+Version: `1.6.3`
 
 ## 1. Portable Release for Users
 
@@ -51,6 +51,8 @@ The application version and dependency version are independent. `package.json.de
 `1.6.1` is a code/documentation-only update and keeps the published runtime/model assets unchanged. RAG hidden-browser proxy teardown now safely handles aborted HTTP responses and HTTPS tunnels, and bounded post-load settling gives short dynamic pages time to render asynchronous text. No new runtime, model or Git asset is required.
 
 `1.6.2` is a code/documentation-only update and keeps the published runtime/model assets unchanged. RAG web-tool cancellation now propagates through DNS validation, hidden-page loading, dynamic extraction, approval waits and the short-lived proxy; cancellation destroys the hidden browser promptly and leaves the session available for the next message. The text-only web reader rejects direct image URLs and image content types before or immediately after extraction, so it does not retry an unsupported pixel request. No new runtime, model or Git asset is required.
+
+`1.6.3` is a documentation-only update. `FUTURE_FEATURES.md` records candidate RAG, MCP and modular “B站之外” capabilities and their implementation constraints. It does not change the current runtime, model, Git or migration contracts and does not require a new Release asset.
 
 ### Updating and migrating an existing installation
 
