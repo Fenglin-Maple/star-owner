@@ -458,13 +458,34 @@ def transcript_diagnostics(segments, duration, normalization=None):
         else:
             merged.append([start, end])
     covered = sum(end - start for start, end in merged)
+    speech_seconds = covered
+    gaps = []
+    for index in range(1, len(merged)):
+        gap = merged[index][0] - merged[index - 1][1]
+        if gap >= 8.0:
+            gaps.append({"start": round(merged[index - 1][1], 3), "end": round(merged[index][0], 3), "seconds": round(gap, 3)})
+    warnings = []
+    if not intervals:
+        warnings.append("No speech segments were recognized; verify that the source contains audible speech and retry with the correct audio track.")
+    elif total_duration >= 60 and speech_seconds / total_duration < 0.04:
+        warnings.append("Recognized speech occupies less than 4% of the audio. This may be music/silence, a wrong audio track, or incomplete recognition.")
+    # 上游 v1.6.2 原版字段（sentenceCount/speechSeconds/...）与 mac 适配新增字段（duration/segmentCount/...）并存，
+    # 保持旧字段兼容（review 建议），同时保留新字段供后续消费。
     payload = {
         "duration": total_duration,
         "segmentCount": len(segments),
         "coveredSeconds": covered,
         "coverageRatio": round(covered / total_duration, 4) if total_duration > 0 else 0.0,
+        "sentenceCount": len(segments),
+        "speechSeconds": round(speech_seconds, 3),
+        "speechCoverage": round(speech_seconds / total_duration, 4) if total_duration else 0,
+        "firstSpeechAt": round(intervals[0][0], 3) if intervals else None,
+        "lastSpeechAt": round(intervals[-1][1], 3) if intervals else None,
+        "largeGapCount": len(gaps),
+        "largestGaps": sorted(gaps, key=lambda item: item["seconds"], reverse=True)[:8],
+        "warnings": warnings,
     }
-    if isinstance(normalization, dict) and normalization:
+    if normalization is not None:
         payload["normalization"] = normalization
     return payload
 
