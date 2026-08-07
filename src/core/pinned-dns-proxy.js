@@ -14,6 +14,7 @@ const EXPECTED_DISCONNECT_CODES = new Set([
 ]);
 
 async function startPinnedDnsProxy(options = {}) {
+  throwIfAborted(options.signal);
   const sockets = new Set();
   const server = http.createServer((request, response) => {
     consumeSocketError(response, 'HTTP client response');
@@ -41,18 +42,37 @@ async function startPinnedDnsProxy(options = {}) {
     });
   });
   const address = server.address();
+  let closePromise = null;
+  const onAbort = () => { closeProxy().catch(() => {}); };
+  const closeProxy = () => {
+    if (closePromise) return closePromise;
+    options.signal?.removeEventListener('abort', onAbort);
+    closePromise = new Promise((resolve) => {
+      for (const socket of sockets) socket.destroy();
+      if (!server.listening) {
+        resolve();
+        return;
+      }
+      try { server.close(() => resolve()); }
+      catch { resolve(); }
+    });
+    return closePromise;
+  };
+  options.signal?.addEventListener('abort', onAbort, { once: true });
+  if (options.signal?.aborted) {
+    await closeProxy();
+    throw proxyAbortError();
+  }
   return {
     host: '127.0.0.1',
     port: Number(address.port),
     proxyRules: `http=127.0.0.1:${address.port};https=127.0.0.1:${address.port}`,
-    async close() {
-      for (const socket of sockets) socket.destroy();
-      await new Promise((resolve) => server.close(() => resolve()));
-    }
+    close: closeProxy
   };
 }
 
 async function proxyHttpRequest(request, response, options) {
+  throwIfAborted(options.signal);
   if (!['GET', 'HEAD'].includes(String(request.method || '').toUpperCase())) throw new Error('Only GET and HEAD requests are allowed.');
   const url = parseHttpUrl(request.url, 'The proxy received an invalid HTTP URL.');
   if (url.protocol !== 'http:') throw new Error('Plain proxy requests must use HTTP.');
@@ -128,6 +148,7 @@ async function proxyHttpRequest(request, response, options) {
 }
 
 async function proxyHttpsTunnel(request, clientSocket, head, options) {
+  throwIfAborted(options.signal);
   const authority = parseAuthority(request.url);
   const target = await resolveConnectionTarget(authority.hostname, options);
   await new Promise((resolve, reject) => {
@@ -227,13 +248,24 @@ function isExpectedDisconnect(error) {
   return /aborted|closed|connection reset|broken pipe|premature close/i.test(String(error.message || error));
 }
 
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw proxyAbortError();
+}
+
+function proxyAbortError() {
+  const error = new Error('The operation was cancelled.');
+  error.name = 'AbortError';
+  return error;
+}
+
 async function resolveConnectionTarget(hostname, options = {}) {
+  throwIfAborted(options.signal);
   const host = normalizeAddress(hostname);
   const approvedPrivate = privateHostApproved(hostname, options);
   if (!approvedPrivate && isPrivateNetworkHost(host)) throw new Error('Local or private-network destinations are not allowed.');
   const records = net.isIP(host)
     ? [{ address: host, family: net.isIP(host) }]
-    : normalizeResolvedAddresses(await (options.resolve || defaultResolve)(hostname));
+    : normalizeResolvedAddresses(await (options.resolve || defaultResolve)(hostname, options.signal));
   if (!records.length) throw new Error('The destination hostname could not be resolved.');
   if (!approvedPrivate && records.some((record) => isPrivateNetworkHost(record.address))) {
     throw new Error('The destination hostname resolved to a local or private-network address.');

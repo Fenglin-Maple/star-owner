@@ -1302,7 +1302,7 @@
   function groupBy(items, key) { const map = new Map(); for (const item of items || []) { const value = key(item); if (!map.has(value)) map.set(value, []); map.get(value).push(item); } return map; }
   function mergeModels(...lists) { const map = new Map(); for (const item of lists.flat()) map.set(item.id, { ...(map.get(item.id) || {}), ...item }); return [...map.values()].sort((a, b) => String(a.id).localeCompare(String(b.id))); }
   function toolLabel(name) { return ({ knowledge_list_collections: '列出已选收藏夹', knowledge_search: '检索知识库', knowledge_list_documents: '列出知识库原文', knowledge_read_document: '读取原始 Markdown', knowledge_view_images: '查看知识库原图', list_files: '列出文件', read_file: '读取文件', write_file: '写入文件', run_command: '执行 CMD', web_search: '联网搜索', browse_url: '读取网页', open_browser: '打开浏览器', spawn_subagent: '调用子 Agent' })[name] || name || '工具'; }
-  function toolStatus(status) { return ({ running: '进行中', succeeded: '已完成', failed: '失败' })[status] || status || '进行中'; }
+  function toolStatus(status) { return ({ running: '进行中', succeeded: '已完成', failed: '失败', cancelled: '已停止' })[status] || status || '进行中'; }
   function formatNumber(value) { return new Intl.NumberFormat('zh-CN', { notation: Number(value) > 999999 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(Number(value || 0)); }
   function formatBytes(value) { const bytes = Number(value || 0); return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`; }
   function isImageAttachment(item) { return String(item?.mimeType || '').startsWith('image/') && Boolean(item?.previewUrl); }

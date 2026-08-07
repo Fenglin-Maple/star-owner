@@ -2,12 +2,14 @@ const dns = require('dns');
 const { isPrivateNetworkHost, parseHttpUrl } = require('./network-policy');
 
 async function assertHiddenBrowserUrl(value, options = {}) {
+  throwIfAborted(options.signal);
   const url = parseHttpUrl(value, 'Hidden browser only supports HTTP(S).');
   if (url.username || url.password) throw new Error('Hidden browser URLs cannot contain credentials.');
   const allowPrivate = privateHostApproved(url.hostname, options);
   if (!allowPrivate && isPrivateNetworkHost(url.hostname)) throw new Error('Hidden browser refused a local or private-network address.');
   const resolve = options.resolve || defaultResolve;
-  const addresses = await resolve(url.hostname);
+  const addresses = await awaitAbortable(resolve(url.hostname, options.signal), options.signal);
+  throwIfAborted(options.signal);
   if (!addresses.length) throw new Error('Hidden browser could not resolve the requested hostname.');
   if (!allowPrivate && addresses.some((address) => isPrivateNetworkHost(address))) {
     throw new Error('Hidden browser refused a hostname that resolves to a local or private-network address.');
@@ -26,6 +28,42 @@ function installHiddenBrowserRequestGuard(webRequest, options = {}) {
 async function defaultResolve(hostname) {
   const records = await dns.promises.lookup(hostname, { all: true, verbatim: true });
   return records.map((item) => item.address);
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortError();
+}
+
+function awaitAbortable(value, signal) {
+  if (!signal) return Promise.resolve(value);
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      reject(abortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(value).then((result) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      resolve(result);
+    }, (error) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      reject(error);
+    });
+  });
+}
+
+function abortError() {
+  const error = new Error('The operation was cancelled.');
+  error.name = 'AbortError';
+  return error;
 }
 
 function privateHostApproved(hostname, options = {}) {

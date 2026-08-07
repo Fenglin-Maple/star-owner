@@ -544,6 +544,7 @@ class RagAssistant {
   async runConversation(session, userMessage, assistantId, signal, startedAt = new Date().toISOString()) {
     const provider = this.rawProvider(session.providerId);
     const model = this.sessionModel(session);
+    throwIfAborted(signal);
     const history = await this.hydrateHistoryAttachments(this.buildHistory(session, model, userMessage.id), model);
     const userApiMessage = await this.userApiMessage(userMessage, model);
     let apiMessages = [...history, userApiMessage];
@@ -560,14 +561,21 @@ class RagAssistant {
     let toolRounds = 0;
     let toolCallsUsed = 0;
     let visionBudgetExhausted = false;
+    let webBrowsingDisabled = false;
     const attachedVisionKeys = new Set();
     const toolContextLimit = toolContextCharacterLimit(model);
     try {
       while (toolRounds <= MAX_RAG_TOOL_ROUNDS) {
+        throwIfAborted(signal);
         assertApiContextBudget(apiMessages, model, this.outputTokenLimit(provider, model));
         assertApiPayloadBudget(apiMessages);
         const availableTools = toolCallsUsed < MAX_RAG_TOOL_CALLS
-          ? tools.filter((item) => !visionBudgetExhausted || item.function?.name !== 'knowledge_view_images')
+          ? tools.filter((item) => {
+            const name = item.function?.name;
+            if (visionBudgetExhausted && name === 'knowledge_view_images') return false;
+            if (webBrowsingDisabled && ['web_search', 'browse_url'].includes(name)) return false;
+            return true;
+          })
           : [];
         const result = await this.streamCompletion(provider, {
           model: session.modelId,
@@ -581,6 +589,7 @@ class RagAssistant {
           if (delta.reasoning) reasoning += delta.reasoning;
           this.emit({ type: 'assistant-delta', sessionId: session.id, messageId: assistantId, ...delta });
         });
+        throwIfAborted(signal);
         usage = addUsage(usage, result.usage || estimateUsage(apiMessages, result.content));
         if (!result.toolCalls.length) {
           finished = true;
@@ -610,6 +619,7 @@ class RagAssistant {
           };
           toolEvents.push(event);
           this.emit({ type: 'tool', sessionId: session.id, messageId: assistantId, tool: event });
+          let cancelled = false;
           try {
             const outcome = normalizeToolResult(await this.executeTool(session, model, call, signal));
             const visionCandidates = outcome.visionParts.map((part, index) => ({
@@ -631,15 +641,18 @@ class RagAssistant {
             roundToolMessages.push(toolMessage);
             roundVision.push(...freshVision);
           } catch (error) {
-            event.status = 'failed';
-            event.output = error.message || String(error);
+            cancelled = Boolean(signal?.aborted || error?.name === 'AbortError');
+            event.status = cancelled ? 'cancelled' : 'failed';
+            event.output = cancelled ? '生成已停止。' : (error.message || String(error));
             event.finishedAt = new Date().toISOString();
-            roundToolMessages.push({ role: 'tool', tool_call_id: call.id, content: `ERROR: ${event.output}` });
-            if (call.name === 'knowledge_view_images' && ['MODEL_CONTEXT_LIMIT', 'MODEL_REQUEST_PAYLOAD_LIMIT'].includes(error.code)) {
+            if (!cancelled) roundToolMessages.push({ role: 'tool', tool_call_id: call.id, content: `ERROR: ${event.output}` });
+            if (!cancelled && call.name === 'knowledge_view_images' && ['MODEL_CONTEXT_LIMIT', 'MODEL_REQUEST_PAYLOAD_LIMIT'].includes(error.code)) {
               visionBudgetExhausted = true;
             }
+            if (!cancelled && error.code === 'WEB_IMAGE_UNSUPPORTED') webBrowsingDisabled = true;
           }
           this.emit({ type: 'tool', sessionId: session.id, messageId: assistantId, tool: event });
+          if (cancelled) throw abortError();
         }
         let attachmentMessage = roundVision.length ? {
           role: 'user',
@@ -665,6 +678,7 @@ class RagAssistant {
           }
         }
         apiMessages.push(...roundToolMessages);
+        if (webBrowsingDisabled) apiMessages.push({ role: 'system', content: 'The web reading tool rejected a direct image URL because this application cannot inspect webpage image pixels. Do not call web_search or browse_url again in this response; answer from the available text or explain the limitation.' });
         if (attachmentMessage) {
           apiMessages.push(attachmentMessage);
           for (const item of roundVision) if (item.key) attachedVisionKeys.add(item.key);
@@ -737,6 +751,7 @@ class RagAssistant {
       model.supportsTools ? 'You can inspect selected knowledge without summarization: use knowledge_read_document to read the exact original Markdown in line ranges, and knowledge_view_images to inspect original local images when vision is enabled.' : '',
       model.supportsTools ? 'Knowledge document metadata includes both the Bilibili publish date and the date when the user added the video to favorites. Preserve the distinction and use these fields when the user asks about chronology or freshness.' : '',
       model.supportsTools ? 'Knowledge metadata also states whether a completed document is still in Bilibili favorites, was removed from the favorites folder, or belongs to a Bilibili folder that was deleted. Archived documents remain valid knowledge; never describe an archived item as currently favorited.' : '',
+      model.supportsTools ? 'The browse_url tool reads webpage text and links only. It cannot inspect image pixels or download/render image URLs. Never call browse_url for a direct image URL; explain this limitation instead of retrying the same image link.' : '',
       model.supportsTools && model.supportsVision ? 'When an inspected knowledge image is useful to the user, include the exact star-rag-image URI returned by knowledge_view_images in Markdown image syntax so the desktop app can display it. Do not claim that only an index is available.' : '',
       `Your working sandbox is: ${session.sandboxDir}`,
       session.permissionMode === 'full' ? 'The user enabled full filesystem and command access.' : 'You have restricted access. Operations outside the sandbox or command execution require explicit user approval.',
@@ -842,8 +857,8 @@ class RagAssistant {
       tool('read_file', 'Read a UTF-8 text file. Outside-sandbox access may require approval.', { path: { type: 'string' } }, ['path']),
       tool('write_file', 'Create or replace a UTF-8 file. Outside-sandbox access may require approval.', { path: { type: 'string' }, content: { type: 'string' } }, ['path', 'content']),
       tool('run_command', 'Run a Windows CMD command in the session sandbox. Restricted sessions require approval.', { command: { type: 'string' }, cwd: { type: 'string' } }, ['command']),
-      tool('web_search', 'Search the public web with the built-in invisible browser.', { query: { type: 'string' } }, ['query']),
-      tool('browse_url', 'Read a public HTTP(S) page with the built-in invisible browser.', { url: { type: 'string' } }, ['url']),
+      tool('web_search', 'Search the public web with the built-in invisible browser. The result contains text and links, not image pixels.', { query: { type: 'string' } }, ['query']),
+      tool('browse_url', 'Read text and links from a public HTTP(S) HTML page with the built-in invisible browser. This tool cannot view image pixels; do not pass a direct image URL or retry one.', { url: { type: 'string' } }, ['url']),
       tool('open_browser', 'Open an HTTP(S) URL in the user default browser.', { url: { type: 'string' } }, ['url'])
     ];
     if (session.knowledgeCollectionIds.length) {
@@ -864,6 +879,7 @@ class RagAssistant {
   }
 
   async executeTool(session, model, call, signal) {
+    throwIfAborted(signal);
     const args = parseJson(call.arguments || '{}', `Invalid arguments for ${call.name}.`);
     if (call.name === 'knowledge_list_collections') return this.listKnowledgeCollections(session, args.query);
     if (call.name === 'knowledge_search') return this.searchKnowledge(session, args.query, args.limit, args.collection_ids || args.collection_id);
@@ -871,27 +887,27 @@ class RagAssistant {
     if (call.name === 'knowledge_read_document') return this.readKnowledgeDocument(session, args.document_id, args.start_line, args.line_count, args.start_column, toolContextCharacterLimit(model));
     if (call.name === 'knowledge_view_images') return this.viewKnowledgeImages(session, model, args.document_id, args.image_indices);
     if (call.name === 'list_files') {
-      const target = await this.authorizePath(session, args.path || '.', 'list directory');
+      const target = await this.authorizePath(session, args.path || '.', 'list directory', signal);
       return fs.readdirSync(target, { withFileTypes: true }).slice(0, 300).map((item) => `${item.isDirectory() ? '[dir]' : '[file]'} ${item.name}`).join('\n');
     }
     if (call.name === 'read_file') {
-      const target = await this.authorizePath(session, args.path, 'read file');
+      const target = await this.authorizePath(session, args.path, 'read file', signal);
       return readUtf8Prefix(target, 80000);
     }
     if (call.name === 'write_file') {
-      const target = await this.authorizePath(session, args.path, 'write file');
+      const target = await this.authorizePath(session, args.path, 'write file', signal);
       ensureDir(path.dirname(target));
       fs.writeFileSync(target, String(args.content || ''), 'utf8');
       return `Wrote ${Buffer.byteLength(String(args.content || ''), 'utf8')} bytes to ${target}`;
     }
     if (call.name === 'run_command') return this.runCommand(session, args.command, args.cwd, signal);
-    if (call.name === 'web_search') return this.browseHidden(`https://www.bing.com/search?q=${encodeURIComponent(String(args.query || ''))}`);
-    if (call.name === 'browse_url') return this.browseUrl(session, args.url);
+    if (call.name === 'web_search') return this.browseHidden(`https://www.bing.com/search?q=${encodeURIComponent(String(args.query || ''))}`, { signal });
+    if (call.name === 'browse_url') return this.browseUrl(session, args.url, signal);
     if (call.name === 'open_browser') {
       const parsed = parseHttpUrl(args.url);
       if (parsed.username || parsed.password) throw new Error('Browser URLs cannot contain embedded account credentials.');
       const url = parsed.toString();
-      if (session.permissionMode !== 'full') await this.approve(session, { action: 'open default browser', target: url, detail: 'The model wants to open a page in your default browser.' });
+      if (session.permissionMode !== 'full') await this.approve(session, { action: 'open default browser', target: url, detail: 'The model wants to open a page in your default browser.' }, signal);
       await this.openExternal(url);
       return `Opened ${url}`;
     }
@@ -906,19 +922,22 @@ class RagAssistant {
     throw new Error(`Unsupported tool: ${call.name}`);
   }
 
-  async authorizePath(session, requested, action) {
+  async authorizePath(session, requested, action, signal) {
+    throwIfAborted(signal);
     if (!requested) throw new Error('A path is required.');
     const target = path.resolve(path.isAbsolute(String(requested)) ? String(requested) : path.join(session.sandboxDir, String(requested)));
     if (session.permissionMode === 'full') return target;
     const sandboxBoundary = realPath(session.sandboxDir);
     const targetBoundary = realPath(existingAncestor(target));
     if (isInside(session.sandboxDir, target) && isInside(sandboxBoundary, targetBoundary)) return target;
-    await this.approve(session, { action, target, detail: 'This path is outside the current session sandbox.' });
+    await this.approve(session, { action, target, detail: 'This path is outside the current session sandbox.' }, signal);
     return target;
   }
 
-  async approve(session, request) {
-    const decision = await this.requestApproval({ sessionId: session.id, ...request });
+  async approve(session, request, signal) {
+    throwIfAborted(signal);
+    const decision = await this.requestApproval({ sessionId: session.id, ...request }, signal);
+    throwIfAborted(signal);
     if (!decision?.approved) throw new Error('User denied this operation.');
     if (decision.fullAccess) {
       session.permissionMode = 'full';
@@ -932,8 +951,8 @@ class RagAssistant {
   async runCommand(session, command, cwd, signal) {
     if (!String(command || '').trim()) throw new Error('Command is required.');
     if (signal?.aborted) throw abortError();
-    const workingDirectory = cwd ? await this.authorizePath(session, cwd, 'use command working directory') : session.sandboxDir;
-    if (session.permissionMode !== 'full') await this.approve(session, { action: 'run CMD command', target: String(command), detail: `Working directory: ${workingDirectory}` });
+    const workingDirectory = cwd ? await this.authorizePath(session, cwd, 'use command working directory', signal) : session.sandboxDir;
+    if (session.permissionMode !== 'full') await this.approve(session, { action: 'run CMD command', target: String(command), detail: `Working directory: ${workingDirectory}` }, signal);
     const commandShell = resolveSystemExecutable('cmd.exe');
     if (!commandShell) throw new Error('Windows 系统缺少 cmd.exe，无法执行命令。');
     return new Promise((resolve, reject) => {
@@ -965,14 +984,17 @@ class RagAssistant {
     });
   }
 
-  async browseUrl(session, value) {
+  async browseUrl(session, value, signal) {
+    throwIfAborted(signal);
     const url = parseHttpUrl(value).toString();
+    if (isLikelyImageUrl(url)) throw unsupportedWebImageError();
     const host = new URL(url).hostname;
-    const privateAddress = await resolvesToPrivateHost(host);
-    if (session.permissionMode !== 'full' && privateAddress) await this.approve(session, { action: 'browse private or local address', target: url, detail: 'This address may access a local service or private network.' });
+    const privateAddress = await resolvesToPrivateHost(host, signal);
+    if (session.permissionMode !== 'full' && privateAddress) await this.approve(session, { action: 'browse private or local address', target: url, detail: 'This address may access a local service or private network.' }, signal);
     return this.browseHidden(url, {
       allowPrivate: privateAddress,
-      allowedPrivateHosts: privateAddress && session.permissionMode !== 'full' ? [host] : undefined
+      allowedPrivateHosts: privateAddress && session.permissionMode !== 'full' ? [host] : undefined,
+      signal
     });
   }
 
@@ -2137,14 +2159,61 @@ function samePath(left, right) {
   return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
-async function resolvesToPrivateHost(hostname) {
+async function resolvesToPrivateHost(hostname, signal) {
   if (isPrivateNetworkHost(hostname)) return true;
   try {
-    const addresses = await dns.promises.lookup(hostname, { all: true, verbatim: true });
+    const addresses = await awaitAbortable(dns.promises.lookup(hostname, { all: true, verbatim: true }), signal);
     return addresses.some((item) => isPrivateNetworkHost(item.address));
+  } catch {
+    if (signal?.aborted) throw abortError();
+    return false;
+  }
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortError();
+}
+
+function awaitAbortable(value, signal) {
+  if (!signal) return Promise.resolve(value);
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(abortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(value).then((result) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    }, (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    });
+  });
+}
+
+function isLikelyImageUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return /\.(?:avif|bmp|gif|ico|jpe?g|png|svg|tiff?|webp)$/i.test(url.pathname);
   } catch {
     return false;
   }
+}
+
+function unsupportedWebImageError() {
+  const error = new Error('网页读取工具当前只能读取网页文本和链接，不能查看图片像素。请不要继续尝试该图片直链。');
+  error.code = 'WEB_IMAGE_UNSUPPORTED';
+  return error;
 }
 
 function safeFilename(value) {
@@ -2393,6 +2462,7 @@ module.exports = {
   MAX_RAG_TOOL_ROUNDS,
   RAG_AUTO_COMPACT_TRIGGER,
   RagAssistant,
+  isLikelyImageUrl,
   normalizeModel,
   readUtf8LineRange,
   splitInlineReasoning,

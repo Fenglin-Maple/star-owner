@@ -217,6 +217,14 @@ function openAndAbortTunnel(proxy, target) {
     setTimeout
   });
   assert(dynamicResult.text.includes('loaded async content'), 'hidden-page extraction returned the shell before delayed DOM content stabilized');
+  const imageResult = await vm.runInNewContext(buildHiddenPageExtractionScript(), {
+    document: { contentType: 'image/jpeg', title: 'Image', body: { innerText: '' }, querySelectorAll: () => [] },
+    location: { href: 'https://img.example/frame.jpeg' },
+    Promise,
+    Date,
+    setTimeout
+  });
+  assert(imageResult.isImage === true && imageResult.contentType === 'image/jpeg' && imageResult.text === '', 'hidden-page extraction did not reject image content before dynamic waiting');
 
   assert(isAllowedApiOrigin('', 'http://127.0.0.1:17391'), 'origin-less Agent request was rejected');
   assert(!isAllowedApiOrigin('https://example.com', 'http://127.0.0.1:17391'), 'cross-origin browser request was accepted');

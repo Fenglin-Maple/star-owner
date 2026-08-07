@@ -1,6 +1,6 @@
 # 星藏家 Design
 
-Version: `1.6.1`
+Version: `1.6.2`
 
 ## 1. Product Goal
 
@@ -284,6 +284,8 @@ RAG sessions retain conversation history. At 75% of the model window or a lower 
 ## 15. RAG Assistant
 
 RAG sessions share provider/model configuration with video Agents but have separate conversation state, sandbox, permissions and usage counters. Knowledge tools first expose `knowledge_list_collections`, then accept exact `collection_id`/`collection_ids` scope on document listing and search; collection IDs are never accepted as document IDs, and a requested scope must already be selected in the session. Internal search inspects at most 60000 chunks per request in addition to document, result-character and time budgets, and reports partial coverage rather than implying an empty collection. Same-BVID documents in different collections remain independent sources. Exact Markdown, metadata dates and images remain available through separate tools. Each assistant message records start/end timestamps, duration and tool-call count; tool events carry sequence and response offsets. The Renderer groups every pre-final model segment and its following tool events into one muted disclosure in original order, keeps it open only while that response is streaming, and leaves the final post-tool answer visible. Legacy events without offsets appear first without splitting the stored answer. A failed provider call retains any partial text and completed tool timeline. Restricted mode requires approval for shell commands, sandbox-external paths, default-browser opening and private-network browsing. Hidden-browser traffic uses a loopback-only, short-lived HTTP/HTTPS tunnel proxy that validates every hostname and connects directly to the selected DNS answer; redirects and subresources cannot trigger a second unvalidated resolution. Client disconnects are treated as normal tunnel teardown: both HTTP upstream streams and HTTPS tunnel sockets are closed and their expected reset/abort errors are consumed without a main-process exception. After the initial page load, extraction waits for a bounded quiet interval and adapts the minimum wait for short shell-like pages; it never waits indefinitely. Remote clipboard images use the same connection-time DNS binding principle.
+
+Version `1.6.2` extends the RAG cancellation contract through DNS resolution, approval promises, hidden BrowserWindow navigation, bounded DOM extraction and the temporary proxy. A canceled tool event is persisted as `cancelled`, the outer response is saved as a canceled assistant message, and the controller is released in `finally`, so the same session can send a new turn. `browse_url` is explicitly text/link-only: obvious image URLs are rejected before network work, and image content types return immediately without the dynamic wait. Unsupported image errors disable further web-tool retries for that response; no webpage pixel-viewing tool is added.
 
 The UI displays only reasoning text returned by the provider. Unsupported vision, tools, reasoning, image output, compression or subagent capabilities degrade honestly.
 

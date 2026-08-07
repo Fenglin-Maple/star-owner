@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.6.1`
+Version: `1.6.2`
 
 ## 1. Portable Release for Users
 
@@ -34,7 +34,7 @@ Star-Owner-v<dependency-version>-model-large-v3-turbo.zip
 Star-Owner-v<dependency-version>-model-large-v3-turbo.zip.sha256
 ```
 
-The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.6.1` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. Existing official v1.0.0 probe-only installations are adopted once using the published asset checksums; the persistent adoption marker prevents a later missing, damaged, wrong-version or wrong-package manifest from being silently accepted. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads and read-only mount snapshots. At runtime, application child processes never resolve Node, Python, FFmpeg, yt-dlp or Git from the user's PATH; the GPU probe and Windows utility calls use known absolute system locations plus the controlled project environment.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.6.2` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. Existing official v1.0.0 probe-only installations are adopted once using the published asset checksums; the persistent adoption marker prevents a later missing, damaged, wrong-version or wrong-package manifest from being silently accepted. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads and read-only mount snapshots. At runtime, application child processes never resolve Node, Python, FFmpeg, yt-dlp or Git from the user's PATH; the GPU probe and Windows utility calls use known absolute system locations plus the controlled project environment.
 
 `1.4.17` remains a code-only update and keeps the published `v1.0.0` runtime/model dependency assets unchanged. It reorganizes the shared-tool hierarchy without changing repository, mount or upload persistence contracts; no new Release asset is required.
 
@@ -49,6 +49,8 @@ The application version and dependency version are independent. `package.json.de
 `1.6.0` is a code/documentation-only update and keeps the published `v1.0.0` runtime/model dependency assets unchanged. The core package still bundles the complete runtime, while the updater now rejects a staged package that lacks its portable manifest, lockfile, transaction helpers, Electron, Python, FFmpeg, VC++ or Portable Git. Automatic update discovery continues to use only the stable GitHub `latest` Release; pre-releases are never installed by that path. Workspace, existing ASR/runtime and model directories remain protected by the update transaction and rollback logic.
 
 `1.6.1` is a code/documentation-only update and keeps the published runtime/model assets unchanged. RAG hidden-browser proxy teardown now safely handles aborted HTTP responses and HTTPS tunnels, and bounded post-load settling gives short dynamic pages time to render asynchronous text. No new runtime, model or Git asset is required.
+
+`1.6.2` is a code/documentation-only update and keeps the published runtime/model assets unchanged. RAG web-tool cancellation now propagates through DNS validation, hidden-page loading, dynamic extraction, approval waits and the short-lived proxy; cancellation destroys the hidden browser promptly and leaves the session available for the next message. The text-only web reader rejects direct image URLs and image content types before or immediately after extraction, so it does not retry an unsupported pixel request. No new runtime, model or Git asset is required.
 
 ### Updating and migrating an existing installation
 

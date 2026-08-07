@@ -16,7 +16,7 @@ const { isAllowedBilibiliNavigation, secureMainWindow } = require('./core/deskto
 const { deleteCompletedDocument, recoverPendingDocumentDeletions } = require('./core/document-lifecycle');
 const { ensurePortableDesktopShortcut } = require('./core/desktop-shortcut');
 const { assertHiddenBrowserUrl, installHiddenBrowserRequestGuard } = require('./core/hidden-browser-policy');
-const { buildHiddenPageExtractionScript } = require('./core/hidden-page-extractor');
+const { buildHiddenPageExtractionScript, isImageContentType } = require('./core/hidden-page-extractor');
 const { InternalAgentManager } = require('./core/internal-agent-manager');
 const { loadClipboardImage } = require('./core/image-clipboard');
 const { LocalToolboxManager } = require('./core/local-toolbox-manager');
@@ -370,11 +370,7 @@ app.on('before-quit', () => {
   videoCacheManager?.shutdown();
   localToolboxManager?.shutdown();
   toolRunner?.shutdown();
-  for (const pending of pendingRagApprovals.values()) {
-    clearTimeout(pending.timer);
-    pending.resolve({ approved: false });
-  }
-  pendingRagApprovals.clear();
+  for (const id of pendingRagApprovals.keys()) settleRagApproval(id, { approved: false });
 });
 
 ipcMain.handle('app:get-runtime', async () => ({
@@ -1118,12 +1114,8 @@ ipcMain.handle('rag:attachment-discard', async (_event, payload = {}) => {
 });
 
 ipcMain.handle('rag:approval-resolve', async (_event, payload = {}) => {
-  const pending = pendingRagApprovals.get(String(payload.id || ''));
-  if (!pending) return { resolved: false };
-  pendingRagApprovals.delete(String(payload.id));
-  clearTimeout(pending.timer);
-  pending.resolve({ approved: Boolean(payload.approved), fullAccess: Boolean(payload.fullAccess) });
-  return { resolved: true };
+  const resolved = settleRagApproval(String(payload.id || ''), { approved: Boolean(payload.approved), fullAccess: Boolean(payload.fullAccess) });
+  return { resolved };
 });
 
 ipcMain.handle('rag:render-markdown', async (_event, payload = {}) => renderRagMarkdown(payload?.markdown, payload?.sessionId));
@@ -1301,36 +1293,62 @@ async function openExternalUrl(value) {
   return url.toString();
 }
 
-function requestRagApproval(request) {
+function requestRagApproval(request, signal) {
+  throwIfRagAborted(signal);
   const id = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      pendingRagApprovals.delete(id);
-      resolve({ approved: false, reason: 'approval timeout' });
+  return new Promise((resolve, reject) => {
+    const pending = { resolve, reject, timer: null, onAbort: null, signal };
+    pending.timer = setTimeout(() => {
+      settleRagApproval(id, { approved: false, reason: 'approval timeout' });
     }, 120000);
-    pendingRagApprovals.set(id, { resolve, timer });
+    pending.onAbort = () => settleRagApproval(id, null, ragAbortError());
+    pendingRagApprovals.set(id, pending);
+    signal?.addEventListener('abort', pending.onAbort, { once: true });
     mainWindow?.webContents.send('rag:event', { type: 'approval-request', approval: { id, ...request } });
   });
 }
 
+function settleRagApproval(id, result, error = null) {
+  const key = String(id || '');
+  const pending = pendingRagApprovals.get(key);
+  if (!pending) return false;
+  pendingRagApprovals.delete(key);
+  clearTimeout(pending.timer);
+  pending.signal?.removeEventListener('abort', pending.onAbort);
+  if (error) pending.reject(error);
+  else pending.resolve(result);
+  return true;
+}
+
 async function browseHidden(value, options = {}) {
+  const signal = options.signal;
+  throwIfRagAborted(signal);
   const partition = `rag-hidden-browser-${crypto.randomUUID()}`;
   const isolatedSession = session.fromPartition(partition, { cache: false });
-  const resolve = async (hostname) => {
-    const result = await isolatedSession.resolveHost(hostname);
+  const resolve = async (hostname, resolveSignal = signal) => {
+    const result = await awaitRagAbortable(isolatedSession.resolveHost(hostname), resolveSignal);
     return (result.endpoints || []).map((item) => item.address);
   };
   const policy = {
     allowPrivate: Boolean(options.allowPrivate),
     allowedPrivateHosts: Array.isArray(options.allowedPrivateHosts) ? options.allowedPrivateHosts : undefined,
-    resolve
+    resolve,
+    signal
   };
-  const url = await assertHiddenBrowserUrl(value, policy);
-  const pinnedProxy = await startPinnedDnsProxy(policy);
+  const url = await awaitRagAbortable(assertHiddenBrowserUrl(value, policy), signal);
+  const pinnedProxy = await awaitRagAbortable(startPinnedDnsProxy(policy), signal);
   let browser = null;
   let timeout = null;
+  const cancelBrowser = () => {
+    try {
+      if (browser && !browser.isDestroyed()) {
+        browser.webContents.stop();
+        browser.destroy();
+      }
+    } catch {}
+  };
   try {
-    await isolatedSession.setProxy({ mode: 'fixed_servers', proxyRules: pinnedProxy.proxyRules, proxyBypassRules: '<-loopback>' });
+    await awaitRagAbortable(isolatedSession.setProxy({ mode: 'fixed_servers', proxyRules: pinnedProxy.proxyRules, proxyBypassRules: '<-loopback>' }), signal);
     installHiddenBrowserRequestGuard(isolatedSession.webRequest, policy);
     isolatedSession.setPermissionCheckHandler(() => false);
     isolatedSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
@@ -1359,24 +1377,70 @@ async function browseHidden(value, options = {}) {
     };
     browser.webContents.on('will-navigate', blockPrivateNavigation);
     browser.webContents.on('will-redirect', blockPrivateNavigation);
-    await Promise.race([
+    await awaitRagAbortable(Promise.race([
       browser.loadURL(url.toString()),
       new Promise((_, reject) => {
         timeout = setTimeout(() => reject(new Error('Hidden browser timed out.')), 25000);
       })
-    ]);
-    const result = await browser.webContents.executeJavaScript(buildHiddenPageExtractionScript({
+    ]), signal, cancelBrowser);
+    const result = await awaitRagAbortable(browser.webContents.executeJavaScript(buildHiddenPageExtractionScript({
       minimumWaitMs: options.minimumWaitMs,
       quietWaitMs: options.quietWaitMs,
       maximumWaitMs: options.maximumWaitMs,
       sampleIntervalMs: options.sampleIntervalMs
-    }), true);
+    }), true), signal, cancelBrowser);
+    if (result?.isImage || isImageContentType(result?.contentType)) {
+      const error = new Error('网页读取工具当前只能读取网页文本和链接，不能查看图片像素。请不要继续尝试该图片直链。');
+      error.code = 'WEB_IMAGE_UNSUPPORTED';
+      throw error;
+    }
     return JSON.stringify(result, null, 2);
   } finally {
     if (timeout) clearTimeout(timeout);
     if (browser && !browser.isDestroyed()) browser.destroy();
-    await pinnedProxy.close();
+    try { await pinnedProxy.close(); } catch {}
   }
+}
+
+function throwIfRagAborted(signal) {
+  if (signal?.aborted) throw ragAbortError();
+}
+
+function awaitRagAbortable(value, signal, onAbort) {
+  if (!signal) return Promise.resolve(value);
+  if (signal.aborted) {
+    try { onAbort?.(); } catch {}
+    return Promise.reject(ragAbortError());
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener('abort', handleAbort);
+    const handleAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      try { onAbort?.(); } catch {}
+      reject(ragAbortError());
+    };
+    signal.addEventListener('abort', handleAbort, { once: true });
+    Promise.resolve(value).then((result) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    }, (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    });
+  });
+}
+
+function ragAbortError() {
+  const error = new Error('The operation was cancelled.');
+  error.name = 'AbortError';
+  return error;
 }
 
 function assertBackendReady() {

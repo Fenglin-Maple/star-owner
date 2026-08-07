@@ -10,6 +10,10 @@ function buildHiddenPageExtractionScript(options = {}) {
   const sampleIntervalMs = boundedInteger(options.sampleIntervalMs, DEFAULT_SAMPLE_INTERVAL_MS, 100, 1000);
   return `(async () => {
     const sleep = (delay) => new Promise((resolve) => setTimeout(resolve, delay));
+    const contentType = String(document.contentType || '').toLowerCase();
+    if (contentType.startsWith('image/')) {
+      return { title: document.title || '', url: location.href, text: '', links: [], contentType, isImage: true };
+    }
     const snapshot = () => {
       const body = document.body;
       const text = body?.innerText || '';
@@ -44,8 +48,12 @@ function buildHiddenPageExtractionScript(options = {}) {
       .slice(0, 40)
       .map((a) => ({ text: (a.innerText || '').trim().slice(0, 160), href: a.href }))
       .filter((item) => item.text && /^https?:/.test(item.href));
-    return { title, url: location.href, text, links };
+    return { title, url: location.href, text, links, contentType, isImage: false };
   })()`;
+}
+
+function isImageContentType(value) {
+  return /^image\//i.test(String(value || '').trim());
 }
 
 function boundedInteger(value, fallback, minimum, maximum) {
@@ -58,5 +66,6 @@ module.exports = {
   DEFAULT_MAXIMUM_WAIT_MS,
   DEFAULT_MINIMUM_WAIT_MS,
   DEFAULT_QUIET_WAIT_MS,
-  buildHiddenPageExtractionScript
+  buildHiddenPageExtractionScript,
+  isImageContentType
 };

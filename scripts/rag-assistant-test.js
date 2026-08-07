@@ -3,11 +3,20 @@ const http = require('http');
 const path = require('path');
 const MarkdownIt = require('markdown-it');
 const { Store } = require('../src/core/store');
-const { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, MAX_RAG_SEARCH_CHUNKS, MAX_RAG_TOOL_ROUNDS, RAG_AUTO_COMPACT_TRIGGER, RagAssistant, normalizeModel, splitTextByTokenBudget, readUtf8LineRange, estimateAttachmentTokens } = require('../src/core/rag-assistant');
+const { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, MAX_RAG_SEARCH_CHUNKS, MAX_RAG_TOOL_ROUNDS, RAG_AUTO_COMPACT_TRIGGER, RagAssistant, isLikelyImageUrl, normalizeModel, splitTextByTokenBudget, readUtf8LineRange, estimateAttachmentTokens } = require('../src/core/rag-assistant');
 const { wrapMarkdownTables } = require('../src/core/markdown');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+async function waitFor(predicate, timeoutMs = 1500) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error('Timed out waiting for the RAG test state.');
 }
 
 function catalogItem(catalog, id) {
@@ -125,6 +134,14 @@ async function startFakeProvider() {
     if (userText.includes('PROVIDER_FAILURE')) {
       response.writeHead(503, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ error: { message: 'temporary upstream outage' } }));
+      return;
+    }
+    if (userText.includes('BROWSE_CANCEL_TEST') && !toolResult) {
+      sse(response, [{ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-browse-cancel', type: 'function', function: { name: 'browse_url', arguments: '{"url":"https://cancel.example/page"}' } }] } }] }]);
+      return;
+    }
+    if (userText.includes('AFTER_CANCEL_TEST')) {
+      sse(response, [{ choices: [{ delta: { content: 'CANCEL_RECOVERY_OK' } }] }]);
       return;
     }
     if (userText.includes('THINK_TAG_TEST')) {
@@ -268,6 +285,8 @@ async function startFakeProvider() {
     const events = [];
     const approvals = [];
     const preparedVisionFiles = [];
+    let browseCalls = 0;
+    let browseAbortObserved = false;
     const assistant = new RagAssistant({
       store,
       workspaceRoot: root,
@@ -275,7 +294,22 @@ async function startFakeProvider() {
       decryptSecret: (secret) => secret.value,
       emit: (event) => events.push(event),
       requestApproval: async (request) => { approvals.push(request); return { approved: false }; },
-      browseHidden: async (url) => `BROWSED ${url}`,
+      browseHidden: async (url, options = {}) => {
+        browseCalls += 1;
+        if (String(url).includes('cancel.example')) {
+          return new Promise((resolve, reject) => {
+            const onAbort = () => {
+              browseAbortObserved = true;
+              const error = new Error('hidden browser cancelled');
+              error.name = 'AbortError';
+              reject(error);
+            };
+            if (options.signal?.aborted) return onAbort();
+            options.signal?.addEventListener('abort', onAbort, { once: true });
+          });
+        }
+        return `BROWSED ${url}`;
+      },
       openExternal: async () => {},
       prepareVisionImage: (file) => {
         preparedVisionFiles.push(file);
@@ -328,6 +362,14 @@ async function startFakeProvider() {
       { id: 'fake-tools', contextWindow: 32768, maxOutputTokens: 2048, supportsTools: true, supportsReasoning: true, supportsVision: true, supportsCompression: true, supportsSubagents: true }
     ]);
     const session = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', knowledgeCollectionIds: ['rag-collection'] });
+    assert(isLikelyImageUrl('https://img.example/preview.jpeg?width=1200') && !isLikelyImageUrl('https://example.com/article/preview'), 'image URL classification was not conservative and query-safe');
+    const browseTool = assistant.toolDefinitions(assistant.requireSession(session.id), assistant.sessionModel(assistant.requireSession(session.id))).find((item) => item.function?.name === 'browse_url');
+    assert(browseTool?.function?.description.includes('cannot view image pixels'), 'browse_url did not document its text-only limitation');
+    let imageToolError = null;
+    try {
+      await assistant.executeTool(assistant.requireSession(session.id), assistant.sessionModel(assistant.requireSession(session.id)), { name: 'browse_url', arguments: JSON.stringify({ url: 'https://img.example/preview.jpeg?width=1200' }) }, new AbortController().signal);
+    } catch (error) { imageToolError = error; }
+    assert(imageToolError?.code === 'WEB_IMAGE_UNSUPPORTED' && browseCalls === 0, 'direct image URL was not rejected before hidden-browser work');
     assert(assistant.state('rag-session-that-no-longer-exists').activeSession?.id === session.id, 'stale RAG session id did not fall back to the first available session');
 
     const scopedSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', knowledgeCollectionIds: ['rag-collection', 'rag-shared-collection'], title: 'Collection scope test' });
@@ -566,6 +608,20 @@ async function startFakeProvider() {
     try { await assistant.executeTool(assistant.requireSession(session.id), assistant.sessionModel(assistant.requireSession(session.id)), { name: 'read_file', arguments: JSON.stringify({ path: outside }) }); }
     catch (error) { denied = /denied/.test(error.message); }
     assert(denied && approvals.length === 1, 'restricted outside-sandbox approval was not enforced');
+
+    const cancellationSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: 'Web cancellation recovery' });
+    const pendingCancellation = assistant.send(cancellationSession.id, { content: 'BROWSE_CANCEL_TEST' });
+    await waitFor(() => events.some((item) => item.type === 'tool' && item.sessionId === cancellationSession.id && item.tool?.status === 'running') && browseCalls > 0);
+    const cancelStartedAt = Date.now();
+    assert(assistant.cancel(cancellationSession.id).cancelled, 'RAG cancel did not find the active web-tool request');
+    const cancelledMessage = await Promise.race([
+      pendingCancellation,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('RAG web-tool cancellation took too long.')), 1000))
+    ]);
+    assert(Date.now() - cancelStartedAt < 1000 && browseAbortObserved, 'RAG web-tool cancellation did not propagate to the hidden browser');
+    assert(cancelledMessage.status === 'cancelled' && cancelledMessage.error, 'cancelled RAG response was not persisted as cancelled');
+    const continuedMessage = await assistant.send(cancellationSession.id, { content: 'AFTER_CANCEL_TEST' });
+    assert(continuedMessage.status === 'complete' && continuedMessage.content.includes('CANCEL_RECOVERY_OK'), 'the same RAG session could not continue after cancellation');
 
     const state = assistant.state(session.id);
     assert(catalogItem(state.knowledgeCatalog, 'rag-collection').documentCount === 2, 'knowledge catalog classification failed');
