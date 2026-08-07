@@ -39,6 +39,9 @@ def main():
         # mlx_whisper 0.4.x 无模型缓存：模型在每次 transcribe 时加载（约 2-3s）。
         # 这里只校验模型就绪并立即报告 ready，不预加载（避免无意义地占用显存/时间）。
         model = None
+        # --device cpu：把 MLX 默认设备强制为 CPU（真实 CPU 推理路径，mx.set_default_device(mx.cpu) 实测有效）。
+        if args.device == "cpu":
+            cli.mlx_force_cpu()
     else:
         from faster_whisper import WhisperModel
 

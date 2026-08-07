@@ -1,6 +1,6 @@
 # macOS 适配记录（MLX Whisper ASR 替换）
 
-> 状态：已完成（PR 就绪） · 更新于 2026-08-07 · 目标平台：Apple Silicon (M4) · 基线版本：1.6.2
+> 状态：已完成（PR #3 已合并 mac 分支，review 建议迭代中） · 更新于 2026-08-07 · 目标平台：Apple Silicon (M4) · 基线版本：1.6.2
 
 ## 目标
 
@@ -60,9 +60,10 @@ Node 侧 AsrService ──spawn──▶ tools/faster-whisper-service.py ──�
 | 文件 | 改动 |
 |---|---|
 | `tools/video-tool.js` | 路径平台化（resolveWhisperPython / resolveImageIoBinaries）+ POSIX 系统命令回退 |
-| `scripts/generate-mac-manifest.js` | 生成 darwin 依赖安装清单（SHA-256），`npm run manifest:mac` |
-| `Start-StarOwner.command` / `Start-StarOwner.cmd` | macOS/Windows 双击启动器（防双开 + 后台启动） |
-| `MAC_ADAPTATION.md` | 本文档 |
+| `scripts/generate-mac-manifest.js` | 生成 darwin 依赖安装清单（SHA-256），`npm run manifest:mac` | 实现 |
+| `scripts/setup-macos-runtime.sh` | Apple Silicon 完整部署脚本（uv 装 Python/venv → mlx 安装 → 模型下载 → ffmpeg symlink 创建验证 → manifest 生成），`npm run setup:mac` | 实现 |
+| `Start-StarOwner.command` / `Start-StarOwner.cmd` | macOS/Windows 双击启动器：直接调用项目自带 Electron（不依赖全局 npm）、从 `runtime/.api-port` 读取实际端口做防双开与成功判断 | 实现 |
+| `MAC_ADAPTATION.md` | 本文档 | 文档 |
 
 ## 模型清单（MLX 版，HuggingFace）
 
@@ -104,6 +105,23 @@ Node 侧 AsrService ──spawn──▶ tools/faster-whisper-service.py ──�
 |---|---|---|
 | tool-runner.js ASR 路径 `let diskError` 声明在 try 块内、catch 块引用（块级作用域不可见） | 任务失败时抛 `diskError is not defined` ReferenceError，掩盖真实错误 | 声明移到 try 外（win32 同样受益） |
 | 退出时 ToolRunner 定时器向已销毁的 webContents 发送事件 | 关闭窗口后弹出「Object has been destroyed」未捕获异常 | main.js 统一 safeSend（isDestroyed + try/catch 保护），所有 webContents.send 走安全通道 |
+
+## Review 迭代记录（PR #3 合并后，按原作者建议完善）
+
+| 作者建议 | 处理 | 状态 |
+|---|---|---|
+| 补齐 macOS 全新部署流程 | 新增 `scripts/setup-macos-runtime.sh`（uv 装 Python/venv → mlx 安装 → 模型下载 → ffmpeg symlink → manifest 生成，可重复执行、逐步幂等）；darwin 下载按钮加 installHint 提示 | ✅ |
+| FFmpeg 链接脚本化 | 安装脚本内置 symlink 创建 + 验证（相对路径链接，项目移动不失效），不依赖全局 FFmpeg | ✅ |
+| 统一 CPU ASR 与 MLX 语义 | 实测 MLX 可强制 CPU（`mx.set_default_device(mx.cpu)` + fp16）；`--device cpu` 真实 CPU 路径已实现（cli/service 双模式验证）；平台判断统一 darwin+arm64（Intel Mac 走 faster-whisper CPU 语义） | ✅ |
+| 平台模型探针 | tool-runner 抽象 `detectModelFiles`（model.bin / weights.npz / .safetensors 分片），模型就绪检查与切换逻辑接入 | ✅ |
+| 依赖健康检查优化 | pyc 排除 + mtime/size 指纹缓存（实测 754ms → 0.3ms，提速 >2500×）；manifest 变更纳入指纹 | ✅ |
+| 本地媒体工具平台化 | child-process-io 新增 `resolveRuntimeBinaries` 跨平台 helper，local-media-runtime 接入 | ✅ |
+| video-tool 系统 PATH 回退改提示 | 缺失即输出中文明确提示（引导运行 setup:mac），不再静默回退 | ✅ |
+| 模型下载 staging | cli.py 下载改 staging 目录 + 完整文件清单校验 + 完成标记 + 原子改名 + 中断清理 + 幂等跳过（真实网络端到端验证） | ✅ |
+| 启动器改项目自带 Electron | .command/.cmd 直接调用 `node_modules/electron/dist/Electron`（不依赖全局 npm/curl）；api-server 实际端口落盘 `runtime/.api-port`，启动器读取做防双开与成功判断 | ✅ |
+| sendBootstrap/sendRuntime 统一 safeSend | 全部收敛（文件内裸 webContents.send 仅剩 safeSend 内部 1 处） | ✅ |
+| 供应商测试用保存温度 + 响应结构验证 | testProvider 用 provider.temperature（默认 0.2），校验 choices/message/content 结构 | ✅ |
+| 审核错误优先结构化错误码 | providerHttpError 解析供应商错误码（error.code/type），`isContentRejectedError(value, supplierCode)` 码优先、message 正则兜底（原签名兼容） | ✅ |
 
 ## 边界与暂缓项
 

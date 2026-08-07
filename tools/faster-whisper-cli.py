@@ -5,7 +5,9 @@ import math
 import os
 import platform
 import re
+import shutil
 import sys
+import time
 import unicodedata
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +19,9 @@ MODELS_ROOT = RUNTIME_ROOT / "models"
 HF_CACHE_ROOT = RUNTIME_ROOT / "cache" / "huggingface"
 VC_RUNTIME_ROOT = RUNTIME_ROOT / "vc-runtime"
 DEFAULT_MODEL = "large-v3-turbo"
+# 模型下载完成标记：staging 目录内文件清单校验通过后才写入，
+# 随 staging 原子改名一起进入正式目录，作为「完整下载」的凭证。
+DOWNLOAD_COMPLETE_MARKER = ".download-complete"
 
 # Apple Silicon 上使用 MLX 推理后端（GPU 加速）；其它平台保持 faster-whisper/CTranslate2。
 IS_APPLE_SILICON = sys.platform == "darwin" and platform.machine().lower() == "arm64"
@@ -103,15 +108,43 @@ def model_dir(model_name):
     return (MODELS_ROOT / model_name).resolve()
 
 
+def validate_model_files(path):
+    """校验模型目录的完整文件清单：config.json + 权重文件必须齐全且非空。
+
+    返回 (ok, missing, files)。small/large-v3-turbo 等不同模型的权重形态不同：
+    faster-whisper 为 model.bin，MLX 为 weights.npz 或 *.safetensors 全集。
+    """
+    missing = []
+    files = []
+    if not path.is_dir():
+        return False, ["目录不存在"], []
+    config = path / "config.json"
+    if not config.is_file() or config.stat().st_size == 0:
+        missing.append("config.json（缺失或为空）")
+    else:
+        files.append(config.name)
+    weights = []
+    for name in ("model.bin", "weights.npz"):
+        item = path / name
+        if item.is_file():
+            weights.append(item)
+    weights.extend(sorted(path.glob("*.safetensors")))
+    if not weights:
+        missing.append("权重文件（model.bin / weights.npz / *.safetensors 均缺失）")
+    else:
+        for item in weights:
+            if item.stat().st_size == 0:
+                missing.append(f"{item.name}（为空）")
+            else:
+                files.append(item.name)
+    return (not missing), missing, files
+
+
 def model_ready(path):
-    if not path.is_dir() or not (path / "config.json").is_file():
-        return False
-    # faster-whisper: model.bin；MLX: weights.npz 或 safetensors 分片
-    if (path / "model.bin").is_file():
-        return True
-    if (path / "weights.npz").is_file():
-        return True
-    return any(path.glob("*.safetensors"))
+    # 结构完整即视为可用：staging + 原子改名保证正式目录里不会出现半成品，
+    # 因此这里只需做文件清单（含非空）校验。
+    ok, _missing, _files = validate_model_files(path)
+    return ok
 
 
 def versions():
@@ -168,20 +201,88 @@ def print_health(model_name):
 
 def download_model(model_name):
     target = model_dir(model_name)
-    target.mkdir(parents=True, exist_ok=True)
     HF_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading {model_name} to {target}", file=sys.stderr)
-    if IS_APPLE_SILICON:
-        from huggingface_hub import snapshot_download
+    target.parent.mkdir(parents=True, exist_ok=True)
 
-        repository = MLX_MODEL_REPOS.get(str(model_name).lower()) or f"mlx-community/whisper-{model_name}"
-        snapshot_download(repository, local_dir=str(target))
-    else:
-        from faster_whisper.utils import download_model as fetch_model
+    # staging 目录与正式目录同文件系统（同父目录），保证 os.rename 原子
+    staging = target.parent / f".staging-{target.name}-{os.getpid()}"
 
-        fetch_model(model_name, output_dir=str(target), cache_dir=str(HF_CACHE_ROOT))
-    if not model_ready(target):
-        raise RuntimeError(f"model download finished but required files are missing: {target}")
+    # 中断清理：先清掉同模型残留的旧 staging（上次被 kill -9 / 崩溃中断留下的）。
+    # 放在幂等判断之前：即使本次跳过下载，也顺带清扫残留，保证不留下半成品目录。
+    stale_prefix = f".staging-{target.name}-"
+    for entry in target.parent.iterdir():
+        if entry.name.startswith(stale_prefix) and entry != staging:
+            print(f"清理上次中断下载残留的 staging 目录：{entry}", file=sys.stderr)
+            shutil.rmtree(entry, ignore_errors=True)
+
+    # 幂等：目标正式目录已存在且文件清单完整 → 直接跳过。
+    # staging + 原子改名保证正式目录里只会出现完整模型，因此完整即可信。
+    if model_ready(target):
+        print(f"模型 {model_name} 已存在且完整，跳过下载：{target}", file=sys.stderr)
+        print(json.dumps({"ok": True, "model": model_name, "modelPath": str(target), "skipped": True}, ensure_ascii=False))
+        return 0
+
+    # 目标存在但不完整：说明是历史半成品下载。只自动清理受管 models 目录下的；
+    # 用户自定义路径不完整时不自动删除，避免误删用户数据。
+    if target.exists():
+        if str(target.resolve()).startswith(str(MODELS_ROOT.resolve())):
+            print(f"检测到不完整的旧下载，清理后重新下载：{target}", file=sys.stderr)
+            shutil.rmtree(target, ignore_errors=True)
+        else:
+            raise RuntimeError(f"目标目录已存在但不完整，请手动清理后重试：{target}")
+
+    try:
+        print(f"开始下载模型 {model_name}（staging：{staging}）", file=sys.stderr)
+        if IS_APPLE_SILICON:
+            from huggingface_hub import snapshot_download
+
+            repository = MLX_MODEL_REPOS.get(str(model_name).lower()) or f"mlx-community/whisper-{model_name}"
+            snapshot_download(repository, local_dir=str(staging))
+        else:
+            from faster_whisper.utils import download_model as fetch_model
+
+            fetch_model(model_name, output_dir=str(staging), cache_dir=str(HF_CACHE_ROOT))
+
+        print(f"校验模型文件清单：{model_name}", file=sys.stderr)
+        ok, missing, files = validate_model_files(staging)
+        if not ok:
+            raise RuntimeError(f"模型下载不完整，缺少文件：{', '.join(missing)}")
+
+        # 完成标记：文件清单校验通过后才写入，随原子改名进入正式目录
+        marker = staging / DOWNLOAD_COMPLETE_MARKER
+        marker.write_text(
+            json.dumps(
+                {
+                    "model": model_name,
+                    "backend": "mlx" if IS_APPLE_SILICON else "faster-whisper",
+                    "files": files,
+                    "completedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        print(f"校验通过，原子改名 staging → 正式目录：{target}", file=sys.stderr)
+        if target.exists() and not model_ready(target):
+            # 防御：下载期间目标被其它进程创建了不完整目录
+            shutil.rmtree(target, ignore_errors=True)
+        if target.exists():
+            # 竞态兜底：目标已完整（其它进程刚下载完成），丢弃 staging 直接复用
+            print(f"目标目录已由其它进程完成，复用现有目录：{target}", file=sys.stderr)
+            shutil.rmtree(staging, ignore_errors=True)
+        else:
+            os.rename(str(staging), str(target))
+        print(f"模型下载完成：{target}", file=sys.stderr)
+    except BaseException:
+        # 中断清理：异常/被中断时删除当前 staging，避免半成品残留
+        if staging.exists():
+            print(f"下载失败，清理 staging 目录：{staging}", file=sys.stderr)
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
+
     print(json.dumps({"ok": True, "model": model_name, "modelPath": str(target)}, ensure_ascii=False))
     return 0
 
@@ -238,8 +339,9 @@ def transcribe(args):
 
 def choose_runtime(requested_device, requested_compute, model_name=DEFAULT_MODEL):
     if IS_APPLE_SILICON:
-        # MLX 只运行在 Apple Silicon 上，自动使用 Metal GPU。
-        return "mlx", "fp16"
+        # MLX 默认走 Metal GPU；显式 --device cpu 时强制 CPU 推理（mx.set_default_device(mx.cpu)，实测有效）。
+        # 注意：darwin 上 'cuda' 语义映射为 MLX 通道（与 JS 侧一致）；Intel Mac 不满足 IS_APPLE_SILICON，走下方 faster-whisper 原逻辑。
+        return ("cpu" if requested_device == "cpu" else "mlx"), "fp16"
     import ctranslate2
 
     device = requested_device
@@ -251,12 +353,29 @@ def choose_runtime(requested_device, requested_compute, model_name=DEFAULT_MODEL
     return device, compute_type
 
 
+def mlx_force_cpu():
+    """Apple Silicon 上把 MLX 默认设备强制为 CPU，返回是否真的切到了 CPU。
+
+    实测（mlx 0.32.0 / mlx_whisper 0.4.3）：mx.set_default_device(mx.cpu) 有效，
+    推理正常且结果正确（解码约 82 frames/s，比 Metal GPU 慢约 5 倍）；
+    环境变量 MLX_CPU_ONLY=1 对 default_device 无效（仍为 gpu），不要依赖。
+    """
+    if not IS_APPLE_SILICON:
+        return False
+    import mlx.core as mx
+
+    mx.set_default_device(mx.cpu)
+    return True
+
+
 def run_model(model_path, source, args, device, compute_type):
     options = transcription_options(args.language, args.beam_size, True)
     if IS_APPLE_SILICON:
         import mlx_whisper
 
-        # 先加载音频获取真实时长，再交给 MLX 推理（GPU）。
+        if device == "cpu":
+            mlx_force_cpu()
+        # 先加载音频获取真实时长，再交给 MLX 推理（Metal GPU，或 --device cpu 时的强制 CPU）。
         audio = mlx_whisper.audio.load_audio(str(source))
         duration = max(0.0, float(len(audio)) / 16000.0)
         result = mlx_whisper.transcribe(audio, path_or_hf_repo=str(model_path), **options)

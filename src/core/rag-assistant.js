@@ -166,7 +166,8 @@ class RagAssistant {
     const model = String(modelId || provider?.enabledModels?.[0]?.id || provider?.remoteModels?.[0]?.id || '');
     if (!model) return { ok: false, model: '', error: '该供应商还没有可用模型，请先启用或手动添加模型' };
     const headers = this.providerHeaders(provider);
-    const body = JSON.stringify({ model, messages: [{ role: 'user', content: '请回复OK' }], max_tokens: 16, temperature: 0 });
+    // 使用供应商保存的 temperature；未配置时与 saveProvider 归一化默认保持一致（0.2）。
+    const body = JSON.stringify({ model, messages: [{ role: 'user', content: '请回复OK' }], max_tokens: 16, temperature: finiteNumber(provider.temperature, undefined, 0.2) });
     const errors = [];
     for (const root of candidateApiRoots(provider)) {
       const startedAt = Date.now();
@@ -174,7 +175,11 @@ class RagAssistant {
         const response = await fetch(`${root}/chat/completions`, { method: 'POST', headers, body, signal: AbortSignal.timeout(30000) });
         const text = await response.text();
         if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 500)}`);
-        parseJson(text, 'non-JSON response');
+        const payload = parseJson(text, 'non-JSON response');
+        // 验证标准 OpenAI 响应结构：choices 非空数组且首项 message.content 为字符串（可为空串）。
+        if (!Array.isArray(payload?.choices) || !payload.choices.length || typeof payload.choices[0]?.message?.content !== 'string') {
+          throw new Error('响应缺少标准 choices/message/content 字段，供应商可能不兼容 OpenAI 协议');
+        }
         return { ok: true, model, latencyMs: Date.now() - startedAt, baseUrl: root };
       } catch (error) {
         errors.push(`${root}/chat/completions: ${readableProviderError(error)}`);
@@ -1775,6 +1780,7 @@ function providerHttpError(status, body) {
   error.status = Number(status) || 0;
   error.explicitProviderError = true;
   error.providerMessage = detail;
+  error.supplierCode = supplierCodeFromBody(body);
   error.possibleCauses = status === 401 || status === 403
     ? ['模型供应商 API Key 无效、过期或权限不足', '供应商 Base URL 与密钥不匹配']
     : status === 429
@@ -1807,6 +1813,32 @@ function providerPayloadError(payload) {
     '供应商 Base URL、API Key、模型名或请求参数不兼容'
   ];
   return error;
+}
+
+// 从供应商错误响应体里提取结构化错误码：优先 error.code，其次 error.type，再兜底顶层 code/type。
+// 供 providerHttpError 附加到错误对象（error.supplierCode），让内容审核判定优先使用结构化错误码。
+function supplierCodeFromBody(body) {
+  try {
+    const parsed = JSON.parse(String(body || ''));
+    if (!parsed || typeof parsed !== 'object') return '';
+    const nested = parsed.error;
+    return String(nested?.code || nested?.type || parsed.code || parsed.type || '');
+  } catch {
+    return '';
+  }
+}
+
+// 常见供应商内容审核拒绝码特征（如火山方舟 RISK_CONTROL、OpenAI content_filter、阿里云 DataInspectionFailed、Google SAFETY 等）。
+const CONTENT_REJECTION_CODE_PATTERN = /content[_ -]?filter|content[_ -]?risk|inappropriate[_ -]?content|sensitive|risk[_ -]?control|safety[_ -]?error|moderation|policy[_ -]?violation|data[_ -]?inspection|inspection[_ -]?failed|blocked[_ -]?content/i;
+
+// 判断是否为模型供应商内容安全审核拒绝：supplierCode（结构化错误码）命中特征直接判定，
+// 减少把临时服务故障误判为内容拒绝；未提供或未命中时回退 message 文本正则（兼容原签名 isContentRejectedError(value)）。
+function isContentRejectedError(value, supplierCode) {
+  const objectCode = value && typeof value === 'object' ? value.supplierCode || value.providerCode : '';
+  const code = String(supplierCode || objectCode || '');
+  if (code && CONTENT_REJECTION_CODE_PATTERN.test(code)) return true;
+  const message = value && typeof value === 'object' ? value.message || String(value) : String(value || '');
+  return /sensitive information|content filter|content_filter|内容(?:安全|审核).{0,10}(?:拒绝|拦截)|审核.{0,6}(?:未通过|拦截|拒绝)/i.test(message);
 }
 
 function normalizeProviderError(error, signal) {
@@ -2495,6 +2527,7 @@ module.exports = {
   MAX_RAG_TOOL_ROUNDS,
   RAG_AUTO_COMPACT_TRIGGER,
   RagAssistant,
+  isContentRejectedError,
   isLikelyImageUrl,
   normalizeModel,
   readUtf8LineRange,
