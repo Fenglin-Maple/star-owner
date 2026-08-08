@@ -52,6 +52,18 @@ GitHub 文档共享工具的完整设计、数据契约、Fork/PR 流程、挂�
 
 ## 快速安装与第一次使用
 
+### macOS（Apple Silicon，源码方式）
+
+macOS 目前以**源码方式**运行（开发者预览）：需要 Node.js ≥ 20（用于 `npm install` 与生成依赖清单）与可访问 HuggingFace 的网络；首次安装后运行时不依赖全局 Python / FFmpeg / uv（均自动安装到项目 `runtime/`）。
+
+1. 克隆/下载本项目后，在项目根执行 `npm install`。
+2. 执行 `npm run setup:mac`：脚本自动把固定版本 uv 下载到项目 `runtime/uv/`（SHA-256 校验，不写入系统目录），并用它安装 Python 3.12、mlx-whisper、项目内 FFmpeg 与默认 `large-v3-turbo` 模型（约 1.6 GB）；可选模型用 `bash scripts/setup-macos-runtime.sh --model small` 补装。
+3. 双击项目根 `Start-StarOwner.command`（或 `npm start`）启动；API 端口以 `runtime/.api-port` 实际值为准。
+
+`.dmg` 打包发布为后续阶段；macOS 上的应用内更新与内置 Git（GitHub 共享提交）暂不可用，界面会明确禁用并给出原因。
+
+### Windows 10/11 x64（便携包）
+
 适用于 Windows 10/11 x64。普通用户不需要预先安装 Node.js、Python、FFmpeg、SQLite 或 faster-whisper。
 
 1. 打开 [最新 GitHub Release](https://github.com/Fenglin-Maple/star-owner/releases/latest)，下载 `Star-Owner-v<version>-win-x64-core.zip`；建议同时下载同名 `.sha256` 校验文件。

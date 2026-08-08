@@ -149,6 +149,13 @@ resolve_uv() {
   ok "项目内 uv 就绪：${UV_CMD}（$("$UV_CMD" --version)）"
 }
 
+# ---- 步骤 0：检查 node（步骤 7 生成依赖清单需要；源码方式 npm install 也已隐含此依赖） ----
+if ! command -v node >/dev/null 2>&1; then
+  echo "错误：未检测到 Node.js。macOS 源码方式需要 Node.js ≥ 20（用于 npm install 与生成依赖清单），" >&2
+  echo "请先安装 Node.js（https://nodejs.org/ 或 nvm），安装完成后重新运行本脚本。" >&2
+  exit 1
+fi
+
 echo "星藏家 macOS 本地运行时安装（项目根目录：${ROOT}）"
 if [[ "$(uname -s)" != "Darwin" ]]; then
   info "警告：当前系统不是 macOS，MLX Whisper 依赖 Apple Silicon 生态，后续步骤可能失败。"
@@ -164,7 +171,7 @@ resolve_uv
 # ---- 步骤 2/8：安装 Python 3.12（托管到 runtime/python/） ---------------------
 step 2 8 "安装 Python 3.12（uv 托管到 runtime/python/）"
 mkdir -p "$RUNTIME"
-"$UV_CMD" python install 3.12 --install-dir "$RUNTIME/python"
+"$UV_CMD" python install 3.12 --install-dir "$RUNTIME/python" --no-bin
 PYTHON_BIN="$(find "$RUNTIME/python" -maxdepth 4 -type f -name 'python3.12' 2>/dev/null | head -n 1 || true)"
 if [[ -z "$PYTHON_BIN" ]]; then
   echo "错误：未在 runtime/python/ 下找到 python3.12 可执行文件，请检查上一步输出。" >&2
@@ -230,6 +237,9 @@ fi
 step 7 8 "生成依赖安装清单（runtime/.dependency-manifests/）"
 if (cd "$ROOT" && node scripts/generate-mac-manifest.js); then
   ok "依赖清单生成完成"
+elif [[ ! -f "$ROOT/scripts/generate-mac-manifest.js" ]]; then
+  echo "错误：缺少 scripts/generate-mac-manifest.js（项目文件不完整？请检查 clone/下载完整性）。" >&2
+  exit 1
 else
   # 可选模型（如 small）未下载时脚本会以非 0 退出，属正常现象，不阻断安装
   info "注意：部分依赖包未生成清单——通常是未下载的可选模型，属正常；"
