@@ -30,13 +30,6 @@ const LOCAL_BINARIES = {
 
 const MEDIA_CACHE_EXTENSIONS = new Set(['.mp4', '.mkv', '.webm', '.m4a', '.mp3', '.wav', '.aac', '.flac', '.part', '.ytdl']);
 
-if (require.main === module) {
-  main().catch((error) => {
-    console.error(`[video-tool] ${error.message || String(error)}`);
-    process.exitCode = 1;
-  });
-}
-
 async function main() {
   const [command, target, ...rest] = process.argv.slice(2);
   if (!command || command === 'help' || command === '--help' || command === '-h') return printHelp();
@@ -259,22 +252,21 @@ async function downloadMerged(videoUrl, outDir, args) {
   cliArgs.push(videoUrl);
   try {
     run('yt-dlp', cliArgs);
-  } catch (error) {
+    const merged = findFirst(stagingDir, /^merged\.(mp4|mkv|webm)$/i);
+    if (!merged || !verifyStagedFile(merged)) {
+      throw new Error('yt-dlp 已结束，但未找到完整可用的 merged.mp4/mkv/webm（下载可能被中断，残留 staging 已清理）。');
+    }
+    // 校验通过后写入完成标记并原子改名为正式目标；正式目录里只可能出现完整文件。
+    fs.writeFileSync(path.join(stagingDir, DOWNLOAD_COMPLETE_MARKER), `${JSON.stringify({ file: path.basename(merged), size: fs.statSync(merged).size, completedAt: new Date().toISOString() })}\n`, 'utf8');
+    const finalPath = path.join(outDir, path.basename(merged));
+    fs.renameSync(merged, finalPath);
+    console.log(finalPath);
+    return finalPath;
+  } finally {
+    // 无论成功还是异常（下载失败/取消、文件不完整、标记写入或原子改名出错），
+    // 都不在正式目录残留 merged.staging-* 目录。
     fs.rmSync(stagingDir, { recursive: true, force: true });
-    throw error;
   }
-  const merged = findFirst(stagingDir, /^merged\.(mp4|mkv|webm)$/i);
-  if (!merged || !verifyStagedFile(merged)) {
-    fs.rmSync(stagingDir, { recursive: true, force: true });
-    throw new Error('yt-dlp 已结束，但未找到完整可用的 merged.mp4/mkv/webm（下载可能被中断，残留 staging 已清理）。');
-  }
-  // 校验通过后写入完成标记并原子改名为正式目标；正式目录里只可能出现完整文件。
-  fs.writeFileSync(path.join(stagingDir, DOWNLOAD_COMPLETE_MARKER), `${JSON.stringify({ file: path.basename(merged), size: fs.statSync(merged).size, completedAt: new Date().toISOString() })}\n`, 'utf8');
-  const finalPath = path.join(outDir, path.basename(merged));
-  fs.renameSync(merged, finalPath);
-  fs.rmSync(stagingDir, { recursive: true, force: true });
-  console.log(finalPath);
-  return finalPath;
 }
 
 async function runAsr(videoUrl, outDir, args) {
@@ -1014,3 +1006,14 @@ function* walk(root) {
 }
 
 module.exports = { assessSubtitle, buildBundle, extractFrames, isNoAudioStreamError, normalizeVideoUrl, prepareAudio, resolveCommand, splitJpegStream, writeNoAudioStatus };
+
+// CLI 入口必须放在全部常量/函数定义之后：main() 的同步段会访问
+// DOWNLOAD_COMPLETE_MARKER（staging 标记）与 MISSING_COMMAND_HINTS（缺失依赖提示），
+// 若在模块加载早期调用，const 尚处 TDZ，依赖缺失时 health 会抛
+// "Cannot access 'MISSING_COMMAND_HINTS' before initialization" 而非返回稳定的 JSON 状态。
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(`[video-tool] ${error.message || String(error)}`);
+    process.exitCode = 1;
+  });
+}

@@ -21,13 +21,17 @@ class GitRuntime {
   }
 
   state() {
+    // bundled Git 仅随 Windows 打包物提供（runtime/git/cmd/git.exe）；macOS/其它平台明确不可用，
+    // 供 UI 禁用依赖内置 Git 的操作（浏览器登录 GitHub、创建 Fork/PR 等）
+    const platformSupported = process.platform === 'win32';
     return {
-      available: fs.existsSync(this.gitPath),
+      available: platformSupported && fs.existsSync(this.gitPath),
       path: this.gitPath,
       runtimeRoot: this.gitRoot,
       isolated: true,
       credentialScope: 'application-dpapi',
-      version: ''
+      version: '',
+      unsupportedReason: platformSupported ? undefined : '内置 Git 仅支持 Windows；macOS 暂未提供 bundled Git 运行时（见 MAC_ADAPTATION.md 边界与暂缓项）'
     };
   }
 

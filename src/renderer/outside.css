@@ -236,6 +236,7 @@
 .shared-auth-intro span { color: var(--muted); font-size: 10px; text-align: right; }
 .shared-auth-primary { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 9px; align-items: stretch; }
 .shared-auth-primary .local-selection-summary { min-height: 34px; }
+.shared-git-status { margin-top: 9px; padding: 8px 10px; color: var(--red); font-size: 11px; line-height: 1.5; border-left: 2px solid var(--red); background: color-mix(in srgb, var(--red) 8%, var(--row)); overflow-wrap: anywhere; }
 .shared-auth-more { border-top: 1px solid color-mix(in srgb, var(--line) 76%, transparent); }
 .shared-auth-more > summary { min-height: 34px; display: flex; align-items: center; color: var(--muted); cursor: pointer; font-size: 11px; list-style: none; }
 .shared-auth-more > summary::-webkit-details-marker { display: none; }

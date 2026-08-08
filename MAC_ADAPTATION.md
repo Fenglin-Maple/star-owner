@@ -21,7 +21,7 @@ Node 侧 AsrService ──spawn──▶ tools/faster-whisper-service.py ──�
 
 | 组件 | 位置 | 说明 |
 |---|---|---|
-| Python 3.12.12 | `runtime/python/cpython-3.12.12-macos-aarch64-none/` | uv 安装，自带 bin/python |
+| Python 3.12.12 | `runtime/python/cpython-3.12.12-macos-aarch64-none/` | uv 引导安装（优先 PATH 中已有 uv；缺失时脚本自动下载固定版本 0.12.3 到 `runtime/uv/`，SHA-256 校验，不写系统目录），自带 bin/python |
 | venv | `runtime/faster-whisper/` | uv venv，mlx-whisper / yt-dlp / imageio-ffmpeg / huggingface_hub |
 | ASR 模型 | `runtime/models/<id>/` | HF `mlx-community/whisper-large-v3-turbo` 等 |
 | 安装清单 | `runtime/.dependency-manifests/<id>.json` | `npm run manifest:mac` 生成，含 SHA-256 |
@@ -59,17 +59,19 @@ Node 侧 AsrService ──spawn──▶ tools/faster-whisper-service.py ──�
 
 | 文件 | 改动 |
 |---|---|
-| `tools/video-tool.js` | 路径平台化（resolveWhisperPython / resolveImageIoBinaries）+ POSIX 系统命令回退 |
+| `tools/video-tool.js` | 路径平台化（resolveWhisperPython / resolveImageIoBinaries）+ 内置工具缺失即中文提示（MISSING_COMMAND_HINTS，按平台引导运行 setup:mac / setup:asr）；不再回退系统 PATH——明确不使用全局 FFmpeg、全局 Python 与全局 yt-dlp |
 | `scripts/generate-mac-manifest.js` | 生成 darwin 依赖安装清单（SHA-256），`npm run manifest:mac` | 实现 |
-| `scripts/setup-macos-runtime.sh` | Apple Silicon 完整部署脚本（uv 装 Python/venv → mlx 安装 → 模型下载 → ffmpeg symlink 创建验证 → manifest 生成），`npm run setup:mac` | 实现 |
+| `scripts/setup-macos-runtime.sh` | Apple Silicon 完整部署脚本（uv 自动引导 → Python/venv → mlx 安装 → 模型下载 → ffmpeg symlink 创建验证 → manifest 生成），`npm run setup:mac` | 实现 |
 | `Start-StarOwner.command` / `Start-StarOwner.cmd` | macOS/Windows 双击启动器：直接调用项目自带 Electron（不依赖全局 npm）、从 `runtime/.api-port` 读取实际端口做防双开与成功判断 | 实现 |
 | `MAC_ADAPTATION.md` | 本文档 | 文档 |
 
 ## 模型清单（MLX 版，HuggingFace）
 
-- `mlx-community/whisper-large-v3-turbo`（默认，约 1.6GB）
-- `mlx-community/whisper-small-mlx`（可选，约 150MB）
-- `mlx-community/whisper-medium-mlx`（保留映射，UI 不展示）
+模型名 → 仓库映射见 `tools/faster-whisper-cli.py` 的 `MLX_MODEL_REPOS`（未知模型名回退 `mlx-community/whisper-<name>`）：
+
+- `small` → `mlx-community/whisper-small-mlx`（可选，约 150MB）
+- `medium` → `mlx-community/whisper-medium-mlx`（保留映射，UI 不展示）
+- `turbo` / `large-v3-turbo` → `mlx-community/whisper-large-v3-turbo`（默认，约 1.6GB）
 
 ## 验证结果
 
@@ -110,7 +112,7 @@ Node 侧 AsrService ──spawn──▶ tools/faster-whisper-service.py ──�
 
 | 作者建议 | 处理 | 状态 |
 |---|---|---|
-| 补齐 macOS 全新部署流程 | 新增 `scripts/setup-macos-runtime.sh`（uv 装 Python/venv → mlx 安装 → 模型下载 → ffmpeg symlink → manifest 生成，可重复执行、逐步幂等）；darwin 下载按钮加 installHint 提示 | ✅ |
+| 补齐 macOS 全新部署流程 | 新增 `scripts/setup-macos-runtime.sh`（uv 自动引导：优先 PATH 中已有 uv，缺失时自动下载固定版本 0.12.3 到 `runtime/uv/` 并校验 SHA-256，不要求全局安装 → Python/venv → mlx 安装 → 模型下载 → ffmpeg symlink → manifest 生成，可重复执行、逐步幂等）；darwin 下载按钮加 installHint 提示 | ✅ |
 | FFmpeg 链接脚本化 | 安装脚本内置 symlink 创建 + 验证（相对路径链接，项目移动不失效），不依赖全局 FFmpeg | ✅ |
 | 统一 CPU ASR 与 MLX 语义 | 实测 MLX 可强制 CPU（`mx.set_default_device(mx.cpu)` + fp16）；`--device cpu` 真实 CPU 路径已实现（cli/service 双模式验证）；平台判断统一 darwin+arm64（Intel Mac 走 faster-whisper CPU 语义） | ✅ |
 | 平台模型探针 | tool-runner 抽象 `detectModelFiles`（model.bin / weights.npz / .safetensors 分片），模型就绪检查与切换逻辑接入 | ✅ |

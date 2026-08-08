@@ -9,7 +9,7 @@
     collectionModal: $('#aiCollectionModal'), collectionName: $('#aiCollectionName'), closeCollection: $('#aiCloseCollection'), cancelCollection: $('#aiCancelCollection'), saveCollection: $('#aiSaveCollection'),
     singleVideo: $('#singleVideoInput'), singleCollection: $('#singleCollectionSelect'), singleCreateCollection: $('#singleCreateCollection'), singleOpenCollection: $('#singleOpenCollection'), singleProvider: $('#singleProviderSelect'), singleModel: $('#singleModelSelect'), singleFrames: $('#singleFrames'), singleComments: $('#singleComments'), singleRequirements: $('#singleRequirements'), singleKeepVideoCache: $('#singleKeepVideoCache'), singleStart: $('#singleStart'), singleSession: $('#singleSessionSelect'), singleDetail: $('#singleAgentDetail'),
     modelNew: $('#aiModelNewProvider'), modelProviderList: $('#aiModelProviderList'), modelProviderId: $('#aiModelProviderId'), modelProviderName: $('#aiModelProviderName'), modelProviderType: $('#aiModelProviderType'), modelProviderBaseUrl: $('#aiModelProviderBaseUrl'), modelProviderApiKey: $('#aiModelProviderApiKey'), modelProviderTemperature: $('#aiModelProviderTemperature'), modelProviderMaxTokens: $('#aiModelProviderMaxTokens'), modelProviderHeaders: $('#aiModelProviderHeaders'), modelDelete: $('#aiModelDeleteProvider'), modelSave: $('#aiModelSaveProvider'), modelFetch: $('#aiModelFetchModels'), modelTestButton: $('#rag-model-test-button'), modelCount: $('#aiModelRemoteCount'), modelRemote: $('#aiModelRemoteModels'),
-    dependencyList: $('#dependencyList'), dependencyRefresh: $('#dependencyRefresh'), dependencyModal: $('#dependencyPromptModal'), dependencyMissing: $('#dependencyPromptMissing'), dependencyLater: $('#dependencyPromptLater'), dependencyDownload: $('#dependencyPromptDownload'),
+    dependencyList: $('#dependencyList'), dependencyRefresh: $('#dependencyRefresh'), dependencyModal: $('#dependencyPromptModal'), dependencyMissing: $('#dependencyPromptMissing'), dependencyLater: $('#dependencyPromptLater'), dependencyDownload: $('#dependencyPromptDownload'), dependencyPromptMode: $('#dependencyPromptMode'), dependencyPromptModeText: $('#dependencyPromptModeText'),
     pathSafetyModal: $('#pathSafetyModal'), pathSafetySummary: $('#pathSafetySummary'), pathSafetyMessage: $('#pathSafetyMessage'), pathSafetyPath: $('#pathSafetyPath'), pathSafetyMoveStep: $('#pathSafetyMoveStep'), pathSafetyOpenProject: $('#pathSafetyOpenProject'), pathSafetyAcknowledge: $('#pathSafetyAcknowledge'),
     loginRequiredModal: $('#singleLoginRequiredModal'), loginRequiredVideo: $('#singleLoginRequiredVideo'), loginRequiredReason: $('#singleLoginRequiredReason'), loginLater: $('#singleLoginLater'), goLogin: $('#singleGoLogin'),
     duplicateModal: $('#singleDuplicateModal'), duplicateMessage: $('#singleDuplicateMessage'), duplicateVideo: $('#singleDuplicateVideo'), duplicateMeta: $('#singleDuplicateMeta'), duplicateCancel: $('#singleDuplicateCancel'), duplicateRegenerate: $('#singleDuplicateRegenerate')
@@ -603,7 +603,7 @@
     if (!dependencyState) return;
     const packages = Array.isArray(dependencyState.packages) ? dependencyState.packages : [];
     const recoveryMessage = dependencyState.recovery?.warning || '';
-    const structureKey = JSON.stringify({ recovery: Boolean(recoveryMessage), packages: packages.map((item) => [item.id, Boolean(item.localImport)]) });
+    const structureKey = JSON.stringify({ recovery: Boolean(recoveryMessage), packages: packages.map((item) => [item.id, Boolean(item.localImport), Boolean(String(item.installHint || '').trim())]) });
     if (structureKey !== dependencyStructureKey) {
       const recoveryWarning = recoveryMessage
         ? '<div class="dependency-recovery-warning" data-dependency-recovery><strong>依赖恢复记录已隔离</strong><p></p></div>'
@@ -613,6 +613,7 @@
           <div><button class="dependency-name-link" type="button" data-dependency-release></button><span class="dependency-state"></span></div>
           <p></p>
           <div class="dependency-progress"><span></span></div>
+          ${String(item.installHint || '').trim() ? `<p class="dependency-install-hint">${esc(String(item.installHint).trim())}</p>` : ''}
         </div>
         <div class="dependency-actions">
           ${item.localImport ? `<button class="secondary-button compact-button" type="button" data-import-dependency="${esc(item.id)}">从本地导入</button>` : ''}
@@ -637,6 +638,9 @@
       const progress = row.querySelector('.dependency-progress span');
       const importButton = row.querySelector('[data-import-dependency]');
       const downloadButton = row.querySelector('[data-download-dependency]');
+      const installHint = String(item.installHint || '').trim();
+      const hint = row.querySelector('.dependency-install-hint');
+      if (hint && hint.textContent !== installHint) hint.textContent = installHint;
       if (release.textContent !== String(item.name || '')) release.textContent = item.name || '';
       const releaseUrl = item.releaseUrl || dependencyState.dependencyReleasePage || '';
       if (release.dataset.dependencyRelease !== releaseUrl) release.dataset.dependencyRelease = releaseUrl;
@@ -649,12 +653,24 @@
       const width = `${Math.round(Number(item.progress || 0) * 100)}%`;
       if (progress.style.width !== width) progress.style.width = width;
       if (importButton && importButton.disabled !== importBusy) importButton.disabled = importBusy;
-      const downloadClass = `${pausable || paused ? 'secondary-button' : 'primary-button'} compact-button`;
-      const downloadDisabled = dependencyActionDisabled(item.status);
-      if (downloadButton.className !== downloadClass) downloadButton.className = downloadClass;
-      if (downloadButton.disabled !== downloadDisabled) downloadButton.disabled = downloadDisabled;
-      const actionLabel = pausable ? '暂停' : (paused ? '继续下载' : (item.available ? '重新下载' : '下载'));
-      if (downloadButton.textContent !== actionLabel) downloadButton.textContent = actionLabel;
+      if (installHint) {
+        // macOS 本地配置模式：assetName 为空、没有 GitHub Release 资产可下载，
+        // 下载按钮降级为禁用状态，并以 installHint 作为按钮提示与指引文本
+        const hintClass = 'primary-button compact-button';
+        if (downloadButton.className !== hintClass) downloadButton.className = hintClass;
+        if (!downloadButton.disabled) downloadButton.disabled = true;
+        const hintLabel = item.available ? '本地已安装' : '需本地安装';
+        if (downloadButton.textContent !== hintLabel) downloadButton.textContent = hintLabel;
+        if (downloadButton.title !== installHint) downloadButton.title = installHint;
+      } else {
+        const downloadClass = `${pausable || paused ? 'secondary-button' : 'primary-button'} compact-button`;
+        const downloadDisabled = dependencyActionDisabled(item.status);
+        if (downloadButton.className !== downloadClass) downloadButton.className = downloadClass;
+        if (downloadButton.disabled !== downloadDisabled) downloadButton.disabled = downloadDisabled;
+        const actionLabel = pausable ? '暂停' : (paused ? '继续下载' : (item.available ? '重新下载' : '下载'));
+        if (downloadButton.textContent !== actionLabel) downloadButton.textContent = actionLabel;
+        if (downloadButton.title !== '') downloadButton.title = '';
+      }
     }
   }
 
@@ -694,7 +710,25 @@
   function maybeShowDependencyPrompt() {
     if (!dependencyState?.needsPrompt || !initialized) return;
     if (pathSafetyState?.safe === false && !pathSafetyAcknowledged) return;
-    elements.dependencyMissing.innerHTML = dependencyState.packages.filter((item) => dependencyState.missingRequired.includes(item.id)).map((item) => `<span>${html(item.name)}</span>`).join('');
+    const missingPackages = (dependencyState.packages || []).filter((item) => dependencyState.missingRequired.includes(item.id));
+    elements.dependencyMissing.innerHTML = missingPackages.map((item) => `<span>${html(item.name)}</span>`).join('');
+    const allHinted = missingPackages.length > 0 && missingPackages.every((item) => String(item.installHint || '').trim());
+    if (allHinted) {
+      // macOS 本地配置模式：依赖不通过 GitHub Release 自动下载（assetName 为空），
+      // 下载按钮降级为禁用状态，并展示 installHint 本地安装指引
+      const hint = missingPackages.map((item) => String(item.installHint || '').trim()).find(Boolean) || '';
+      elements.dependencyPromptMode.textContent = '需要运行本地安装脚本（macOS）';
+      elements.dependencyPromptModeText.innerHTML = `macOS 版不会从 GitHub Release 自动下载运行时与模型。${html(hint)}。安装完成后点击“稍后处理”，再到“设置 → 项目依赖包”确认状态。`;
+      elements.dependencyPromptDownload.disabled = true;
+      elements.dependencyPromptDownload.textContent = '暂不支持自动下载';
+      elements.dependencyPromptDownload.title = hint;
+    } else {
+      elements.dependencyPromptMode.textContent = '从星藏家 GitHub Release 自动下载';
+      elements.dependencyPromptModeText.innerHTML = '文件只会保存和解压到当前应用目录的 <code>runtime/</code>。下载过程会显示实时进度，并优先校验 Release 提供的 SHA-256。';
+      elements.dependencyPromptDownload.disabled = false;
+      elements.dependencyPromptDownload.textContent = '同意并开始下载';
+      elements.dependencyPromptDownload.title = '';
+    }
     elements.dependencyModal.hidden = false;
   }
 
@@ -997,6 +1031,13 @@
     catch (error) { notify('无法保存依赖提示状态', error.message || String(error), 'error'); }
   });
   elements.dependencyDownload.addEventListener('click', async () => {
+    const missingPackages = (dependencyState?.packages || []).filter((item) => dependencyState?.missingRequired?.includes(item.id));
+    if (missingPackages.length && missingPackages.every((item) => String(item.installHint || '').trim())) {
+      // macOS 本地配置模式：无 Release 资产可下载，仅确认提示状态，不触发自动下载
+      try { await window.orchestrator.dependencyAcknowledge({ download: false }); elements.dependencyModal.hidden = true; }
+      catch (error) { notify('无法保存依赖提示状态', error.message || String(error), 'error'); }
+      return;
+    }
     try {
       await window.orchestrator.dependencyAcknowledge({ download: true });
       elements.dependencyModal.hidden = true;

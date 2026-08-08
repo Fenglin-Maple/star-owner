@@ -5,7 +5,7 @@ const { spawnSync } = require('child_process');
 const { utf8ChildEnvironment } = require('../src/core/child-process-io');
 
 const root = path.resolve(__dirname, '..');
-const electron = path.join(root, 'node_modules', 'electron', 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron');
+const electron = path.join(root, 'node_modules', 'electron', 'dist', process.platform === 'win32' ? 'electron.exe' : (process.platform === 'darwin' ? 'Electron.app/Contents/MacOS/Electron' : 'electron'));
 const tool = path.join(root, 'tools', 'video-tool.js');
 assert(fs.existsSync(electron), `Bundled Electron executable is missing: ${electron}`);
 
