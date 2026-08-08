@@ -454,6 +454,24 @@ class InternalAgentManager {
       this.store.commit();
       this.log(session, `已同步 ${user.name || user.mid} 的登录状态，准备重试。`);
     }
+    // 单例模式（视频总结-单个）：已登录时始终携带最新 cookie。
+    // B 站自 2026-08 起 x/web-interface/view 无 cookie 必返 412 request was banned，
+    // “公开获取优先”已失效；未登录则跳过（登录检查由 UI 的 -101 轮询提示）。
+    if (session.mode === 'single') {
+      const user = this.getCurrentUser();
+      if (user?.isLogin) {
+        const task = this.store.getTask(session.singleTaskId);
+        if (task && !task.cookieFile) {
+          try {
+            task.cookieFile = await this.bili.exportCookies(user.name || String(user.mid));
+            this.store.upsertTask(task);
+            this.store.commit();
+          } catch (error) {
+            this.log(session, `单例 cookie 导出失败（将尝试公开获取）：${error.message || String(error)}`);
+          }
+        }
+      }
+    }
     const worker = this.store.getWorker(session.workerId);
     if (worker?.status === 'paused') this.store.updateWorker(worker.id, { status: 'active' });
     session.acceptNewTasks = session.mode === 'single' ? false : true;
@@ -820,14 +838,22 @@ class InternalAgentManager {
           return;
         }
         if (isBilibiliBannedError(error)) {
-          // B 站短时风控（HTTP 412 request was banned）：任务保留、可重试，不删除、不阻塞会话
-          const reason = `B站临时风控拦截（HTTP 412 request was banned）：请求过于频繁或触发风控，请稍等 5-10 分钟后在任务总览重试。`;
+          // B 站短时风控（HTTP 412 request was banned）：任务保留、可重试，不删除、不阻塞会话。
+          // 同时进入 10 分钟退避窗口：未到期不领取任何任务（会话本轮 idle 结束），
+          // 避免零间隔热循环重试持续轰炸 B 站（否则风控窗口会被应用自身维持不解除）。
+          // 无 cookie 的 412 是 B 站对未携带登录态请求的拒绝（x/web-interface/view 无 cookie 必 412），
+          // 提示登录而不是“稍等重试”，避免误导。
+          const hasCookie = Boolean(task.cookieFile && fs.existsSync(task.cookieFile));
+          const reason = hasCookie
+            ? `B站临时风控拦截（HTTP 412 request was banned）：请求过于频繁或触发风控，请稍等 5-10 分钟后在任务总览重试。`
+            : `B站拒绝了未携带登录状态的请求（HTTP 412 request was banned）。请先前往 B站登录后重试。`;
           latest.failed = Number(latest.failed || 0) + 1;
           latest.status = 'error';
           latest.phase = '任务失败（B站临时风控，稍后可重试）';
           latest.lastError = reason;
           latest.currentTaskId = '';
           latest.currentRunId = '';
+          latest.bilibiliRetryAfter = Date.now() + 10 * 60 * 1000;
           this.abortAttempt(task.id, latest.workerId, reason, 'bilibili-banned');
           this.markMultipartTaskFailed(task, reason, 'bilibili-banned');
           this.saveSession(latest);
@@ -837,6 +863,7 @@ class InternalAgentManager {
           latest.status = 'running';
           latest.currentTaskId = '';
           this.saveSession(latest);
+          excluded.add(task.id); // 本轮不再重领该任务，避免热循环
           continue;
         }
         excluded.add(task.id);
@@ -864,6 +891,8 @@ class InternalAgentManager {
   }
 
   claimNextTask(session, excluded) {
+    // B 站风控退避窗口：未到期不领取任何任务（会话本轮以 idle 结束，任务保留，用户稍后重试）
+    if (session.bilibiliRetryAfter && Date.now() < session.bilibiliRetryAfter) return null;
     const collection = this.store.getCollectionById(session.collectionId);
     if (!collection) throw new Error('工作收藏夹已不存在。');
     const collectionReason = agentCollectionBlockReason(collection);
