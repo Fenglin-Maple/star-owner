@@ -819,6 +819,26 @@ class InternalAgentManager {
           this.emit({ type: 'login-required', sessionId: latest.id, bvid: task.bvid, title: task.title, reason: '已先尝试公开获取，但该视频要求登录。登录完成后回到“视频总结（单个）”，点击“登录后重试”并从头处理。' });
           return;
         }
+        if (isBilibiliBannedError(error)) {
+          // B 站短时风控（HTTP 412 request was banned）：任务保留、可重试，不删除、不阻塞会话
+          const reason = `B站临时风控拦截（HTTP 412 request was banned）：请求过于频繁或触发风控，请稍等 5-10 分钟后在任务总览重试。`;
+          latest.failed = Number(latest.failed || 0) + 1;
+          latest.status = 'error';
+          latest.phase = '任务失败（B站临时风控，稍后可重试）';
+          latest.lastError = reason;
+          latest.currentTaskId = '';
+          latest.currentRunId = '';
+          this.abortAttempt(task.id, latest.workerId, reason, 'bilibili-banned');
+          this.markMultipartTaskFailed(task, reason, 'bilibili-banned');
+          this.saveSession(latest);
+          this.log(latest, `任务失败（B站临时风控）：${reason}`, 'error');
+          this.emit({ type: 'task-failed', sessionId: latest.id, taskId: task.id, bvid: task.bvid, reason });
+          if (latest.mode === 'single' || !latest.acceptNewTasks) return;
+          latest.status = 'running';
+          latest.currentTaskId = '';
+          this.saveSession(latest);
+          continue;
+        }
         excluded.add(task.id);
         latest.failed = Number(latest.failed || 0) + 1;
         latest.status = 'error';
@@ -1984,6 +2004,12 @@ function isInside(root, target) {
 
 function isContextLimitError(value) {
   return /context(?:[_ -]?(?:length|window))?|maximum context|too many tokens|token limit|上下文.{0,8}(?:超|长|限)|请求.{0,8}过长/i.test(String(value || ''));
+}
+
+function isBilibiliBannedError(value) {
+  // B 站风控拦截：HTTP 412 / 错误码 -412 / "request was banned"（video-tool 已转成中文提示，此处兜底识别原始形态）
+  const text = `${String(value?.code || '')}\n${String(value?.message || value || '')}\n${String(value?.stderr || '')}`;
+  return /HTTP Error 412|HTTP 412|"code"\s*:\s*-412|request was banned|B站临时风控拦截/i.test(text);
 }
 
 function isContentRejectedError(value) {

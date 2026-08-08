@@ -262,6 +262,11 @@ async function downloadMerged(videoUrl, outDir, args) {
     fs.renameSync(merged, finalPath);
     console.log(finalPath);
     return finalPath;
+  } catch (error) {
+    if (isBilibiliBannedError(error)) {
+      throw new Error(`B站临时风控拦截（HTTP 412 request was banned）：请求过于频繁或触发风控，请稍等 5-10 分钟后再试（任务会保留，可重试）。\n${String(error.message || error).slice(0, 300)}`);
+    }
+    throw error;
   } finally {
     // 无论成功还是异常（下载失败/取消、文件不完整、标记写入或原子改名出错），
     // 都不在正式目录残留 merged.staging-* 目录。
@@ -671,7 +676,13 @@ async function fetchPlainJson(url, args) {
   } catch {
     throw new Error(`Bilibili returned non-JSON: ${text.slice(0, 180)}`);
   }
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 180)}`);
+  if (!response.ok) {
+    if (response.status === 412) {
+      // B 站风控拦截（-412 request was banned）：通常是短时频率风控，非代码/网络故障
+      throw new Error(`B站临时风控拦截（HTTP 412 request was banned）：请求过于频繁或触发风控，请稍等 5-10 分钟后再试（任务会保留，可重试）。${text.slice(0, 120)}`);
+    }
+    throw new Error(`HTTP ${response.status}: ${text.slice(0, 180)}`);
+  }
   return json;
 }
 
@@ -989,6 +1000,12 @@ function processFailureDetail(stderr, stdout) {
 function isNoAudioStreamError(error) {
   const text = `${String(error?.code || '')}\n${String(error?.message || error || '')}\n${String(error?.stderr || '')}`;
   return /NO_AUDIO_STREAM|Output file does not contain any stream|matches no streams|does not contain an audio stream/i.test(text);
+}
+
+function isBilibiliBannedError(error) {
+  // B 站风控拦截：HTTP 412 / 错误码 -412 / "request was banned"（yt-dlp 或 video-tool 请求均可命中）
+  const text = `${String(error?.code || '')}\n${String(error?.message || error || '')}\n${String(error?.stderr || '')}`;
+  return /HTTP Error 412|HTTP 412|"code"\s*:\s*-412|request was banned/i.test(text);
 }
 
 function findFirst(dir, pattern) {
