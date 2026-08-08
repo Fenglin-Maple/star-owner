@@ -164,7 +164,12 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   try {
     const modelDefinition = dependencyManager.definitions().find((item) => item.id === 'model-small');
     const resolvedHistoricalModel = await dependencyManager.resolveReleaseAsset(modelDefinition);
-    if (resolvedHistoricalModel.asset.name !== 'Star-Owner-v9.9.8-model-small.zip' || !dependencyRequests.some((url) => url.includes('/releases?per_page=10'))) throw new Error('dependency resolver did not fall back from a current code-only release to a recent model asset');
+    if (process.platform === 'win32') {
+      if (resolvedHistoricalModel.asset.name !== 'Star-Owner-v9.9.8-model-small.zip' || !dependencyRequests.some((url) => url.includes('/releases?per_page=10'))) throw new Error('dependency resolver did not fall back from a current code-only release to a recent model asset');
+    } else if (resolvedHistoricalModel.asset) {
+      // darwin 本地配置模式：assetName 为空，不得解析 GitHub Release 资产
+      throw new Error('darwin local-config mode must not resolve GitHub Release assets');
+    }
   } finally {
     global.fetch = originalFetch;
   }
@@ -172,8 +177,13 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   try {
     const modelDefinition = dependencyManager.definitions().find((item) => item.id === 'model-large-v3-turbo');
     const directModel = await dependencyManager.resolveReleaseAsset(modelDefinition);
-    if (!directModel.directFallback || !directModel.asset.browser_download_url.endsWith('/releases/download/v9.9.9/Star-Owner-v9.9.9-model-large-v3-turbo.zip')) throw new Error('dependency resolver did not provide a current-release direct URL when GitHub API was unavailable');
-    if (!directModel.release.assets.some((item) => item.name === 'Star-Owner-v9.9.9-model-large-v3-turbo.zip.sha256')) throw new Error('direct dependency fallback omitted the checksum asset');
+    if (process.platform === 'win32') {
+      if (!directModel.directFallback || !directModel.asset.browser_download_url.endsWith('/releases/download/v9.9.9/Star-Owner-v9.9.9-model-large-v3-turbo.zip')) throw new Error('dependency resolver did not provide a current-release direct URL when GitHub API was unavailable');
+      if (!directModel.release.assets.some((item) => item.name === 'Star-Owner-v9.9.9-model-large-v3-turbo.zip.sha256')) throw new Error('direct dependency fallback omitted the checksum asset');
+    } else if (directModel.unavailable !== 'local-config' || directModel.asset) {
+      // darwin 本地配置模式：GitHub API 不可用时同样不得生成无效 direct URL 资产
+      throw new Error('darwin local-config mode must not fall back to a direct Release URL');
+    }
   } finally {
     global.fetch = originalFetch;
   }
@@ -188,8 +198,13 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
     const pinnedState = pinnedDependencyManager.state();
     const pinnedDefinition = pinnedDependencyManager.definitions().find((item) => item.id === 'model-large-v3-turbo');
     const pinnedModel = await pinnedDependencyManager.resolveReleaseAsset(pinnedDefinition);
-    if (pinnedState.dependencyReleaseVersion !== '9.9.8' || pinnedDefinition.assetName !== 'Star-Owner-v9.9.8-model-large-v3-turbo.zip') throw new Error('dependency release version was not pinned independently from the application version');
-    if (!pinnedModel.directFallback || !pinnedModel.asset.browser_download_url.endsWith('/releases/download/v9.9.8/Star-Owner-v9.9.8-model-large-v3-turbo.zip')) throw new Error('rate-limit fallback did not use the pinned dependency release');
+    if (process.platform === 'win32') {
+      if (pinnedState.dependencyReleaseVersion !== '9.9.8' || pinnedDefinition.assetName !== 'Star-Owner-v9.9.8-model-large-v3-turbo.zip') throw new Error('dependency release version was not pinned independently from the application version');
+      if (!pinnedModel.directFallback || !pinnedModel.asset.browser_download_url.endsWith('/releases/download/v9.9.8/Star-Owner-v9.9.8-model-large-v3-turbo.zip')) throw new Error('rate-limit fallback did not use the pinned dependency release');
+    } else if (pinnedState.dependencyReleaseVersion !== '9.9.8' || pinnedModel.unavailable !== 'local-config') {
+      // darwin 本地配置模式：资产名与 Release 解析均不适用，仅依赖版本固定契约仍须成立
+      throw new Error('darwin local-config mode must not resolve pinned Release assets');
+    }
   } finally {
     global.fetch = originalFetch;
   }
@@ -219,6 +234,8 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   fs.mkdirSync(path.join(validSource, 'runtime', 'models', 'small'), { recursive: true });
   fs.writeFileSync(path.join(validSource, 'runtime', 'models', 'small', 'model.bin'), 'verified-new-model');
   fs.writeFileSync(path.join(validSource, 'runtime', 'models', 'small', 'config.json'), '{"version":"new"}');
+  if (process.platform === 'win32') {
+  // ===== Windows 专属：Release 资产归档导入/解压/事务恢复（macOS 为本地配置模式，不走归档安装） =====
   const validArchive = path.join(manualDownloads, smallDefinition.assetName);
   createArchive(validArchive, validSource, 'runtime');
   const validChecksum = sha256File(validArchive);
@@ -339,6 +356,9 @@ const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('../src/co
   if (!recoveredFromCorruption.state().recovery?.warning || fs.existsSync(corruptJournal)) throw new Error('corrupt dependency recovery journal still blocked startup');
   if (!listCorruptJournals(dependencyRoot).length) throw new Error('corrupt dependency recovery journal was not quarantined');
   if (fs.existsSync(path.join(dependencyRoot, 'src', 'must-not-extract.txt'))) throw new Error('legacy core fallback extracted application files');
+  } else {
+    console.log('跳过 Windows 专属依赖归档/解压语义（macOS 本地配置模式）');
+  }
   const defaultFilenameMetadata = store.getFilenameMetadata();
   if (Object.values(defaultFilenameMetadata).some((enabled) => enabled !== true)) throw new Error('filename metadata defaults failed');
   store.setFilenameMetadata({ tags: false, title: false });

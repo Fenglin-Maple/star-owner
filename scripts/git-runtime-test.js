@@ -15,6 +15,13 @@ const { GitRuntime, gitAuthorizationHeader, normalizeGitAuthor, normalizeGitRemo
   fs.mkdirSync(poisonHome, { recursive: true });
   fs.writeFileSync(poisonConfig, '[user]\n\tname = Global Poison\n[credential]\n\thelper = poison-helper\n', 'utf8');
   try {
+    if (process.platform !== 'win32') {
+      // macOS/其它平台：bundled Git 仅 Windows（runtime/git/cmd/git.exe），状态应明确不可用（UI 据此禁用相关操作）
+      const state = runtime.state();
+      assert.strictEqual(state.available, false, '非 Windows 平台 bundled Git 应明确不可用');
+      console.log('git runtime isolation test passed（bundled Git 仅 Windows，非 win32 断言不可用状态）');
+      return;
+    }
     const result = await runtime.run(['config', '--list'], {
       env: {
         PATH: path.join(poisonRoot, 'global-bin'),

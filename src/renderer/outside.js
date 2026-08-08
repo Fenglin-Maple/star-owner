@@ -57,6 +57,7 @@
     sharedSetToken: $('#sharedSetToken'),
     sharedLogout: $('#sharedLogout'),
     sharedAuthStatus: $('#sharedAuthStatus'),
+    sharedGitStatus: $('#sharedGitStatus'),
     sharedRepositoryStatus: $('#sharedRepositoryStatus'),
     sharedRepositorySelect: $('#sharedRepositorySelect'),
     sharedRepositoryInput: $('#sharedRepositoryInput'),
@@ -675,6 +676,20 @@
     return repository.owner && repository.name ? `${repository.owner}/${repository.name}` : '';
   }
 
+  function sharedGitAvailable() {
+    // git 状态字段缺失时视为可用，保持 win32 既有行为不变；
+    // 仅当主进程明确报告 available === false（如 macOS 无 bundled Git）才降级
+    return !sharedData.git || sharedData.git.available !== false;
+  }
+
+  function sharedGitUnavailableReason() {
+    // 优先消费主进程透传的 unsupportedReason（git-runtime state() 提供，随平台/状态变化）；
+    // 缺失时回退通用文案（兼容旧主进程）
+    const provided = sharedData.git && typeof sharedData.git === 'object' ? String(sharedData.git.unsupportedReason || '') : '';
+    if (provided) return provided;
+    return 'macOS 暂不支持内置 Git（runtime/git 仅随 Windows 核心包提供），浏览器登录与创建 Fork / PR 暂不可用。可改用 Fine-grained Token 授权，或使用系统 Git 命令行 / GitHub 网页手动完成提交；公共目录读取、GitHub API 目录浏览与挂载不受影响。';
+  }
+
   function sharedRepositoryOwnerMode(repository = sharedData.repository || {}) {
     const sameId = repository.ownerId && sharedData.userId && String(repository.ownerId) === String(sharedData.userId);
     const sameLogin = repository.owner && sharedData.login && String(repository.owner).toLowerCase() === String(sharedData.login).toLowerCase();
@@ -692,7 +707,9 @@
     const fullName = sharedRepositoryFullName(repository);
     const health = sharedData.repositoryHealth || {};
     const healthLabel = health.status === 'available' ? '连接正常' : health.status === 'unavailable' ? '连接异常' : '待检查';
-    const role = !sharedData.authenticated ? '未授权时可读取公开目录' : sharedRepositoryOwnerMode(repository) ? '当前账户是仓库主人，将直接创建分支 / PR' : '当前账户不是仓库主人，将使用 Fork / PR';
+    const role = !sharedGitAvailable()
+      ? '内置 Git 不可用（macOS），上传与 Fork / PR 暂不可用'
+      : (!sharedData.authenticated ? '未授权时可读取公开目录' : sharedRepositoryOwnerMode(repository) ? '当前账户是仓库主人，将直接创建分支 / PR' : '当前账户不是仓库主人，将使用 Fork / PR');
     elements.sharedRepositoryStatus.textContent = fullName ? `${fullName} · ${repository.branch || 'main'} · ${healthLabel} · ${role}` : '尚未配置共享仓库。';
     const repositories = (sharedData.repositories || []).filter((item) => item.verified === true);
     const current = elements.sharedRepositorySelect.value;
@@ -907,6 +924,15 @@
     const login = sharedData.authenticated ? `已授权：${sharedData.login || 'GitHub 用户'}（${sharedData.userId || 'ID 已隐藏'}${method ? ` · ${method}` : ''}）` : '公共仓库目录可以直接浏览；上传和创建 Pull Request 需要 GitHub 授权。';
     elements.sharedAuthStatus.textContent = login;
     elements.sharedLogout.hidden = !sharedData.authenticated;
+    const gitAvailable = sharedGitAvailable();
+    // bundled Git 不可用（macOS）时：禁用浏览器登录 GitHub，并给出原因与恢复指引
+    elements.sharedLogin.disabled = !gitAvailable;
+    elements.sharedLogin.title = gitAvailable ? '' : sharedGitUnavailableReason();
+    const gitStatus = elements.sharedGitStatus;
+    if (gitStatus) {
+      gitStatus.hidden = gitAvailable;
+      if (!gitAvailable && gitStatus.textContent !== sharedGitUnavailableReason()) gitStatus.textContent = sharedGitUnavailableReason();
+    }
     renderSharedRepository();
     renderSharedCollections();
     renderSharedCatalog();
@@ -1058,6 +1084,11 @@
   }
 
   async function browserSharedLogin() {
+    if (!sharedGitAvailable()) {
+      // bundled Git 不可用（macOS）：浏览器登录依赖内置 Git 凭据环境，直接给出原因，避免点击后才报运行时错误
+      notify('GitHub 浏览器登录不可用', sharedGitUnavailableReason(), 'error');
+      return;
+    }
     setBusy(elements.sharedLogin, true, '等待浏览器授权');
     try { await window.orchestrator.sharedBrowserLogin(); await refresh(); notify('GitHub 授权成功', '已从项目内置 Git 凭据环境读取授权，可创建 Fork / Pull Request。', 'success'); }
     catch (error) { notify('GitHub 浏览器授权失败', error); }
@@ -1284,7 +1315,10 @@
     elements.sharedUploadPrepareRemove.disabled = !selectedPreparedTaskIds.size;
     const ownerMode = sharedRepositoryOwnerMode();
     elements.sharedUpload.textContent = ownerMode ? '创建分支 / PR' : '创建 Fork / PR';
-    elements.sharedUpload.disabled = !selectedItems.length || selectedItems.length > maximum || Boolean(sharedData.upload);
+    const gitAvailable = sharedGitAvailable();
+    // bundled Git 不可用（macOS）时：禁用创建 Fork / PR，并给出原因与恢复指引
+    elements.sharedUpload.disabled = !gitAvailable || !selectedItems.length || selectedItems.length > maximum || Boolean(sharedData.upload);
+    elements.sharedUpload.title = gitAvailable ? '' : sharedGitUnavailableReason();
     if (!selectedItems.length) {
       elements.sharedUploadPrepareList.innerHTML = '<div class="empty-state">从上方筛选结果中选择要共享的总结文档。</div>';
       return;
@@ -1314,6 +1348,11 @@
   }
 
   async function uploadShared() {
+    if (!sharedGitAvailable()) {
+      // bundled Git 不可用（macOS）：Fork / PR 依赖内置 Git 提交与推送，直接给出原因，避免点击后才报运行时错误
+      notify('无法创建共享 PR', sharedGitUnavailableReason(), 'error');
+      return;
+    }
     const taskIds = [...selectedUploadTaskIds];
     if (!taskIds.length) return notify('无法创建共享 PR', '请先把至少一篇总结文档加入准备上传列表。');
     const maximum = Number(sharedData.limits?.maxUploadDocuments || 1000);

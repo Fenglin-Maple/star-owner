@@ -1,4 +1,6 @@
 const assert = require('assert');
+const os = require('os');
+const path = require('path');
 const { LEGACY_BILI_SESSION, migrateLegacyBiliPartition, projectBiliPartition } = require('../src/core/bili-session');
 
 function createCookieSession(partitions, name) {
@@ -30,8 +32,19 @@ function createFailOnceCookieSession(partitions, name, failedCookieName) {
 }
 
 (async () => {
-  assert.notStrictEqual(projectBiliPartition('C:\\Star Owner A'), projectBiliPartition('C:\\Star Owner B'), 'different project roots shared a Bilibili partition');
-  assert.strictEqual(projectBiliPartition('C:\\Star Owner A'), projectBiliPartition('c:\\star owner a'), 'partition identity was not stable across Windows path casing');
+  // win32：大小写不敏感的分区身份（路径归一化小写）；darwin/POSIX：大小写敏感
+  if (process.platform === 'win32') {
+    assert.notStrictEqual(projectBiliPartition('C:\\Star Owner A'), projectBiliPartition('C:\\Star Owner B'), 'different project roots shared a Bilibili partition');
+    assert.strictEqual(projectBiliPartition('C:\\Star Owner A'), projectBiliPartition('c:\\star owner a'), 'partition identity was not stable across Windows path casing');
+  } else {
+    const rootA = projectBiliPartition('C:\\Star Owner A');
+    assert.notStrictEqual(rootA, projectBiliPartition('C:\\Star Owner B'), 'different project roots shared a Bilibili partition');
+    assert.notStrictEqual(rootA, projectBiliPartition('c:\\star owner a'), 'POSIX partition identity must stay case-sensitive (case folding is a win32-only semantic)');
+    assert.strictEqual(rootA, projectBiliPartition('C:\\Star Owner A'), 'partition identity was not stable for the identical project root');
+    const posixRoot = path.join(os.tmpdir(), 'Star Owner POSIX');
+    assert.strictEqual(projectBiliPartition(posixRoot), projectBiliPartition(posixRoot), 'POSIX partition identity was not stable for an identical absolute root');
+    assert.notStrictEqual(projectBiliPartition(posixRoot), projectBiliPartition(path.join(os.tmpdir(), 'Star Owner POSIX B')), 'different POSIX project roots shared a Bilibili partition');
+  }
 
   const partitions = new Map();
   const sessionModule = { fromPartition: (name) => createCookieSession(partitions, name) };

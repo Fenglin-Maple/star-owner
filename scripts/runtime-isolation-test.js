@@ -35,7 +35,10 @@ assert.strictEqual(path.resolve(node.executable), path.resolve(process.execPath)
 assert(!String(node.env.PATH).toLowerCase().includes('fake-global-node'), 'Node child inherited a global PATH entry');
 
 const asr = serviceEnvironment(root);
-assert.strictEqual(path.resolve(asr.PYTHONPATH), path.resolve(root, 'runtime', 'faster-whisper', 'Lib', 'site-packages'));
+const expectedSitePackages = process.platform === 'win32'
+  ? path.resolve(root, 'runtime', 'faster-whisper', 'Lib', 'site-packages')
+  : path.join(root, 'runtime', 'faster-whisper', 'lib', 'python3.12', 'site-packages');
+assert.strictEqual(path.resolve(asr.PYTHONPATH), expectedSitePackages);
 assert(!String(asr.PATH).toLowerCase().includes('global-tools'), 'ASR service inherited a global PATH entry');
 assert.strictEqual(asr.FASTER_WHISPER_BIN, undefined);
 

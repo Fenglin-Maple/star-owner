@@ -50,15 +50,33 @@ class DependencyManager {
     if (isDarwin) {
       // macOS：本地配置模式（MLX Whisper + 系统/本地 Python），模型由 HuggingFace mlx-community 仓库下载，
       // 不通过 GitHub Release 资源安装，因此 assetName/assetPattern 置空。
-      const modelWeightsProbe = (model) => {
+      // 收集模型目录全部必需权重文件（相对路径数组，排序保证确定性，manifest/健康检查/就绪判断共用）：
+      // 1) 存在 model.safetensors.index.json → 解析 weight_map，探针 = index.json + 其引用的全部分片（去重排序）
+      // 2) 否则 → 目录内全部 *.safetensors（排序）
+      // 3) 都没有 → 回退 weights.npz（老格式小模型）；目录缺失时也返回占位路径，让 probes-missing 生效
+      const modelWeightProbes = (model) => {
         const relativeDir = `runtime/models/${model.id}`;
         const absoluteDir = path.join(this.projectRoot, relativeDir);
-        if (fs.existsSync(path.join(absoluteDir, 'weights.npz'))) return `${relativeDir}/weights.npz`;
+        const rel = (name) => `${relativeDir}/${name}`;
         if (fs.existsSync(absoluteDir)) {
-          const safetensors = fs.readdirSync(absoluteDir).find((name) => name.endsWith('.safetensors'));
-          if (safetensors) return `${relativeDir}/${safetensors}`;
+          const indexFile = path.join(absoluteDir, 'model.safetensors.index.json');
+          if (fs.existsSync(indexFile)) {
+            try {
+              const index = JSON.parse(fs.readFileSync(indexFile, 'utf8').replace(/^\uFEFF/, ''));
+              const shards = Object.keys(index.weight_map || {}).map((key) => String(index.weight_map[key]));
+              const uniqueShards = [...new Set(shards)].filter((name) => name.endsWith('.safetensors')).sort();
+              if (uniqueShards.length) return [rel('model.safetensors.index.json'), ...uniqueShards.map(rel)];
+            } catch (error) {
+              // index 损坏：仍把 index.json 纳入探针，防止篡改逃逸；分片按目录扫描兜底
+            }
+            const scanned = fs.readdirSync(absoluteDir).filter((name) => name.endsWith('.safetensors')).sort();
+            if (scanned.length) return [rel('model.safetensors.index.json'), ...scanned.map(rel)];
+          }
+          const safetensors = fs.readdirSync(absoluteDir).filter((name) => name.endsWith('.safetensors')).sort();
+          if (safetensors.length) return safetensors.map(rel);
+          if (fs.existsSync(path.join(absoluteDir, 'weights.npz'))) return [rel('weights.npz')];
         }
-        return `${relativeDir}/weights.npz`;
+        return [rel('weights.npz')];
       };
       return [
         {
@@ -87,7 +105,7 @@ class DependencyManager {
           assetPattern: '',
           // macOS 模型由 HuggingFace mlx-community 仓库下载，不提供 Release 下载按钮
           installHint: '请运行 npm run setup:mac 完成本地运行时安装（scripts/setup-macos-runtime.sh）',
-          probes: [`runtime/models/${model.id}/config.json`, modelWeightsProbe(model)]
+          probes: [`runtime/models/${model.id}/config.json`, ...modelWeightProbes(model)]
         }))
       ];
     }
@@ -487,6 +505,10 @@ class DependencyManager {
     throwIfDependencyCancelled(signal);
     this.update(definition.id, { status: 'resolving', progress: 0.01, message: '正在查询 GitHub Release 资源' });
     const release = await this.resolveReleaseAsset(definition, signal);
+    if (release?.unavailable === 'local-config') {
+      // macOS 本地配置模式：不提供 Release 资产下载，明确提示安装方式
+      throw new Error('macOS 本地配置模式不支持自动下载，请运行 npm run setup:mac 完成本地运行时安装。');
+    }
     const archive = path.join(this.downloadRoot, release.asset.name);
     const partial = `${archive}.partial`;
     this.update(definition.id, { status: 'resolving', source: release.asset.browser_download_url, progress: 0.015, message: '正在获取 SHA-256 校验信息' });
@@ -559,6 +581,11 @@ class DependencyManager {
   }
 
   async resolveReleaseAsset(definition, signal) {
+    // macOS 本地配置模式（assetName/assetPattern 均为空）：不解析 GitHub Release 资产，
+    // 直接返回不可用（避免生成 name='' + vundefined 的无效资产被 UI/下载流程消费）
+    if (!definition.assetName && !definition.assetPattern && !definition.fallbackAssetPattern) {
+      return { release: null, asset: null, fallback: false, directFallback: false, unavailable: 'local-config' };
+    }
     const candidates = [];
     const releaseUrls = [...new Set([
       `https://api.github.com/repos/${REPOSITORY}/releases/tags/v${this.dependencyVersion}`,

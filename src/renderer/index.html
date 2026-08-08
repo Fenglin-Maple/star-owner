@@ -810,6 +810,7 @@
                   <div class="shared-auth-card">
                     <div class="shared-auth-intro"><strong>GitHub 授权</strong><span>公共目录无需登录；上传和创建 Pull Request 才需要授权。</span></div>
                     <div class="shared-auth-primary"><button id="sharedLogin" class="primary-button" type="button">浏览器登录 GitHub</button><div id="sharedAuthStatus" class="local-selection-summary">尚未授权 GitHub。</div></div>
+                    <div id="sharedGitStatus" class="shared-git-status" hidden></div>
                     <details id="sharedAuthMore" class="shared-auth-more">
                       <summary>更多授权选项</summary>
                       <div class="shared-auth-more-body"><label class="shared-token-field"><span>备用：粘贴 Fine-grained Token</span><input id="sharedToken" type="password" autocomplete="off" placeholder="仅上传 / PR 需要" /></label><button id="sharedSetToken" class="secondary-button" type="button">保存 Token</button><div class="shared-auth-clear"><button id="sharedLogout" class="secondary-button compact-button danger-button" type="button" hidden>清除星藏家 GitHub 授权</button><small>清除应用数据库和内置 Git 私有存储中的令牌，用于切换提交账户；绝不清除系统 Git、系统凭据库或用户全局 Git 配置。</small></div></div>
@@ -998,7 +999,7 @@
     <div id="dependencyPromptModal" class="rag-modal dependency-prompt-modal" hidden>
       <section class="rag-modal-dialog compact" role="dialog" aria-modal="true" aria-labelledby="dependencyPromptTitle">
         <header><div><h2 id="dependencyPromptTitle">需要补全项目依赖</h2><p>首次启动检查发现运行时或默认 ASR 模型缺失。</p></div></header>
-        <div class="dependency-prompt-body"><div class="dependency-prompt-icon"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg></div><div><strong>从星藏家 GitHub Release 自动下载</strong><p>文件只会保存和解压到当前应用目录的 <code>runtime/</code>。下载过程会显示实时进度，并优先校验 Release 提供的 SHA-256。</p></div><div id="dependencyPromptMissing" class="chip-row"></div></div>
+        <div class="dependency-prompt-body"><div class="dependency-prompt-icon"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg></div><div><strong id="dependencyPromptMode">从星藏家 GitHub Release 自动下载</strong><p id="dependencyPromptModeText">文件只会保存和解压到当前应用目录的 <code>runtime/</code>。下载过程会显示实时进度，并优先校验 Release 提供的 SHA-256。</p></div><div id="dependencyPromptMissing" class="chip-row"></div></div>
         <footer><button id="dependencyPromptLater" class="secondary-button" type="button">稍后处理</button><span></span><span></span><button id="dependencyPromptDownload" class="primary-button" type="button">同意并开始下载</button></footer>
       </section>
     </div>

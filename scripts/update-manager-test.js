@@ -5,6 +5,12 @@ const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const { UpdateManager, cleanupManagedUpdateArtifacts, commandLineContainsProjectRoot, findRunningProjectProcesses, resolveCoreRelease, validateArchiveEntries, validateStagedPackage } = require('../src/core/update-manager');
 
+// macOS 应用内更新为暂缓项（当前仅 Windows 便携版语义）：非 win32 平台明确跳过并说明
+if (process.platform !== 'win32') {
+  console.log('跳过：应用内更新为 Windows 便携版语义（macOS 更新功能为暂缓项，见 MAC_ADAPTATION.md）');
+  process.exit(0);
+}
+
 function runPowerShell(script, args) {
   const result = runPowerShellResult(script, args);
   if (result.error) throw result.error;
