@@ -84,7 +84,7 @@ Node 侧 AsrService ──spawn──▶ tools/faster-whisper-service.py ──�
 | Service 模式：READY → transcribe ok=true → shutdown 正常 | ✅ |
 | Python 侧 ad-hoc 全量（py_compile/health/CLI/Service 协议） | ✅ 8/8 |
 | JS 侧验收（调度层/依赖/平台化契约） | ✅ 9/9 |
-| OpenCode 独立复核两轮（win32 保真 A 组 7/10 + 二阶段 4 项） | ✅ |
+| 独立复核两轮（win32 保真 A 组 7/10 + 二阶段 4 项） | ✅ |
 | manifest 校验（正常/篡改/删除/恢复） | ✅ 10/10 |
 | 集成：npm start 启动 + 单视频总结 + 收藏夹工作流真实跑通 | ✅ |
 | 退出行为（关窗口干净退出、无崩溃弹窗） | ✅ |
