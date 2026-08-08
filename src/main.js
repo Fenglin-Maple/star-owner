@@ -1252,14 +1252,20 @@ ipcMain.handle('dependencies:import-local', async (_event, packageId) => {
 ipcMain.handle('updates:state', async () => updateManager?.state() || null);
 ipcMain.handle('updates:check', async () => {
   assertBackendReady();
+  if (process.platform === 'darwin') {
+    // macOS 应用内更新为暂缓项（便携包更新为 Windows 语义）：明确返回不可用状态，UI 禁用相关操作
+    return { status: 'unsupported', message: 'macOS 暂不支持应用内更新（打包发布为后续阶段）。' };
+  }
   return updateManager.check();
 });
 ipcMain.handle('updates:prepare', async () => {
   assertBackendReady();
+  if (process.platform === 'darwin') throw new Error('macOS 暂不支持应用内更新（打包发布为后续阶段）。');
   return updateManager.prepare();
 });
 ipcMain.handle('updates:apply', async () => {
   assertBackendReady();
+  if (process.platform === 'darwin') throw new Error('macOS 暂不支持应用内更新（打包发布为后续阶段）。');
   const result = updateManager.launchPreparedUpdate();
   setImmediate(() => app.quit());
   return result;

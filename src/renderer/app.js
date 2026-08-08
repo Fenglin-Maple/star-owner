@@ -1675,6 +1675,14 @@ function renderUpdateState(state = runtime.update) {
   updateStatus.textContent = `${state.message || '尚未检查更新。'}${bytes}`;
   const available = state.status === 'available';
   const ready = state.status === 'ready' && state.prepared;
+  const unsupported = state.status === 'unsupported';
+  if (unsupported) {
+    // macOS 等平台：应用内更新不可用，禁用全部更新操作并显示原因
+    if (checkUpdateButton) checkUpdateButton.disabled = true;
+    if (prepareUpdateButton) prepareUpdateButton.disabled = true;
+    if (applyUpdateButton) applyUpdateButton.disabled = true;
+    return;
+  }
   if (checkUpdateButton) checkUpdateButton.disabled = ['checking', 'downloading', 'verifying', 'applying'].includes(state.status);
   if (prepareUpdateButton) prepareUpdateButton.disabled = !available || ['downloading', 'verifying', 'applying'].includes(state.status);
   if (applyUpdateButton) applyUpdateButton.disabled = !ready;

@@ -95,7 +95,7 @@ info() { printf '\033[33m%s\033[0m\n' "$1"; }
 resolve_uv() {
   # 1) PATH 中已有 uv：直接使用，不重复下载
   if command -v uv >/dev/null 2>&1; then
-    ok "使用 PATH 中的 uv：$(uv --version)"
+    ok "使用 PATH 中的 uv：$(uv --version)（注：脚本固定版本主张仅适用于自动下载到 runtime/uv/ 的路径）"
     UV_CMD="uv"
     return 0
   fi
@@ -151,7 +151,7 @@ resolve_uv() {
 
 # ---- 步骤 0：检查 node（步骤 7 生成依赖清单需要；源码方式 npm install 也已隐含此依赖） ----
 if ! command -v node >/dev/null 2>&1; then
-  echo "错误：未检测到 Node.js。macOS 源码方式需要 Node.js ≥ 20（用于 npm install 与生成依赖清单），" >&2
+  echo "错误：未检测到 Node.js。macOS 源码方式需要 Node.js ≥ 22（用于 npm install 与生成依赖清单），" >&2
   echo "请先安装 Node.js（https://nodejs.org/ 或 nvm），安装完成后重新运行本脚本。" >&2
   exit 1
 fi
