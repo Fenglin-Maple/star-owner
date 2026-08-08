@@ -50,11 +50,15 @@ GitHub 文档共享工具的完整设计、数据契约、Fork/PR 流程、挂�
 
 ### macOS（Apple Silicon，源码方式）
 
-macOS 目前以**源码方式**运行（开发者预览）：需要 Node.js ≥ 20（用于 `npm install` 与生成依赖清单）与可访问 HuggingFace 的网络；首次安装后运行时不依赖全局 Python / FFmpeg / uv（均自动安装到项目 `runtime/`）。
+macOS 目前以**源码方式**运行（开发者预览）：需要 **Node.js ≥ 22**（用于 `npm install` 与生成依赖清单；安装方式见 https://nodejs.org/ 或 nvm）与可访问 HuggingFace 的网络；首次安装后运行时不依赖全局 Python / FFmpeg / uv（均自动安装到项目 `runtime/`）。
 
-1. 克隆/下载本项目后，在项目根执行 `npm install`。
-2. 执行 `npm run setup:mac`：脚本自动把固定版本 uv 下载到项目 `runtime/uv/`（SHA-256 校验，不写入系统目录），并用它安装 Python 3.12、mlx-whisper、项目内 FFmpeg 与默认 `large-v3-turbo` 模型（约 1.6 GB）；可选模型用 `bash scripts/setup-macos-runtime.sh --model small` 补装。
-3. 双击项目根 `Start-StarOwner.command`（或 `npm start`）启动；API 端口以 `runtime/.api-port` 实际值为准。
+1. 获取源码：安装 git 后 `git clone https://github.com/Fenglin-Maple/star-owner.git`，或直接下载仓库 ZIP 并解压。
+2. 在项目根执行 `npm install`（会下载 Electron 二进制；网络受限时可先 `export ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"`）。
+3. 执行 `npm run setup:mac`：脚本自动把固定版本 uv 下载到项目 `runtime/uv/`（SHA-256 校验，不写入系统目录），并用它安装 Python 3.12、mlx-whisper、项目内 FFmpeg 与默认 `large-v3-turbo` 模型（约 1.6 GB）；可选模型用 `bash scripts/setup-macos-runtime.sh --model small` 补装。网络受限时可先 `export HF_ENDPOINT="https://hf-mirror.com"` 再运行。
+4. 双击项目根 `Start-StarOwner.command`（或 `npm start`）启动；API 端口以 `runtime/.api-port` 实际值为准。
+5. 首次使用需在「AI → AI 模型配置」填入 OpenAI 兼容的 API Key（如 DeepSeek / 火山方舟），应用内「第一次上手」引导会逐步完成配置、B站登录、收藏夹同步与工作流创建。
+
+**提示**：通过 ZIP 下载时，macOS 可能拦截未签名应用（提示「无法验证开发者」）——在访达中右键应用/脚本选择「打开」，或执行 `xattr -dr com.apple.quarantine <文件路径>` 解除隔离。
 
 `.dmg` 打包发布为后续阶段；macOS 上的应用内更新与内置 Git（GitHub 共享提交）暂不可用，界面会明确禁用并给出原因。
 

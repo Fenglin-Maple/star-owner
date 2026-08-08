@@ -26,6 +26,8 @@ const result = spawnSync(process.execPath, [installer], {
   windowsHide: true
 });
 if (result.status !== 0 || !fs.existsSync(binary)) {
-  console.error('Electron binary installation failed. See DEPLOYMENT.md for mirror and proxy troubleshooting.');
+  console.error('Electron 二进制安装失败。若网络受限，可设置镜像后重试：');
+  console.error('  export ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/" && npm install');
+  console.error('或使用代理：export HTTPS_PROXY="http://127.0.0.1:端口" && npm install');
   process.exit(result.status || 1);
 }
