@@ -1518,7 +1518,11 @@ class ToolRunner {
 
     if (action !== 'clean-cache') {
       args.push('--out', artifactDir);
+      // 收藏夹工作流用 collection.cookieFile；单例模式（视频总结-单个）无收藏夹，
+      // 登录后由 internal-agent-manager 导出到 task.cookieFile（B 站自 2026-08 起
+      // x/web-interface/view 无 cookie 必返 412 request was banned）
       if (collection?.cookieFile && fs.existsSync(collection.cookieFile)) args.push('--cookies', collection.cookieFile);
+      else if (task?.cookieFile && fs.existsSync(task.cookieFile)) args.push('--cookies', task.cookieFile);
       if (task.page) args.push('--page', String(task.page));
       if (task.cid) args.push('--cid', String(task.cid));
     } else if (options.preserveProcessCache) {
