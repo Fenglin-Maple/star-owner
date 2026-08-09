@@ -83,7 +83,7 @@ let backendReady = false;
 let toolHealth = [];
 let pathSafety = null;
 let bootstrapStarted = false;
-const VOLATILE_ACTIVITY_TYPES = new Set(['collection-sync-progress', 'asr-progress', 'asr-service-log', 'video-cache-job-updated', 'video-cache-queue-updated', 'local-toolbox-job-created', 'local-toolbox-job-updated', 'local-toolbox-queue-updated', 'shared-upload-progress', 'shared-operation-progress']);
+const VOLATILE_ACTIVITY_TYPES = new Set(['collection-sync-progress', 'asr-progress', 'asr-service-log', 'video-cache-job-updated', 'video-cache-queue-updated', 'local-toolbox-job-created', 'local-toolbox-job-updated', 'local-toolbox-queue-updated', 'multipart-progress', 'shared-upload-progress', 'shared-operation-progress']);
 const pendingRagApprovals = new Map();
 const taskDisplayCoverCache = new Map();
 let bootstrapState = {
@@ -1513,7 +1513,7 @@ async function refreshToolHealth() {
 function publishEvent(event) {
   const record = { createdAt: new Date().toISOString(), ...event };
   if (store && !VOLATILE_ACTIVITY_TYPES.has(event.type)) {
-    const { cacheState, localToolbox, ...activity } = record;
+    const { cacheState, localToolbox, multiPart, ...activity } = record;
     store.recordActivity(activity);
   }
   mainWindow?.webContents.send('app:event', record);
@@ -1557,7 +1557,10 @@ function publishLocalToolboxEvent(event) {
 }
 
 function publishMultipartEvent(event) {
-  publishEvent(event);
+  // Live multi-P state is consumed only by its dedicated viewer. Sending the
+  // complete tree through app:event would also persist it and invalidate the
+  // application's global task snapshot several times per second.
+  if (event.type !== 'multipart-progress') publishEvent(event);
   mainWindow?.webContents.send('multipart:event', event);
 }
 

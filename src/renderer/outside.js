@@ -133,6 +133,7 @@
   let state = { jobs: [], videoCollections: [], documentCollections: [] };
   let multipartState = { collections: [], parents: [] };
   let multipartInspection = null;
+  let multipartCollectionSignature = '';
   let sharedData = { repository: null, authenticated: false, collections: [], mounts: [], documents: [] };
   let sharedCatalogData = { documents: [] };
   let snapshot = { tasks: [], collections: [] };
@@ -228,6 +229,7 @@
       sharedRepositoryCheckedForEntry = false;
       if (outsideBackendReady) ensureSharedRepositoryReady().catch(() => {});
     }
+    if (activeToolId === 'multipart') renderMultipart();
   }
 
   function closeOutsideTool({ focus = true } = {}) {
@@ -366,15 +368,19 @@
 
   function renderMultipartCollections() {
     const collections = multipartState.collections || [];
+    const signature = JSON.stringify(collections.map((item) => [String(item.id), String(item.name)]));
     const currentCollection = elements.multipartCollection.value;
-    elements.multipartCollection.innerHTML = `<option value="__new__">创建新收藏夹</option>${collections.map((item) => `<option value="${escAttr(item.id)}">${esc(item.name)}</option>`).join('')}`;
+    const currentViewer = elements.multipartViewerCollection.value;
+    if (signature !== multipartCollectionSignature) {
+      elements.multipartCollection.innerHTML = `<option value="__new__">创建新收藏夹</option>${collections.map((item) => `<option value="${escAttr(item.id)}">${esc(item.name)}</option>`).join('')}`;
+      elements.multipartViewerCollection.innerHTML = `<option value="">选择多P视频收藏夹</option>${collections.map((item) => `<option value="${escAttr(item.id)}">${esc(item.name)}</option>`).join('')}`;
+      multipartCollectionSignature = signature;
+    }
     if (collections.some((item) => item.id === currentCollection)) elements.multipartCollection.value = currentCollection;
     const defaultName = multipartInspection ? `${multipartInspection.title || multipartInspection.bvid} 多P` : '';
     const sameName = collections.find((item) => item.name === defaultName);
     if (!currentCollection || currentCollection === '__new__') elements.multipartCollection.value = sameName?.id || '__new__';
     if (!elements.multipartCollectionName.value) elements.multipartCollectionName.value = defaultName;
-    const currentViewer = elements.multipartViewerCollection.value;
-    elements.multipartViewerCollection.innerHTML = `<option value="">选择多P视频收藏夹</option>${collections.map((item) => `<option value="${escAttr(item.id)}">${esc(item.name)}</option>`).join('')}`;
     elements.multipartViewerCollection.value = collections.some((item) => item.id === currentViewer) ? currentViewer : (collections[0]?.id || '');
   }
 
@@ -471,9 +477,9 @@
       const pages = (parent.pages || []).map((page) => {
         const task = page.task || {};
         const checked = task.enabled !== false && (parent.selectedCids || []).map(String).includes(String(page.cid));
-        const displayStatus = task.pageState === 'removed' ? 'removed' : (task.displayStatus || (task.status === 'done' ? 'completed' : 'pending'));
+        const displayStatus = multipartDisplayStatus(task);
         const stateClass = `is-${displayStatus}`;
-        const progress = Math.max(0, Math.min(100, Number(task.progressPercent ?? (Number(task.progress || 0) * 100)) || 0));
+        const progress = multipartProgressPercent(task);
         const label = multipartPartStatusLabel(displayStatus);
         const phase = String(task.phase || label);
         const canStop = task.pageState !== 'removed' && task.status !== 'done' && task.enabled !== false && task.stopped !== true;
@@ -485,7 +491,7 @@
               ? { action: 'retry-part', label: '重试此 P', className: 'primary-button', disabled: false }
               : { action: 'stop-part', label: '停止此 P', className: 'secondary-button', disabled: !canStop };
         const errorTitle = task.error ? ` title="${escAttr(task.error)}"` : '';
-        return `<div class="multipart-parent-page ${stateClass}"${errorTitle}><div class="multipart-part-main"><input class="app-checkbox" type="checkbox" aria-label="选择 P${Number(page.page || 1)}" data-parent-id="${escAttr(parent.id)}" data-parent-page="${escAttr(page.cid)}" ${checked ? 'checked' : ''} ${task.pageState === 'removed' || task.status === 'done' ? 'disabled' : ''}/><div class="multipart-part-copy"><strong>P${Number(page.page || 1)} · ${esc(page.part || '')}</strong><small>${esc(label)} · CID ${esc(page.cid)} · ${formatDuration(page.duration)}</small></div><button class="${partAction.className} compact-button multipart-part-stop" type="button" data-multipart-action="${escAttr(partAction.action)}" data-parent-id="${escAttr(parent.id)}" data-part-id="${escAttr(page.cid)}" ${partAction.disabled ? 'disabled' : ''}>${esc(partAction.label)}</button></div><div class="multipart-part-progress"><div class="local-progress"><span style="width:${progress}%"></span></div><span>${Math.round(progress)}%</span></div><div class="multipart-part-phase">${esc(phase)}</div></div>`;
+        return `<div class="multipart-parent-page ${stateClass}" data-multipart-part-record data-parent-id="${escAttr(parent.id)}" data-part-id="${escAttr(page.cid)}"${errorTitle}><div class="multipart-part-main"><input class="app-checkbox" type="checkbox" aria-label="选择 P${Number(page.page || 1)}" data-parent-id="${escAttr(parent.id)}" data-parent-page="${escAttr(page.cid)}" ${checked ? 'checked' : ''} ${task.pageState === 'removed' || task.status === 'done' ? 'disabled' : ''}/><div class="multipart-part-copy"><strong>P${Number(page.page || 1)} · ${esc(page.part || '')}</strong><small data-multipart-part-status>${esc(label)} · CID ${esc(page.cid)} · ${formatDuration(page.duration)}</small></div><button class="${partAction.className} compact-button multipart-part-stop" type="button" data-multipart-action="${escAttr(partAction.action)}" data-parent-id="${escAttr(parent.id)}" data-part-id="${escAttr(page.cid)}" ${partAction.disabled ? 'disabled' : ''}>${esc(partAction.label)}</button></div><div class="multipart-part-progress"><div class="local-progress"><span data-multipart-part-progress-bar style="width:${progress}%"></span></div><span data-multipart-part-progress-text>${Math.round(progress)}%</span></div><div class="multipart-part-phase" data-multipart-part-phase>${esc(phase)}</div></div>`;
       }).join('');
       const progress = Math.max(0, Math.min(100, Math.round(Number(parent.progress || 0) * 100)));
       const running = Number(parent.running || 0);
@@ -496,7 +502,7 @@
       const batchActions = parent.activeSessions?.length
         ? `<button class="secondary-button compact-button" type="button" data-multipart-action="stop" data-parent-id="${escAttr(parent.id)}">停止全部</button>`
         : `${stopped ? `<button class="primary-button compact-button" type="button" data-multipart-action="resume-stopped" data-parent-id="${escAttr(parent.id)}">全部继续（${stopped}）</button>` : ''}${failed ? `<button class="primary-button compact-button" type="button" data-multipart-action="retry-failed" data-parent-id="${escAttr(parent.id)}">全部重试（${failed}）</button>` : ''}${pending ? `<button class="secondary-button compact-button" type="button" data-multipart-action="start" data-parent-id="${escAttr(parent.id)}">继续选中</button>` : ''}`;
-      return `<article class="multipart-parent-record" data-parent-record="${escAttr(parent.id)}"><div class="multipart-parent-head"><div><strong>${esc(parent.title)}</strong><small>${esc(parent.bvid)} · ${esc(parent.collectionName || '')} · ${status}</small></div><div class="multipart-parent-actions"><button class="secondary-button compact-button" type="button" data-multipart-action="refresh" data-parent-id="${escAttr(parent.id)}">刷新 P</button>${batchActions}<button class="secondary-button compact-button danger-button" type="button" data-multipart-action="delete" data-parent-id="${escAttr(parent.id)}">删除</button></div></div><div class="local-progress"><span style="width:${progress}%"></span></div><div class="multipart-parent-summary">${parent.completed}/${parent.total} P · ${progress}% · ${esc(status)}</div><details class="multipart-parent-details" data-multipart-details data-parent-id="${escAttr(parent.id)}" ${expandedMultipartParents.has(parent.id) ? 'open' : ''}><summary><span>子 P 任务明细</span><small>${esc(detailSummary)}${failed ? ` · ${failed} 个失败` : ''}</small></summary><div class="multipart-parent-pages">${pages}</div></details></article>`;
+      return `<article class="multipart-parent-record" data-parent-record="${escAttr(parent.id)}"><div class="multipart-parent-head"><div><strong>${esc(parent.title)}</strong><small>${esc(parent.bvid)} · ${esc(parent.collectionName || '')} · ${status}</small></div><div class="multipart-parent-actions"><button class="secondary-button compact-button" type="button" data-multipart-action="refresh" data-parent-id="${escAttr(parent.id)}">刷新 P</button>${batchActions}<button class="secondary-button compact-button danger-button" type="button" data-multipart-action="delete" data-parent-id="${escAttr(parent.id)}">删除</button></div></div><div class="local-progress"><span data-multipart-parent-progress style="width:${progress}%"></span></div><div class="multipart-parent-summary" data-multipart-parent-summary>${parent.completed}/${parent.total} P · ${progress}% · ${esc(status)}</div><details class="multipart-parent-details" data-multipart-details data-parent-id="${escAttr(parent.id)}" ${expandedMultipartParents.has(parent.id) ? 'open' : ''}><summary><span>子 P 任务明细</span><small data-multipart-parent-detail-summary>${esc(detailSummary)}${failed ? ` · ${failed} 个失败` : ''}</small></summary><div class="multipart-parent-pages">${pages}</div></details></article>`;
     }).join('') : '<div class="empty-state">这个收藏夹还没有多P父任务。</div>';
     for (const details of elements.multipartParentList.querySelectorAll('[data-multipart-details]')) {
       details.addEventListener('toggle', () => {
@@ -505,6 +511,57 @@
         else expandedMultipartParents.delete(parentId);
       });
     }
+  }
+
+  function updateMultipartProgressView() {
+    if (activeToolId !== 'multipart') return;
+    const selectedCollectionId = elements.multipartViewerCollection.value;
+    if (!selectedCollectionId) return;
+    const parents = (multipartState.parents || []).filter((parent) => String(parent.collectionId) === String(selectedCollectionId));
+    const records = new Map([...elements.multipartParentList.querySelectorAll('[data-parent-record]')].map((record) => [String(record.dataset.parentRecord), record]));
+    if (parents.length !== records.size || parents.some((parent) => !records.has(String(parent.id)))) {
+      renderMultipart();
+      return;
+    }
+    for (const parent of parents) {
+      const record = records.get(String(parent.id));
+      const progress = Math.max(0, Math.min(100, Math.round(Number(parent.progress || 0) * 100)));
+      const status = parentStatusLabel(parent.status);
+      const parentBar = record.querySelector('[data-multipart-parent-progress]');
+      const parentSummary = record.querySelector('[data-multipart-parent-summary]');
+      const detailSummary = record.querySelector('[data-multipart-parent-detail-summary]');
+      if (parentBar) parentBar.style.width = `${progress}%`;
+      if (parentSummary) parentSummary.textContent = `${parent.completed}/${parent.total} P · ${progress}% · ${status}`;
+      if (detailSummary) {
+        detailSummary.textContent = [`${parent.total} 个子 P`, parent.running ? `${parent.running} 个处理中` : '', parent.stopped ? `${parent.stopped} 个已停止` : '', parent.failed ? `${parent.failed} 个失败` : ''].filter(Boolean).join(' · ');
+      }
+      const rows = new Map([...record.querySelectorAll('[data-multipart-part-record]')].map((row) => [String(row.dataset.partId), row]));
+      for (const page of parent.pages || []) {
+        const row = rows.get(String(page.cid));
+        if (!row) { renderMultipart(); return; }
+        const task = page.task || {};
+        const displayStatus = multipartDisplayStatus(task);
+        const partProgress = multipartProgressPercent(task);
+        row.classList.remove('is-pending', 'is-running', 'is-stopped', 'is-failed', 'is-completed', 'is-removed');
+        row.classList.add(`is-${displayStatus}`);
+        const statusText = row.querySelector('[data-multipart-part-status]');
+        const progressBar = row.querySelector('[data-multipart-part-progress-bar]');
+        const progressText = row.querySelector('[data-multipart-part-progress-text]');
+        const phase = row.querySelector('[data-multipart-part-phase]');
+        if (statusText) statusText.textContent = `${multipartPartStatusLabel(displayStatus)} · CID ${page.cid} · ${formatDuration(page.duration)}`;
+        if (progressBar) progressBar.style.width = `${partProgress}%`;
+        if (progressText) progressText.textContent = `${Math.round(partProgress)}%`;
+        if (phase) phase.textContent = String(task.phase || multipartPartStatusLabel(displayStatus));
+      }
+    }
+  }
+
+  function multipartDisplayStatus(task = {}) {
+    return task.pageState === 'removed' ? 'removed' : (task.displayStatus || (task.status === 'done' ? 'completed' : 'pending'));
+  }
+
+  function multipartProgressPercent(task = {}) {
+    return Math.max(0, Math.min(100, Number(task.progressPercent ?? (Number(task.progress || 0) * 100)) || 0));
   }
 
   function parentStatusLabel(status) { return ({ pending: '待开始', running: '处理中', partial: '部分完成', stopped: '已停止', failed: '处理失败', completed: '已完成' })[status] || status || '未知'; }
@@ -577,7 +634,9 @@
       }
       else if (action === 'delete') {
         if (!window.confirm('确定删除这个多P父任务及其所有已完成 P 产物吗？')) return;
-        await window.orchestrator.multiPartDelete(parentId);
+        setBusy(button, true, '删除中');
+        try { await window.orchestrator.multiPartDelete(parentId); }
+        finally { if (button.isConnected) setBusy(button, false, '删除'); }
       }
       await refresh();
     } catch (error) { notify('多P父任务操作失败', error); }
@@ -1909,7 +1968,13 @@
     else refresh().catch(() => {});
   });
   window.orchestrator.onMultipartEvent((event) => {
-    if (event.multiPart) { multipartRefreshGate.next(); multipartState = event.multiPart; renderMultipart(); renderOutsideCards(); }
+    if (event.multiPart) {
+      multipartRefreshGate.next();
+      multipartState = event.multiPart;
+      if (event.type === 'multipart-progress') updateMultipartProgressView();
+      else renderMultipart();
+      renderOutsideCards();
+    }
     else refresh().catch(() => {});
   });
   window.orchestrator.onSharedEvent((event) => {

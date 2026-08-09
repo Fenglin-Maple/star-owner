@@ -9,6 +9,14 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   fs.rmSync(root, { recursive: true, force: true });
   fs.mkdirSync(root, { recursive: true });
   const store = await Store.open(path.join(root, 'test.sqlite'));
+  store.delete('settings', 'multipartActivityCompaction');
+  store.set('activities', 'legacy-multipart-progress', { id: 'legacy-multipart-progress', type: 'multipart-progress', multiPart: { parents: [{ id: 'large-live-tree' }] } });
+  store.set('activities', 'legacy-multipart-terminal', { id: 'legacy-multipart-terminal', type: 'multipart-parent-started', parentId: 'parent-1', multiPart: { parents: [{ id: 'large-terminal-tree' }] } });
+  store.commit();
+  const activityMigration = store.migrateMultipartActivityPayloads();
+  assert.strictEqual(activityMigration.removed, 1, 'legacy multipart progress activity was not removed');
+  assert.strictEqual(store.get('activities', 'legacy-multipart-progress'), null, 'legacy multipart progress activity remained in the database');
+  assert.strictEqual(store.get('activities', 'legacy-multipart-terminal').multiPart, undefined, 'redundant multipart tree remained in a terminal activity');
   const workspace = store.addWorkspace({ name: '多P测试', root: path.join(root, 'workspace') });
   store.setDefaultWorkspace(workspace.id);
   store.set('ragProviders', 'provider-multipart', {
@@ -64,13 +72,14 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
     },
     deleteSession: (id) => sessions.delete(id)
   };
+  const emittedEvents = [];
   const manager = new MultiPartManager({
     store,
     bili,
     internalAgentManager,
     ragAssistant: { rawProvider: (id) => store.get('ragProviders', id) },
     getCurrentUser: () => ({ isLogin: true, id: '42', mid: '42', name: '测试作者', cookieFile }),
-    emit: () => {}
+    emit: (event) => emittedEvents.push(event)
   });
 
   assert.throws(() => assertMultipartVideoSupported({ url: 'https://www.bilibili.com/bangumi/play/ep1' }, { pages: [{ cid: '101' }, { cid: '102' }] }), /PGC/);
@@ -158,9 +167,32 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   const livePart = manager.state().parents[0].parts.find((item) => item.cid === '102');
   assert(livePart.displayStatus === 'running' && livePart.progressPercent === 42 && livePart.phase === '模型正在撰写', '子 P 没有暴露独立实时进度和阶段');
   assert(manager.state().parents[0].progress > 0.25, '父任务总进度没有汇总正在运行的子 P 进度');
+  const originalListTasks = store.listTasks.bind(store);
+  const originalStatSync = fs.statSync;
+  let listTaskCalls = 0;
+  let artifactStatCalls = 0;
+  store.listTasks = (...args) => { listTaskCalls += 1; return originalListTasks(...args); };
+  fs.statSync = (target, ...args) => {
+    if (/\b(?:summary|index)\.md$/i.test(String(target))) artifactStatCalls += 1;
+    return originalStatSync(target, ...args);
+  };
   listSessionCalls = 0;
+  try {
+    manager.invalidatePartTaskCache();
+    manager.state({ reconcile: false });
+  } finally {
+    store.listTasks = originalListTasks;
+    fs.statSync = originalStatSync;
+  }
+  assert.strictEqual(listTaskCalls, 1, 'lightweight multipart state scanned all tasks more than once');
+  assert.strictEqual(listSessionCalls, 1, 'lightweight multipart state scanned Agent sessions more than once');
+  assert.strictEqual(artifactStatCalls, 0, 'live multipart progress revalidated Markdown artifacts from disk');
+  listSessionCalls = 0;
+  emittedEvents.length = 0;
   for (let index = 0; index < 1000; index += 1) manager.handleAgentEvent({ type: 'stream', sessionId: sessionOne.id, parentId: created.id, mode: 'multipart' });
   assert.strictEqual(listSessionCalls, 0, '多P流式增量仍在每个 token 上扫描全部 Agent 会话');
+  await new Promise((resolve) => setTimeout(resolve, 850));
+  assert.strictEqual(emittedEvents.filter((event) => event.type === 'multipart-progress').length, 1, 'burst multi-part progress produced more than one viewer update per throttle window');
 
   failNextStart = true;
   const stoppedPart = await manager.stopPart({ parentId: created.id, cid: '102' });
@@ -268,7 +300,13 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   }
   store.commit();
 
-  await manager.delete(created.id);
+  const deletionLoad = path.join(parentRoot, 'delete-load');
+  fs.mkdirSync(deletionLoad, { recursive: true });
+  for (let index = 0; index < 300; index += 1) fs.writeFileSync(path.join(deletionLoad, `file-${index}.txt`), 'delete asynchronously', 'utf8');
+  const deletion = manager.delete(created.id);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert(store.get('multiPartParents', created.id), 'multipart deletion blocked the event loop until all files were removed');
+  await deletion;
   assert.strictEqual(store.get('multiPartParents', created.id), null, '多P父任务没有删除');
   assert.strictEqual(store.listTasks({ collectionId: created.collectionId }).length, 0, '多P父任务删除后仍残留任务');
   assert.strictEqual(fs.existsSync(created.parentRoot || ''), false, '多P产物目录没有删除');

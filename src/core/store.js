@@ -6,6 +6,7 @@ const { recoverAtomicFile, restoreAtomicBackup, writeFileRecoverable } = require
 const { DEFAULT_FILENAME_METADATA, WORKSPACE_ROOT, ensureDir, normalizeFilenameMetadata, normalizeTags } = require('./workspace');
 
 const DB_FILE = path.join(WORKSPACE_ROOT, 'orchestrator.sqlite');
+const MULTIPART_ACTIVITY_COMPACTION_VERSION = 1;
 
 // Only fields whose application schema defines them as filesystem paths may be
 // rewritten when a portable installation moves. User prompts and chat text can
@@ -94,6 +95,7 @@ class Store {
     this.initDefaultTools();
     this.migrateLegacyTasks();
     this.migrateCompletedTaskMetadata();
+    this.migrateMultipartActivityPayloads();
     this.save();
   }
 
@@ -531,6 +533,26 @@ class Store {
     this.set('activities', id, record);
     this.save();
     return record;
+  }
+
+  migrateMultipartActivityPayloads() {
+    const markerId = 'multipartActivityCompaction';
+    const marker = this.get('settings', markerId) || {};
+    if (Number(marker.version || 0) >= MULTIPART_ACTIVITY_COMPACTION_VERSION) return { removed: 0, compacted: 0 };
+
+    const removed = Number(this.db.exec("SELECT COUNT(*) AS count FROM kv WHERE scope = 'activities' AND json_extract(data, '$.type') = 'multipart-progress'")?.[0]?.values?.[0]?.[0] || 0);
+    const compacted = Number(this.db.exec("SELECT COUNT(*) AS count FROM kv WHERE scope = 'activities' AND json_type(data, '$.multiPart') IS NOT NULL")?.[0]?.values?.[0]?.[0] || 0);
+    if (removed) this.db.run("DELETE FROM kv WHERE scope = 'activities' AND json_extract(data, '$.type') = 'multipart-progress'");
+    if (compacted) this.db.run("UPDATE kv SET data = json_remove(data, '$.multiPart') WHERE scope = 'activities' AND json_type(data, '$.multiPart') IS NOT NULL");
+    this.set('settings', markerId, {
+      id: markerId,
+      version: MULTIPART_ACTIVITY_COMPACTION_VERSION,
+      removed,
+      compacted,
+      updatedAt: new Date().toISOString()
+    });
+    if (removed || compacted) this.db.run('VACUUM');
+    return { removed, compacted };
   }
 
   initDefaultWorkspace() {

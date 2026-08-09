@@ -258,6 +258,24 @@ function removePathInside(parent, candidate, { allowRoot = false } = {}) {
   return true;
 }
 
+async function removePathInsideAsync(parent, candidate, { allowRoot = false } = {}) {
+  const resolvedParent = path.resolve(parent);
+  const resolvedCandidate = assertInside(resolvedParent, candidate);
+  if (!allowRoot && sameFilesystemPath(resolvedCandidate, resolvedParent)) {
+    throw new Error(`Refusing to remove the managed root itself: ${resolvedCandidate}`);
+  }
+  try {
+    await fs.promises.lstat(resolvedCandidate);
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+  assertNoLinkedParent(resolvedParent, resolvedCandidate);
+  const realParent = await fs.promises.realpath(resolvedParent);
+  await removeWithoutFollowingLinksAsync(resolvedCandidate, realParent);
+  return true;
+}
+
 function assertNoLinkedParent(parent, candidate) {
   const segments = path.relative(parent, candidate).split(path.sep).filter(Boolean);
   let current = parent;
@@ -300,6 +318,43 @@ function removeEmptyDirectory(target) {
   throw lastError;
 }
 
+async function removeWithoutFollowingLinksAsync(target, realParent) {
+  let stat;
+  try {
+    stat = await fs.promises.lstat(target);
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  if (stat.isSymbolicLink()) {
+    await fs.promises.unlink(target);
+    return;
+  }
+  assertInside(realParent, await fs.promises.realpath(target));
+  if (!stat.isDirectory()) {
+    await fs.promises.rm(target, { force: true, maxRetries: 8, retryDelay: 150 });
+    return;
+  }
+  for (const name of await fs.promises.readdir(target)) await removeWithoutFollowingLinksAsync(path.join(target, name), realParent);
+  await removeEmptyDirectoryAsync(target);
+}
+
+async function removeEmptyDirectoryAsync(target) {
+  let lastError;
+  for (let attempt = 0; attempt < 9; attempt += 1) {
+    try {
+      await fs.promises.rmdir(target);
+      return;
+    } catch (error) {
+      if (error.code === 'ENOENT') return;
+      lastError = error;
+      if (!['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(error.code) || attempt === 8) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
 function sameFilesystemPath(left, right) {
   const normalize = (value) => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
   return normalize(left) === normalize(right);
@@ -333,6 +388,7 @@ module.exports = {
   normalizeFilenameMetadata,
   normalizeTags,
   removePathInside,
+  removePathInsideAsync,
   safeName,
   timestampForFile,
   userCookiesDir,

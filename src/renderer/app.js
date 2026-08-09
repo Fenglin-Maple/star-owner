@@ -181,6 +181,7 @@ const SNAPSHOT_IGNORED_EVENTS = new Set([
   'video-cache-queue-updated',
   'local-toolbox-job-updated',
   'local-toolbox-queue-updated',
+  'multipart-progress',
   'shared-upload-progress'
 ]);
 

@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { collectionDirs, ensureDir, safeName, assertInside, removePathInside } = require('./workspace');
+const { collectionDirs, ensureDir, safeName, assertInside, removePathInsideAsync } = require('./workspace');
 const { unsupportedBilibiliUrlReason } = require('./video-support');
 
 const MULTIPART_KIND = 'bilibili-multipart';
@@ -12,6 +12,7 @@ const MAX_INDEX_PART_SUMMARY_CHARACTERS = 8000;
 const VIDEO_INFO_CACHE_TTL_MS = 30 * 1000;
 const VIDEO_INFO_CACHE_LIMIT = 8;
 const BILIBILI_RISK_CONTROL_RETRIES = 3;
+const MULTIPART_PROGRESS_EMIT_INTERVAL_MS = 800;
 
 class MultiPartManager {
   constructor({ store, bili, internalAgentManager, ragAssistant, getCurrentUser, emit }) {
@@ -30,16 +31,25 @@ class MultiPartManager {
     this.refreshStoredIndexes();
   }
 
-  state() {
-    const parents = this.store.list('multiPartParents').map((parent) => {
-      // A task can be changed by an Agent worker between renderer updates. Drop
-      // the short-lived cache before reconciling so completion never depends on
-      // which parent happened to be read first.
-      this.invalidatePartTaskCache(parent.id);
-      this.reconcileParentArtifacts(parent);
-      const current = this.store.get('multiPartParents', parent.id) || parent;
-      return this.publicParent(current, { reconcile: false });
-    });
+  state({ reconcile = true } = {}) {
+    const storedParents = this.store.list('multiPartParents');
+    if (reconcile) {
+      for (const parent of storedParents) {
+        // Explicit state reads remain the repair boundary for legacy or missing
+        // artifacts. Live progress events use the lightweight path below.
+        this.invalidatePartTaskCache(parent.id);
+        this.reconcileParentArtifacts(parent);
+      }
+    }
+    const currentParents = storedParents.map((parent) => this.store.get('multiPartParents', parent.id) || parent);
+    const partsByParent = this.partTasksByParent(currentParents.map((parent) => parent.id));
+    const sessionsByParent = this.activeSessionsByParent(currentParents.map((parent) => parent.id));
+    const parents = currentParents.map((parent) => this.publicParent(parent, {
+      reconcile: false,
+      verifyArtifacts: false,
+      parts: partsByParent.get(parent.id) || [],
+      active: sessionsByParent.get(parent.id) || []
+    }));
     return {
       collections: this.collections().map(publicCollection),
       parents: parents.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
@@ -309,11 +319,11 @@ class MultiPartManager {
     const taskIds = [parent.id, ...this.partTasks(parent.id).map((task) => task.id)];
     for (const taskId of taskIds) {
       const task = this.store.getTask(taskId);
-      if (task?.artifactDir && fs.existsSync(task.artifactDir)) removePathInside(task.allowedRoot || parent.parentRoot, task.artifactDir);
+      if (task?.artifactDir && fs.existsSync(task.artifactDir)) await removePathInsideAsync(task.allowedRoot || parent.parentRoot, task.artifactDir);
       this.store.delete('tasks', taskId);
       this.store.delete('videos', taskId);
     }
-    if (fs.existsSync(parent.parentRoot)) removePathInside(collection.collectionRoot, parent.parentRoot);
+    if (fs.existsSync(parent.parentRoot)) await removePathInsideAsync(collection.collectionRoot, parent.parentRoot);
     this.store.delete('multiPartParents', parent.id);
     if (collection) this.store.set('collections', collection.id, { ...collection, videoCount: this.store.listTasks({ collectionId: collection.id }).length, updatedAt: new Date().toISOString() });
     this.store.save();
@@ -386,6 +396,30 @@ class MultiPartManager {
     return tasks;
   }
 
+  partTasksByParent(parentIds = []) {
+    const wanted = new Set(parentIds.map(String));
+    const grouped = new Map([...wanted].map((id) => [id, []]));
+    for (const task of this.store.listTasks()) {
+      const parentId = String(task.multiPartParentId || '');
+      if (task.multiPartRole === 'part' && wanted.has(parentId)) grouped.get(parentId).push(task);
+    }
+    const createdAt = Date.now();
+    for (const [parentId, tasks] of grouped) this.partTaskCache.set(parentId, { createdAt, tasks });
+    return grouped;
+  }
+
+  activeSessionsByParent(parentIds = []) {
+    const wanted = new Set(parentIds.map(String));
+    const grouped = new Map([...wanted].map((id) => [id, []]));
+    for (const session of this.internalAgentManager.listSessions()) {
+      const parentId = String(session.multiPartParentId || '');
+      if (!wanted.has(parentId)) continue;
+      if (!ACTIVE_SESSION_STATUSES.has(session.status) && !this.internalAgentManager.running?.has(session.id)) continue;
+      grouped.get(parentId).push(session);
+    }
+    return grouped;
+  }
+
   reconcileParentArtifacts(parentInput, { writeIndex = true } = {}) {
     const parent = this.store.get('multiPartParents', String(parentInput?.id || '')) || parentInput;
     if (!parent?.id) return { changed: false, parent };
@@ -438,7 +472,7 @@ class MultiPartManager {
     this.invalidatePartTaskCache(parent.id);
     const refreshedParts = this.partTasks(parent.id);
     const active = this.activeSessions(parent.id);
-    const nextStatus = deriveMultipartParentStatus(parent, refreshedParts, active, { missingArtifactDetected });
+    const nextStatus = deriveMultipartParentStatus(parent, refreshedParts, active, { missingArtifactDetected, verifyArtifacts: false });
     const statusChanged = parent.status !== nextStatus;
     if (statusChanged) {
       parent.status = nextStatus;
@@ -792,19 +826,25 @@ class MultiPartManager {
     return /^https?:\/\//i.test(String(parent.cover || '').trim()) ? String(parent.cover).trim() : '';
   }
 
-  publicParent(parent, { reconcile = true } = {}) {
-    if (reconcile) this.reconcileParentArtifacts(parent);
+  publicParent(parent, { reconcile = true, verifyArtifacts = true, parts = null, active = null } = {}) {
+    if (reconcile) {
+      this.reconcileParentArtifacts(parent);
+      verifyArtifacts = false;
+      parts = null;
+      active = null;
+    }
     parent = this.store.get('multiPartParents', parent.id) || parent;
-    const parts = this.partTasks(parent.id).sort((a, b) => Number(a.page || 0) - Number(b.page || 0));
-    const active = this.activeSessions(parent.id);
-    const sessionsByTask = new Map(active
+    const resolvedParts = (parts || this.partTasks(parent.id)).sort((a, b) => Number(a.page || 0) - Number(b.page || 0));
+    const resolvedActive = active || this.activeSessions(parent.id);
+    const sessionsByTask = new Map(resolvedActive
       .filter((session) => session.currentTaskId)
       .map((session) => [String(session.currentTaskId), session]));
-    const publicParts = parts.map((task) => publicPart(task, sessionsByTask.get(String(task.id))));
-    const completed = parts.filter((task) => task.status === 'done' && multipartArtifactReady(task)).length;
-    const running = parts.filter((task) => sessionsByTask.has(String(task.id))).length;
-    const stopped = parts.filter((task) => task.multiPartStopped === true).length;
-    const failed = parts.filter((task) => isMultipartTaskFailed(task)).length;
+    const tasksByCid = new Map(resolvedParts.map((task) => [String(task.cid), task]));
+    const publicParts = resolvedParts.map((task) => publicPart(task, sessionsByTask.get(String(task.id)), { verifyArtifacts }));
+    const completed = resolvedParts.filter((task) => task.status === 'done' && (!verifyArtifacts || multipartArtifactReady(task))).length;
+    const running = resolvedParts.filter((task) => sessionsByTask.has(String(task.id))).length;
+    const stopped = resolvedParts.filter((task) => task.multiPartStopped === true).length;
+    const failed = resolvedParts.filter((task) => isMultipartTaskFailed(task)).length;
     const progress = publicParts.length
       ? publicParts.reduce((total, task) => total + clampProgress(task.progress), 0) / publicParts.length
       : 0;
@@ -812,17 +852,17 @@ class MultiPartManager {
     return {
       ...publicParent,
       pages: (parent.pages || []).map((page) => {
-        const task = parts.find((item) => String(item.cid) === String(page.cid));
-        return { ...page, task: publicPart(task, sessionsByTask.get(String(task?.id || ''))) };
+        const task = tasksByCid.get(String(page.cid));
+        return { ...page, task: publicPart(task, sessionsByTask.get(String(task?.id || '')), { verifyArtifacts }) };
       }),
       parts: publicParts,
       completed,
-      total: parts.length,
+      total: resolvedParts.length,
       progress,
       running,
       stopped,
       failed,
-      activeSessions: active.map((session) => ({ id: session.id, status: session.status, title: session.title, currentTaskId: session.currentTaskId || '' }))
+      activeSessions: resolvedActive.map((session) => ({ id: session.id, status: session.status, title: session.title, currentTaskId: session.currentTaskId || '' }))
     };
   }
 
@@ -833,7 +873,7 @@ class MultiPartManager {
       clearTimeout(timer);
       this.stateEmitTimers.delete(key);
     }
-    this.emit({ type, parentId, multiPart: this.state() });
+    this.emit({ type, parentId, multiPart: this.state({ reconcile: false }) });
   }
 
   scheduleStateEmit(parentId) {
@@ -841,8 +881,8 @@ class MultiPartManager {
     if (!key || this.stateEmitTimers.has(key)) return;
     const timer = setTimeout(() => {
       this.stateEmitTimers.delete(key);
-      this.emit({ type: 'multipart-progress', parentId: key, multiPart: this.state() });
-    }, 400);
+      this.emit({ type: 'multipart-progress', parentId: key, multiPart: this.state({ reconcile: false }) });
+    }, MULTIPART_PROGRESS_EMIT_INTERVAL_MS);
     timer.unref?.();
     this.stateEmitTimers.set(key, timer);
   }
@@ -919,10 +959,10 @@ function parentIdFor(bvid, collectionId) {
 }
 
 function extractBvid(value) { return String(value || '').match(/BV[0-9A-Za-z]{10}/i)?.[0] || ''; }
-function deriveMultipartParentStatus(parent = {}, parts = [], activeSessions = [], { missingArtifactDetected = false } = {}) {
+function deriveMultipartParentStatus(parent = {}, parts = [], activeSessions = [], { missingArtifactDetected = false, verifyArtifacts = true } = {}) {
   if (activeSessions.length) return 'running';
   const available = parts.filter((task) => task.pageState !== 'removed');
-  const completed = available.filter((task) => task.status === 'done' && multipartArtifactReady(task)).length;
+  const completed = available.filter((task) => task.status === 'done' && (!verifyArtifacts || multipartArtifactReady(task))).length;
   if (available.length > 0 && completed === available.length) return 'completed';
   // A user stop is a meaningful terminal UI state. Keep it until the user
   // explicitly resumes the parent, unless reconciliation found a completed
@@ -967,10 +1007,10 @@ function assertMultipartVideoSupported(input, info) {
   if (rights.arc_pay || rights.is_ugc_pay) throw new Error('当前多P工具不支持付费或特殊权限视频。');
 }
 function publicPage(page) { return { page: Number(page.page || 1), cid: String(page.cid || ''), part: String(page.part || ''), duration: Number(page.duration || 0) }; }
-function publicPart(task, session = null) {
+function publicPart(task, session = null, { verifyArtifacts = true } = {}) {
   if (!task) return null;
   const active = Boolean(session && session.currentTaskId === task.id);
-  const completed = task.status === 'done' && multipartArtifactReady(task);
+  const completed = task.status === 'done' && (!verifyArtifacts || multipartArtifactReady(task));
   const progress = completed
     ? 1
     : active
