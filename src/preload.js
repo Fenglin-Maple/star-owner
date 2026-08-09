@@ -86,7 +86,7 @@ contextBridge.exposeInMainWorld('orchestrator', {
   localDocumentStart: (payload) => ipcRenderer.invoke('local-tools:document-start', payload),
   localToolCancel: (jobId) => ipcRenderer.invoke('local-tools:cancel', jobId),
   localToolOpenOutput: (jobId) => ipcRenderer.invoke('local-tools:open-output', jobId),
-  multiPartState: () => ipcRenderer.invoke('multipart:state'),
+  multiPartState: (options = {}) => ipcRenderer.invoke('multipart:state', options),
   multiPartInspect: (payload) => ipcRenderer.invoke('multipart:inspect', payload),
   multiPartCreate: (payload) => ipcRenderer.invoke('multipart:create', payload),
   multiPartRefresh: (parentId) => ipcRenderer.invoke('multipart:refresh', parentId),

@@ -40,6 +40,7 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   const sessions = new Map();
   const deletedSessionCalls = [];
   let failNextStart = false;
+  let simulateSessionPersistence = false;
   let listSessionCalls = 0;
   const internalAgentManager = {
     running: new Map(),
@@ -48,6 +49,7 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
       const sequence = sessions.size + 1;
       const session = { id: `session-${sequence}`, workerId: `worker-${sequence}`, status: 'idle', progress: 0, phase: '', currentTaskId: '', ...input };
       sessions.set(session.id, session);
+      if (simulateSessionPersistence) store.save();
       return session;
     },
     start: async (id) => {
@@ -57,6 +59,7 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
         throw new Error('模拟补位工作流启动失败');
       }
       session.status = 'running';
+      if (simulateSessionPersistence) store.save();
       return session;
     },
     stop: (id) => {
@@ -134,6 +137,21 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   assert(completedIndex.includes('##### 小结内要点'), 'P 小结内部标题没有降级到父目录层级之下');
   assert(!completedIndex.includes('不应复制到父目录的小结区域。'), '父目录错误复制了 P 小结之后的正文');
   assert(completedIndex.includes('该 P 尚未完成；完成后会自动在这里写入小结。'), '父目录没有显示未完成 P 的小结占位状态');
+  manager.partArtifactCache.clear();
+  manager.partSummaryCache.clear();
+  const originalReadFileSync = fs.readFileSync;
+  let repeatedSummaryReads = 0;
+  fs.readFileSync = (file, ...args) => {
+    if (path.resolve(String(file)) === path.resolve(partOne.preallocatedArtifactDir, 'summary.md')) repeatedSummaryReads += 1;
+    return originalReadFileSync(file, ...args);
+  };
+  try {
+    manager.writeIndex(store.get('multiPartParents', created.id));
+    manager.writeIndex(store.get('multiPartParents', created.id));
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+  }
+  assert.strictEqual(repeatedSummaryReads, 1, 'unchanged completed P summaries were reread on every parent index refresh');
 
   fs.writeFileSync(indexFile, '# 旧版目录\n', 'utf8');
   const startupManager = new MultiPartManager({
@@ -197,7 +215,9 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   for (let index = 0; index < 1000; index += 1) manager.handleAgentEvent({ type: 'stream', sessionId: sessionOne.id, parentId: created.id, mode: 'multipart' });
   assert.strictEqual(listSessionCalls, 0, '多P流式增量仍在每个 token 上扫描全部 Agent 会话');
   await new Promise((resolve) => setTimeout(resolve, 850));
-  assert.strictEqual(emittedEvents.filter((event) => event.type === 'multipart-progress').length, 1, 'burst multi-part progress produced more than one viewer update per throttle window');
+  const progressEvents = emittedEvents.filter((event) => event.type === 'multipart-progress');
+  assert.strictEqual(progressEvents.length, 1, 'burst multi-part progress produced more than one viewer update per throttle window');
+  assert(progressEvents[0].parent?.id === created.id && progressEvents[0].multiPart === undefined, 'live multi-part progress still emitted the complete collection/parent tree');
 
   failNextStart = true;
   const stoppedPart = await manager.stopPart({ parentId: created.id, cid: '102' });
@@ -290,7 +310,13 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   store.upsertTask({ id: `${stoppedParentId}:part:502`, collectionId: created.collectionId, bvid: 'BVCONSIST03', title: '已停止父任务 P2', status: 'pending', outputMarkdown: '', artifactDir: '', preallocatedArtifactDir: path.join(stoppedParentRoot, 'parts', 'cid-502'), multiPartRole: 'part', multiPartParentId: stoppedParentId, cid: '502', multiPartId: '502', page: 2, pageState: 'active', multiPartStopped: true });
   store.commit();
   manager.invalidatePartTaskCache();
-  const consistencyState = manager.state();
+  const consistencyListTasks = store.listTasks.bind(store);
+  let consistencyTaskScans = 0;
+  store.listTasks = (...args) => { consistencyTaskScans += 1; return consistencyListTasks(...args); };
+  let consistencyState;
+  try { consistencyState = manager.state(); }
+  finally { store.listTasks = consistencyListTasks; }
+  assert.strictEqual(consistencyTaskScans, 1, 'full multi-parent artifact reconciliation rescanned the complete task table per parent');
   const completeView = consistencyState.parents.find((item) => item.id === completeParentId);
   const incompleteView = consistencyState.parents.find((item) => item.id === incompleteParentId);
   const stoppedView = consistencyState.parents.find((item) => item.id === stoppedParentId);
@@ -304,6 +330,52 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
     for (const task of store.listTasks().filter((item) => item.id === id || item.multiPartParentId === id)) store.delete('tasks', task.id);
   }
   store.commit();
+
+  currentPages = Array.from({ length: 120 }, (_, index) => page(index + 1, String(10_000 + index), `高 P 测试 ${index + 1}`));
+  let highPartCreateYielded = false;
+  const highPartCreatePromise = manager.create({
+    bvid: 'BV1HIGHPARTS',
+    providerId: 'provider-multipart',
+    modelId: 'model-multipart',
+    collectionId: created.collectionId,
+    selectedPages: currentPages.map((item) => String(item.cid)),
+    concurrency: 4,
+    minimumFrames: 8
+  });
+  setImmediate(() => { highPartCreateYielded = true; });
+  const highPartParent = await highPartCreatePromise;
+  assert.strictEqual(highPartParent.total, 120, 'high-P parent creation did not preserve every child task');
+  assert(highPartCreateYielded, 'high-P parent creation blocked the main event loop for its complete metadata write loop');
+
+  const highStartStoreSave = store.save.bind(store);
+  let highStartPhysicalSaves = 0;
+  let highPartStartYielded = false;
+  store.save = (...args) => {
+    if (store.saveBatchDepth === 0) highStartPhysicalSaves += 1;
+    return highStartStoreSave(...args);
+  };
+  simulateSessionPersistence = true;
+  const highPartStartPromise = manager.start({
+    parentId: highPartParent.id,
+    selectedPages: currentPages.map((item) => String(item.cid)),
+    providerId: 'provider-multipart',
+    modelId: 'model-multipart',
+    concurrency: 4
+  });
+  setImmediate(() => { highPartStartYielded = true; });
+  let highPartStarted;
+  try { highPartStarted = await highPartStartPromise; }
+  finally {
+    simulateSessionPersistence = false;
+    store.save = highStartStoreSave;
+  }
+  assert.strictEqual(highPartStarted.sessions.length, 4, 'high-P start did not preserve the configured worker concurrency');
+  assert(highPartStartYielded, 'high-P start blocked the main event loop while preparing child metadata');
+  assert.strictEqual(highStartPhysicalSaves, 1, 'high-P start rewrote the complete database more than once during its synchronous startup burst');
+  const highPartStartEvent = emittedEvents.filter((event) => event.type === 'multipart-parent-started' && event.parentId === highPartParent.id).at(-1);
+  assert(highPartStartEvent?.parent?.parts?.length === 120 && highPartStartEvent.multiPart === undefined, 'high-P structural event did not stay scoped to its changed parent');
+  await manager.stop(highPartParent.id);
+  await manager.delete(highPartParent.id);
 
   const deletionLoad = path.join(parentRoot, 'delete-load');
   fs.mkdirSync(deletionLoad, { recursive: true });

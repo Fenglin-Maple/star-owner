@@ -14,12 +14,29 @@ function assert(condition, message) {
   const store = await Store.open(database);
   store.set('test', 'record', { value: 42 });
   store.save();
+  const originalSave = store.save.bind(store);
+  let batchPhysicalSaves = 0;
+  store.save = (...args) => {
+    if (store.saveBatchDepth === 0) batchPhysicalSaves += 1;
+    return originalSave(...args);
+  };
+  store.batchSave(() => {
+    store.set('test', 'batch-a', { value: 'a' });
+    store.save();
+    store.batchSave(() => {
+      store.set('test', 'batch-b', { value: 'b' });
+      store.save();
+    });
+  });
+  store.save = originalSave;
+  assert(batchPhysicalSaves === 1, 'nested save batching exported the complete SQLite database more than once');
   store.db.close();
   fs.copyFileSync(database, `${database}.bak`);
   fs.writeFileSync(`${database}.tmp`, 'incomplete');
   fs.rmSync(database, { force: true });
   const recovered = await Store.open(database);
   assert(recovered.get('test', 'record')?.value === 42, 'database backup was not recovered');
+  assert(recovered.get('test', 'batch-a')?.value === 'a' && recovered.get('test', 'batch-b')?.value === 'b', 'batched SQLite updates were not persisted');
   assert(!fs.existsSync(`${database}.tmp`), 'stale database temporary file was not removed');
   recovered.db.close();
 

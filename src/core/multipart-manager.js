@@ -13,6 +13,7 @@ const VIDEO_INFO_CACHE_TTL_MS = 30 * 1000;
 const VIDEO_INFO_CACHE_LIMIT = 8;
 const BILIBILI_RISK_CONTROL_RETRIES = 3;
 const MULTIPART_PROGRESS_EMIT_INTERVAL_MS = 800;
+const MULTIPART_MUTATION_YIELD_INTERVAL = 24;
 
 class MultiPartManager {
   constructor({ store, bili, internalAgentManager, ragAssistant, getCurrentUser, emit }) {
@@ -25,6 +26,8 @@ class MultiPartManager {
     this.indexRefreshFailures = [];
     this.stateEmitTimers = new Map();
     this.partTaskCache = new Map();
+    this.partArtifactCache = new Map();
+    this.partSummaryCache = new Map();
     this.partTaskCacheTtlMs = 250;
     this.videoInfoCache = new Map();
     this.videoInfoRequests = new Map();
@@ -33,17 +36,23 @@ class MultiPartManager {
 
   state({ reconcile = true } = {}) {
     const storedParents = this.store.list('multiPartParents');
+    let partsByParent = this.partTasksByParent(storedParents.map((parent) => parent.id));
+    let sessionsByParent = this.activeSessionsByParent(storedParents.map((parent) => parent.id));
     if (reconcile) {
       for (const parent of storedParents) {
         // Explicit state reads remain the repair boundary for legacy or missing
         // artifacts. Live progress events use the lightweight path below.
-        this.invalidatePartTaskCache(parent.id);
-        this.reconcileParentArtifacts(parent);
+        this.reconcileParentArtifacts(parent, {
+          parts: partsByParent.get(parent.id) || [],
+          active: sessionsByParent.get(parent.id) || []
+        });
       }
     }
     const currentParents = storedParents.map((parent) => this.store.get('multiPartParents', parent.id) || parent);
-    const partsByParent = this.partTasksByParent(currentParents.map((parent) => parent.id));
-    const sessionsByParent = this.activeSessionsByParent(currentParents.map((parent) => parent.id));
+    if (reconcile) {
+      partsByParent = new Map(currentParents.map((parent) => [parent.id, this.partTasks(parent.id)]));
+      sessionsByParent = new Map(currentParents.map((parent) => [parent.id, sessionsByParent.get(parent.id) || []]));
+    }
     const parents = currentParents.map((parent) => this.publicParent(parent, {
       reconcile: false,
       verifyArtifacts: false,
@@ -54,6 +63,17 @@ class MultiPartManager {
       collections: this.collections().map(publicCollection),
       parents: parents.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
     };
+  }
+
+  parentState(parentId) {
+    const parent = this.store.get('multiPartParents', String(parentId || ''));
+    if (!parent) return null;
+    return this.publicParent(parent, {
+      reconcile: false,
+      verifyArtifacts: false,
+      parts: this.partTasks(parent.id),
+      active: this.activeSessions(parent.id)
+    });
   }
 
   collections() {
@@ -92,7 +112,7 @@ class MultiPartManager {
     if (existing) {
       await this.mergePages(existing, info.pages, info);
       const refreshed = this.store.get('multiPartParents', parentId);
-      const publicValue = this.publicParent(refreshed);
+      const publicValue = this.parentState(refreshed.id);
       return {
         ...publicValue,
         existing: true,
@@ -129,15 +149,20 @@ class MultiPartManager {
     };
     this.store.set('multiPartParents', parentId, parent);
     this.store.upsertCollection({ ...collection, updatedAt: now });
-    for (const page of info.pages) {
-      const task = this.ensurePartTask(parent, page, selected.includes(String(page.cid)), now);
-      this.seedPartInfo(parent, task, page);
-    }
+    const partSeeds = info.pages.map((page) => ({
+      page,
+      task: this.ensurePartTask(parent, page, selected.includes(String(page.cid)), now)
+    }));
     this.ensureParentIndexTask(parent, now);
+    for (let index = 0; index < partSeeds.length; index += 1) {
+      const seed = partSeeds[index];
+      this.seedPartInfo(parent, seed.task, seed.page);
+      if ((index + 1) % MULTIPART_MUTATION_YIELD_INTERVAL === 0) await yieldToEventLoop();
+    }
     this.store.commit();
     this.writeIndex(parent);
     this.emitState('multipart-parent-created', parentId);
-    return this.publicParent(this.store.get('multiPartParents', parentId));
+    return this.parentState(parentId);
   }
 
   async refresh(parentId) {
@@ -149,7 +174,7 @@ class MultiPartManager {
     const refreshed = this.store.get('multiPartParents', parent.id);
     this.writeIndex(refreshed);
     this.emitState('multipart-parent-refreshed', parent.id);
-    return this.publicParent(refreshed);
+    return this.parentState(refreshed.id);
   }
 
   async start(input = {}) {
@@ -160,45 +185,62 @@ class MultiPartManager {
     const tasks = this.partTasks(parent.id).filter((task) => selected.includes(String(task.cid)) && task.status !== 'done' && task.pageState !== 'removed');
     if (!tasks.length) throw new Error('当前选择范围内没有待总结的 P。');
     await this.prepareCollectionAuthentication(parent);
-    for (const task of tasks) {
+    for (let index = 0; index < tasks.length; index += 1) {
+      const task = tasks[index];
       const page = (parent.pages || []).find((item) => String(item.cid) === String(task.cid));
       if (page) this.seedPartInfo(parent, task, page);
+      if ((index + 1) % MULTIPART_MUTATION_YIELD_INTERVAL === 0) await yieldToEventLoop();
     }
     const settings = { ...parent.settings, ...normalizeSettings(input, parent.settings) };
     const selectedSet = new Set(selected);
-    for (const part of this.partTasks(parent.id)) {
-      if (part.status === 'done' || part.pageState === 'removed') continue;
-      part.enabled = selectedSet.has(String(part.cid));
-      if (part.enabled) {
-        part.multiPartStopped = false;
-        part.multiPartStopReason = '';
-        part.multiPartStoppedAt = '';
-        part.multiPartFailed = false;
-        part.multiPartFailureReason = '';
-        part.multiPartFailedAt = '';
-      }
-      part.updatedAt = new Date().toISOString();
-      this.store.upsertTask(part);
-    }
-    parent.settings = settings;
-    parent.selectedCids = selected;
-    parent.status = 'running';
-    parent.updatedAt = new Date().toISOString();
-    this.store.set('multiPartParents', parent.id, parent);
-    this.store.commit();
     const sessions = [];
+    const createdSessions = [];
+    const startPromises = [];
     const concurrency = Math.max(1, Math.min(4, Number(settings.concurrency) || 2));
     try {
-      for (let index = 0; index < Math.min(concurrency, tasks.length); index += 1) {
-        const session = this.createMultipartSession(parent, tasks, index + 1);
-        sessions.push(await this.internalAgentManager.start(session.id));
-      }
+      this.store.batchSave(() => {
+        for (const part of this.partTasks(parent.id)) {
+          if (part.status === 'done' || part.pageState === 'removed') continue;
+          part.enabled = selectedSet.has(String(part.cid));
+          if (part.enabled) {
+            part.multiPartStopped = false;
+            part.multiPartStopReason = '';
+            part.multiPartStoppedAt = '';
+            part.multiPartFailed = false;
+            part.multiPartFailureReason = '';
+            part.multiPartFailedAt = '';
+          }
+          part.updatedAt = new Date().toISOString();
+          this.store.upsertTask(part);
+        }
+        parent.settings = settings;
+        parent.selectedCids = selected;
+        parent.status = 'running';
+        parent.updatedAt = new Date().toISOString();
+        this.store.set('multiPartParents', parent.id, parent);
+        for (let index = 0; index < Math.min(concurrency, tasks.length); index += 1) {
+          const session = this.createMultipartSession(parent, tasks, index + 1);
+          createdSessions.push(session);
+          startPromises.push(this.internalAgentManager.start(session.id));
+        }
+        this.store.commit();
+      });
+      const startResults = await Promise.allSettled(startPromises);
+      const failedStart = startResults.find((result) => result.status === 'rejected');
+      sessions.push(...startResults.filter((result) => result.status === 'fulfilled').map((result) => result.value));
+      if (failedStart) throw failedStart.reason;
     } catch (error) {
-      for (const session of sessions) {
-        try { this.internalAgentManager.stop(session.id); } catch {}
-      }
-      const waits = sessions.map((session) => this.internalAgentManager.running?.get(session.id)).filter(Boolean);
+      if (startPromises.length) await Promise.allSettled(startPromises);
+      this.store.batchSave(() => {
+        for (const session of createdSessions) {
+          try { this.internalAgentManager.stop(session.id); } catch {}
+        }
+      });
+      const waits = createdSessions.map((session) => this.internalAgentManager.running?.get(session.id)).filter(Boolean);
       if (waits.length) await Promise.allSettled(waits);
+      for (const session of createdSessions) {
+        try { this.internalAgentManager.deleteSession(session.id, { persist: false }); } catch {}
+      }
       parent.status = 'stopped';
       parent.updatedAt = new Date().toISOString();
       this.store.set('multiPartParents', parent.id, parent);
@@ -206,7 +248,7 @@ class MultiPartManager {
       throw error;
     }
     this.emitState('multipart-parent-started', parent.id);
-    return { parent: this.publicParent(this.store.get('multiPartParents', parent.id)), sessions };
+    return { parent: this.parentState(parent.id), sessions };
   }
 
   async stopPart(input = {}) {
@@ -287,7 +329,7 @@ class MultiPartManager {
     const current = this.store.get('multiPartParents', parent.id);
     this.emitState('multipart-part-stopped', parent.id);
     return {
-      parent: this.publicParent(current),
+      parent: this.parentState(current.id),
       stoppedPart: publicPart(this.store.getTask(task.id)),
       replacementSessions,
       replacementWarning
@@ -305,7 +347,7 @@ class MultiPartManager {
     this.store.set('multiPartParents', parent.id, parent);
     this.store.commit();
     this.emitState('multipart-parent-stopped', parent.id);
-    return this.publicParent(parent);
+    return this.parentState(parent.id);
   }
 
   async delete(parentId) {
@@ -322,6 +364,8 @@ class MultiPartManager {
       if (task?.artifactDir && fs.existsSync(task.artifactDir)) await removePathInsideAsync(task.allowedRoot || parent.parentRoot, task.artifactDir);
       this.store.delete('tasks', taskId);
       this.store.delete('videos', taskId);
+      this.partArtifactCache.delete(taskId);
+      this.partSummaryCache.delete(taskId);
     }
     if (fs.existsSync(parent.parentRoot)) await removePathInsideAsync(collection.collectionRoot, parent.parentRoot);
     this.store.delete('multiPartParents', parent.id);
@@ -353,7 +397,6 @@ class MultiPartManager {
     if (!parentId) return;
     const parent = this.store.get('multiPartParents', parentId);
     if (!parent) return;
-    this.invalidatePartTaskCache(parent.id);
     if (event.type === 'session-finished' && event.status === 'stopped') {
       // Preserve an explicit user stop while the terminal Agent event is being
       // reconciled. Other terminal failures are allowed to become retryable.
@@ -361,13 +404,15 @@ class MultiPartManager {
       parent.updatedAt = new Date().toISOString();
       this.store.set('multiPartParents', parent.id, parent);
     }
-    this.reconcileParentArtifacts(parent, { writeIndex: false });
-    this.invalidatePartTaskCache(parent.id);
-    const parts = this.partTasks(parent.id);
+    const reconciliation = this.reconcileParentArtifacts(parent, {
+      writeIndex: false,
+      taskIds: task?.id ? [task.id] : []
+    });
+    const parts = reconciliation.parts || this.partTasks(parent.id);
     const done = parts.filter((item) => item.status === 'done' && multipartArtifactReady(item)).length;
     const pending = parts.filter((item) => item.status !== 'done' && item.pageState !== 'removed').length;
     const sessionStopped = event.type === 'session-finished' && ['stopped', 'collection-unavailable', 'model-unavailable'].includes(String(event.status || ''));
-    const activeSessions = this.activeSessions(parent.id).filter((session) => event.type !== 'session-finished' || session.id !== event.sessionId);
+    const activeSessions = (reconciliation.active || this.activeSessions(parent.id)).filter((session) => event.type !== 'session-finished' || session.id !== event.sessionId);
     parent.status = activeSessions.length
       ? 'running'
       : sessionStopped && event.status === 'stopped'
@@ -420,16 +465,20 @@ class MultiPartManager {
     return grouped;
   }
 
-  reconcileParentArtifacts(parentInput, { writeIndex = true } = {}) {
+  reconcileParentArtifacts(parentInput, { writeIndex = true, parts: providedParts = null, active: providedActive = null, taskIds = null } = {}) {
     const parent = this.store.get('multiPartParents', String(parentInput?.id || '')) || parentInput;
     if (!parent?.id) return { changed: false, parent };
-    this.invalidatePartTaskCache(parent.id);
-    const parts = this.partTasks(parent.id);
+    const parts = Array.isArray(providedParts) ? providedParts : (() => {
+      this.invalidatePartTaskCache(parent.id);
+      return this.partTasks(parent.id);
+    })();
+    const wantedTaskIds = taskIds === null ? null : new Set((taskIds || []).map(String));
     let changed = false;
     let artifactChanged = false;
     let missingArtifactDetected = false;
     const now = new Date().toISOString();
     for (const task of parts) {
+      if (wantedTaskIds && !wantedTaskIds.has(String(task.id))) continue;
       if (task.status !== 'done') continue;
       const artifact = resolveMultipartArtifact(task);
       if (artifact.ready) {
@@ -469,9 +518,14 @@ class MultiPartManager {
       artifactChanged = true;
       missingArtifactDetected = true;
     }
-    this.invalidatePartTaskCache(parent.id);
-    const refreshedParts = this.partTasks(parent.id);
-    const active = this.activeSessions(parent.id);
+    let refreshedParts = parts;
+    if (!Array.isArray(providedParts)) {
+      this.invalidatePartTaskCache(parent.id);
+      refreshedParts = this.partTasks(parent.id);
+    } else {
+      this.partTaskCache.set(parent.id, { createdAt: Date.now(), tasks: refreshedParts });
+    }
+    const active = Array.isArray(providedActive) ? providedActive : this.activeSessions(parent.id);
     const nextStatus = deriveMultipartParentStatus(parent, refreshedParts, active, { missingArtifactDetected, verifyArtifacts: false });
     const statusChanged = parent.status !== nextStatus;
     if (statusChanged) {
@@ -491,7 +545,7 @@ class MultiPartManager {
     };
     const indexReady = multipartArtifactReady(parentTask);
     const indexNeedsRepair = Boolean(writeIndex && parent.parentRoot && fs.existsSync(parent.parentRoot) && !indexReady);
-    if (!changed && !indexNeedsRepair) return { changed: false, parent };
+    if (!changed && !indexNeedsRepair) return { changed: false, parent, parts: refreshedParts, active };
     parent.updatedAt = now;
     this.store.set('multiPartParents', parent.id, parent);
     this.store.commit();
@@ -501,7 +555,7 @@ class MultiPartManager {
         this.store.commit();
       } catch {}
     }
-    return { changed: true, parent };
+    return { changed: true, parent, parts: refreshedParts, active };
   }
 
   invalidatePartTaskCache(parentId = '') {
@@ -569,7 +623,6 @@ class MultiPartManager {
       cookieFile,
       cookieExportedAt: new Date().toISOString()
     });
-    this.store.commit();
     return updated;
   }
 
@@ -588,10 +641,17 @@ class MultiPartManager {
   refreshStoredIndexes() {
     this.indexRefreshFailures = [];
     let refreshed = 0;
-    for (const parent of this.store.list('multiPartParents')) {
+    const parents = this.store.list('multiPartParents');
+    const partsByParent = this.partTasksByParent(parents.map((parent) => parent.id));
+    const sessionsByParent = this.activeSessionsByParent(parents.map((parent) => parent.id));
+    for (const parent of parents) {
       if (!parent?.parentRoot || !fs.existsSync(parent.parentRoot)) continue;
       try {
-        this.reconcileParentArtifacts(parent, { writeIndex: false });
+        this.reconcileParentArtifacts(parent, {
+          writeIndex: false,
+          parts: partsByParent.get(parent.id) || [],
+          active: sessionsByParent.get(parent.id) || []
+        });
         this.writeIndex(this.store.get('multiPartParents', parent.id) || parent);
         refreshed += 1;
       } catch (error) {
@@ -739,9 +799,15 @@ class MultiPartManager {
     parent.aid = info.aid || parent.aid;
     parent.sourceInfo = sourceInfoSnapshot(info);
     parent.lastRefreshedAt = now;
+    const partSeeds = [];
     for (const page of pages) {
       const task = this.ensurePartTask(parent, page, selected.has(String(page.cid)), now);
-      if (task.status !== 'done') this.seedPartInfo(parent, task, page);
+      if (task.status !== 'done') partSeeds.push({ task, page });
+    }
+    for (let index = 0; index < partSeeds.length; index += 1) {
+      const seed = partSeeds[index];
+      this.seedPartInfo(parent, seed.task, seed.page);
+      if ((index + 1) % MULTIPART_MUTATION_YIELD_INTERVAL === 0) await yieldToEventLoop();
     }
     parent.selectedCids = pages.map((page) => String(page.cid || '')).filter((cid) => selected.has(cid));
     for (const task of this.partTasks(parent.id)) {
@@ -762,15 +828,17 @@ class MultiPartManager {
     const parent = this.store.get('multiPartParents', parentInput.id) || parentInput;
     ensureDir(parent.parentRoot);
     const parts = this.partTasks(parent.id).sort((a, b) => Number(a.page || 0) - Number(b.page || 0));
-    const partSummaries = parts.flatMap((task) => partSummaryLines(parent, task));
+    const artifacts = new Map(parts.map((task) => [task.id, this.cachedPartArtifact(task)]));
+    const completedParts = parts.filter((task) => artifacts.get(task.id)?.ready);
+    const partSummaries = parts.flatMap((task) => partSummaryLines(parent, task, artifacts.get(task.id), this.partSummaryCache));
     const coverReference = this.ensureParentCover(parent, parts);
     const lines = [
       `# ${parent.title} · 多P视频目录`, '',
       '## 小结', '',
-      `该父任务包含 ${parent.pages.length} 个 P，当前已完成 ${parts.filter((task) => task.status === 'done' && multipartArtifactReady(task)).length} 个。每个 P 的详细总结单独存放，并保留稳定 CID 标识。`, '',
+      `该父任务包含 ${parent.pages.length} 个 P，当前已完成 ${completedParts.length} 个。每个 P 的详细总结单独存放，并保留稳定 CID 标识。`, '',
       '## 思维导图', '', '```mermaid', 'flowchart TD', '  A[多P视频] --> B[逐P总结]', ...parts.map((task) => `  B --> P${task.page}[P${task.page} ${escapeMermaid(task.part)}]`), '```', '',
       '## 目录', '',
-      ...parts.map((task) => `- [P${task.page} ${task.part}](parts/cid-${safeName(task.cid, 'part', 40)}/summary.md) · ${task.status === 'done' && multipartArtifactReady(task) ? '已完成' : task.pageState === 'removed' ? '远程已移除' : '待处理'}`), '',
+      ...parts.map((task) => `- [P${task.page} ${task.part}](parts/cid-${safeName(task.cid, 'part', 40)}/summary.md) · ${artifacts.get(task.id)?.ready ? '已完成' : task.pageState === 'removed' ? '远程已移除' : '待处理'}`), '',
       '## 每 P 小结', '',
       ...partSummaries,
       '## 字幕', '', '每个 P 的 ASR 时间戳和站内字幕位于对应 P 的产物目录。', '',
@@ -782,8 +850,26 @@ class MultiPartManager {
     writeTextIfChanged(path.join(parent.parentRoot, 'metadata.json'), `${JSON.stringify({ ...parentMetadata, coverFile: coverReference, parts: parts.map(publicPartMetadata) }, null, 2)}\n`);
   }
 
+  cachedPartArtifact(task) {
+    if (task.status !== 'done') return { ready: false, markdownFile: '', root: '' };
+    const cacheKey = [task.status, task.updatedAt, task.outputMarkdown, task.artifactDir, task.preallocatedArtifactDir].map((value) => String(value || '')).join('|');
+    const cached = this.partArtifactCache.get(task.id);
+    if (cached?.key === cacheKey) return cached.artifact;
+    const artifact = resolveMultipartArtifact(task);
+    this.partArtifactCache.set(task.id, { key: cacheKey, artifact });
+    return artifact;
+  }
+
   ensureParentCover(parent, parts) {
-    const ordered = [...parts].sort((left, right) => {
+    if (parent.coverFile) {
+      const existing = path.isAbsolute(String(parent.coverFile))
+        ? String(parent.coverFile)
+        : path.join(parent.parentRoot, String(parent.coverFile));
+      try {
+        if (fs.statSync(assertInside(parent.parentRoot, existing)).isFile()) return path.basename(existing).replace(/\\/g, '/');
+      } catch {}
+    }
+    const ordered = parts.filter((task) => task.status === 'done').sort((left, right) => {
       const leftP1 = Number(left.page || 0) === 1 ? 0 : 1;
       const rightP1 = Number(right.page || 0) === 1 ? 0 : 1;
       return leftP1 - rightP1 || Number(left.page || 0) - Number(right.page || 0);
@@ -799,12 +885,6 @@ class MultiPartManager {
           if (/^frame-\d+\.(?:jpe?g|png|webp)$/i.test(name)) candidates.push(path.join(artifactDir, 'frames', name));
         }
       } catch {}
-    }
-    if (parent.coverFile) {
-      const existing = path.isAbsolute(String(parent.coverFile))
-        ? String(parent.coverFile)
-        : path.join(parent.parentRoot, String(parent.coverFile));
-      candidates.push(existing);
     }
     const source = candidates.find((candidate) => {
       try { return fs.statSync(assertInside(parent.parentRoot, candidate)).isFile(); } catch { return false; }
@@ -873,7 +953,16 @@ class MultiPartManager {
       clearTimeout(timer);
       this.stateEmitTimers.delete(key);
     }
-    this.emit({ type, parentId, multiPart: this.state({ reconcile: false }) });
+    const parent = this.parentState(key);
+    this.emit({
+      type,
+      parentId: key,
+      parent,
+      removed: !parent,
+      ...(['multipart-parent-created', 'multipart-parent-deleted'].includes(type)
+        ? { collections: this.collections().map(publicCollection) }
+        : {})
+    });
   }
 
   scheduleStateEmit(parentId) {
@@ -881,7 +970,8 @@ class MultiPartManager {
     if (!key || this.stateEmitTimers.has(key)) return;
     const timer = setTimeout(() => {
       this.stateEmitTimers.delete(key);
-      this.emit({ type: 'multipart-progress', parentId: key, multiPart: this.state({ reconcile: false }) });
+      const parent = this.parentState(key);
+      if (parent) this.emit({ type: 'multipart-progress', parentId: key, parent });
     }, MULTIPART_PROGRESS_EMIT_INTERVAL_MS);
     timer.unref?.();
     this.stateEmitTimers.set(key, timer);
@@ -1056,11 +1146,11 @@ function clampProgress(value) {
   return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : 0;
 }
 
-function partSummaryLines(parent, task) {
+function partSummaryLines(parent, task, artifact, summaryCache) {
   const cid = safeName(task.cid, 'part', 40);
   const title = `P${Number(task.page || 1)} ${String(task.part || '').replace(/[\r\n]+/g, ' ').trim()}`.trim();
   const link = `parts/cid-${cid}/summary.md`;
-  const completed = task.status === 'done' && multipartArtifactReady(task);
+  const completed = task.status === 'done' && artifact?.ready;
   const status = completed
     ? (task.pageState === 'removed' ? '已完成，远程页面已移除' : '已完成')
     : task.pageState === 'removed' ? '远程已移除'
@@ -1073,24 +1163,29 @@ function partSummaryLines(parent, task) {
     lines.push(`> ${task.pageState === 'removed' ? '该 P 尚未完成且远程页面已移除，当前没有可展示的小结。' : '该 P 尚未完成；完成后会自动在这里写入小结。'}`, '');
     return lines;
   }
-  const summary = readPartSummary(parent, task, `parts/cid-${cid}`);
+  const summary = readPartSummary(parent, task, `parts/cid-${cid}`, artifact, summaryCache);
   lines.push('#### 小结', '', summary || '> 该 P 已完成，但总结文档中没有可提取的“小结”章节；请打开完整总结查看。', '');
   return lines;
 }
 
-function readPartSummary(parent, task, relativePartDirectory) {
+function readPartSummary(parent, task, relativePartDirectory, artifact, summaryCache) {
   try {
-    if (!task.outputMarkdown) return '';
-    const markdownFile = assertInside(parent.parentRoot, task.outputMarkdown);
-    if (!fs.existsSync(markdownFile) || !fs.statSync(markdownFile).isFile()) return '';
+    const markdownFile = assertInside(parent.parentRoot, artifact?.markdownFile || task.outputMarkdown);
+    const cacheKey = [task.updatedAt, markdownFile, relativePartDirectory].map((value) => String(value || '')).join('|');
+    const cached = summaryCache?.get(task.id);
+    if (cached?.key === cacheKey) return cached.summary;
     const section = extractLevelTwoSummary(fs.readFileSync(markdownFile, 'utf8'));
-    if (!section) return '';
+    if (!section) {
+      summaryCache?.set(task.id, { key: cacheKey, summary: '' });
+      return '';
+    }
     let value = rebaseRelativeMarkdownDestinations(section, relativePartDirectory)
       .replace(/^(#{1,6})\s+(.+)$/gm, (_match, marks, heading) => `${'#'.repeat(Math.min(6, marks.length + 2))} ${heading}`)
       .trim();
     if (value.length > MAX_INDEX_PART_SUMMARY_CHARACTERS) {
       value = `${value.slice(0, MAX_INDEX_PART_SUMMARY_CHARACTERS).trimEnd()}\n\n> 本 P 小结过长，目录中已截断；请打开完整总结查看剩余内容。`;
     }
+    summaryCache?.set(task.id, { key: cacheKey, summary: value });
     return value;
   } catch {
     return '';
@@ -1194,6 +1289,10 @@ function multipartRiskControlError(cause = null) {
 
 function bilibiliRiskControlDelay(attempt) {
   return Math.min(12_000, 1_600 * (2 ** Math.max(0, Number(attempt) || 0))) + 250 + Math.floor(Math.random() * 650);
+}
+
+function yieldToEventLoop() {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function delay(milliseconds) {

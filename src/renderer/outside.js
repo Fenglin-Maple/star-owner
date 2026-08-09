@@ -280,7 +280,7 @@
     };
     const [local, multipart, shared, currentSnapshot] = await Promise.all([
       window.orchestrator.localToolboxState(),
-      window.orchestrator.multiPartState(),
+      window.orchestrator.multiPartState({ reconcile: false }),
       window.orchestrator.sharedState(),
       window.orchestrator.snapshot()
     ]);
@@ -300,6 +300,16 @@
     renderMultipart();
     renderShared();
     return state;
+  }
+
+  async function refreshMultipartState({ preserveScroll = true } = {}) {
+    const generation = multipartRefreshGate.next();
+    const nextState = await window.orchestrator.multiPartState({ reconcile: false });
+    if (!multipartRefreshGate.isCurrent(generation)) return multipartState;
+    multipartState = nextState;
+    renderMultipart({ preserveScroll });
+    renderOutsideCards();
+    return multipartState;
   }
 
   async function refreshSharedLocalDirectory() {
@@ -428,6 +438,39 @@
     };
   }
 
+  function ensureMultipartCollection(parent) {
+    if (!parent?.collectionId || (multipartState.collections || []).some((item) => String(item.id) === String(parent.collectionId))) return;
+    multipartState = {
+      ...multipartState,
+      collections: [...(multipartState.collections || []), {
+        id: parent.collectionId,
+        name: parent.collectionName || 'B站多P收藏夹',
+        collectionKind: 'bilibili-multipart'
+      }]
+    };
+  }
+
+  function mergeMultipartParent(parent, { render = true, compare = true } = {}) {
+    if (!parent?.id) return false;
+    const parents = [...(multipartState.parents || [])];
+    const index = parents.findIndex((item) => String(item.id) === String(parent.id));
+    if (compare && index >= 0 && JSON.stringify(parents[index]) === JSON.stringify(parent)) return false;
+    if (index >= 0) parents[index] = parent;
+    else parents.unshift(parent);
+    multipartState = { ...multipartState, parents };
+    ensureMultipartCollection(parent);
+    if (render) renderMultipart();
+    return true;
+  }
+
+  function removeMultipartParent(parentId, { render = true } = {}) {
+    const parents = (multipartState.parents || []).filter((item) => String(item.id) !== String(parentId || ''));
+    if (parents.length === (multipartState.parents || []).length) return false;
+    multipartState = { ...multipartState, parents };
+    if (render) renderMultipart();
+    return true;
+  }
+
   async function createMultipart(startAfter) {
     if (!multipartInspection) return notify('无法创建多P任务', '请先读取 BV 的 P 列表。');
     const payload = multipartPayload();
@@ -440,23 +483,46 @@
         const pending = (parent.existingPendingCids || []).join(', ') || '无';
         const message = `目标收藏夹已存在这个多P视频的产物。已完成 CID：${completed}；待处理 CID：${pending}。继续操作只会处理未完成 P，不会覆盖已完成 P。`;
         if (startAfter && !window.confirm(`${message}\n\n是否继续启动未完成范围？`)) {
-          await refresh();
+          mergeMultipartParent(parent);
           return;
         }
         notify('检测到已有多P产物', message);
       }
-      if (startAfter) await window.orchestrator.multiPartStart({ parentId: parent.id, ...payload });
-      await refresh();
+      let currentParent = parent;
+      if (startAfter) {
+        const started = await window.orchestrator.multiPartStart({ parentId: parent.id, ...payload });
+        currentParent = started.parent || currentParent;
+      }
+      mergeMultipartParent(currentParent);
       if (startAfter && parent.collectionId) {
         elements.multipartViewerCollection.value = parent.collectionId;
-        renderMultipart();
+        renderMultipart({ preserveScroll: false });
       }
       notify(startAfter ? '多P任务已启动' : '多P父任务已创建', startAfter ? '已进入应用内 Agent 队列。' : '可在父任务查看器中选择范围后继续。');
     } catch (error) { notify('多P任务操作失败', error); }
     finally { setBusy(startAfter ? elements.multipartCreateStart : elements.multipartCreate, false, startAfter ? '创建并开始' : '创建父任务'); }
   }
 
-  function renderMultipart() {
+  function captureMultipartScrollState() {
+    const partLists = new Map();
+    for (const record of elements.multipartParentList.querySelectorAll('[data-parent-record]')) {
+      const list = record.querySelector('.multipart-parent-pages');
+      if (list) partLists.set(String(record.dataset.parentRecord || ''), list.scrollTop);
+    }
+    return { parentList: elements.multipartParentList.scrollTop, partLists };
+  }
+
+  function restoreMultipartScrollState(scrollState) {
+    if (!scrollState) return;
+    elements.multipartParentList.scrollTop = scrollState.parentList;
+    for (const record of elements.multipartParentList.querySelectorAll('[data-parent-record]')) {
+      const list = record.querySelector('.multipart-parent-pages');
+      if (list) list.scrollTop = scrollState.partLists.get(String(record.dataset.parentRecord || '')) || 0;
+    }
+  }
+
+  function renderMultipart({ preserveScroll = true } = {}) {
+    const scrollState = preserveScroll ? captureMultipartScrollState() : null;
     renderMultipartCollections();
     for (const details of elements.multipartParentList.querySelectorAll('[data-multipart-details]')) {
       const parentId = String(details.dataset.parentId || '');
@@ -511,15 +577,17 @@
         else expandedMultipartParents.delete(parentId);
       });
     }
+    restoreMultipartScrollState(scrollState);
   }
 
-  function updateMultipartProgressView() {
+  function updateMultipartProgressView(parentId = '') {
     if (activeToolId !== 'multipart') return;
     const selectedCollectionId = elements.multipartViewerCollection.value;
     if (!selectedCollectionId) return;
-    const parents = (multipartState.parents || []).filter((parent) => String(parent.collectionId) === String(selectedCollectionId));
+    const parents = (multipartState.parents || []).filter((parent) => String(parent.collectionId) === String(selectedCollectionId)
+      && (!parentId || String(parent.id) === String(parentId)));
     const records = new Map([...elements.multipartParentList.querySelectorAll('[data-parent-record]')].map((record) => [String(record.dataset.parentRecord), record]));
-    if (parents.length !== records.size || parents.some((parent) => !records.has(String(parent.id)))) {
+    if ((!parentId && parents.length !== records.size) || parents.some((parent) => !records.has(String(parent.id)))) {
       renderMultipart();
       return;
     }
@@ -571,7 +639,7 @@
     const parent = (multipartState.parents || []).find((item) => item.id === parentId);
     if (!parent) return;
     if (!selectedPages.length) return notify('无法继续多 P 任务', '请至少选择一个尚未完成的 P。');
-    await window.orchestrator.multiPartStart({
+    const result = await window.orchestrator.multiPartStart({
       parentId,
       selectedPages,
       providerId: parent.settings?.providerId,
@@ -579,7 +647,7 @@
       ...parent.settings?.taskOptions,
       taskRequirements: parent.settings?.taskRequirements || ''
     });
-    await refresh();
+    mergeMultipartParent(result.parent);
     notify(`多 P 任务${actionLabel}已开始`, `已提交 ${selectedPages.length} 个 P 到应用内 Agent 队列。`, 'success');
   }
 
@@ -589,7 +657,7 @@
     const selectedPages = [...document.querySelectorAll(`[data-parent-id="${cssEscape(parentId)}"][data-parent-page]:checked`)].map((input) => input.dataset.parentPage);
     if (!selectedPages.length) return notify('无法继续多P任务', '请至少选择一个尚未完成的 P。');
     try {
-      await window.orchestrator.multiPartStart({
+      const result = await window.orchestrator.multiPartStart({
         parentId,
         selectedPages,
         providerId: parent.settings?.providerId,
@@ -597,7 +665,7 @@
         ...parent.settings?.taskOptions,
         taskRequirements: parent.settings?.taskRequirements || ''
       });
-      await refresh();
+      mergeMultipartParent(result.parent);
     } catch (error) { notify('启动多P任务失败', error); }
   }
 
@@ -608,7 +676,7 @@
     const action = button.dataset.multipartAction;
     let restoreViewerFocus = false;
     try {
-      if (action === 'refresh') await window.orchestrator.multiPartRefresh(parentId);
+      if (action === 'refresh') mergeMultipartParent(await window.orchestrator.multiPartRefresh(parentId));
       else if (action === 'start') await startExistingMultipart(parentId);
       else if (action === 'resume-part' || action === 'retry-part') {
         setBusy(button, true, action === 'retry-part' ? '重试中' : '继续中');
@@ -622,11 +690,12 @@
         try { await startMultipartPages(parentId, pages, action === 'retry-failed' ? '重试' : '继续'); }
         finally { setBusy(button, false, action === 'retry-failed' ? `全部重试（${pages.length}）` : `全部继续（${pages.length}）`); }
       }
-      else if (action === 'stop') await window.orchestrator.multiPartStop(parentId);
+      else if (action === 'stop') mergeMultipartParent(await window.orchestrator.multiPartStop(parentId));
       else if (action === 'stop-part') {
         setBusy(button, true, '停止中');
         try {
           const result = await window.orchestrator.multiPartStopPart({ parentId, cid: button.dataset.partId });
+          mergeMultipartParent(result.parent);
           if (result.replacementWarning) notify('子 P 已停止，补位未启动', result.replacementWarning);
           else notify('子 P 已停止', '当前 P 已回退并关闭，其它正在处理或排队的 P 会继续。');
         } finally {
@@ -637,10 +706,12 @@
         if (!window.confirm('确定删除这个多P父任务及其所有已完成 P 产物吗？')) return;
         restoreViewerFocus = true;
         setBusy(button, true, '删除中');
-        try { await window.orchestrator.multiPartDelete(parentId); }
+        try {
+          await window.orchestrator.multiPartDelete(parentId);
+          removeMultipartParent(parentId);
+        }
         finally { if (button.isConnected) setBusy(button, false, '删除'); }
       }
-      await refresh();
     } catch (error) { notify('多P父任务操作失败', error); }
     finally {
       if (restoreViewerFocus) requestAnimationFrame(() => {
@@ -1793,7 +1864,12 @@
   elements.multipartProvider.addEventListener('change', () => { refreshMultipartProvidersForUi().catch((error) => notify('刷新模型列表失败', error)); });
   elements.multipartCreate.addEventListener('click', () => createMultipart(false));
   elements.multipartCreateStart.addEventListener('click', () => createMultipart(true));
-  elements.multipartRefreshState.addEventListener('click', () => refresh().catch((error) => notify('刷新多P父任务失败', error)));
+  elements.multipartRefreshState.addEventListener('click', async () => {
+    setBusy(elements.multipartRefreshState, true, '刷新中');
+    try { await refreshMultipartState(); }
+    catch (error) { notify('刷新多P父任务失败', error); }
+    finally { setBusy(elements.multipartRefreshState, false, '刷新列表'); }
+  });
   elements.multipartParentList.addEventListener('click', handleMultipartAction);
   elements.sharedLogin.addEventListener('click', browserSharedLogin);
   elements.sharedSetToken.addEventListener('click', setSharedToken);
@@ -1967,7 +2043,7 @@
     openOutsideTool(card.dataset.outsideOpen);
   });
   elements.toolBack.addEventListener('click', () => closeOutsideTool());
-  elements.multipartViewerCollection.addEventListener('change', renderMultipart);
+  elements.multipartViewerCollection.addEventListener('change', () => renderMultipart({ preserveScroll: false }));
   document.querySelector('[data-page="outside-bilibili"]')?.addEventListener('click', () => {
     closeOutsideTool({ focus: false });
     if (outsideBackendReady) refresh().catch((error) => notify('刷新本地工具失败', error));
@@ -1977,14 +2053,32 @@
     else refresh().catch(() => {});
   });
   window.orchestrator.onMultipartEvent((event) => {
+    if (event.type === 'multipart-progress' && event.parent) {
+      multipartRefreshGate.next();
+      mergeMultipartParent(event.parent, { render: false, compare: false });
+      updateMultipartProgressView(event.parentId || event.parent.id);
+      return;
+    }
+    if (event.parent || event.removed) {
+      multipartRefreshGate.next();
+      const previousCollections = JSON.stringify((multipartState.collections || []).map((item) => [item.id, item.name]));
+      if (Array.isArray(event.collections)) multipartState = { ...multipartState, collections: event.collections };
+      const parentChanged = event.removed
+        ? removeMultipartParent(event.parentId, { render: false })
+        : mergeMultipartParent(event.parent, { render: false });
+      const collectionsChanged = previousCollections !== JSON.stringify((multipartState.collections || []).map((item) => [item.id, item.name]));
+      if (parentChanged || collectionsChanged) renderMultipart();
+      renderOutsideCards();
+      return;
+    }
     if (event.multiPart) {
       multipartRefreshGate.next();
       multipartState = event.multiPart;
-      if (event.type === 'multipart-progress') updateMultipartProgressView();
+      if (event.type === 'multipart-progress') updateMultipartProgressView(event.parentId);
       else renderMultipart();
-      renderOutsideCards();
+      if (event.type !== 'multipart-progress') renderOutsideCards();
     }
-    else refresh().catch(() => {});
+    else refreshMultipartState().catch(() => {});
   });
   window.orchestrator.onSharedEvent((event) => {
     if (event.operation) updateSharedOperation(event.operation);

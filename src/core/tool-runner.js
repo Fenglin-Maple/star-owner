@@ -51,7 +51,9 @@ class ToolRunner {
     this.cleanupRecoveryTimer = null;
     this.volatileRunIds = new Set();
     this.volatileRunFlushTimer = null;
+    this.volatileRunFlushDueAt = 0;
     this.volatileRunFlushDelayMs = 1000;
+    this.multipartVolatileRunFlushDelayMs = 4000;
     this.pendingLogWrites = new Map();
     this.logFlushTimer = null;
     this.logFlushDelayMs = 1000;
@@ -1345,6 +1347,7 @@ class ToolRunner {
     this.cpuAsr.stop();
     if (this.volatileRunFlushTimer) clearTimeout(this.volatileRunFlushTimer);
     this.volatileRunFlushTimer = null;
+    this.volatileRunFlushDueAt = 0;
     this.flushVolatileRunUpdates();
     if (this.logFlushTimer) clearTimeout(this.logFlushTimer);
     this.logFlushTimer = null;
@@ -1393,6 +1396,7 @@ class ToolRunner {
       this.volatileRunIds.clear();
       if (this.volatileRunFlushTimer) clearTimeout(this.volatileRunFlushTimer);
       this.volatileRunFlushTimer = null;
+      this.volatileRunFlushDueAt = 0;
     } else {
       this.volatileRunIds.add(String(id));
       this.scheduleVolatileRunFlush();
@@ -1401,11 +1405,18 @@ class ToolRunner {
   }
 
   scheduleVolatileRunFlush() {
-    if (this.volatileRunFlushTimer) return;
+    const dirtyRuns = [...this.volatileRunIds].map((id) => this.store.getToolRun(id)).filter(Boolean);
+    const onlyMultipart = dirtyRuns.length > 0 && dirtyRuns.every((run) => this.store.getTask?.(run.taskId)?.multiPartRole === 'part');
+    const delayMs = onlyMultipart ? this.multipartVolatileRunFlushDelayMs : this.volatileRunFlushDelayMs;
+    const dueAt = Date.now() + delayMs;
+    if (this.volatileRunFlushTimer && this.volatileRunFlushDueAt <= dueAt) return;
+    if (this.volatileRunFlushTimer) clearTimeout(this.volatileRunFlushTimer);
+    this.volatileRunFlushDueAt = dueAt;
     this.volatileRunFlushTimer = setTimeout(() => {
       this.volatileRunFlushTimer = null;
+      this.volatileRunFlushDueAt = 0;
       this.flushVolatileRunUpdates();
-    }, this.volatileRunFlushDelayMs);
+    }, delayMs);
     this.volatileRunFlushTimer.unref?.();
   }
 

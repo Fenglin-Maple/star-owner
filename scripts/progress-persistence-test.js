@@ -7,10 +7,15 @@ const { ToolRunner } = require('../src/core/tool-runner');
 (async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'star-owner-progress-'));
   const logFile = path.join(tempRoot, 'run.log');
-  const records = new Map([['run-1', { id: 'run-1', status: 'running', logFile }]]);
+  const records = new Map([['run-1', { id: 'run-1', taskId: 'ordinary-task', status: 'running', logFile }]]);
+  const tasks = new Map([
+    ['ordinary-task', { id: 'ordinary-task' }],
+    ['multipart-task', { id: 'multipart-task', multiPartRole: 'part' }]
+  ]);
   let saves = 0;
   const store = {
     getToolRun(id) { return records.get(id) || null; },
+    getTask(id) { return tasks.get(id) || null; },
     updateToolRun(id, patch, { persist = true } = {}) {
       const next = { ...(records.get(id) || {}), ...patch, id };
       records.set(id, next);
@@ -21,6 +26,7 @@ const { ToolRunner } = require('../src/core/tool-runner');
   };
   const runner = new ToolRunner({ store });
   runner.volatileRunFlushDelayMs = 20;
+  runner.multipartVolatileRunFlushDelayMs = 80;
   runner.logFlushDelayMs = 20;
 
   for (let index = 0; index < 1000; index += 1) {
@@ -36,6 +42,13 @@ const { ToolRunner } = require('../src/core/tool-runner');
   assert.strictEqual(saves, 2, 'terminal tool state was not persisted immediately');
   await delay(60);
   assert.strictEqual(saves, 2, 'terminal persistence left a redundant deferred export');
+
+  records.set('run-multipart', { id: 'run-multipart', taskId: 'multipart-task', status: 'running', logFile });
+  runner.updateRun('run-multipart', { progress: 0.5 }, { persist: false });
+  await delay(40);
+  assert.strictEqual(saves, 2, 'multipart volatile progress used the ordinary short persistence window');
+  await delay(60);
+  assert.strictEqual(saves, 3, 'multipart volatile progress was not persisted after its extended batching window');
 
   for (let index = 0; index < 1000; index += 1) runner.appendLog('run-1', `progress ${index}\n`);
   assert.strictEqual(fs.existsSync(logFile), false, 'tool output was written synchronously for every chunk');

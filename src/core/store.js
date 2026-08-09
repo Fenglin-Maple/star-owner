@@ -79,6 +79,8 @@ class Store {
   constructor(SQL, file = DB_FILE) {
     this.SQL = SQL;
     this.file = file;
+    this.saveBatchDepth = 0;
+    this.saveBatchPending = false;
     this.portableWorkspaceRoot = portableWorkspaceRootForDatabase(file);
     this.portableRelocation = null;
     ensureDir(path.dirname(file));
@@ -121,7 +123,26 @@ class Store {
   }
 
   save() {
+    if (this.saveBatchDepth > 0) {
+      this.saveBatchPending = true;
+      return;
+    }
     writeFileRecoverable(this.file, Buffer.from(this.db.export()));
+  }
+
+  batchSave(callback) {
+    this.saveBatchDepth += 1;
+    try {
+      const result = callback();
+      if (result && typeof result.then === 'function') throw new Error('Store.batchSave callback must be synchronous.');
+      return result;
+    } finally {
+      this.saveBatchDepth -= 1;
+      if (this.saveBatchDepth === 0 && this.saveBatchPending) {
+        this.saveBatchPending = false;
+        this.save();
+      }
+    }
   }
 
   transaction(callback) {

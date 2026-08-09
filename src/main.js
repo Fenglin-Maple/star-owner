@@ -578,7 +578,7 @@ ipcMain.handle('store:snapshot', async () => {
     internalAgentSessions: internalAgentManager?.state().sessions || [],
     videoCache: videoCacheManager?.state() || { collections: [], videos: [], jobs: [] },
     localToolbox: localToolboxManager?.state() || { jobs: [], videoCollections: [], documentCollections: [] },
-    multiPart: multiPartManager?.state() || { collections: [], parents: [] },
+    multiPart: multiPartManager?.state({ reconcile: false }) || { collections: [], parents: [] },
     sharedKnowledge: sharedKnowledgeManager?.state() || { repository: null, authenticated: false, mounts: [], documents: [] },
     analytics: buildAnalytics(store),
     scheduler: toolRunner?.getState() || null,
@@ -727,9 +727,9 @@ ipcMain.handle('local-tools:open-output', async (_event, jobId) => {
   return { directory };
 });
 
-ipcMain.handle('multipart:state', async () => {
+ipcMain.handle('multipart:state', async (_event, options = {}) => {
   assertBackendReady();
-  return multiPartManager.state();
+  return multiPartManager.state({ reconcile: options.reconcile === true });
 });
 
 ipcMain.handle('multipart:inspect', async (_event, payload = {}) => {
@@ -1472,7 +1472,7 @@ function sendRuntime() {
     dependencies: dependencyManager?.state() || null,
     videoCache: videoCacheManager?.state() || null,
     localToolbox: localToolboxManager?.state() || null,
-    multiPart: multiPartManager?.state() || null,
+    multiPart: multiPartManager?.state({ reconcile: false }) || null,
     sharedKnowledge: sharedKnowledgeManager?.state() || null,
     pathSafety,
     backendReady,
@@ -1560,7 +1560,10 @@ function publishMultipartEvent(event) {
   // Live multi-P state is consumed only by its dedicated viewer. Sending the
   // complete tree through app:event would also persist it and invalidate the
   // application's global task snapshot several times per second.
-  if (event.type !== 'multipart-progress') publishEvent(event);
+  if (event.type !== 'multipart-progress') {
+    const { parent, collections, ...activity } = event;
+    publishEvent(activity);
+  }
   mainWindow?.webContents.send('multipart:event', event);
 }
 

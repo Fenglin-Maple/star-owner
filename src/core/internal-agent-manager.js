@@ -47,7 +47,9 @@ class InternalAgentManager {
     this.sessionCache = new Map();
     this.dirtySessionIds = new Set();
     this.sessionFlushTimer = null;
+    this.sessionFlushDueAt = 0;
     this.sessionFlushDelayMs = 1000;
+    this.multipartSessionFlushDelayMs = 4000;
     this.emptyResponseRetryDelays = normalizeRetryDelays(emptyResponseRetryDelays);
     this.ensureInternalUser();
     this.recoverInterruptedSessions();
@@ -600,6 +602,7 @@ class InternalAgentManager {
     }
     if (this.sessionFlushTimer) clearTimeout(this.sessionFlushTimer);
     this.sessionFlushTimer = null;
+    this.sessionFlushDueAt = 0;
     this.flushSessionCache();
   }
 
@@ -1510,6 +1513,7 @@ class InternalAgentManager {
     if (this.sessionFlushTimer) {
       clearTimeout(this.sessionFlushTimer);
       this.sessionFlushTimer = null;
+      this.sessionFlushDueAt = 0;
     }
     this.store.set('internalAgentSessions', session.id, session);
     this.store.save();
@@ -1537,11 +1541,18 @@ class InternalAgentManager {
   }
 
   scheduleSessionFlush() {
-    if (this.sessionFlushTimer) return;
+    const dirtySessions = [...this.dirtySessionIds].map((id) => this.sessionCache.get(id)).filter(Boolean);
+    const onlyMultipart = dirtySessions.length > 0 && dirtySessions.every((session) => session.mode === 'multipart');
+    const delayMs = onlyMultipart ? this.multipartSessionFlushDelayMs : this.sessionFlushDelayMs;
+    const dueAt = Date.now() + delayMs;
+    if (this.sessionFlushTimer && this.sessionFlushDueAt <= dueAt) return;
+    if (this.sessionFlushTimer) clearTimeout(this.sessionFlushTimer);
+    this.sessionFlushDueAt = dueAt;
     this.sessionFlushTimer = setTimeout(() => {
       this.sessionFlushTimer = null;
+      this.sessionFlushDueAt = 0;
       this.flushSessionCache();
-    }, this.sessionFlushDelayMs);
+    }, delayMs);
     this.sessionFlushTimer.unref?.();
   }
 
