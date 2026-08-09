@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.6.7`
+Version: `1.6.8`
 
 ## 1. Portable Release for Users
 
@@ -34,7 +34,7 @@ Star-Owner-v<dependency-version>-model-large-v3-turbo.zip
 Star-Owner-v<dependency-version>-model-large-v3-turbo.zip.sha256
 ```
 
-The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.6.7` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. Existing official v1.0.0 probe-only installations are adopted once using the published asset checksums; the persistent adoption marker prevents a later missing, damaged, wrong-version or wrong-package manifest from being silently accepted. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads and read-only mount snapshots. At runtime, application child processes never resolve Node, Python, FFmpeg, yt-dlp or Git from the user's PATH; the GPU probe and Windows utility calls use known absolute system locations plus the controlled project environment.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.6.8` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. Existing official v1.0.0 probe-only installations are adopted once using the published asset checksums; the persistent adoption marker prevents a later missing, damaged, wrong-version or wrong-package manifest from being silently accepted. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads and read-only mount snapshots. At runtime, application child processes never resolve Node, Python, FFmpeg, yt-dlp or Git from the user's PATH; the GPU probe and Windows utility calls use known absolute system locations plus the controlled project environment.
 
 `1.4.17` remains a code-only update and keeps the published `v1.0.0` runtime/model dependency assets unchanged. It reorganizes the shared-tool hierarchy without changing repository, mount or upload persistence contracts; no new Release asset is required.
 
@@ -61,6 +61,8 @@ The application version and dependency version are independent. `package.json.de
 `1.6.6` is a code/documentation-only multi-part deletion performance update and keeps all published runtime/model assets unchanged. Deleting a multi-part parent now batches child Agent-session and Worker mutations into one final SQLite save and restores focus to the surviving parent-viewer collection selector after structural rendering. Ordinary Agent and single-video session deletion retains immediate persistence. No schema migration or new runtime, model or Git asset is required.
 
 `1.6.7` is a code/documentation-only multi-part responsiveness update and keeps all published runtime/model assets unchanged. High-P creation yields between bounded metadata batches; synchronous worker/session/claim/tool startup writes are exported once; volatile multi-part session and tool progress use a four-second persistence window while terminal states remain immediate. Dedicated events carry only the changed parent, global snapshots skip routine artifact reconciliation, action results merge locally, and parent/child scroll positions survive structural rendering. Parent-index refresh caches unchanged child artifacts and extracted summaries. Ordinary Agent, single-video, RAG, shared knowledge, document-library and update contracts are unchanged. No schema migration or new runtime, model or Git asset is required.
+
+`1.6.8` is a code/documentation-only Bilibili request hardening update and keeps all published runtime/model assets unchanged. Single-video, managed Bilibili cache and multi-part entry points validate the current application login Cookie before their first remote request; short-link redirects and media tools receive the same authenticated state. Missing or expired Cookies stop before anonymous access and produce an in-app notification. Favorite-based Agent and local-media processing contracts remain unchanged. No schema migration or new runtime, model or Git asset is required.
 
 ### Updating and migrating an existing installation
 

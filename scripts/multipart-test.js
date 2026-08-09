@@ -81,18 +81,22 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
     }
   };
   const emittedEvents = [];
+  let currentUser = null;
   const manager = new MultiPartManager({
     store,
     bili,
     internalAgentManager,
     ragAssistant: { rawProvider: (id) => store.get('ragProviders', id) },
-    getCurrentUser: () => ({ isLogin: true, id: '42', mid: '42', name: '测试作者', cookieFile }),
+    getCurrentUser: () => currentUser,
     emit: (event) => emittedEvents.push(event)
   });
 
   assert.throws(() => assertMultipartVideoSupported({ url: 'https://www.bilibili.com/bangumi/play/ep1' }, { pages: [{ cid: '101' }, { cid: '102' }] }), /PGC/);
   assert.throws(() => assertMultipartVideoSupported({ bvid: 'BV1MULTIPART' }, { rights: { is_stein_gate: true } }), /互动视频/);
 
+  await assert.rejects(() => manager.inspect({ bvid: 'BV1MULTIPART' }), (error) => error.code === 'BILIBILI_COOKIE_REQUIRED');
+  assert.strictEqual(videoInfoCalls, 0, '多P检查在缺少 B站 Cookie 时仍然请求了视频信息');
+  currentUser = { isLogin: true, id: '42', mid: '42', name: '测试作者', cookieFile };
   const inspected = await manager.inspect({ bvid: 'BV1MULTIPART' });
   assert.strictEqual(inspected.pages.length, 3, '多P检查没有返回完整 P 列表');
   const created = await manager.create({

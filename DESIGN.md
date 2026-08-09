@@ -1,6 +1,6 @@
 # 星藏家 Design
 
-Version: `1.6.7`
+Version: `1.6.8`
 
 ## 1. Product Goal
 
@@ -106,6 +106,8 @@ On Windows, managed paths target a 259-character compatibility ceiling. Artifact
 The Bilibili WebView uses a persistent partition derived from the normalized absolute project root, Electron sandboxing, no Node bridge, official-domain navigation only and persistent login state. Password, SMS and QR-code login converge on the same automatic synchronization of user ID, name, avatar and cookies. Every QR-login button press reloads the official login page without cache when it is already open, or navigates to a fresh official login page, before selecting the QR panel. Video navigations are removed from the embedded login surface and opened in a separate sandboxed BrowserWindow using the same persistent partition; unrelated popups and non-Bilibili navigation remain denied.
 
 Saved account passwords require Electron `safeStorage`. Netscape cookie files remain plaintext because yt-dlp requires them and are stored under the user Workspace hierarchy with export time metadata.
+
+Remote Bilibili video operations require an authenticated application session. Single-video inspection/execution, managed Bilibili cache downloads and multi-part inspection/refresh/execution validate and export a non-empty, unexpired Bilibili Netscape Cookie file before their first network request. Bilibili short-link redirects receive the same Cookie header. Missing Cookies stop before task creation or download and surface a Renderer toast; persisted legacy cache jobs wait for login instead of resuming anonymously. Favorite-based Agent collections keep their existing synchronized Cookie path, while locally imported media remains independent of Bilibili login.
 
 ## 7. Collection Sync
 

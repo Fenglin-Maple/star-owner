@@ -717,6 +717,9 @@
       elements.loginRequiredReason.textContent = event.reason || '登录完成后回到“视频总结（单个）”，点击“登录后重试”即可重新处理。';
       elements.loginRequiredModal.hidden = false;
     }
+    if (event.type === 'bilibili-cookie-required') {
+      notify('需要 B站登录 Cookie', event.reason || '请重新登录 B站后再继续当前视频任务。', 'error');
+    }
     scheduleStreamRender(structural);
   }
 

@@ -552,6 +552,10 @@ function refreshBilibiliUser() {
       if (generation !== biliAccountGeneration) return currentUser;
       const user = store.upsertUser({ id: String(info.mid), mid: String(info.mid), name: info.name, face: info.face, faceDataUrl });
       currentUser = { ...info, id: user.id, cookieFile, faceDataUrl };
+      if (videoCacheManager) {
+        try { await videoCacheManager.resumeWaitingForLogin({ onlyMissing: true }); }
+        catch (error) { console.warn(`[video-cache-auth-resume] ${error.message || String(error)}`); }
+      }
     }
     if (info.isLogin || previousLogin !== Boolean(info.isLogin)) sendRuntime();
     return currentUser;

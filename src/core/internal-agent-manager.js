@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { readBilibiliCookieHeader, requireBilibiliCookie } = require('./bilibili-auth');
 const { applySubmissionFinalization, stageSubmissionFinalization } = require('./submission-artifacts');
 const { collectionBlockReason, collectionKindInfo, collectionStorageName } = require('./collection-state');
 const { promoteMindMap } = require('./markdown');
@@ -193,12 +194,15 @@ class InternalAgentManager {
     return this.publicSession(session);
   }
 
-  async inspectSingleTask(input = {}) {
-    const bvid = extractBvid(input.video) || await resolveBvid(input.video);
-    if (!bvid) throw new Error('请输入有效的 BV 号或 Bilibili 视频链接。');
+  async inspectSingleTask(input = {}, authentication = null) {
+    let bvid = extractBvid(input.video);
+    if (!bvid && !String(input.video || '').trim()) throw new Error('请输入有效的 BV 号或 Bilibili 视频链接。');
     const collection = this.store.getCollectionById(String(input.collectionId || ''));
     if (!collection || !(collection.userId === INTERNAL_USER_ID || collection.internal === true)) throw new Error('请选择内置用户下的内置收藏夹。');
     if (['video-cache', 'document-archive', 'multimodal-document', 'bilibili-multipart', 'shared'].includes(collection.collectionKind)) throw new Error('请选择普通内置收藏夹，不能把单视频任务写入缓存库、文档归档库、多P库或共享知识库。');
+    const auth = authentication || await this.prepareSingleAuthentication('读取单视频');
+    bvid ||= await resolveBvid(input.video, global.fetch, { cookie: auth.cookieHeader });
+    if (!bvid) throw new Error('请输入有效的 BV 号或 Bilibili 视频链接。');
     this.reclaimExpired(collection.id);
     const sessions = this.listSessions().filter((session) => session.mode === 'single');
     const candidates = this.store.listTasks({ collectionId: collection.id })
@@ -227,16 +231,17 @@ class InternalAgentManager {
     const modelId = String(input.modelId || '');
     if (!(provider.enabledModels || []).some((model) => model.id === modelId)) throw new Error('Select an enabled model before creating a single-video task.');
     const inspection = await this.inspectSingleTask(input);
+    const authentication = await this.prepareSingleAuthentication('创建单视频总结任务');
     const { bvid } = inspection;
     const collection = this.store.getCollectionById(inspection.collectionId);
     const duplicateAction = String(input.duplicateAction || '');
     if (inspection.active) throw new Error(`这个视频已有任务正在处理，请切换到现有会话：${inspection.active.sessionTitle || inspection.active.bvid}`);
     if (inspection.latestCompleted && duplicateAction !== 'overwrite') throw new Error('所选内置收藏夹中已经存在这个视频的完成产物，请选择放弃本次任务并保留旧产物，或重新生成并覆盖旧产物。');
     if (inspection.latestCompleted) {
-      return this.reuseSingleTask(inspection.latestCompleted.taskId, input, provider, modelId, { overwrite: true });
+      return this.reuseSingleTask(inspection.latestCompleted.taskId, input, provider, modelId, { overwrite: true, cookieFile: authentication.cookieFile });
     }
     if (inspection.recoverable) {
-      return this.reuseSingleTask(inspection.recoverable.taskId, input, provider, modelId);
+      return this.reuseSingleTask(inspection.recoverable.taskId, input, provider, modelId, { cookieFile: authentication.cookieFile });
     }
     const dirs = this.collectionDirectories(collection);
     const now = new Date().toISOString();
@@ -266,8 +271,8 @@ class InternalAgentManager {
       revisionOfTaskId: '',
       revision: 1,
       knowledgeActive: true,
-      publicAttempt: true,
-      cookieFile: '',
+      publicAttempt: false,
+      cookieFile: authentication.cookieFile,
       keepVideoCache: Boolean(input.keepVideoCache),
       createdAt: now,
       updatedAt: now
@@ -308,8 +313,8 @@ class InternalAgentManager {
       abortReason: '',
       abortSource: '',
       abortedAt: '',
-      publicAttempt: true,
-      cookieFile: '',
+      publicAttempt: false,
+      cookieFile: options.cookieFile || task.cookieFile || '',
       keepVideoCache: Boolean(input.keepVideoCache),
       versionGroupId: '',
       revisionOfTaskId: '',
@@ -361,6 +366,15 @@ class InternalAgentManager {
       : '检测到未完成或产物缺失的同 BV 任务，已清理旧缓存并从头重建。');
     this.store.commit();
     return { ...this.publicSession(existing), reusedTask: true, overwritten: Boolean(options.overwrite) };
+  }
+
+  async prepareSingleAuthentication(purpose) {
+    const cookieFile = await requireBilibiliCookie({
+      bili: this.bili,
+      user: this.getCurrentUser(),
+      purpose
+    });
+    return { cookieFile, cookieHeader: readBilibiliCookieHeader(cookieFile) };
   }
 
   removeSingleTaskSiblings(keepTask) {
@@ -426,18 +440,18 @@ class InternalAgentManager {
     if (hardware?.checkedAt && !hardware.nvidia?.supported && hardware.cpu?.supported && scheduler.config?.asrExecutionMode !== 'cpu') {
       throw new Error('未检测到可用 NVIDIA/CUDA ASR；本机可使用 CPU ASR，但该通道默认关闭。请先在“设置 → 资源调度”中手动开启 CPU ASR。');
     }
-    if (session.status === 'waiting-login') {
-      const user = this.getCurrentUser();
-      if (!user?.isLogin) {
-        this.emit({ type: 'login-required', sessionId: session.id, bvid: this.store.getTask(session.singleTaskId)?.bvid || '', reason: '请先前往 B站登录。登录完成后回到视频总结页面，点击“登录后重试”。' });
-        throw new Error('这个视频需要 Bilibili 登录后才能继续，请先完成登录。');
-      }
+    if (session.mode === 'single') {
       const task = this.store.getTask(session.singleTaskId);
-      if (!task) throw new Error('等待登录的单视频任务已不存在。');
+      if (!task) throw new Error('单视频任务已不存在。');
+      const wasWaitingForLogin = session.status === 'waiting-login';
       const startupController = new AbortController();
       this.controllers.set(session.id, startupController);
       try {
-        task.cookieFile = await this.bili.exportCookies(user.name || String(user.mid));
+        task.cookieFile = await requireBilibiliCookie({
+          bili: this.bili,
+          user: this.getCurrentUser(),
+          purpose: wasWaitingForLogin ? '重新开始单视频总结' : '开始单视频总结'
+        });
       } catch (error) {
         if (this.controllers.get(session.id) === startupController) this.controllers.delete(session.id);
         throw error;
@@ -451,7 +465,7 @@ class InternalAgentManager {
       task.updatedAt = new Date().toISOString();
       this.store.upsertTask(task);
       this.store.commit();
-      this.log(session, `已同步 ${user.name || user.mid} 的登录状态，准备重试。`);
+      if (wasWaitingForLogin) this.log(session, '已重新同步 B站登录 Cookie，准备从头重试。');
     }
     const worker = this.store.getWorker(session.workerId);
     if (worker?.status === 'paused') this.store.updateWorker(worker.id, { status: 'active' });
@@ -783,14 +797,14 @@ class InternalAgentManager {
         if (latest.mode === 'single' && error.code === 'BILIBILI_LOGIN_REQUIRED') {
           this.abortAttempt(task.id, latest.workerId, error.message || String(error), 'login-required');
           latest.status = 'waiting-login';
-          latest.phase = '需要登录后继续';
+          latest.phase = 'B站登录 Cookie 已失效';
           latest.lastError = error.message || String(error);
           latest.currentTaskId = '';
           latest.currentRunId = '';
           latest.progress = Math.max(0.08, Number(latest.progress || 0));
           this.saveSession(latest);
-          this.log(latest, `公开获取受限：${latest.lastError}`);
-          this.emit({ type: 'login-required', sessionId: latest.id, bvid: task.bvid, title: task.title, reason: '已先尝试公开获取，但该视频要求登录。登录完成后回到“视频总结（单个）”，点击“登录后重试”并从头处理。' });
+          this.log(latest, `B站拒绝了当前登录 Cookie：${latest.lastError}`);
+          this.emit({ type: 'bilibili-cookie-required', sessionId: latest.id, bvid: task.bvid, title: task.title, reason: '当前 B站登录 Cookie 已失效。请重新登录 B站，再回到“视频总结（单个）”点击“登录后重试”。' });
           return;
         }
         excluded.add(task.id);
@@ -889,7 +903,7 @@ class InternalAgentManager {
     const stopLeaseHeartbeat = this.startTaskLeaseHeartbeat(task);
     try {
     const collection = this.store.getCollectionById(task.collectionId) || {};
-    const toolCollection = task.singleTask ? { ...collection, cookieFile: task.publicAttempt ? '' : (task.cookieFile || '') } : collection;
+    const toolCollection = task.singleTask ? { ...collection, cookieFile: task.cookieFile || '' } : collection;
     this.setProgress(session, '准备视频素材', 0.09);
     const commentLimit = Number(session.taskOptions?.commentLimit ?? 3);
     const bundle = this.startTool(session, task, toolCollection, 'material-bundle', {
@@ -959,7 +973,7 @@ class InternalAgentManager {
       if (TERMINAL_RUNS.has(run.status)) {
         if (run.status !== 'succeeded') {
           const message = `${run.toolName || run.toolId} ${run.status}：${run.error || '请查看运行日志'}`;
-          if (session.mode === 'single' && task.publicAttempt && isLoginRequiredMessage(message)) throw loginRequiredError(message);
+          if (session.mode === 'single' && isLoginRequiredMessage(message)) throw loginRequiredError(message);
           const error = new Error(message);
           error.code = run.errorCode || '';
           error.failureKind = run.failureKind || '';

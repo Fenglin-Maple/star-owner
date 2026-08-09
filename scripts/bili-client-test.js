@@ -1,7 +1,22 @@
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const { isUsableBilibiliCookieFile, readBilibiliCookieHeader, requireBilibiliCookie } = require('../src/core/bilibili-auth');
 const { BiliClient, isBilibiliCookieDomain, normalizeBilibiliAssetUrl } = require('../src/core/bili');
 
 (async () => {
+  const authRoot = path.join(__dirname, '..', '.cache', 'bili-auth-test');
+  fs.rmSync(authRoot, { recursive: true, force: true });
+  fs.mkdirSync(authRoot, { recursive: true });
+  const cookieFile = path.join(authRoot, 'cookies.txt');
+  fs.writeFileSync(cookieFile, '# Netscape HTTP Cookie File\n', 'utf8');
+  assert.strictEqual(isUsableBilibiliCookieFile(cookieFile), false, 'comment-only Cookie file was treated as authenticated');
+  fs.writeFileSync(cookieFile, '# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tTRUE\t1\tSESSDATA\texpired\n', 'utf8');
+  assert.strictEqual(isUsableBilibiliCookieFile(cookieFile), false, 'expired B站 Cookie was treated as usable');
+  fs.writeFileSync(cookieFile, '# Netscape HTTP Cookie File\n#HttpOnly_.bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\ttest-session\n', 'utf8');
+  assert(isUsableBilibiliCookieFile(cookieFile) && readBilibiliCookieHeader(cookieFile) === 'SESSDATA=test-session', 'valid HttpOnly B站 Cookie was not parsed');
+  await assert.rejects(() => requireBilibiliCookie({ bili: {}, user: null, purpose: '测试视频请求' }), (error) => error.code === 'BILIBILI_COOKIE_REQUIRED');
+
   assert.strictEqual(normalizeBilibiliAssetUrl('http://i0.hdslb.com/avatar.jpg'), 'https://i0.hdslb.com/avatar.jpg');
   assert.strictEqual(normalizeBilibiliAssetUrl('//i1.hdslb.com/avatar.jpg'), 'https://i1.hdslb.com/avatar.jpg');
   assert.strictEqual(normalizeBilibiliAssetUrl('https://i2.hdslb.com/avatar.jpg'), 'https://i2.hdslb.com/avatar.jpg');
@@ -68,6 +83,7 @@ const { BiliClient, isBilibiliCookieDomain, normalizeBilibiliAssetUrl } = requir
   } finally {
     global.fetch = originalFetch;
   }
+  fs.rmSync(authRoot, { recursive: true, force: true });
   console.log('Bilibili client normalization test passed');
 })().catch((error) => {
   console.error(error);

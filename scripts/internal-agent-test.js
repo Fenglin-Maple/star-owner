@@ -110,7 +110,7 @@ function assert(condition, message) {
     getState: () => ({ hardware: { checkedAt: '', localAsrSupported: false }, config: { cpuAsrEnabled: false } }),
     start: ({ task, tool, workerId, collection: runCollection }) => {
       const id = `run-${tool.id}-${Date.now()}`;
-      const loginBlocked = forceLoginFailure && tool.id === 'material-bundle' && !runCollection?.cookieFile;
+      const loginBlocked = forceLoginFailure && tool.id === 'material-bundle';
       const infrastructureBlocked = forceInfrastructureFailure && tool.id === 'material-bundle';
       const unavailable = forceUnavailableFailure && tool.id === 'material-bundle';
       const unsupported = forceUnsupportedFailure && tool.id === 'material-bundle';
@@ -130,7 +130,8 @@ function assert(condition, message) {
   const events = [];
   let currentUser = null;
   const cookieFixture = path.join(root, 'login-cookies.txt');
-  const manager = new InternalAgentManager({ store, toolRunner, ragAssistant: rag, bili: { exportCookies: async () => { fs.writeFileSync(cookieFixture, 'cookie'); return cookieFixture; } }, getCurrentUser: () => currentUser, emit: (event) => events.push(event), emptyResponseRetryDelays: [0, 0, 0, 0, 0] });
+  const cookieText = '# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\ttest-session\n';
+  const manager = new InternalAgentManager({ store, toolRunner, ragAssistant: rag, bili: { exportCookies: async () => { fs.writeFileSync(cookieFixture, cookieText); return cookieFixture; } }, getCurrentUser: () => currentUser, emit: (event) => events.push(event), emptyResponseRetryDelays: [0, 0, 0, 0, 0] });
   const sharedCollection = store.upsertCollection({ id: 'shared-agent-test', userId: 'shared-user', userName: '共享', name: '共享知识测试', internal: true, collectionKind: 'shared', workspaceId: workspace.id, workspaceRoot: workspace.root, collectionRoot: path.join(workspace.root, '共享', '共享知识测试') });
   assert(!manager.state().collections.some((item) => item.id === sharedCollection.id), '共享收藏夹仍出现在 Agent 工作流收藏夹列表');
   assert(!manager.listInternalCollections().some((item) => item.id === sharedCollection.id), '共享收藏夹仍出现在单视频总结收藏夹列表');
@@ -208,6 +209,11 @@ function assert(condition, message) {
   try { await manager.createSingleTask({ video: 'BVINVALID001', collectionId: collection.id, providerId: 'provider-test', modelId: 'missing-model' }); }
   catch { invalidSingleModelRejected = true; }
   assert(invalidSingleModelRejected && store.listTasks().length === tasksBeforeInvalidModel, 'invalid single-video model configuration left an orphan task');
+  let missingCookieRejected = false;
+  try { await manager.createSingleTask({ video: 'BVCOOKIE0001', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' }); }
+  catch (error) { missingCookieRejected = error.code === 'BILIBILI_COOKIE_REQUIRED'; }
+  assert(missingCookieRejected && store.listTasks().length === tasksBeforeInvalidModel, 'single-video creation did not reject a missing B站 login Cookie before creating a task');
+  currentUser = { isLogin: true, name: '测试登录用户', mid: '100' };
   const session = await manager.createSingleTask({
     video: 'https://www.bilibili.com/video/BV1234567890',
     collectionId: collection.id,
@@ -216,7 +222,7 @@ function assert(condition, message) {
     taskRequirements: '保留测试参数。',
     taskOptions: { frames: 8, commentLimit: 3 }
   });
-  assert(store.getTask(session.singleTaskId)?.publicAttempt === true && !store.getTask(session.singleTaskId)?.cookieFile, 'single task must try public access first');
+  assert(store.getTask(session.singleTaskId)?.publicAttempt === false && store.getTask(session.singleTaskId)?.cookieFile === cookieFixture, 'single task did not carry the B站 Cookie on its first request');
   await Promise.all([manager.start(session.id), manager.start(session.id)]);
   const finished = await waitForSession(manager, session.id);
   assert(finished.status === 'completed', `single session did not complete: ${finished.lastError || finished.status}`);
@@ -371,14 +377,14 @@ function assert(condition, message) {
   await manager.start(loginSession.id);
   const waiting = await waitForStatus(manager, loginSession.id, 'waiting-login');
   assert(waiting.lastError.includes('Bilibili'), 'single task did not preserve login-required reason');
-  assert(events.some((event) => event.type === 'login-required' && event.sessionId === loginSession.id), 'login-required UI event was not emitted');
+  assert(events.some((event) => event.type === 'bilibili-cookie-required' && event.sessionId === loginSession.id), 'expired Cookie did not emit the bottom-right notification event');
+  forceLoginFailure = false;
   currentUser = { isLogin: true, name: '测试登录用户', mid: '100' };
   await manager.start(loginSession.id);
   const retried = await waitForSession(manager, loginSession.id);
   assert(retried.status === 'completed', `logged-in retry did not complete: ${retried.lastError || retried.status}`);
   assert(store.getTask(loginSession.singleTaskId)?.publicAttempt === false, 'logged-in retry did not switch from public access');
 
-  forceLoginFailure = false;
   forceInfrastructureFailure = true;
   const blockedSession = await manager.createSingleTask({ video: 'BVINFRA00001', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
   await manager.start(blockedSession.id);

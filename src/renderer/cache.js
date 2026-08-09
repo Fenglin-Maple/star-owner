@@ -300,6 +300,9 @@
       elements.loginReason.textContent = shortError(event.reason || '该视频要求登录后下载。');
       elements.loginModal.hidden = false;
     }
+    if (event.type === 'video-cache-cookie-required') {
+      toast('需要 B站登录 Cookie', shortError(event.reason || '请登录 B站后再继续缓存任务。'), 'error');
+    }
     scheduleRefresh(event.cacheState);
   });
 

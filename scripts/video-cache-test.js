@@ -32,7 +32,7 @@ function assert(condition, message) {
         fs.writeFileSync(path.join(task.artifactDir, 'info.json'), JSON.stringify({ bvid: task.bvid, title: '缓存测试视频', owner: { name: '测试 UP', mid: 1 }, duration: 125, pubdate: 1767225600, tags: ['AI', '测试'], pic: 'http://i0.hdslb.com/test.jpg', coverFile: 'cover.jpg', dimension: { width: 1080, height: 1920, rotate: 0 } }));
       }
       if (tool.id === 'merged-video') {
-        if (requireLogin && !collection.cookieFile) {
+        if (requireLogin) {
           status = 'failed';
           error = 'This video is only available for registered users. Use --cookies.';
         } else {
@@ -45,7 +45,7 @@ function assert(condition, message) {
     }
   };
   const cookieFile = path.join(root, 'cookies.txt');
-  fs.writeFileSync(cookieFile, 'cookie');
+  fs.writeFileSync(cookieFile, '# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\ttest-session\n', 'utf8');
   let currentUser = null;
   const manager = new VideoCacheManager({ store, toolRunner: runner, bili: { exportCookies: async () => cookieFile }, getCurrentUser: () => currentUser, pollMs: 25, maxConcurrent: 2 });
   manager.initialize();
@@ -55,6 +55,18 @@ function assert(condition, message) {
   try { await resolveBvid('https://www.bilibili.com/bangumi/play/ep123456', async () => { throw new Error('special URL must be rejected before fetch'); }); }
   catch (error) { specialRejected = error.code === 'UNSUPPORTED_VIDEO_TYPE'; }
   assert(specialRejected, 'special Bilibili URL was not rejected before cache submission');
+  let missingCookieRejected = false;
+  try { await manager.submit({ inputs: 'BVCOOKIE0002', collectionId: defaultCollection.id }); }
+  catch (error) { missingCookieRejected = error.code === 'BILIBILI_COOKIE_REQUIRED'; }
+  assert(missingCookieRejected && store.listVideoCacheJobs().length === 0, 'cache submission without a B站 Cookie created a download job');
+  const startupJob = store.upsertVideoCacheJob({ id: 'startup-cookie-job', collectionId: defaultCollection.id, input: 'BVSTARTUP001', bvid: 'BVSTARTUP001', status: 'queued', outputRoot: defaultCollection.cacheRoot, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  const runsBeforeStartupCookie = runCount;
+  await manager.runJob(startupJob.id);
+  assert(store.getVideoCacheJob(startupJob.id)?.cookieWaitReason === 'missing' && runCount === runsBeforeStartupCookie, 'startup cache recovery requested B站 before the login state was ready');
+  currentUser = { isLogin: true, name: '测试用户', mid: '1' };
+  const autoResumed = await manager.resumeWaitingForLogin({ onlyMissing: true });
+  assert(autoResumed.resumed === 1, 'startup cache job did not resume after the application restored its login Cookie');
+  await waitForJob(store, startupJob.id, 'completed');
 
   store.createToolRun({
     id: 'cache-run-interrupted',
@@ -110,6 +122,9 @@ function assert(condition, message) {
   requireLogin = true;
   const waitingSubmit = await manager.submit({ inputs: 'BV0987654321', collectionId: defaultCollection.id });
   await waitForJob(store, waitingSubmit.jobs[0].id, 'waiting-login');
+  const rejectedAutoResume = await manager.resumeWaitingForLogin({ onlyMissing: true });
+  assert(rejectedAutoResume.resumed === 0 && store.getVideoCacheJob(waitingSubmit.jobs[0].id)?.status === 'waiting-login', 'server-rejected Cookie entered an automatic retry loop');
+  requireLogin = false;
   currentUser = { isLogin: true, name: '测试用户', mid: '1' };
   const resumed = await manager.resumeWaitingForLogin();
   assert(resumed.resumed === 1, 'waiting login job was not resumed');
@@ -141,6 +156,15 @@ function assert(condition, message) {
   let externalFetches = 0;
   try { await resolveBvid('https://example.com/video?bilibili=1', async () => { externalFetches += 1; }); } catch { /* expected */ }
   assert(externalFetches === 0, 'non-Bilibili URL reached the network layer');
+  const shortLinkHeaders = [];
+  const shortBvid = await resolveBvid('https://b23.tv/cookie-test', async (url, options) => {
+    shortLinkHeaders.push(options.headers);
+    if (String(url).includes('b23.tv')) {
+      return { status: 302, ok: false, headers: { get: (name) => name === 'location' ? 'https://www.bilibili.com/video/BVSHORT00001' : '' }, url };
+    }
+    return { status: 200, ok: true, headers: { get: () => '' }, url, text: async () => '' };
+  }, { cookie: 'SESSDATA=test-session' });
+  assert(shortBvid === 'BVSHORT00001' && shortLinkHeaders.every((headers) => headers.cookie === 'SESSDATA=test-session'), 'Bilibili short-link resolution did not carry the login Cookie across redirects');
   const temporary = manager.createCollection('可删除缓存');
   manager.deleteCollection(temporary.id);
   assert(!store.getCollectionById(temporary.id) && store.getCollectionById(DEFAULT_CACHE_COLLECTION_ID), 'cache collection lifecycle failed');

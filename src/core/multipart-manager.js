@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { requireBilibiliCookie } = require('./bilibili-auth');
 const { collectionDirs, ensureDir, safeName, assertInside, removePathInsideAsync } = require('./workspace');
 const { unsupportedBilibiliUrlReason } = require('./video-support');
 
@@ -83,6 +84,7 @@ class MultiPartManager {
   async inspect(input = {}) {
     const bvid = extractBvid(input.bvid || input.url);
     if (!bvid) throw new Error('请输入有效的多P BV号或视频链接。');
+    await this.requireAuthentication('读取多P视频列表');
     const info = await this.readVideoInfo(bvid);
     assertMultipartVideoSupported(input, info);
     if (info.pages.length < 2) throw new Error('该视频只有一个P，不需要使用多P视频总结工具。');
@@ -103,10 +105,14 @@ class MultiPartManager {
     if (!(provider.enabledModels || []).some((model) => model.id === modelId)) throw new Error('请选择已启用的模型。');
     const bvid = extractBvid(input.bvid || input.url);
     if (!bvid) throw new Error('请输入有效的多P BV号或视频链接。');
+    const cookieFile = await this.requireAuthentication('创建多P视频任务');
     const info = await this.readVideoInfo(bvid);
     assertMultipartVideoSupported(input, info);
     if (info.pages.length < 2) throw new Error('该视频只有一个P，不需要使用多P视频总结工具。');
-    const collection = this.requireOrCreateCollection(input.collectionId, input.collectionName || `${info.title || bvid} 多P`);
+    let collection = this.requireOrCreateCollection(input.collectionId, input.collectionName || `${info.title || bvid} 多P`);
+    if (collection.cookieFile !== cookieFile) {
+      collection = this.store.upsertCollection({ ...collection, cookieFile, cookieExportedAt: new Date().toISOString() });
+    }
     const parentId = parentIdFor(bvid, collection.id);
     const existing = this.store.get('multiPartParents', parentId);
     if (existing) {
@@ -167,6 +173,7 @@ class MultiPartManager {
 
   async refresh(parentId) {
     const parent = this.requireParent(parentId);
+    await this.prepareCollectionAuthentication(parent);
     const info = await this.readVideoInfo(parent.bvid, { force: true });
     assertMultipartVideoSupported({ bvid: parent.bvid }, info);
     if (info.pages.length < 2) throw new Error('B站返回的页面数已少于 2，无法继续作为多P任务处理。');
@@ -605,25 +612,19 @@ class MultiPartManager {
 
   async prepareCollectionAuthentication(parent) {
     const collection = this.store.getCollectionById(parent.collectionId);
-    const user = this.getCurrentUser?.();
-    if (!collection || !user?.isLogin) return collection;
-
-    let cookieFile = String(user.cookieFile || '').trim();
-    if (!cookieFile || !fs.existsSync(cookieFile)) {
-      try {
-        cookieFile = await this.bili.exportCookies(user.name || String(user.mid || user.id || 'multipart'));
-      } catch (error) {
-        console.warn(`[multipart] unable to export Bilibili cookies: ${error.message || String(error)}`);
-        return collection;
-      }
-    }
-    if (!cookieFile || !fs.existsSync(cookieFile) || path.resolve(cookieFile) === path.resolve(String(collection.cookieFile || ''))) return collection;
+    if (!collection) throw new Error('多P父任务所属收藏夹不存在。');
+    const cookieFile = await this.requireAuthentication('处理多P视频');
+    if (path.resolve(cookieFile) === path.resolve(String(collection.cookieFile || ''))) return collection;
     const updated = this.store.upsertCollection({
       ...collection,
       cookieFile,
       cookieExportedAt: new Date().toISOString()
     });
     return updated;
+  }
+
+  async requireAuthentication(purpose) {
+    return requireBilibiliCookie({ bili: this.bili, user: this.getCurrentUser?.(), purpose });
   }
 
   seedPartInfo(parent, task, page) {

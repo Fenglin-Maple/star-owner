@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
+const { BILIBILI_COOKIE_REQUIRED, readBilibiliCookieHeader, requireBilibiliCookie } = require('./bilibili-auth');
 const { isLoginRequiredMessage, isVideoUnavailableMessage, unsupportedVideoError } = require('./media-errors');
 const { assertBilibiliUrl } = require('./network-policy');
 const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('./video-support');
@@ -95,12 +96,14 @@ class VideoCacheManager {
     const parsed = parseInputs(inputs);
     const rawItems = parsed.valid;
     if (!rawItems.length) throw new Error('请至少输入一个 BV 号或 Bilibili 视频链接。');
+    const authentication = await this.prepareAuthentication('提交 B站视频缓存任务');
+    this.store.upsertCollection({ ...collection, cookieFile: authentication.cookieFile, cookieExportedAt: new Date().toISOString() });
     const targetRoot = ensureDir(collection.cacheRoot);
     const jobs = [];
     const seen = new Set();
     const resolvedItems = [];
     for (const rawInput of rawItems) {
-      const bvid = await resolveBvid(rawInput, this.fetch);
+      const bvid = await resolveBvid(rawInput, this.fetch, { cookie: authentication.cookieHeader });
       if (seen.has(bvid)) continue;
       seen.add(bvid);
       const task = this.store.getTask(`cache-task:${collection.id}:${bvid}`);
@@ -128,7 +131,8 @@ class VideoCacheManager {
         progress: existingFile ? 1 : 0,
         outputRoot: targetRoot,
         cacheId: existingFile ? existing.id : '',
-        publicAttempt: true,
+        publicAttempt: false,
+        cookieFile: authentication.cookieFile,
         currentRunId: '',
         error: '',
         createdAt: now,
@@ -142,15 +146,15 @@ class VideoCacheManager {
     return { jobs, invalidInputs: parsed.invalid, state: this.state() };
   }
 
-  async resumeWaitingForLogin() {
-    const user = this.getCurrentUser();
-    if (!user?.isLogin) throw new Error('请先完成 Bilibili 登录。');
-    const cookieFile = await this.bili.exportCookies(user.name || String(user.mid));
+  async resumeWaitingForLogin(options = {}) {
+    const { cookieFile } = await this.prepareAuthentication('继续 B站视频缓存任务');
+    const onlyMissing = options.onlyMissing === true;
     let resumed = 0;
     const affectedCollections = new Set();
     for (const job of this.store.listVideoCacheJobs()) {
       if (job.status !== 'waiting-login') continue;
-      this.store.upsertVideoCacheJob({ ...job, status: 'queued', phase: '已同步登录状态，等待重试', publicAttempt: false, cookieFile, error: '', updatedAt: new Date().toISOString() });
+      if (onlyMissing && job.cookieWaitReason !== 'missing') continue;
+      this.store.upsertVideoCacheJob({ ...job, status: 'queued', phase: '已同步登录状态，等待重试', publicAttempt: false, cookieFile, cookieWaitReason: '', error: '', updatedAt: new Date().toISOString() });
       affectedCollections.add(job.collectionId);
       resumed += 1;
     }
@@ -158,8 +162,10 @@ class VideoCacheManager {
       const collection = this.store.getCollectionById(collectionId);
       if (collection) this.store.upsertCollection({ ...collection, cookieFile, cookieExportedAt: new Date().toISOString() });
     }
-    this.emitState('video-cache-login-resumed', { resumed });
-    this.dispatch();
+    if (resumed) {
+      this.emitState('video-cache-login-resumed', { resumed });
+      this.dispatch();
+    }
     return { resumed, state: this.state() };
   }
 
@@ -283,6 +289,22 @@ class VideoCacheManager {
     let job = this.store.getVideoCacheJob(jobId);
     if (!job || job.status !== 'queued') return;
     const collection = this.requireCacheCollection(job.collectionId);
+    let authentication;
+    try {
+      authentication = await this.prepareAuthentication('下载 B站视频缓存');
+    } catch (error) {
+      if (error.code !== BILIBILI_COOKIE_REQUIRED) throw error;
+      this.updateJob(job, { status: 'waiting-login', phase: '等待 B站登录 Cookie', currentRunId: '', cookieWaitReason: 'missing', error: error.message, updatedAt: new Date().toISOString() });
+      this.emitState('video-cache-cookie-required', { jobId: job.id, bvid: job.bvid, reason: error.message });
+      return;
+    }
+    if (job.cookieFile !== authentication.cookieFile || job.publicAttempt !== false) {
+      job = this.updateJob(job, { publicAttempt: false, cookieFile: authentication.cookieFile }, false);
+    }
+    if (collection.cookieFile !== authentication.cookieFile) {
+      this.store.upsertCollection({ ...collection, cookieFile: authentication.cookieFile, cookieExportedAt: new Date().toISOString() });
+      this.store.commit();
+    }
     const baseDir = ensureDir(path.join(job.outputRoot, safeName(`[BV-${job.bvid}]`, job.bvid, 120)));
     const now = new Date().toISOString();
     const taskId = `cache-task:${collection.id}:${job.bvid}`;
@@ -315,9 +337,9 @@ class VideoCacheManager {
     };
     this.store.upsertTask(task);
     this.store.commit();
-    job = this.updateJob(job, { status: 'running', phase: '读取公开元数据', progress: 0.06, error: '' });
+    job = this.updateJob(job, { status: 'running', phase: '读取视频元数据', progress: 0.06, error: '' });
     try {
-      const runCollection = { ...collection, cookieFile: job.publicAttempt ? '' : job.cookieFile };
+      const runCollection = { ...collection, cookieFile: authentication.cookieFile };
       const infoRun = this.toolRunner.start({ task, tool: this.store.get('tools', 'video-info'), collection: runCollection, workerId: 'video-cache-manager', options: { timeoutMs: 30 * 60 * 1000 } });
       job = this.updateJob(job, { currentRunId: infoRun.id, phase: '读取视频元数据', progress: 0.1 });
       await this.waitForRun(infoRun.id);
@@ -407,9 +429,9 @@ class VideoCacheManager {
       } else if (error.code === 'BILIBILI_VIDEO_UNAVAILABLE' || isVideoUnavailableMessage(detail)) {
         this.updateJob(job, { status: 'skipped', phase: '视频已删除、下架或不可用', currentRunId: '', error: detail.slice(0, 2000), finishedAt: new Date().toISOString() });
         this.emitState('video-cache-download-skipped', { jobId: job.id, bvid: job.bvid, reason: detail.slice(0, 500) });
-      } else if (job.publicAttempt && isLoginRequiredMessage(detail)) {
-        this.updateJob(job, { status: 'waiting-login', phase: '等待 Bilibili 登录', progress: Math.max(0.04, Number(job.progress || 0)), currentRunId: '', error: detail.slice(0, 1200) });
-        this.emitState('video-cache-login-required', { jobId: job.id, bvid: job.bvid, reason: detail.slice(0, 500) });
+      } else if (isLoginRequiredMessage(detail)) {
+        this.updateJob(job, { status: 'waiting-login', phase: 'B站登录 Cookie 已失效', progress: Math.max(0.04, Number(job.progress || 0)), currentRunId: '', cookieWaitReason: 'rejected', error: detail.slice(0, 1200) });
+        this.emitState('video-cache-cookie-required', { jobId: job.id, bvid: job.bvid, reason: '当前 B站登录 Cookie 已失效，请重新登录后继续缓存任务。' });
       } else {
         this.updateJob(job, { status: 'failed', phase: '下载失败', currentRunId: '', error: detail.slice(0, 2000), finishedAt: new Date().toISOString() });
         this.emitState('video-cache-download-failed', { jobId: job.id, bvid: job.bvid, error: detail.slice(0, 500) });
@@ -526,6 +548,11 @@ class VideoCacheManager {
     return collection;
   }
 
+  async prepareAuthentication(purpose) {
+    const cookieFile = await requireBilibiliCookie({ bili: this.bili, user: this.getCurrentUser(), purpose });
+    return { cookieFile, cookieHeader: readBilibiliCookieHeader(cookieFile) };
+  }
+
   emitState(type, detail) {
     this.emit({ type, ...detail, cacheState: this.state() });
   }
@@ -549,7 +576,7 @@ function parseInputs(value) {
   return { valid, invalid };
 }
 
-async function resolveBvid(value, fetchImpl = global.fetch) {
+async function resolveBvid(value, fetchImpl = global.fetch, requestHeaders = {}) {
   const inputReason = unsupportedBilibiliUrlReason(value);
   if (inputReason) throw unsupportedVideoError(inputReason, 'special-video');
   const direct = String(value || '').match(/BV[0-9A-Za-z]{10}/i)?.[0];
@@ -559,7 +586,11 @@ async function resolveBvid(value, fetchImpl = global.fetch) {
   if (normalizedReason) throw unsupportedVideoError(normalizedReason, 'special-video');
   let response;
   for (let redirects = 0; redirects <= 5; redirects += 1) {
-    response = await fetchImpl(url.toString(), { redirect: 'manual', headers: { 'user-agent': 'Mozilla/5.0 StarOwner/0.8' }, signal: AbortSignal.timeout(20000) });
+    response = await fetchImpl(url.toString(), {
+      redirect: 'manual',
+      headers: { ...requestHeaders, 'user-agent': 'Mozilla/5.0 StarOwner/0.8' },
+      signal: AbortSignal.timeout(20000)
+    });
     if (![301, 302, 303, 307, 308].includes(Number(response.status || 0))) break;
     const location = response.headers?.get?.('location');
     if (!location) throw new Error('Bilibili 短链接返回了无目标的重定向。');
