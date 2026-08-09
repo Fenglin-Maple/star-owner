@@ -98,6 +98,59 @@ const { sharedRepositoryTemplate } = require('../src/core/shared-repository-temp
   assert.strictEqual(clearedBrowserAuth.scope, 'application-only', '清除共享授权没有限制在星藏家应用范围');
   assert.strictEqual(clearedBrowserAuth.gitCredential.scope, 'application-dpapi', '清除共享授权没有清理内置 Git 私有凭据');
   assert.strictEqual(browserManager.state().authenticated, false, '清除共享授权后应用仍显示已授权');
+  const githubAuthStore = await Store.open(path.join(root, 'github-auth-fallback.sqlite'));
+  const githubAuthManager = new SharedKnowledgeManager({
+    store: githubAuthStore,
+    encryptSecret: (value) => ({ mode: 'test', value }),
+    decryptSecret: (secret) => secret.value,
+    gitRuntime: { state: () => ({ available: true, isolated: true, path: 'test-git' }) }
+  });
+  const originalFetch = global.fetch;
+  const originalEnvironmentToken = process.env.STAR_OWNER_GITHUB_TOKEN;
+  const githubFetches = [];
+  try {
+    delete process.env.STAR_OWNER_GITHUB_TOKEN;
+    global.fetch = async (url, options = {}) => {
+      githubFetches.push({ url: String(url), options });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          content: Buffer.from(`${JSON.stringify({ schemaVersion: 1, generatedAt: '', total: 0, documents: [] })}\n`, 'utf8').toString('base64'),
+          sha: 'anonymous-catalog'
+        })
+      };
+    };
+    const anonymousCatalog = await githubAuthManager.remoteCatalog();
+    assert.strictEqual(anonymousCatalog.total, 0, '未登录时无法匿名读取公开共享目录');
+    assert.strictEqual(githubFetches.length, 1, '匿名目录索引读取发出了额外 GitHub 请求');
+    assert(!githubFetches[0].options.headers.authorization, '未登录的公开目录读取错误携带 Authorization 请求头');
+
+    githubAuthStore.set('settings', 'sharedGithub', {
+      id: 'sharedGithub',
+      encryptedToken: { mode: 'test', value: 'expired-token' },
+      login: 'expired-user',
+      userId: '123456',
+      authMethod: 'browser'
+    });
+    githubAuthStore.save();
+    githubFetches.length = 0;
+    global.fetch = async (url, options = {}) => {
+      githubFetches.push({ url: String(url), options });
+      return { ok: false, status: 401, text: async () => JSON.stringify({ message: 'Bad credentials' }) };
+    };
+    await assert.rejects(
+      () => githubAuthManager.remoteCatalog(),
+      (error) => error?.code === 'GITHUB_AUTH_INVALID' && /重新登录 GitHub/.test(error.message),
+      '失效 GitHub Token 没有返回可操作的重新授权提示'
+    );
+    assert.strictEqual(githubFetches.length, 1, '失效 Token 的目录请求仍回退 Git Tree 或匿名重试');
+    assert.strictEqual(githubFetches[0].options.headers.authorization, 'Bearer expired-token', '失效 Token 测试没有携带已保存授权');
+  } finally {
+    global.fetch = originalFetch;
+    if (originalEnvironmentToken === undefined) delete process.env.STAR_OWNER_GITHUB_TOKEN;
+    else process.env.STAR_OWNER_GITHUB_TOKEN = originalEnvironmentToken;
+  }
   const stableOne = manager.prepareDocument({ ...task, id: 'task-id-one', githubUserId: '123456' });
   const stableTwo = manager.prepareDocument({ ...task, id: 'task-id-two', githubUserId: '123456' });
   assert.strictEqual(stableOne.documentId, stableTwo.documentId, 'stable shared document id changed with local task id');

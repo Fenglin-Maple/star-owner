@@ -25,6 +25,7 @@ const REPOSITORY_MARKER_FILE = '_star-owner-repository.json';
 const REPOSITORY_SCHEMA_VERSION = 1;
 const REQUIRED_REPOSITORY_CAPABILITIES = Object.freeze(['bilibili-summary', 'single-video-summary', 'multipart-summary', 'catalog-v1']);
 const REQUIRED_VALIDATION_CONTEXT = 'validate-shared-docs';
+const GITHUB_AUTH_INVALID_CODE = 'GITHUB_AUTH_INVALID';
 const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;
 const APPLICATION_VERSION = require('../../package.json').version;
 
@@ -261,7 +262,7 @@ class SharedKnowledgeManager {
       this.catalogCache.set(cacheKey, { cachedAt: Date.now(), value: indexed });
       return indexed;
     } catch (error) {
-      if (isAbortError(error)) throw error;
+      if (isAbortError(error) || isGithubAuthInvalid(error)) throw error;
       this.reportOperation({
         stage: 'catalog-fallback',
         progress: progressWithin(options, 0.12),
@@ -348,6 +349,7 @@ class SharedKnowledgeManager {
         validateRemoteMetadata(metadata, entry.path);
         result.push({ ...metadata, path: entry.path, metadataPath: entry.path, remoteSha: entry.sha, updatedAt: metadata.updatedAt || metadata.uploadedAt || '' });
       } catch (error) {
+        if (isGithubAuthInvalid(error)) throw error;
         result.push({ path: entry.path, metadataPath: entry.path, remoteSha: entry.sha, invalid: true, error: error.message || String(error) });
       }
     }
@@ -1562,7 +1564,9 @@ class SharedKnowledgeManager {
       try {
         const profile = await this.githubRequest(`/user/${encodeURIComponent(contributorId)}`, { token });
         login = String(profile?.login || '').trim();
-      } catch {}
+      } catch (error) {
+        if (isGithubAuthInvalid(error)) throw error;
+      }
       this.githubLoginCache.set(contributorId, login);
       for (const document of documents) if (String(document.contributorGithubId || '') === contributorId && !document.contributorGithubLogin) document.contributorGithubLogin = login;
     }
@@ -1843,7 +1847,15 @@ class SharedKnowledgeManager {
     const text = await response.text();
     let body = {};
     try { body = text ? JSON.parse(text) : {}; } catch { body = { message: text.slice(0, 500) }; }
-    if (!response.ok) { const error = new Error(`GitHub API ${response.status}: ${body.message || text.slice(0, 300)}`); error.status = response.status; throw error; }
+    if (!response.ok) {
+      const authenticated = Boolean(options.token);
+      const error = response.status === 401 && authenticated
+        ? new Error('GitHub 授权已失效或被撤销，请展开“更多授权选项”，清除当前授权后重新登录 GitHub。')
+        : new Error(`GitHub API ${response.status}: ${body.message || text.slice(0, 300)}`);
+      error.status = response.status;
+      if (response.status === 401 && authenticated) error.code = GITHUB_AUTH_INVALID_CODE;
+      throw error;
+    }
     return body;
   }
 
@@ -2317,6 +2329,10 @@ function validateGithubToken(value) {
   if (!token) throw new Error('GitHub Token 不能为空。');
   if (token.length > 512 || /[\u0000-\u001f\u007f]/.test(token)) throw new Error('GitHub Token 格式无效，不能包含控制字符或超过 512 个字符。');
   return token;
+}
+
+function isGithubAuthInvalid(error) {
+  return error?.code === GITHUB_AUTH_INVALID_CODE;
 }
 
 function normalizeRepository(value = {}) {
