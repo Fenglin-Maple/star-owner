@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.6.5`
+Version: `1.6.6`
 
 ## 1. Portable Release for Users
 
@@ -34,7 +34,7 @@ Star-Owner-v<dependency-version>-model-large-v3-turbo.zip
 Star-Owner-v<dependency-version>-model-large-v3-turbo.zip.sha256
 ```
 
-The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.6.5` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. Existing official v1.0.0 probe-only installations are adopted once using the published asset checksums; the persistent adoption marker prevents a later missing, damaged, wrong-version or wrong-package manifest from being silently accepted. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads and read-only mount snapshots. At runtime, application child processes never resolve Node, Python, FFmpeg, yt-dlp or Git from the user's PATH; the GPU probe and Windows utility calls use known absolute system locations plus the controlled project environment.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.6.6` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. Existing official v1.0.0 probe-only installations are adopted once using the published asset checksums; the persistent adoption marker prevents a later missing, damaged, wrong-version or wrong-package manifest from being silently accepted. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads and read-only mount snapshots. At runtime, application child processes never resolve Node, Python, FFmpeg, yt-dlp or Git from the user's PATH; the GPU probe and Windows utility calls use known absolute system locations plus the controlled project environment.
 
 `1.4.17` remains a code-only update and keeps the published `v1.0.0` runtime/model dependency assets unchanged. It reorganizes the shared-tool hierarchy without changing repository, mount or upload persistence contracts; no new Release asset is required.
 
@@ -57,6 +57,8 @@ The application version and dependency version are independent. `package.json.de
 `1.6.4` is a code/documentation-only update and keeps the published runtime/model assets unchanged. The multi-part video tool now passes the application's current exported Bilibili Cookie to its internal collection, reuses one parent metadata snapshot for all selected P children, and retries Bilibili `412/-412` risk-control responses with bounded jittered backoff. Ordinary Agent and single-video request arguments remain unchanged. The parent viewer automatically switches to the destination collection after “创建并开始”. No database migration or new runtime, model or Git asset is required.
 
 `1.6.5` is a code/documentation-only performance update and keeps all published runtime/model assets unchanged. Multi-part progress no longer writes complete viewer trees into activity history or invalidates the global task snapshot; live state and Renderer updates are lightweight and parent artifact deletion is asynchronous. On first startup, a bounded SQLite migration removes only legacy `multipart-progress` activity rows, strips redundant `multiPart` snapshots from retained activity records and vacuums reclaimed pages. Task, document, session, collection, provider, runtime and update records are unchanged. No new runtime, model or Git asset is required.
+
+`1.6.6` is a code/documentation-only multi-part deletion performance update and keeps all published runtime/model assets unchanged. Deleting a multi-part parent now batches child Agent-session and Worker mutations into one final SQLite save and restores focus to the surviving parent-viewer collection selector after structural rendering. Ordinary Agent and single-video session deletion retains immediate persistence. No schema migration or new runtime, model or Git asset is required.
 
 ### Updating and migrating an existing installation
 

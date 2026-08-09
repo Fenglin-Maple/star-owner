@@ -38,6 +38,7 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
     exportCookies: async () => cookieFile
   };
   const sessions = new Map();
+  const deletedSessionCalls = [];
   let failNextStart = false;
   let listSessionCalls = 0;
   const internalAgentManager = {
@@ -70,7 +71,11 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
       store.commit();
       return session;
     },
-    deleteSession: (id) => sessions.delete(id)
+    deleteSession: (id, options = {}) => {
+      deletedSessionCalls.push({ id, options });
+      if (options.persist !== false) store.save();
+      return sessions.delete(id);
+    }
   };
   const emittedEvents = [];
   const manager = new MultiPartManager({
@@ -303,10 +308,18 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   const deletionLoad = path.join(parentRoot, 'delete-load');
   fs.mkdirSync(deletionLoad, { recursive: true });
   for (let index = 0; index < 300; index += 1) fs.writeFileSync(path.join(deletionLoad, `file-${index}.txt`), 'delete asynchronously', 'utf8');
+  const deletedSessionOffset = deletedSessionCalls.length;
+  const originalStoreSave = store.save.bind(store);
+  let deletionSaveCalls = 0;
+  store.save = (...args) => { deletionSaveCalls += 1; return originalStoreSave(...args); };
   const deletion = manager.delete(created.id);
   await new Promise((resolve) => setImmediate(resolve));
   assert(store.get('multiPartParents', created.id), 'multipart deletion blocked the event loop until all files were removed');
-  await deletion;
+  try { await deletion; }
+  finally { store.save = originalStoreSave; }
+  const parentDeletionCalls = deletedSessionCalls.slice(deletedSessionOffset);
+  assert(parentDeletionCalls.length > 0 && parentDeletionCalls.every((entry) => entry.options.persist === false), 'multipart parent deletion persisted each Agent session separately');
+  assert.strictEqual(deletionSaveCalls, 1, 'multipart parent deletion rewrote the complete database more than once');
   assert.strictEqual(store.get('multiPartParents', created.id), null, '多P父任务没有删除');
   assert.strictEqual(store.listTasks({ collectionId: created.collectionId }).length, 0, '多P父任务删除后仍残留任务');
   assert.strictEqual(fs.existsSync(created.parentRoot || ''), false, '多P产物目录没有删除');

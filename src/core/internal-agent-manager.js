@@ -555,7 +555,7 @@ class InternalAgentManager {
     return affected;
   }
 
-  deleteSession(sessionId) {
+  deleteSession(sessionId, { persist = true } = {}) {
     const session = this.requireSession(sessionId);
     if (this.running.has(session.id)) throw new Error('请先停止正在工作的 Agent 会话。');
     if (session.mode === 'single' && session.singleTaskId) {
@@ -570,11 +570,11 @@ class InternalAgentManager {
         if (collection) this.store.set('collections', collection.id, { ...collection, videoCount: this.store.listTasks({ collectionId: collection.id }).length, updatedAt: new Date().toISOString() });
       }
     }
-    try { this.store.updateWorker(session.workerId, { status: 'paused', pauseReason: '对应的应用内 Agent 工作流已被用户删除。' }); } catch {}
+    try { this.store.updateWorker(session.workerId, { status: 'paused', pauseReason: '对应的应用内 Agent 工作流已被用户删除。' }, { persist }); } catch {}
     this.sessionCache.delete(session.id);
     this.dirtySessionIds.delete(session.id);
     this.store.delete('internalAgentSessions', session.id);
-    this.store.save();
+    if (persist !== false) this.store.save();
     return { deleted: true, id: session.id };
   }
 

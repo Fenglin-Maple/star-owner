@@ -136,6 +136,7 @@ function fakeButton(label) {
   assert(outside.includes('data-multipart-details') && outside.includes('multipartPartStatusLabel') && outside.includes('multiPartStopPart({ parentId'), 'multi-part parent viewer is missing expandable per-P progress or the isolated stop action');
   assert(['resume-part', 'retry-part', 'resume-stopped', 'retry-failed'].every((action) => outside.includes(`'${action}'`)), 'multi-part stopped or failed P tasks are missing continue/retry controls');
   assert(outside.includes('if (startAfter && parent.collectionId)') && outside.includes('elements.multipartViewerCollection.value = parent.collectionId;'), 'creating and starting a multi-part parent does not switch the viewer to its destination collection');
+  assert(outside.includes('let restoreViewerFocus = false;') && outside.includes("elements.multipartViewerCollection.focus({ preventScroll: true });"), 'multi-part parent deletion does not restore focus after its action row is removed');
   const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
   const multipartManager = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'multipart-manager.js'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');

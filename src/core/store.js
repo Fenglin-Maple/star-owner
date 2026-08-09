@@ -434,7 +434,7 @@ class Store {
     return next;
   }
 
-  updateWorker(id, patch = {}) {
+  updateWorker(id, patch = {}, { persist = true } = {}) {
     const worker = this.getWorker(id);
     if (!worker) throw new Error(`Unknown workerId: ${id}`);
     const status = patch.status === undefined ? worker.status : String(patch.status);
@@ -448,7 +448,7 @@ class Store {
       updatedAt: now
     };
     this.set('workers', id, next);
-    this.save();
+    if (persist !== false) this.save();
     return next;
   }
 

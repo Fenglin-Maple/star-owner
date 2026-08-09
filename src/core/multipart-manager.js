@@ -314,7 +314,7 @@ class MultiPartManager {
     const collection = this.store.getCollectionById(parent.collectionId);
     if (!collection?.collectionRoot) throw new Error('多P父任务所属收藏夹不存在，无法安全删除产物。');
     for (const session of this.internalAgentManager.listSessions().filter((item) => item.multiPartParentId === parent.id)) {
-      try { this.internalAgentManager.deleteSession(session.id); } catch {}
+      try { this.internalAgentManager.deleteSession(session.id, { persist: false }); } catch {}
     }
     const taskIds = [parent.id, ...this.partTasks(parent.id).map((task) => task.id)];
     for (const taskId of taskIds) {

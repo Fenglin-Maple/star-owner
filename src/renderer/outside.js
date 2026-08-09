@@ -606,6 +606,7 @@
     if (!button) return;
     const parentId = button.dataset.parentId;
     const action = button.dataset.multipartAction;
+    let restoreViewerFocus = false;
     try {
       if (action === 'refresh') await window.orchestrator.multiPartRefresh(parentId);
       else if (action === 'start') await startExistingMultipart(parentId);
@@ -634,12 +635,20 @@
       }
       else if (action === 'delete') {
         if (!window.confirm('确定删除这个多P父任务及其所有已完成 P 产物吗？')) return;
+        restoreViewerFocus = true;
         setBusy(button, true, '删除中');
         try { await window.orchestrator.multiPartDelete(parentId); }
         finally { if (button.isConnected) setBusy(button, false, '删除'); }
       }
       await refresh();
     } catch (error) { notify('多P父任务操作失败', error); }
+    finally {
+      if (restoreViewerFocus) requestAnimationFrame(() => {
+        if (activeToolId === 'multipart' && elements.multipartViewerCollection.isConnected) {
+          elements.multipartViewerCollection.focus({ preventScroll: true });
+        }
+      });
+    }
   }
 
   function automaticSharedCollectionName() {

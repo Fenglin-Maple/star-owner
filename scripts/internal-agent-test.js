@@ -163,7 +163,19 @@ function assert(condition, message) {
   const toggleClaim = manager.claimNextTask(toggleSession, new Set());
   assert(toggleClaim?.id === `${toggleCollection.id}:enabled`, 'internal Agent claimed a task disabled in Task Overview');
   manager.abortAttempt(toggleClaim.id, toggleSession.workerId, 'test cleanup', 'test');
+  const originalStoreSave = store.save.bind(store);
+  let ordinaryDeleteSaves = 0;
+  store.save = (...args) => { ordinaryDeleteSaves += 1; return originalStoreSave(...args); };
   manager.deleteSession(toggleSession.id);
+  store.save = originalStoreSave;
+  assert(ordinaryDeleteSaves === 2, 'ordinary Agent deletion did not preserve its immediate Worker and session persistence');
+  const deferredDeleteSession = manager.createSession({ title: '批量删除暂存测试', collectionId: toggleCollection.id, providerId: 'provider-test', modelId: 'model-test' });
+  let deferredDeleteSaves = 0;
+  store.save = (...args) => { deferredDeleteSaves += 1; return originalStoreSave(...args); };
+  manager.deleteSession(deferredDeleteSession.id, { persist: false });
+  store.save = originalStoreSave;
+  assert(deferredDeleteSaves === 0 && !store.get('internalAgentSessions', deferredDeleteSession.id), 'deferred Agent deletion wrote the complete database before its batch commit');
+  store.save();
   const collection = manager.listInternalCollections().find((item) => item.id !== toggleCollection.id);
   const multipartFailureTask = {
     id: `${collection.id}:multipart-failure-test`,

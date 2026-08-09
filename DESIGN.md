@@ -1,6 +1,6 @@
 # 星藏家 Design
 
-Version: `1.6.5`
+Version: `1.6.6`
 
 ## 1. Product Goal
 
@@ -350,7 +350,7 @@ The ordinary single-video and batch Agent workflows accept ordinary Bilibili BV 
 
 Multi-part Bilibili access is isolated from ordinary Agent and single-video behavior. The manager reuses one short-lived authenticated metadata result across inspect/create, stores a bounded non-secret parent metadata snapshot, materializes one CID-scoped `info.json` per child, and passes the current application's exported Bilibili Cookie only to the multi-part collection. Child subtitle/comment preparation reuses that validated local snapshot instead of repeating `/view` for every P. HTTP `412` or API `-412` receives three bounded exponential retries with jitter and a dedicated risk-control error; ordinary video task arguments do not enable these safeguards. Creating and starting a parent also selects its destination collection in the parent viewer after the refreshed state is accepted.
 
-Multi-part live progress is a dedicated volatile channel. It is emitted at most once per 800 milliseconds, builds the full viewer state with one task scan and one Agent-session scan, skips filesystem artifact reconciliation, and never enters persistent activity history or the global snapshot invalidation path. The Renderer retains collection option nodes and updates only progress bars, percentages, phase labels and status classes for live events; structural and terminal events still perform a complete render and explicit state reads still verify real artifacts. Existing databases run a one-time migration that removes legacy `multipart-progress` activities, strips redundant multi-part trees from terminal activity records and vacuums reclaimed pages. Multi-part parent artifact deletion uses the same containment/link policy as other destructive operations but yields through asynchronous filesystem calls so the Electron main loop stays responsive.
+Multi-part live progress is a dedicated volatile channel. It is emitted at most once per 800 milliseconds, builds the full viewer state with one task scan and one Agent-session scan, skips filesystem artifact reconciliation, and never enters persistent activity history or the global snapshot invalidation path. The Renderer retains collection option nodes and updates only progress bars, percentages, phase labels and status classes for live events; structural and terminal events still perform a complete render and explicit state reads still verify real artifacts. Existing databases run a one-time migration that removes legacy `multipart-progress` activities, strips redundant multi-part trees from terminal activity records and vacuums reclaimed pages. Multi-part parent artifact deletion uses the same containment/link policy as other destructive operations but yields through asynchronous filesystem calls so the Electron main loop stays responsive. Its child Agent-session and Worker mutations are accumulated without per-session persistence and committed in one final SQLite save; ordinary Agent and single-video session deletion keeps its immediate durable default. After the deleted row is structurally rerendered, focus returns to the surviving multi-part collection selector instead of a detached action button.
 
 ## 19. GitHub Shared Bilibili Knowledge
 
