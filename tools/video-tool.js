@@ -119,7 +119,7 @@ async function writeInfo(videoUrl, outDir, args) {
 }
 
 async function writeComments(videoUrl, outDir, args) {
-  const info = await getVideoInfo(videoUrl, args);
+  const info = readReusableVideoInfo(videoUrl, outDir, args) || await getVideoInfo(videoUrl, args);
   const commentsDir = path.join(outDir, 'comments');
   fs.mkdirSync(commentsDir, { recursive: true });
   const limit = Number(args['comment-limit'] || 3);
@@ -134,7 +134,7 @@ async function writeComments(videoUrl, outDir, args) {
 }
 
 async function writeSubtitles(videoUrl, outDir, args) {
-  const info = await getVideoInfo(videoUrl, args);
+  const info = readReusableVideoInfo(videoUrl, outDir, args) || await getVideoInfo(videoUrl, args);
   const subtitlesDir = path.join(outDir, 'subtitles');
   fs.rmSync(subtitlesDir, { recursive: true, force: true });
   fs.mkdirSync(subtitlesDir, { recursive: true });
@@ -620,16 +620,70 @@ async function fetchJson(url, args) {
 
 async function fetchPlainJson(url, args) {
   if (!url) throw new Error('Missing JSON resource URL.');
-  const response = await fetch(url, { headers: requestHeaders(args, 'application/json, text/plain, */*', url), signal: AbortSignal.timeout(30000) });
-  const text = await response.text();
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    throw new Error(`Bilibili returned non-JSON: ${text.slice(0, 180)}`);
+  const retries = boundedInteger(args?.['risk-control-retries'], 0, 5, 0);
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const response = await fetch(url, { headers: requestHeaders(args, 'application/json, text/plain, */*', url), signal: AbortSignal.timeout(30000) });
+    const text = await response.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    if (isBilibiliRiskControlResponse(response.status, json, text)) {
+      if (attempt >= retries) throw bilibiliRiskControlError(retries);
+      const waitMs = bilibiliRiskControlDelay(attempt, args);
+      console.error(`[video-tool] Bilibili risk control detected; retry ${attempt + 1}/${retries} after ${waitMs} ms.`);
+      await delay(waitMs);
+      continue;
+    }
+    if (!json) throw new Error(`Bilibili returned non-JSON: ${text.slice(0, 180)}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 180)}`);
+    return json;
   }
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 180)}`);
-  return json;
+  throw bilibiliRiskControlError(retries);
+}
+
+function readReusableVideoInfo(videoUrl, outDir, args = {}) {
+  if (!args['reuse-info']) return null;
+  const file = path.join(outDir, 'info.json');
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > 4 * 1024 * 1024) return null;
+    const info = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const bvid = extractBvid(videoUrl);
+    const requestedCid = String(args.cid || '').trim();
+    const requestedPage = Number(args.page || new URL(videoUrl).searchParams.get('p') || 0);
+    const infoCid = String(info.cid || info.pages?.[0]?.cid || '');
+    const infoPage = Number(info.page || info.pages?.[0]?.page || 0);
+    if (String(info.bvid || '') !== bvid) return null;
+    if (requestedCid && infoCid !== requestedCid) return null;
+    if (requestedPage > 0 && infoPage !== requestedPage) return null;
+    return info;
+  } catch {
+    return null;
+  }
+}
+
+function isBilibiliRiskControlResponse(status, json, text = '') {
+  return Number(status) === 412 || Number(json?.code) === -412 || /Request was banned|请求被拦截|临时风控/i.test(String(text || ''));
+}
+
+function bilibiliRiskControlError(retries) {
+  const error = new Error(`B站触发临时风控（HTTP 412 / -412），已退避重试 ${Number(retries) || 0} 次但接口仍未恢复。请暂停反复操作，稍后再试；使用代理时请让 B站域名直连。`);
+  error.code = 'BILIBILI_RISK_CONTROL';
+  return error;
+}
+
+function bilibiliRiskControlDelay(attempt, args = {}) {
+  const base = boundedInteger(args['risk-control-base-delay-ms'], 100, 10_000, 1_600);
+  return Math.min(12_000, base * (2 ** Math.max(0, Number(attempt) || 0))) + 250 + Math.floor(Math.random() * 650);
+}
+
+function boundedInteger(value, minimum, maximum, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(minimum, Math.min(maximum, Math.floor(number)));
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function requestHeaders(args, accept = 'application/json, text/plain, */*', requestUrl = 'https://api.bilibili.com') {
@@ -931,4 +985,18 @@ function* walk(root) {
   }
 }
 
-module.exports = { assessSubtitle, buildBundle, extractFrames, isNoAudioStreamError, normalizeVideoUrl, prepareAudio, resolveCommand, splitJpegStream, writeNoAudioStatus };
+module.exports = {
+  assessSubtitle,
+  bilibiliRiskControlDelay,
+  buildBundle,
+  extractFrames,
+  fetchPlainJson,
+  isBilibiliRiskControlResponse,
+  isNoAudioStreamError,
+  normalizeVideoUrl,
+  prepareAudio,
+  readReusableVideoInfo,
+  resolveCommand,
+  splitJpegStream,
+  writeNoAudioStatus
+};

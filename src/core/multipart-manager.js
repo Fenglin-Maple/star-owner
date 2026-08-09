@@ -9,18 +9,24 @@ const MULTIPART_USER_ID = 'builtin-agent-user';
 const MULTIPART_USER_NAME = '内置用户';
 const ACTIVE_SESSION_STATUSES = new Set(['running', 'draining', 'stopping']);
 const MAX_INDEX_PART_SUMMARY_CHARACTERS = 8000;
+const VIDEO_INFO_CACHE_TTL_MS = 30 * 1000;
+const VIDEO_INFO_CACHE_LIMIT = 8;
+const BILIBILI_RISK_CONTROL_RETRIES = 3;
 
 class MultiPartManager {
-  constructor({ store, bili, internalAgentManager, ragAssistant, emit }) {
+  constructor({ store, bili, internalAgentManager, ragAssistant, getCurrentUser, emit }) {
     this.store = store;
     this.bili = bili;
     this.internalAgentManager = internalAgentManager;
     this.ragAssistant = ragAssistant;
+    this.getCurrentUser = getCurrentUser || (() => null);
     this.emit = emit || (() => {});
     this.indexRefreshFailures = [];
     this.stateEmitTimers = new Map();
     this.partTaskCache = new Map();
     this.partTaskCacheTtlMs = 250;
+    this.videoInfoCache = new Map();
+    this.videoInfoRequests = new Map();
     this.refreshStoredIndexes();
   }
 
@@ -47,7 +53,7 @@ class MultiPartManager {
   async inspect(input = {}) {
     const bvid = extractBvid(input.bvid || input.url);
     if (!bvid) throw new Error('请输入有效的多P BV号或视频链接。');
-    const info = await this.bili.getVideoInfo(bvid);
+    const info = await this.readVideoInfo(bvid);
     assertMultipartVideoSupported(input, info);
     if (info.pages.length < 2) throw new Error('该视频只有一个P，不需要使用多P视频总结工具。');
     return {
@@ -67,7 +73,7 @@ class MultiPartManager {
     if (!(provider.enabledModels || []).some((model) => model.id === modelId)) throw new Error('请选择已启用的模型。');
     const bvid = extractBvid(input.bvid || input.url);
     if (!bvid) throw new Error('请输入有效的多P BV号或视频链接。');
-    const info = await this.bili.getVideoInfo(bvid);
+    const info = await this.readVideoInfo(bvid);
     assertMultipartVideoSupported(input, info);
     if (info.pages.length < 2) throw new Error('该视频只有一个P，不需要使用多P视频总结工具。');
     const collection = this.requireOrCreateCollection(input.collectionId, input.collectionName || `${info.title || bvid} 多P`);
@@ -97,6 +103,7 @@ class MultiPartManager {
       owner: info.owner?.name || '',
       aid: info.aid || '',
       cover: info.pic || '',
+      sourceInfo: sourceInfoSnapshot(info),
       collectionId: collection.id,
       collectionName: collection.name,
       collectionKind: MULTIPART_KIND,
@@ -112,7 +119,10 @@ class MultiPartManager {
     };
     this.store.set('multiPartParents', parentId, parent);
     this.store.upsertCollection({ ...collection, updatedAt: now });
-    for (const page of info.pages) this.ensurePartTask(parent, page, selected.includes(String(page.cid)), now);
+    for (const page of info.pages) {
+      const task = this.ensurePartTask(parent, page, selected.includes(String(page.cid)), now);
+      this.seedPartInfo(parent, task, page);
+    }
     this.ensureParentIndexTask(parent, now);
     this.store.commit();
     this.writeIndex(parent);
@@ -122,7 +132,7 @@ class MultiPartManager {
 
   async refresh(parentId) {
     const parent = this.requireParent(parentId);
-    const info = await this.bili.getVideoInfo(parent.bvid);
+    const info = await this.readVideoInfo(parent.bvid, { force: true });
     assertMultipartVideoSupported({ bvid: parent.bvid }, info);
     if (info.pages.length < 2) throw new Error('B站返回的页面数已少于 2，无法继续作为多P任务处理。');
     await this.mergePages(parent, info.pages, info);
@@ -139,6 +149,11 @@ class MultiPartManager {
     const selected = normalizeSelectedPages(input.selectedPages, parent.pages);
     const tasks = this.partTasks(parent.id).filter((task) => selected.includes(String(task.cid)) && task.status !== 'done' && task.pageState !== 'removed');
     if (!tasks.length) throw new Error('当前选择范围内没有待总结的 P。');
+    await this.prepareCollectionAuthentication(parent);
+    for (const task of tasks) {
+      const page = (parent.pages || []).find((item) => String(item.cid) === String(task.cid));
+      if (page) this.seedPartInfo(parent, task, page);
+    }
     const settings = { ...parent.settings, ...normalizeSettings(input, parent.settings) };
     const selectedSet = new Set(selected);
     for (const part of this.partTasks(parent.id)) {
@@ -469,6 +484,73 @@ class MultiPartManager {
     return this.internalAgentManager.listSessions().filter((session) => session.mode === 'multipart' && (ACTIVE_SESSION_STATUSES.has(session.status) || this.internalAgentManager.running?.has(session.id)));
   }
 
+  async readVideoInfo(bvid, { force = false } = {}) {
+    const key = String(bvid || '').trim();
+    const cached = this.videoInfoCache.get(key);
+    if (!force && cached && cached.expiresAt > Date.now()) return cached.info;
+    if (this.videoInfoRequests.has(key)) return this.videoInfoRequests.get(key);
+
+    const request = this.fetchVideoInfoWithRetry(key).then((info) => {
+      this.videoInfoCache.delete(key);
+      this.videoInfoCache.set(key, { info, expiresAt: Date.now() + VIDEO_INFO_CACHE_TTL_MS });
+      while (this.videoInfoCache.size > VIDEO_INFO_CACHE_LIMIT) this.videoInfoCache.delete(this.videoInfoCache.keys().next().value);
+      return info;
+    }).finally(() => {
+      if (this.videoInfoRequests.get(key) === request) this.videoInfoRequests.delete(key);
+    });
+    this.videoInfoRequests.set(key, request);
+    return request;
+  }
+
+  async fetchVideoInfoWithRetry(bvid) {
+    for (let attempt = 0; attempt <= BILIBILI_RISK_CONTROL_RETRIES; attempt += 1) {
+      try {
+        return await this.bili.getVideoInfo(bvid);
+      } catch (error) {
+        if (!isBilibiliRiskControlError(error)) throw error;
+        if (attempt >= BILIBILI_RISK_CONTROL_RETRIES) throw multipartRiskControlError(error);
+        await delay(bilibiliRiskControlDelay(attempt));
+      }
+    }
+    throw multipartRiskControlError();
+  }
+
+  async prepareCollectionAuthentication(parent) {
+    const collection = this.store.getCollectionById(parent.collectionId);
+    const user = this.getCurrentUser?.();
+    if (!collection || !user?.isLogin) return collection;
+
+    let cookieFile = String(user.cookieFile || '').trim();
+    if (!cookieFile || !fs.existsSync(cookieFile)) {
+      try {
+        cookieFile = await this.bili.exportCookies(user.name || String(user.mid || user.id || 'multipart'));
+      } catch (error) {
+        console.warn(`[multipart] unable to export Bilibili cookies: ${error.message || String(error)}`);
+        return collection;
+      }
+    }
+    if (!cookieFile || !fs.existsSync(cookieFile) || path.resolve(cookieFile) === path.resolve(String(collection.cookieFile || ''))) return collection;
+    const updated = this.store.upsertCollection({
+      ...collection,
+      cookieFile,
+      cookieExportedAt: new Date().toISOString()
+    });
+    this.store.commit();
+    return updated;
+  }
+
+  seedPartInfo(parent, task, page) {
+    if (!task?.preallocatedArtifactDir || !page) return '';
+    const artifactDir = assertInside(parent.parentRoot, task.preallocatedArtifactDir);
+    ensureDir(artifactDir);
+    const file = path.join(artifactDir, 'info.json');
+    let existing = {};
+    try { existing = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+    const info = buildPartInfo(parent, page, task, existing);
+    writeTextIfChanged(file, `${JSON.stringify(info, null, 2)}\n`);
+    return file;
+  }
+
   refreshStoredIndexes() {
     this.indexRefreshFailures = [];
     let refreshed = 0;
@@ -620,8 +702,13 @@ class MultiPartManager {
     parent.title = info.title || parent.title;
     parent.owner = info.owner?.name || parent.owner;
     parent.cover = info.pic || parent.cover;
+    parent.aid = info.aid || parent.aid;
+    parent.sourceInfo = sourceInfoSnapshot(info);
     parent.lastRefreshedAt = now;
-    for (const page of pages) this.ensurePartTask(parent, page, selected.has(String(page.cid)), now);
+    for (const page of pages) {
+      const task = this.ensurePartTask(parent, page, selected.has(String(page.cid)), now);
+      if (task.status !== 'done') this.seedPartInfo(parent, task, page);
+    }
     parent.selectedCids = pages.map((page) => String(page.cid || '')).filter((cid) => selected.has(cid));
     for (const task of this.partTasks(parent.id)) {
       if (!remoteCids.has(String(task.cid)) && task.pageState !== 'removed') {
@@ -657,7 +744,8 @@ class MultiPartManager {
     ];
     if (coverReference) lines.splice(1, 0, `![视频封面](${coverReference})`, '');
     writeTextIfChanged(path.join(parent.parentRoot, 'index.md'), `${lines.join('\n')}\n`);
-    writeTextIfChanged(path.join(parent.parentRoot, 'metadata.json'), `${JSON.stringify({ ...parent, coverFile: coverReference, parts: parts.map(publicPartMetadata) }, null, 2)}\n`);
+    const { sourceInfo: _sourceInfo, ...parentMetadata } = parent;
+    writeTextIfChanged(path.join(parent.parentRoot, 'metadata.json'), `${JSON.stringify({ ...parentMetadata, coverFile: coverReference, parts: parts.map(publicPartMetadata) }, null, 2)}\n`);
   }
 
   ensureParentCover(parent, parts) {
@@ -720,9 +808,9 @@ class MultiPartManager {
     const progress = publicParts.length
       ? publicParts.reduce((total, task) => total + clampProgress(task.progress), 0) / publicParts.length
       : 0;
+    const { parentRoot: _parentRoot, sourceInfo: _sourceInfo, ...publicParent } = parent;
     return {
-      ...parent,
-      parentRoot: undefined,
+      ...publicParent,
       pages: (parent.pages || []).map((page) => {
         const task = parts.find((item) => String(item.cid) === String(page.cid));
         return { ...page, task: publicPart(task, sessionsByTask.get(String(task?.id || ''))) };
@@ -1003,6 +1091,73 @@ function rebaseRelativeMarkdownDestinations(markdown, relativeDirectory) {
     const rebased = `${prefix}/${target.replace(/^\.\//, '')}`;
     return `${label}(${angle ? `<${rebased}>` : rebased}${suffix})`;
   });
+}
+
+function sourceInfoSnapshot(info = {}) {
+  return {
+    bvid: String(info.bvid || ''),
+    aid: info.aid || '',
+    title: String(info.title || ''),
+    owner: {
+      mid: info.owner?.mid || '',
+      name: String(info.owner?.name || ''),
+      face: String(info.owner?.face || '')
+    },
+    pubdate: info.pubdate || 0,
+    ctime: info.ctime || 0,
+    desc: String(info.desc || ''),
+    pic: String(info.pic || ''),
+    duration: Number(info.duration || 0),
+    dimension: info.dimension || null,
+    redirectUrl: String(info.redirectUrl || ''),
+    rights: info.rights || {},
+    stat: info.stat || {},
+    fetchedAt: String(info.fetchedAt || new Date().toISOString())
+  };
+}
+
+function buildPartInfo(parent, page, task, existing = {}) {
+  const source = parent.sourceInfo || {};
+  const owner = source.owner && typeof source.owner === 'object' ? source.owner : {};
+  return {
+    ...existing,
+    ...source,
+    bvid: String(parent.bvid || source.bvid || ''),
+    aid: source.aid || parent.aid || existing.aid || '',
+    title: String(parent.title || source.title || existing.title || parent.bvid || ''),
+    owner: { ...owner, name: String(parent.owner || owner.name || '') },
+    pic: String(parent.cover || source.pic || existing.pic || ''),
+    duration: Number(source.duration || existing.duration || (parent.pages || []).reduce((total, item) => total + Number(item.duration || 0), 0)),
+    dimension: source.dimension || existing.dimension || page.dimension || null,
+    redirectUrl: String(source.redirectUrl || existing.redirectUrl || ''),
+    rights: source.rights || existing.rights || {},
+    stat: source.stat || existing.stat || {},
+    tags: Array.isArray(existing.tags) ? existing.tags : [],
+    pages: [publicPage(page)],
+    page: Number(page.page || 1),
+    cid: String(page.cid || ''),
+    url: String(task.url || `https://www.bilibili.com/video/${parent.bvid}?p=${Number(page.page || 1)}`),
+    fetchedAt: String(source.fetchedAt || parent.lastRefreshedAt || parent.updatedAt || new Date().toISOString())
+  };
+}
+
+function isBilibiliRiskControlError(error) {
+  return /(?:HTTP\s*412|Bilibili API\s*-412|Request was banned|请求被拦截|临时风控)/i.test(String(error?.message || error || ''));
+}
+
+function multipartRiskControlError(cause = null) {
+  const error = new Error('B站触发临时风控（HTTP 412 / -412），多P工具已完成退避重试但接口仍未恢复。请暂停反复操作，稍后再试；使用代理时请让 B站域名直连。');
+  error.code = 'BILIBILI_RISK_CONTROL';
+  if (cause) error.cause = cause;
+  return error;
+}
+
+function bilibiliRiskControlDelay(attempt) {
+  return Math.min(12_000, 1_600 * (2 ** Math.max(0, Number(attempt) || 0))) + 250 + Math.floor(Math.random() * 650);
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function writeTextIfChanged(file, content) {

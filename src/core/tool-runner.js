@@ -398,8 +398,10 @@ class ToolRunner {
     const localImported = task.localImported === true || task.sourceType === 'local-video';
     const localAudio = localImported && (task.sourceMediaKind === 'audio' || task.mediaKind === 'audio');
     const options = run.options || {};
+    const reusableMultipartInfo = !localImported && hasReusableMultipartInfo(task, run.artifactDir);
+    const metadataOptions = reusableMultipartInfo ? { ...options, reuseInfo: true } : options;
     if (!localImported) await this.runScheduledStage(state, 'api', 'metadata-comments', async () => {
-      if (!options.skipInfo) await this.runChild(state, this.buildArgs({ task, action: 'info', collection, artifactDir: run.artifactDir, options }), run.timeoutMs);
+      if (!options.skipInfo && !reusableMultipartInfo) await this.runChild(state, this.buildArgs({ task, action: 'info', collection, artifactDir: run.artifactDir, options }), run.timeoutMs);
       if (!fs.existsSync(path.join(run.artifactDir, 'info.json'))) {
         throw new Error('Required video metadata is missing after the material bundle metadata stage.');
       }
@@ -407,9 +409,9 @@ class ToolRunner {
       const support = inspectVideoSupport(info);
       if (!support.supported) throw unsupportedVideoError(support.reason, support.kind);
       const optionalCalls = [];
-      if (!options.skipSubtitles) optionalCalls.push(['subtitles', this.buildArgs({ task, action: 'subtitles', collection, artifactDir: run.artifactDir, options })]);
+      if (!options.skipSubtitles) optionalCalls.push(['subtitles', this.buildArgs({ task, action: 'subtitles', collection, artifactDir: run.artifactDir, options: metadataOptions })]);
       if (!options.skipComments && options.comments !== false && Number(options.commentLimit ?? 3) > 0) {
-        optionalCalls.push(['comments', this.buildArgs({ task, action: 'comments', collection, artifactDir: run.artifactDir, options: { ...options, commentLimit: clampNumber(options.commentLimit, 1, 3, 3) } })]);
+        optionalCalls.push(['comments', this.buildArgs({ task, action: 'comments', collection, artifactDir: run.artifactDir, options: { ...metadataOptions, commentLimit: clampNumber(options.commentLimit, 1, 3, 3) } })]);
       }
       for (const [label, args] of optionalCalls) {
         try {
@@ -1478,6 +1480,8 @@ class ToolRunner {
       if (collection?.cookieFile && fs.existsSync(collection.cookieFile)) args.push('--cookies', collection.cookieFile);
       if (task.page) args.push('--page', String(task.page));
       if (task.cid) args.push('--cid', String(task.cid));
+      if (task.multiPartRole === 'part') args.push('--risk-control-retries', '3');
+      if (options.reuseInfo) args.push('--reuse-info');
     } else if (options.preserveProcessCache) {
       args.push('--preserve-process-cache');
     } else if (options.preserveVideo || task.keepVideoCache || task.cachedVideoId) {
@@ -1617,6 +1621,20 @@ function normalizeConfig(value) {
     gpuReserveMiB: clampNumber(value.gpuReserveMiB, 256, 4096, DEFAULT_CONFIG.gpuReserveMiB),
     gpuStartupReserveMiB: getAsrModel(asrModel).gpuStartupFreeMiB
   };
+}
+
+function hasReusableMultipartInfo(task, artifactDir) {
+  if (task?.multiPartRole !== 'part' || !task.bvid || !task.cid) return false;
+  const file = path.join(artifactDir, 'info.json');
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > 4 * 1024 * 1024) return false;
+    const info = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const infoCid = String(info.cid || info.pages?.[0]?.cid || '');
+    return String(info.bvid || '') === String(task.bvid) && infoCid === String(task.cid);
+  } catch {
+    return false;
+  }
 }
 
 async function waitForServicesStopped(services, timeoutMs = 5000) {
@@ -1869,4 +1887,4 @@ function killProcessTree(child) {
   try { child.kill('SIGTERM'); } catch {}
 }
 
-module.exports = { DEFAULT_CONFIG, ToolRunner, asrInfrastructureError, isAsrInfrastructureFailure };
+module.exports = { DEFAULT_CONFIG, ToolRunner, asrInfrastructureError, hasReusableMultipartInfo, isAsrInfrastructureFailure };

@@ -135,6 +135,7 @@ function fakeButton(label) {
   assert(outside.includes("if (event.localToolbox) { localRefreshGate.next()") && outside.includes("if (event.multiPart) { multipartRefreshGate.next()"), 'push events did not invalidate their matching in-flight toolbox state');
   assert(outside.includes('data-multipart-details') && outside.includes('multipartPartStatusLabel') && outside.includes('multiPartStopPart({ parentId'), 'multi-part parent viewer is missing expandable per-P progress or the isolated stop action');
   assert(['resume-part', 'retry-part', 'resume-stopped', 'retry-failed'].every((action) => outside.includes(`'${action}'`)), 'multi-part stopped or failed P tasks are missing continue/retry controls');
+  assert(outside.includes('if (startAfter && parent.collectionId)') && outside.includes('elements.multipartViewerCollection.value = parent.collectionId;'), 'creating and starting a multi-part parent does not switch the viewer to its destination collection');
   const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
   const multipartManager = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'multipart-manager.js'), 'utf8');
   assert(main.includes('multipartHotEvent') && main.includes("['stream', 'multipart-progress', 'session-updated']") && multipartManager.includes("}, 400);"), 'multi-part token events are still sent to the renderer without throttling');

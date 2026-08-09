@@ -19,7 +19,16 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   store.save();
 
   let currentPages = [page(1, '101', '第一集'), page(2, '102', '第二集'), page(3, '103', '第三集')];
-  const bili = { getVideoInfo: async () => ({ bvid: 'BV1MULTIPART', title: '多P测试视频', owner: { name: '测试作者' }, pic: '', pages: currentPages, duration: 600 }) };
+  let videoInfoCalls = 0;
+  const cookieFile = path.join(root, 'bilibili-cookies.txt');
+  fs.writeFileSync(cookieFile, '# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\ttest-session\n', 'utf8');
+  const bili = {
+    getVideoInfo: async () => {
+      videoInfoCalls += 1;
+      return { bvid: 'BV1MULTIPART', aid: '9001', title: '多P测试视频', owner: { mid: '42', name: '测试作者' }, pic: '', pages: currentPages, duration: 600, rights: {}, fetchedAt: new Date().toISOString() };
+    },
+    exportCookies: async () => cookieFile
+  };
   const sessions = new Map();
   let failNextStart = false;
   let listSessionCalls = 0;
@@ -60,12 +69,15 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
     bili,
     internalAgentManager,
     ragAssistant: { rawProvider: (id) => store.get('ragProviders', id) },
+    getCurrentUser: () => ({ isLogin: true, id: '42', mid: '42', name: '测试作者', cookieFile }),
     emit: () => {}
   });
 
   assert.throws(() => assertMultipartVideoSupported({ url: 'https://www.bilibili.com/bangumi/play/ep1' }, { pages: [{ cid: '101' }, { cid: '102' }] }), /PGC/);
   assert.throws(() => assertMultipartVideoSupported({ bvid: 'BV1MULTIPART' }, { rights: { is_stein_gate: true } }), /互动视频/);
 
+  const inspected = await manager.inspect({ bvid: 'BV1MULTIPART' });
+  assert.strictEqual(inspected.pages.length, 3, '多P检查没有返回完整 P 列表');
   const created = await manager.create({
     bvid: 'BV1MULTIPART',
     providerId: 'provider-multipart',
@@ -78,6 +90,14 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   assert.strictEqual(created.total, 3, '多P父任务没有建立全部 P');
   assert.strictEqual(created.collectionKind, 'bilibili-multipart', '多P收藏夹类型错误');
   assert(created.parentDocumentId.includes('BV1MULTIPART'), '父任务稳定 ID 缺少 BV');
+  assert.strictEqual(videoInfoCalls, 1, '检查后立即创建多P父任务时重复请求了同一 BV 元数据');
+  assert.strictEqual(created.sourceInfo, undefined, '父任务内部元数据快照暴露到了渲染层');
+  for (const cid of ['101', '102', '103']) {
+    const task = store.getTask(`${created.id}:part:${cid}`);
+    const info = JSON.parse(fs.readFileSync(path.join(task.preallocatedArtifactDir, 'info.json'), 'utf8'));
+    assert.strictEqual(info.cid, cid, `子 P ${cid} 没有复用父任务元数据`);
+    assert.strictEqual(info.pages.length, 1, `子 P ${cid} 的元数据没有限定到当前 P`);
+  }
 
   const partOne = store.getTask(`${created.id}:part:101`);
   fs.mkdirSync(partOne.preallocatedArtifactDir, { recursive: true });
@@ -125,6 +145,7 @@ const { MultiPartManager, assertMultipartVideoSupported } = require('../src/core
   const started = await manager.start({ parentId: created.id, selectedPages: ['102', '103', '104'], providerId: 'provider-multipart', modelId: 'model-multipart', concurrency: 2 });
   assert.strictEqual(started.sessions.length, 2, '多P并发工作流数量没有按设置创建');
   assert(started.sessions.every((item) => item.mode === 'multipart' && item.multiPartParentId === created.id), '多P工作流没有绑定父任务');
+  assert.strictEqual(store.getCollectionById(created.collectionId).cookieFile, cookieFile, '多P子任务没有继承当前 B站登录 Cookie');
   const sessionOne = sessions.get('session-1');
   const sessionTwo = sessions.get('session-2');
   const partTwo = store.getTask(`${created.id}:part:102`);

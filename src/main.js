@@ -277,6 +277,7 @@ async function bootstrap() {
     bili,
     internalAgentManager,
     ragAssistant,
+    getCurrentUser: () => currentUser,
     emit: publishMultipartEvent
   });
   sharedKnowledgeManager = new SharedKnowledgeManager({

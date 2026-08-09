@@ -1,17 +1,43 @@
 const assert = require('assert');
 const fs = require('fs');
+const http = require('http');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { PassThrough } = require('stream');
 const { nodeChildProcessSpec, readUtf8, utf8ChildEnvironment } = require('../src/core/child-process-io');
-const { buildBundle, extractFrames, resolveCommand } = require('../tools/video-tool');
-const { ToolRunner } = require('../src/core/tool-runner');
+const { bilibiliRiskControlDelay, buildBundle, extractFrames, fetchPlainJson, isBilibiliRiskControlResponse, readReusableVideoInfo, resolveCommand } = require('../tools/video-tool');
+const { hasReusableMultipartInfo, ToolRunner } = require('../src/core/tool-runner');
 const { MIN_ARTIFACT_NAME_LENGTH, PROJECT_ROOT, PathSafetyError, evaluateWorkspacePathSafety, fitArtifactName, safeName } = require('../src/core/workspace');
 
 (async () => {
   const root = path.join(PROJECT_ROOT, 'workspace', '.star-note', 'media-edge-cases-92%test');
   fs.rmSync(root, { recursive: true, force: true });
   fs.mkdirSync(root, { recursive: true });
+  const reusableInfoRoot = path.join(root, 'reusable-info');
+  fs.mkdirSync(reusableInfoRoot, { recursive: true });
+  fs.writeFileSync(path.join(reusableInfoRoot, 'info.json'), `${JSON.stringify({ bvid: 'BV1xx411c7mD', cid: '123', page: 2, pages: [{ cid: '123', page: 2 }] })}\n`, 'utf8');
+  assert(readReusableVideoInfo('https://www.bilibili.com/video/BV1xx411c7mD?p=2', reusableInfoRoot, { 'reuse-info': true, cid: '123', page: '2' }), 'matching multi-part metadata was not reused');
+  assert.strictEqual(readReusableVideoInfo('https://www.bilibili.com/video/BV1xx411c7mD?p=3', reusableInfoRoot, { 'reuse-info': true, cid: '999', page: '3' }), null, 'mismatched multi-part metadata was reused');
+  assert(hasReusableMultipartInfo({ bvid: 'BV1xx411c7mD', cid: '123', multiPartRole: 'part' }, reusableInfoRoot), 'tool runner did not accept the matching parent metadata snapshot');
+  assert(!hasReusableMultipartInfo({ bvid: 'BV1xx411c7mD', cid: '999', multiPartRole: 'part' }, reusableInfoRoot), 'tool runner accepted metadata from another P');
+  assert(isBilibiliRiskControlResponse(412, { code: -412 }, '{"message":"Request was banned"}'), 'HTTP 412 was not recognized as Bilibili risk control');
+  assert(isBilibiliRiskControlResponse(200, { code: -412 }, ''), 'Bilibili API -412 was not recognized when HTTP status was 200');
+  const retryDelay = bilibiliRiskControlDelay(0, { 'risk-control-base-delay-ms': 100 });
+  assert(retryDelay >= 350 && retryDelay < 1000, 'Bilibili risk-control retry delay is outside the bounded jitter window');
+  let riskControlRequests = 0;
+  const riskControlServer = http.createServer((_request, response) => {
+    riskControlRequests += 1;
+    response.writeHead(riskControlRequests === 1 ? 412 : 200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(riskControlRequests === 1 ? { code: -412, message: 'Request was banned' } : { code: 0, data: { recovered: true } }));
+  });
+  await new Promise((resolve, reject) => riskControlServer.listen(0, '127.0.0.1', (error) => error ? reject(error) : resolve()));
+  try {
+    const address = riskControlServer.address();
+    const recovered = await fetchPlainJson(`http://127.0.0.1:${address.port}/view`, { 'risk-control-retries': 1, 'risk-control-base-delay-ms': 100 });
+    assert(recovered.code === 0 && riskControlRequests === 2, 'Bilibili HTTP 412 did not recover through bounded retry');
+  } finally {
+    await new Promise((resolve) => riskControlServer.close(resolve));
+  }
   const ffmpeg = resolveCommand('ffmpeg');
   assert(ffmpeg, 'Project-local FFmpeg is missing.');
   assert.strictEqual(utf8ChildEnvironment({ PATH: 'test' }).PYTHONIOENCODING, 'utf-8', 'Python child processes are not forced to UTF-8.');
@@ -92,6 +118,19 @@ const { MIN_ARTIFACT_NAME_LENGTH, PROJECT_ROOT, PathSafetyError, evaluateWorkspa
     updateToolRun: (_id, patch) => { toolRun = { ...toolRun, ...patch }; return toolRun; }
   };
   const runner = new ToolRunner({ store });
+  const cookieFile = path.join(root, 'cookies.txt');
+  fs.writeFileSync(cookieFile, '# Netscape HTTP Cookie File\n', 'utf8');
+  const multipartArgs = runner.buildArgs({
+    task: { bvid: 'BV1xx411c7mD', cid: '123', page: 2, multiPartRole: 'part' },
+    action: 'subtitles',
+    collection: { cookieFile },
+    artifactDir: root,
+    options: { reuseInfo: true }
+  });
+  assert(multipartArgs.includes('--cookies') && multipartArgs.includes(cookieFile), 'multi-part tool arguments did not include the collection Cookie');
+  assert(multipartArgs.includes('--reuse-info') && multipartArgs.includes('--risk-control-retries'), 'multi-part tool arguments did not enable metadata reuse and risk-control retry');
+  const ordinaryArgs = runner.buildArgs({ task: { bvid: 'BV1xx411c7mD' }, action: 'subtitles', collection: {}, artifactDir: root, options: {} });
+  assert(!ordinaryArgs.includes('--reuse-info') && !ordinaryArgs.includes('--risk-control-retries'), 'multi-part network safeguards leaked into the ordinary video path');
   const result = await runner.runAsrStage({ warnings: [] }, toolRun);
   const asr = JSON.parse(fs.readFileSync(path.join(root, 'asr', 'asr-result.json'), 'utf8'));
   assert(result.ok && result.skipped && asr.noAudioStream && asr.diagnostics.noAudioStream, 'No-audio ASR diagnostic was not generated.');

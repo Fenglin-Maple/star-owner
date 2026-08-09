@@ -441,6 +441,10 @@
       }
       if (startAfter) await window.orchestrator.multiPartStart({ parentId: parent.id, ...payload });
       await refresh();
+      if (startAfter && parent.collectionId) {
+        elements.multipartViewerCollection.value = parent.collectionId;
+        renderMultipart();
+      }
       notify(startAfter ? '多P任务已启动' : '多P父任务已创建', startAfter ? '已进入应用内 Agent 队列。' : '可在父任务查看器中选择范围后继续。');
     } catch (error) { notify('多P任务操作失败', error); }
     finally { setBusy(startAfter ? elements.multipartCreateStart : elements.multipartCreate, false, startAfter ? '创建并开始' : '创建父任务'); }

@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.6.3`
+Version: `1.6.4`
 
 ## 1. Portable Release for Users
 
@@ -34,7 +34,7 @@ Star-Owner-v<dependency-version>-model-large-v3-turbo.zip
 Star-Owner-v<dependency-version>-model-large-v3-turbo.zip.sha256
 ```
 
-The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.6.2` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. Existing official v1.0.0 probe-only installations are adopted once using the published asset checksums; the persistent adoption marker prevents a later missing, damaged, wrong-version or wrong-package manifest from being silently accepted. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads and read-only mount snapshots. At runtime, application child processes never resolve Node, Python, FFmpeg, yt-dlp or Git from the user's PATH; the GPU probe and Windows utility calls use known absolute system locations plus the controlled project environment.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.6.4` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. Existing official v1.0.0 probe-only installations are adopted once using the published asset checksums; the persistent adoption marker prevents a later missing, damaged, wrong-version or wrong-package manifest from being silently accepted. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads and read-only mount snapshots. At runtime, application child processes never resolve Node, Python, FFmpeg, yt-dlp or Git from the user's PATH; the GPU probe and Windows utility calls use known absolute system locations plus the controlled project environment.
 
 `1.4.17` remains a code-only update and keeps the published `v1.0.0` runtime/model dependency assets unchanged. It reorganizes the shared-tool hierarchy without changing repository, mount or upload persistence contracts; no new Release asset is required.
 
@@ -53,6 +53,8 @@ The application version and dependency version are independent. `package.json.de
 `1.6.2` is a code/documentation-only update and keeps the published runtime/model assets unchanged. RAG web-tool cancellation now propagates through DNS validation, hidden-page loading, dynamic extraction, approval waits and the short-lived proxy; cancellation destroys the hidden browser promptly and leaves the session available for the next message. The text-only web reader rejects direct image URLs and image content types before or immediately after extraction, so it does not retry an unsupported pixel request. No new runtime, model or Git asset is required.
 
 `1.6.3` is a documentation-only update. `FUTURE_FEATURES.md` records candidate RAG, MCP and modular “B站之外” capabilities and their implementation constraints. It does not change the current runtime, model, Git or migration contracts and does not require a new Release asset.
+
+`1.6.4` is a code/documentation-only update and keeps the published runtime/model assets unchanged. The multi-part video tool now passes the application's current exported Bilibili Cookie to its internal collection, reuses one parent metadata snapshot for all selected P children, and retries Bilibili `412/-412` risk-control responses with bounded jittered backoff. Ordinary Agent and single-video request arguments remain unchanged. The parent viewer automatically switches to the destination collection after “创建并开始”. No database migration or new runtime, model or Git asset is required.
 
 ### Updating and migrating an existing installation
 
