@@ -16,6 +16,7 @@
   let confirmAction = null;
   let refreshTimer = null;
   let refreshSequence = 0;
+  let submittingDownloads = false;
 
   async function refresh({ quiet = false } = {}) {
     const sequence = ++refreshSequence;
@@ -41,8 +42,12 @@
 
   function renderCollections() {
     const previous = elements.collection.value;
-    elements.collection.innerHTML = state.collections.map((item) => `<option value="${attr(item.id)}">${html(item.name)} (${Number(item.videoCount || 0)})</option>`).join('');
-    elements.collection.value = state.collections.some((item) => item.id === previous) ? previous : (state.defaultCollectionId || state.collections[0]?.id || '');
+    const downloadCollections = state.collections.filter((item) => item.downloadTargetAllowed !== false);
+    elements.collection.innerHTML = downloadCollections.map((item) => `<option value="${attr(item.id)}">${html(item.name)} (${Number(item.videoCount || 0)})</option>`).join('');
+    elements.collection.value = downloadCollections.some((item) => item.id === previous)
+      ? previous
+      : (downloadCollections.some((item) => item.id === state.defaultCollectionId) ? state.defaultCollectionId : (downloadCollections[0]?.id || ''));
+    elements.submit.disabled = submittingDownloads || !downloadCollections.length;
 
     const libraryPrevious = elements.libraryCollection.value;
     elements.libraryCollection.innerHTML = '<option value="">全部缓存收藏夹</option>' + state.collections.map((item) => `<option value="${attr(item.id)}">${html(item.name)} (${Number(item.videoCount || 0)})</option>`).join('');
@@ -80,7 +85,8 @@
     const previousScrollTop = elements.list.scrollTop;
     const collectionId = elements.libraryCollection.value;
     const query = elements.librarySearch.value.trim().toLowerCase();
-    const allForCollection = state.videos.filter((item) => !collectionId || item.collectionId === collectionId);
+    const libraryRecords = window.StarOwnerLibraryState?.videoLibraryRecords(state.videos) || state.videos;
+    const allForCollection = libraryRecords.filter((item) => !collectionId || item.collectionId === collectionId);
     // Range inputs use whole-second steps. Round the boundary up so media with
     // fractional probe durations is not hidden just beyond the slider maximum.
     const maxDuration = Math.max(1, Math.ceil(Math.max(0, ...allForCollection.map((item) => Number(item.duration || 0)))));
@@ -199,6 +205,7 @@
   }
 
   async function submitDownloads() {
+    submittingDownloads = true;
     elements.submit.disabled = true;
     try {
       const result = await window.orchestrator.videoCacheSubmit({ inputs: elements.inputs.value, collectionId: elements.collection.value });
@@ -207,8 +214,13 @@
       render();
       const ignored = result.invalidInputs?.length ? `，另有 ${result.invalidInputs.length} 项不是可识别的 Bilibili 输入，已忽略` : '';
       toast('已加入下载队列', `${result.jobs.length} 个视频将按资源情况并行处理${ignored}。`, 'success');
-    } catch (error) { toast('无法提交缓存任务', error.message || String(error), 'error'); }
-    finally { elements.submit.disabled = false; }
+    } catch (error) {
+      if (!window.StarOwnerBilibiliAuthNotice?.notifyBilibiliCookieRequired(error, toast)) toast('无法提交缓存任务', error.message || String(error), 'error');
+    }
+    finally {
+      submittingDownloads = false;
+      elements.submit.disabled = !elements.collection.value;
+    }
   }
 
   async function createCollection() {

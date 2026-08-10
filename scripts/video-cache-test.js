@@ -100,6 +100,10 @@ function assert(condition, message) {
   assert(firstRecord.cover.startsWith('file:') && firstRecord.orientation === 'portrait' && firstRecord.width === 1080 && firstRecord.height === 1920, 'local cover or portrait metadata was not exposed to the video library');
   const cachedTask = store.getTask(firstRecord.taskId);
   assert(cachedTask?.enabled && cachedTask.cachedVideoId === firstRecord.id && cachedTask.reuseCachedMedia, 'cached video was not exposed as an enabled Agent task');
+  store.updateTasksEnabled([cachedTask.id], false);
+  const disabledTaskRecord = manager.state().videos.find((item) => item.id === firstRecord.id);
+  assert(disabledTaskRecord?.fileExists, 'video library dropped an existing cache file after its linked task was disabled');
+  store.updateTasksEnabled([cachedTask.id], true);
   store.upsertVideoCacheJob({ id: 'active-delete-guard', collectionId: defaultCollection.id, input: firstRecord.bvid, bvid: firstRecord.bvid, status: 'running', outputRoot: defaultCollection.cacheRoot, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
   let activeDeleteRejected = false;
   try { manager.deleteVideos([firstRecord.id]); } catch (error) { activeDeleteRejected = /仍在下载|等待登录/.test(error.message); }
@@ -168,6 +172,27 @@ function assert(condition, message) {
   const temporary = manager.createCollection('可删除缓存');
   manager.deleteCollection(temporary.id);
   assert(!store.getCollectionById(temporary.id) && store.getCollectionById(DEFAULT_CACHE_COLLECTION_ID), 'cache collection lifecycle failed');
+
+  const legacyLocalCollection = manager.createCollection('旧版本地导入收藏夹');
+  const legacyLocalDir = path.join(legacyLocalCollection.cacheRoot, 'legacy-local');
+  fs.mkdirSync(legacyLocalDir, { recursive: true });
+  const legacyLocalFile = path.join(legacyLocalDir, 'merged.mp4');
+  fs.writeFileSync(legacyLocalFile, 'legacy local video');
+  store.upsertVideoCache({ id: 'cache:legacy-local', collectionId: legacyLocalCollection.id, title: '旧版本地视频', sourceType: 'local-video', localImported: true, videoFile: legacyLocalFile, artifactDir: legacyLocalDir, downloadedAt: new Date().toISOString() });
+  const migrationManager = new VideoCacheManager({ store, toolRunner: runner, bili: { exportCookies: async () => cookieFile }, getCurrentUser: () => currentUser, pollMs: 25 });
+  const migratedCollection = store.getCollectionById(legacyLocalCollection.id);
+  assert(migratedCollection.videoCacheSource === 'local-media', 'legacy unmarked local-import collection was not migrated');
+  const reopenedStore = await Store.open(path.join(root, 'test.sqlite'));
+  assert(reopenedStore.getCollectionById(legacyLocalCollection.id)?.videoCacheSource === 'local-media', 'local-import collection migration was not persisted for the next application start');
+  assert(migrationManager.state().collections.find((item) => item.id === legacyLocalCollection.id)?.downloadTargetAllowed === false, 'migrated local-import collection remained selectable for B站 downloads');
+  let localTargetRejected = false;
+  try { await migrationManager.submit({ inputs: 'BVLOCAL00001', collectionId: legacyLocalCollection.id }); }
+  catch (error) { localTargetRejected = error.code === 'LOCAL_MEDIA_COLLECTION_DOWNLOAD_FORBIDDEN'; }
+  assert(localTargetRejected, 'core cache submission accepted a local-media collection');
+  let localNameRejected = false;
+  try { migrationManager.createCollection(legacyLocalCollection.name); }
+  catch (error) { localNameRejected = /本地视频 \/ 音频导入/.test(error.message); }
+  assert(localNameRejected, 'download collection creation reused a local-media collection with the same name');
 
   const partialCollection = manager.createCollection('partial-cleanup-test');
   const partialArtifact = path.join(partialCollection.cacheRoot, '[BV-BVPARTIAL01]');

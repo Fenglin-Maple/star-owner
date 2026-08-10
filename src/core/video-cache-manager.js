@@ -6,6 +6,7 @@ const { BILIBILI_COOKIE_REQUIRED, readBilibiliCookieHeader, requireBilibiliCooki
 const { isLoginRequiredMessage, isVideoUnavailableMessage, unsupportedVideoError } = require('./media-errors');
 const { assertBilibiliUrl } = require('./network-policy');
 const { inspectVideoSupport, unsupportedBilibiliUrlReason } = require('./video-support');
+const { LOCAL_MEDIA_CACHE_SOURCE, isLocalMediaCacheCollection } = require('./video-cache-collection');
 const { assertInside, collectionDirs, ensureDir, normalizeTags, removePathInside, safeName } = require('./workspace');
 
 const CACHE_USER_ID = 'builtin-agent-user';
@@ -28,6 +29,7 @@ class VideoCacheManager {
     this.running = new Map();
     this.stopped = false;
     this.ensureDefaultCollection();
+    this.migrateLocalMediaCollectionSources();
   }
 
   initialize() {
@@ -65,7 +67,12 @@ class VideoCacheManager {
     const collectionName = String(name || '').trim();
     if (!collectionName) throw new Error('缓存视频收藏夹名称不能为空。');
     const duplicate = this.store.listVideoCacheCollections().find((item) => item.name === collectionName);
-    if (duplicate) return duplicate;
+    if (duplicate) {
+      if (isLocalMediaCacheCollection(duplicate, this.store.listVideoCaches({ collectionId: duplicate.id }))) {
+        throw new Error('同名收藏夹已用于本地视频 / 音频导入，不能作为 B站视频下载目标。请使用其它名称。');
+      }
+      return duplicate;
+    }
     const workspace = this.requireWorkspace();
     const dirs = collectionDirs(workspace.root, CACHE_USER_NAME, collectionName);
     const cacheRoot = ensureDir(path.join(dirs.root, '视频缓存'));
@@ -78,6 +85,7 @@ class VideoCacheManager {
       label: 'video-cache',
       internal: true,
       collectionKind: 'video-cache',
+      videoCacheSource: String(options.videoCacheSource || ''),
       protected: Boolean(options.protected),
       workspaceId: workspace.id,
       workspaceRoot: workspace.root,
@@ -93,6 +101,11 @@ class VideoCacheManager {
 
   async submit({ inputs, collectionId } = {}) {
     const collection = this.requireCacheCollection(collectionId);
+    if (isLocalMediaCacheCollection(collection, this.store.listVideoCaches({ collectionId: collection.id }))) {
+      const error = new Error('本地视频 / 音频导入收藏夹只用于保存本地媒体，不能作为 B站视频下载目标。请新建或选择普通内置缓存收藏夹。');
+      error.code = 'LOCAL_MEDIA_COLLECTION_DOWNLOAD_FORBIDDEN';
+      throw error;
+    }
     const parsed = parseInputs(inputs);
     const rawItems = parsed.valid;
     if (!rawItems.length) throw new Error('请至少输入一个 BV 号或 Bilibili 视频链接。');
@@ -170,14 +183,18 @@ class VideoCacheManager {
   }
 
   state() {
+    const cacheRecords = this.store.listVideoCaches();
     const collections = this.store.listVideoCacheCollections().map((collection) => {
       const { cookieFile, ...safeCollection } = collection;
+      const localMedia = isLocalMediaCacheCollection(collection, cacheRecords);
       return {
       ...safeCollection,
-      videoCount: this.store.listVideoCaches({ collectionId: collection.id }).length
+      videoCount: cacheRecords.filter((record) => record.collectionId === collection.id).length,
+      localMedia,
+      downloadTargetAllowed: !localMedia
       };
     });
-    const videos = this.store.listVideoCaches().map((record) => {
+    const videos = cacheRecords.map((record) => {
       const task = record.taskId ? this.store.getTask(record.taskId) : null;
       const videoExists = Boolean(record.videoFile && fs.existsSync(record.videoFile));
       return {
@@ -551,6 +568,23 @@ class VideoCacheManager {
   async prepareAuthentication(purpose) {
     const cookieFile = await requireBilibiliCookie({ bili: this.bili, user: this.getCurrentUser(), purpose });
     return { cookieFile, cookieHeader: readBilibiliCookieHeader(cookieFile) };
+  }
+
+  migrateLocalMediaCollectionSources() {
+    const records = this.store.listVideoCaches();
+    let changed = 0;
+    for (const collection of this.store.listVideoCacheCollections()) {
+      if (collection.videoCacheSource === LOCAL_MEDIA_CACHE_SOURCE) continue;
+      if (!isLocalMediaCacheCollection(collection, records)) continue;
+      this.store.set('collections', collection.id, {
+        ...collection,
+        videoCacheSource: LOCAL_MEDIA_CACHE_SOURCE,
+        updatedAt: new Date().toISOString()
+      });
+      changed += 1;
+    }
+    if (changed) this.store.save();
+    return changed;
   }
 
   emitState(type, detail) {

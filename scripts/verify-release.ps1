@@ -126,6 +126,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Local toolbox integration test failed." }
   & npm run test:renderer-state
   if ($LASTEXITCODE -ne 0) { throw "Renderer state guard test failed." }
+  & npm run test:library-auth-ui
+  if ($LASTEXITCODE -ne 0) { throw "Library and Bilibili authentication Electron UI flow test failed." }
   & npm run test:runtime-isolation
   if ($LASTEXITCODE -ne 0) { throw "Project runtime isolation test failed." }
   & npm run test:git-runtime

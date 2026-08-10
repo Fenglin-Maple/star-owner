@@ -388,7 +388,7 @@
 
           <section class="page cache-download-page" id="page-cache-download">
             <div class="page-head cache-page-head">
-              <div><h1>下载视频</h1><p>批量提交 BV 号或任意 Bilibili 视频链接，公开访问优先，队列会并行下载并合轨。</p></div>
+              <div><h1>下载视频</h1><p>批量提交 BV 号或任意 Bilibili 视频链接，使用应用内 B站登录 Cookie，队列会并行下载并合轨。</p></div>
               <div class="cache-live-badge"><span></span><strong id="cacheQueueHeadline">队列空闲</strong></div>
             </div>
             <div class="cache-download-layout">
@@ -1117,6 +1117,8 @@
     <script src="../../node_modules/dompurify/dist/purify.min.js"></script>
     <script src="../../node_modules/mermaid/dist/mermaid.min.js"></script>
     <script src="./dependency-indicator.js"></script>
+    <script src="./bilibili-auth-notice.js"></script>
+    <script src="./library-state.js"></script>
     <script src="./app.js"></script>
     <script src="./renderer-guards.js"></script>
     <script src="./rag.js"></script>

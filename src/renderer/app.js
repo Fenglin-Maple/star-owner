@@ -911,6 +911,10 @@ function showToast(title, message = '', type = 'info', options = {}) {
 
 window.notify = showToast;
 
+function showBilibiliLoginRequired(error) {
+  return Boolean(window.StarOwnerBilibiliAuthNotice?.notifyBilibiliCookieRequired(error, showToast));
+}
+
 function renderBootstrap(state = {}) {
   if (!bootstrapPanel) return;
   const overview = document.querySelector('#page-overview');
@@ -2478,7 +2482,8 @@ function renderDocumentLibrary() {
 function completedDocuments() {
   const collections = new Map((lastSnapshot.collections || []).map((collection) => [collection.id, collection]));
   return (lastSnapshot.tasks || [])
-    .filter((task) => task.status === 'done' && task.outputMarkdown && task.knowledgeActive !== false && task.multiPartRole !== 'part')
+    .filter((task) => window.StarOwnerLibraryState?.isDocumentLibraryTask(task)
+      ?? (task.status === 'done' && task.outputMarkdown && task.knowledgeActive !== false && task.multiPartRole !== 'part'))
     .map((task) => ({ task, collection: collections.get(task.collectionId) }))
     .filter((item) => item.collection);
 }
@@ -3430,7 +3435,7 @@ document.querySelector('#loadFolders').addEventListener('click', async () => {
   } catch (error) {
     setFolderInventory([]);
     collectionOutput.textContent = error.message || String(error);
-    showToast(TEXT.toastError, error.message || String(error), 'error');
+    if (!showBilibiliLoginRequired(error)) showToast(TEXT.toastError, error.message || String(error), 'error');
   }
 });
 
@@ -3463,7 +3468,7 @@ document.querySelector('#syncCollection').addEventListener('click', async () => 
   } catch (error) {
     renderSyncProgress({ stage: 'error', progress: 1 });
     collectionOutput.textContent = error.message || String(error);
-    showToast(TEXT.toastError, error.message || String(error), 'error');
+    if (!showBilibiliLoginRequired(error)) showToast(TEXT.toastError, error.message || String(error), 'error');
   } finally {
     collectionSyncInFlight = false;
     updateSyncCollectionState();

@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Version: `1.6.9`
+Version: `1.7.0`
 
 ## 1. Portable Release for Users
 
@@ -34,7 +34,7 @@ Star-Owner-v<dependency-version>-model-large-v3-turbo.zip
 Star-Owner-v<dependency-version>-model-large-v3-turbo.zip.sha256
 ```
 
-The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.6.9` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. Existing official v1.0.0 probe-only installations are adopted once using the published asset checksums; the persistent adoption marker prevents a later missing, damaged, wrong-version or wrong-package manifest from being silently accepted. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads and read-only mount snapshots. At runtime, application child processes never resolve Node, Python, FFmpeg, yt-dlp or Git from the user's PATH; the GPU probe and Windows utility calls use known absolute system locations plus the controlled project environment.
+The application version and dependency version are independent. `package.json.dependencyReleaseVersion` is copied into `portable-manifest.json` and controls API lookup, direct fallback URLs, local-import Release links and exact accepted asset names. Version `1.7.0` uses the unchanged published `v1.0.0` runtime, required Turbo and optional small assets. Existing official v1.0.0 probe-only installations are adopted once using the published asset checksums; the persistent adoption marker prevents a later missing, damaged, wrong-version or wrong-package manifest from being silently accepted. The historical v1.0.0 medium asset remains available for older applications and is not used by the current dependency registry. The core archive also contains the project-local Git runtime used for shared Fork/PR uploads and read-only mount snapshots. At runtime, application child processes never resolve Node, Python, FFmpeg, yt-dlp or Git from the user's PATH; the GPU probe and Windows utility calls use known absolute system locations plus the controlled project environment.
 
 `1.4.17` remains a code-only update and keeps the published `v1.0.0` runtime/model dependency assets unchanged. It reorganizes the shared-tool hierarchy without changing repository, mount or upload persistence contracts; no new Release asset is required.
 
@@ -65,6 +65,8 @@ The application version and dependency version are independent. `package.json.de
 `1.6.8` is a code/documentation-only Bilibili request hardening update and keeps all published runtime/model assets unchanged. Single-video, managed Bilibili cache and multi-part entry points validate the current application login Cookie before their first remote request; short-link redirects and media tools receive the same authenticated state. Missing or expired Cookies stop before anonymous access and produce an in-app notification. Favorite-based Agent and local-media processing contracts remain unchanged. No schema migration or new runtime, model or Git asset is required.
 
 `1.6.9` is a code/documentation-only GitHub sharing authorization hardening update and keeps all published runtime/model assets unchanged. Public shared catalogs remain anonymously readable when no GitHub credential is configured. If an attached application credential receives HTTP 401, catalog loading stops immediately, prompts the user to clear and renew authorization, and does not hide the invalid credential through anonymous or Git-tree retry. No schema migration or new runtime, model or Git asset is required.
+
+`1.7.0` is a code/documentation-only Bilibili authentication and file-library boundary update and keeps all published runtime/model assets unchanged. Favorite reads/synchronization, video metadata, single-video, multi-part and managed downloads require the current application Cookie and surface one consistent login notification; anonymous access remains limited to login-state probing. Local video/audio import collections receive a backward-compatible source marker, legacy collections are inferred from their existing records, and these collections are excluded from Bilibili download targets without leaving the video library. File Browser video and completed-document records remain visible when Task Overview disables their linked tasks. No SQLite schema change or new runtime, model or Git asset is required.
 
 ### Updating and migrating an existing installation
 

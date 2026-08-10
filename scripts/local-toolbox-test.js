@@ -70,6 +70,7 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
     const record = store.listVideoCaches({ collectionId: collection.id }).find((item) => item.sourceMediaKind === 'video');
     const task = store.getTask(record.taskId);
     assert(record.localImported && record.sourceType === 'local-video' && record.orientation === 'portrait', 'local video metadata was not persisted');
+    assert(collection.videoCacheSource === 'local-media' && videoCache.state().collections.find((item) => item.id === collection.id)?.downloadTargetAllowed === false, 'local import collection was still exposed as a B站 download target');
     assert(task.status === 'pending' && task.reuseCachedMedia && task.cachedVideoFile === record.videoFile, 'local video was not exposed as an Agent task');
     assert(fs.existsSync(sourceVideo), 'source video was moved or deleted');
     assert(fs.statSync(record.videoFile).size <= 30 * 1024 * 1024, 'short imported video exceeded the 30 MiB budget');

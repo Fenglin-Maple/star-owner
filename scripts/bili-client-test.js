@@ -24,14 +24,28 @@ const { BiliClient, isBilibiliCookieDomain, normalizeBilibiliAssetUrl } = requir
   assert(!isBilibiliCookieDomain('notbilibili.com') && !isBilibiliCookieDomain('bilibili.com.example.org'));
 
   const originalFetch = global.fetch;
-  global.fetch = async () => new Response(JSON.stringify({
-    code: 0,
-    data: { isLogin: true, mid: 123, uname: 'Avatar test', face: 'http://i0.hdslb.com/avatar.jpg' }
-  }), { status: 200, headers: { 'content-type': 'application/json' } });
+  let anonymousNavCookie = null;
+  global.fetch = async (_url, options = {}) => {
+    anonymousNavCookie = options.headers?.cookie;
+    return new Response(JSON.stringify({
+      code: 0,
+      data: { isLogin: true, mid: 123, uname: 'Avatar test', face: 'http://i0.hdslb.com/avatar.jpg' }
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
   try {
     const client = new BiliClient(() => ({ cookies: { get: async () => [] } }));
     const profile = await client.nav();
     assert.strictEqual(profile.face, 'https://i0.hdslb.com/avatar.jpg');
+    assert.strictEqual(anonymousNavCookie, '', 'login-state detection unexpectedly required an existing Cookie');
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  global.fetch = async () => new Response(JSON.stringify({ code: -101, message: '账号未登录' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  try {
+    const loggedOutClient = new BiliClient(() => ({ cookies: { get: async () => [] } }));
+    const loggedOut = await loggedOutClient.nav();
+    assert.strictEqual(loggedOut.isLogin, false, 'Bilibili nav -101 was not normalized to a logged-out state');
   } finally {
     global.fetch = originalFetch;
   }
@@ -62,24 +76,31 @@ const { BiliClient, isBilibiliCookieDomain, normalizeBilibiliAssetUrl } = requir
   }));
   await assert.rejects(() => mismatchedAvatar.fetchImageDataUrl('https://i0.hdslb.com/not-a-jpeg.jpg'), /do not match image\/jpeg/);
 
-  global.fetch = async () => new Response(JSON.stringify({
-    code: 0,
-    data: {
-      info: { media_count: 3 },
-      has_more: false,
-      medias: [
-        { bvid: 'BVCLIENT0001', title: 'Visible A', upper: { name: 'UP A' } },
-        { bvid: 'BVCLIENT0002', title: 'Visible B', upper: { name: 'UP B' } }
-      ]
-    }
-  }), { status: 200, headers: { 'content-type': 'application/json' } });
+  let authenticatedRequestCookie = '';
+  global.fetch = async (_url, options = {}) => {
+    authenticatedRequestCookie = options.headers?.cookie || '';
+    return new Response(JSON.stringify({
+      code: 0,
+      data: {
+        info: { media_count: 3 },
+        has_more: false,
+        medias: [
+          { bvid: 'BVCLIENT0001', title: 'Visible A', upper: { name: 'UP A' } },
+          { bvid: 'BVCLIENT0002', title: 'Visible B', upper: { name: 'UP B' } }
+        ]
+      }
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
   try {
-    const partialClient = new BiliClient(() => ({ cookies: { get: async () => [] } }));
+    const partialClient = new BiliClient(() => ({ cookies: { get: async () => [{ name: 'SESSDATA', value: 'client-session' }] } }));
     const snapshot = await partialClient.listVideos('123');
     assert.strictEqual(snapshot.videos.length, 2);
     assert.strictEqual(snapshot.reportedTotal, 3);
     assert.strictEqual(snapshot.visibilityGap, 1);
     assert.strictEqual(snapshot.completedPages, true);
+    assert.strictEqual(authenticatedRequestCookie, 'SESSDATA=client-session', 'authenticated Bilibili API request omitted the application Cookie');
+    const anonymousClient = new BiliClient(() => ({ cookies: { get: async () => [] } }));
+    await assert.rejects(() => anonymousClient.listVideos('123'), (error) => error.code === 'BILIBILI_COOKIE_REQUIRED');
   } finally {
     global.fetch = originalFetch;
   }

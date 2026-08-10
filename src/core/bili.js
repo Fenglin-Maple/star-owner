@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { bilibiliCookieRequiredError } = require('./bilibili-auth');
 const { timestampForFile, userCookiesDir } = require('./workspace');
 
 const BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -19,8 +20,11 @@ class BiliClient {
     return cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
   }
 
-  async fetchJson(endpoint) {
+  async fetchJson(endpoint, options = {}) {
     const cookie = await this.cookieHeader('https://www.bilibili.com');
+    if (options.requireCookie && !cookie) {
+      throw bilibiliCookieRequiredError(`${options.purpose || '请求 B站接口'}前没有读取到登录 Cookie。`);
+    }
     const response = await fetch(endpoint, {
       signal: AbortSignal.timeout(30000),
       headers: {
@@ -39,12 +43,23 @@ class BiliClient {
       throw new Error(`Bilibili returned non-JSON: ${text.slice(0, 180)}`);
     }
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 180)}`);
-    if (json.code !== 0) throw new Error(`Bilibili API ${json.code}: ${json.message || json.msg || 'unknown'}`);
+    if (json.code !== 0) {
+      const error = new Error(`Bilibili API ${json.code}: ${json.message || json.msg || 'unknown'}`);
+      error.code = 'BILIBILI_API_ERROR';
+      error.bilibiliCode = Number(json.code);
+      throw error;
+    }
     return json.data;
   }
 
   async nav() {
-    const data = await this.fetchJson('https://api.bilibili.com/x/web-interface/nav');
+    let data;
+    try {
+      data = await this.fetchJson('https://api.bilibili.com/x/web-interface/nav');
+    } catch (error) {
+      if (error.bilibiliCode === -101) return { isLogin: false, mid: 0, name: '', face: '' };
+      throw error;
+    }
     return {
       isLogin: Boolean(data.isLogin),
       mid: data.mid,
@@ -54,7 +69,7 @@ class BiliClient {
   }
 
   async listFolders(mid) {
-    const data = await this.fetchJson(`https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${encodeURIComponent(mid)}`);
+    const data = await this.fetchJson(`https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${encodeURIComponent(mid)}`, { requireCookie: true, purpose: '读取 B站收藏夹' });
     return (data.list || []).map((folder) => ({
       id: String(folder.id),
       name: folder.title,
@@ -64,7 +79,7 @@ class BiliClient {
   }
 
   async getVideoInfo(bvid) {
-    const data = await this.fetchJson(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(String(bvid || ''))}`);
+    const data = await this.fetchJson(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(String(bvid || ''))}`, { requireCookie: true, purpose: '读取 B站视频信息' });
     return {
       bvid: data.bvid || bvid,
       aid: data.aid,
@@ -130,7 +145,7 @@ class BiliClient {
     let completedPages = false;
     for (let page = 1; page <= 200; page += 1) {
       const url = `https://api.bilibili.com/x/v3/fav/resource/list?media_id=${encodeURIComponent(folderId)}&pn=${page}&ps=${pageSize}&keyword=&order=mtime&type=0&tid=0&platform=web`;
-      const data = await this.fetchJson(url);
+      const data = await this.fetchJson(url, { requireCookie: true, purpose: '读取 B站收藏夹视频' });
       const list = data.medias || [];
       for (const item of list) videos.push(normalizeVideo(item));
       const hasMore = data.has_more === undefined ? list.length === pageSize : Boolean(data.has_more);

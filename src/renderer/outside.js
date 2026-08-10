@@ -364,7 +364,7 @@
       multipartInspection = null;
       elements.multipartInspectResult.hidden = true;
       elements.multipartSettings.hidden = true;
-      notify('读取多P列表失败', error);
+      if (!notifyBilibiliLoginRequired(error)) notify('读取多P列表失败', error);
     } finally { setBusy(elements.multipartInspect, false, '读取 P 列表'); }
   }
 
@@ -499,7 +499,7 @@
         renderMultipart({ preserveScroll: false });
       }
       notify(startAfter ? '多P任务已启动' : '多P父任务已创建', startAfter ? '已进入应用内 Agent 队列。' : '可在父任务查看器中选择范围后继续。');
-    } catch (error) { notify('多P任务操作失败', error); }
+    } catch (error) { if (!notifyBilibiliLoginRequired(error)) notify('多P任务操作失败', error); }
     finally { setBusy(startAfter ? elements.multipartCreateStart : elements.multipartCreate, false, startAfter ? '创建并开始' : '创建父任务'); }
   }
 
@@ -666,7 +666,7 @@
         taskRequirements: parent.settings?.taskRequirements || ''
       });
       mergeMultipartParent(result.parent);
-    } catch (error) { notify('启动多P任务失败', error); }
+    } catch (error) { if (!notifyBilibiliLoginRequired(error)) notify('启动多P任务失败', error); }
   }
 
   async function handleMultipartAction(event) {
@@ -712,7 +712,7 @@
         }
         finally { if (button.isConnected) setBusy(button, false, '删除'); }
       }
-    } catch (error) { notify('多P父任务操作失败', error); }
+    } catch (error) { if (!notifyBilibiliLoginRequired(error)) notify('多P父任务操作失败', error); }
     finally {
       if (restoreViewerFocus) requestAnimationFrame(() => {
         if (activeToolId === 'multipart' && elements.multipartViewerCollection.isConnected) {
@@ -1807,6 +1807,10 @@
     const message = detail?.message || String(detail || '');
     if (typeof window.notify === 'function') window.notify(title, message, type);
     else console.error(title, message);
+  }
+
+  function notifyBilibiliLoginRequired(error) {
+    return Boolean(window.StarOwnerBilibiliAuthNotice?.notifyBilibiliCookieRequired(error, notify));
   }
 
   function statusLabel(status) {

@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { CACHE_USER_ID, CACHE_USER_NAME } = require('./video-cache-manager');
+const { LOCAL_MEDIA_CACHE_SOURCE } = require('./video-cache-collection');
 const { importDocument, inspectDocument, stableDocumentId } = require('./local-document-importer');
 const { compressMedia, extractAudio, extractCover, inspectMedia, mediaKind, writeSubtitleFormats } = require('./local-media-runtime');
 const { assertInside, collectionDirs, ensureDir, fitArtifactName, safeName } = require('./workspace');
@@ -477,7 +478,7 @@ class LocalToolboxManager {
       this.store.transaction(() => {
         this.store.set('videoCaches', record.id, record);
         this.store.set('tasks', task.id, task);
-        this.store.set('collections', collection.id, { ...collection, videoCount: this.store.listVideoCaches({ collectionId: collection.id }).filter((item) => item.id !== record.id).length + 1, updatedAt: importedAt });
+        this.store.set('collections', collection.id, { ...collection, videoCacheSource: LOCAL_MEDIA_CACHE_SOURCE, videoCount: this.store.listVideoCaches({ collectionId: collection.id }).filter((item) => item.id !== record.id).length + 1, updatedAt: importedAt });
       });
       fs.rmSync(path.join(targetDir, IMPORT_MANIFEST_NAME), { force: true });
       if (fs.existsSync(backupDir)) fs.rmSync(backupDir, { recursive: true, force: true });
@@ -711,12 +712,15 @@ class LocalToolboxManager {
 
   requireOrCreateCollection(kind, collectionId, name) {
     const existing = this.resolveCollection(kind, { collectionId, collectionName: name });
-    if (existing) return existing;
+    if (existing) {
+      if (kind !== 'video-cache' || existing.videoCacheSource === LOCAL_MEDIA_CACHE_SOURCE) return existing;
+      return this.store.upsertCollection({ ...existing, videoCacheSource: LOCAL_MEDIA_CACHE_SOURCE, updatedAt: new Date().toISOString() });
+    }
     const collectionName = normalizeCollectionName(name);
     if (!collectionName) throw new Error('请输入或选择内置收藏夹名称。');
     const collision = this.store.listCollections().find((item) => item.userId === CACHE_USER_ID && sameName(item.name, collectionName));
     if (collision) throw new Error(`“${collectionName}”已经被其它类型的内置收藏夹使用，请换一个名称。`);
-    if (kind === 'video-cache') return this.videoCacheManager.createCollection(collectionName);
+    if (kind === 'video-cache') return this.videoCacheManager.createCollection(collectionName, { videoCacheSource: LOCAL_MEDIA_CACHE_SOURCE });
     return this.createDocumentCollection(collectionName);
   }
 

@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { bilibiliCookieRequiredError } = require('./bilibili-auth');
 const {
   collectionSourceName,
   collectionStorageName,
@@ -30,7 +31,7 @@ class CollectionSyncService {
 
   async sync(input = {}) {
     const currentUser = this.getCurrentUser();
-    if (!currentUser?.isLogin) throw new Error('Not logged in to Bilibili in the desktop app.');
+    if (!currentUser?.isLogin) throw bilibiliCookieRequiredError('同步 B站收藏夹前未检测到已登录账户。');
     const identifier = String(input.collectionName || input.collectionId || '').trim();
     if (!identifier) throw new Error('collectionName or collectionId is required.');
     const key = 'bilibili-session';

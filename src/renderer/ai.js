@@ -213,7 +213,9 @@
         if (activeSingleId === session.id) activeSingleId = '';
       }
       await refreshAll({ quiet: true });
-    } catch (error) { notify('Agent 操作失败', error.message || String(error), 'error'); }
+    } catch (error) {
+      if (!window.StarOwnerBilibiliAuthNotice?.notifyBilibiliCookieRequired(error, notify)) notify('Agent 操作失败', error.message || String(error), 'error');
+    }
     finally {
       pendingSessionActions.delete(pendingKey);
       const latest = state.sessions.find((item) => item.id === session.id);
@@ -391,7 +393,9 @@
       await window.orchestrator.internalAgentStart(session.id);
       await refreshAll({ quiet: true });
       notify(session.overwritten ? '旧产物已清理并开始覆盖' : (session.reusedTask ? '旧任务已从头重建' : '单任务已开始'), session.overwritten ? '单视频模式只保留唯一产物，本次会从头生成。' : (session.reusedTask ? '旧缓存已清理，本次不会从中断位置继续。' : '可以切换到其它页面，后台会继续处理。'), 'success');
-    } catch (error) { notify('无法开始单任务', error.message || String(error), 'error'); }
+    } catch (error) {
+      if (!window.StarOwnerBilibiliAuthNotice?.notifyBilibiliCookieRequired(error, notify)) notify('无法开始单任务', error.message || String(error), 'error');
+    }
     finally { updateSingleStartState(); }
   }
 

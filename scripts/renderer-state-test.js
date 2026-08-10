@@ -1,5 +1,7 @@
 const { RequestGate, SerialQueue, planAssistantFlow, runLatestRequest, streamMatches } = require('../src/renderer/renderer-guards');
 const { activeDependencyPackages, aggregateDependencyProgress, dependencyStatusLabel } = require('../src/renderer/dependency-indicator');
+const { isBilibiliCookieRequired, notifyBilibiliCookieRequired } = require('../src/renderer/bilibili-auth-notice');
+const { isDocumentLibraryTask, videoLibraryRecords } = require('../src/renderer/library-state');
 const fs = require('fs');
 const path = require('path');
 
@@ -28,6 +30,16 @@ function fakeButton(label) {
 }
 
 (async () => {
+  const loginNotices = [];
+  assert(isBilibiliCookieRequired(Object.assign(new Error('missing'), { code: 'BILIBILI_COOKIE_REQUIRED' })), 'coded B站 Cookie error was not recognized by the renderer');
+  assert(isBilibiliCookieRequired(new Error('Error invoking remote method: 读取视频前没有找到可用的 B站登录 Cookie。')), 'serialized B站 Cookie error was not recognized by the renderer');
+  assert(!isBilibiliCookieRequired(new Error('GitHub token is missing')), 'unrelated authorization error was mistaken for a B站 login problem');
+  assert(notifyBilibiliCookieRequired(new Error('Not logged in to Bilibili in the desktop app.'), (...args) => loginNotices.push(args)) && loginNotices[0][2] === 'error', 'B站 login notice did not use the bottom-right error-toast contract');
+  assert(videoLibraryRecords([{ id: 'disabled-video', taskEnabled: false }]).length === 1, 'video library filtered a file because its linked task was disabled');
+  assert(videoLibraryRecords([{ id: 'missing-video', fileExists: false }]).length === 1, 'video library hid the existing record used to diagnose a missing media file');
+  assert(isDocumentLibraryTask({ status: 'done', outputMarkdown: 'summary.md', enabled: false }), 'document library filtered a completed Markdown because its task was disabled');
+  assert(isDocumentLibraryTask({ status: 'done', outputMarkdown: 'missing.md', documentExists: false, enabled: false }), 'document library hid the existing record used to diagnose a missing Markdown file');
+  assert(!isDocumentLibraryTask({ status: 'pending', outputMarkdown: 'summary.md', enabled: false }), 'document library accepted a non-completed task solely because a stale output path remained');
   const activeDependencies = activeDependencyPackages({ packages: [
     { id: 'runtime-base', status: 'downloading', progress: 0.5, totalBytes: 300 },
     { id: 'model-small', status: 'verifying', progress: 0.75, totalBytes: 100 },
@@ -200,10 +212,13 @@ function fakeButton(label) {
   const preload = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
   const cacheRenderer = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'cache.js'), 'utf8');
   const appRenderer = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const ai = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'ai.js'), 'utf8');
   assert(cacheRenderer.includes('Math.ceil(Math.max(0, ...allForCollection.map((item) => Number(item.duration || 0))))'), 'video-library duration filtering can still hide fractional-duration local imports at the slider maximum');
+  assert(cacheRenderer.includes('item.downloadTargetAllowed !== false') && cacheRenderer.includes('StarOwnerLibraryState?.videoLibraryRecords(state.videos)'), 'download targets still include local-media collections or the video library is not using its task-state-independent selector');
+  assert(appRenderer.includes('StarOwnerLibraryState?.isDocumentLibraryTask(task)'), 'document library is not using its task-state-independent selector');
+  assert(cacheRenderer.includes('notifyBilibiliCookieRequired(error, toast)') && ai.includes('notifyBilibiliCookieRequired(error, notify)') && outside.includes('notifyBilibiliLoginRequired(error)') && appRenderer.includes('showBilibiliLoginRequired(error)'), 'one or more user-triggered B站 entry points are missing the login-Cookie toast fallback');
   assert(appRenderer.includes('Math.ceil(Math.max(60, ...tasks.map((task) => Number(task.duration || 0))))'), 'document-library duration filtering can still hide fractional-duration local imports at the slider maximum');
   assert(preload.includes("multiPartState: (options = {}) => ipcRenderer.invoke('multipart:state', options)") && preload.includes("multiPartStopPart: (payload) => ipcRenderer.invoke('multipart:stop-part', payload)"), 'lightweight multi-part state options or per-P stop IPC were not exposed through the preload boundary');
-  const ai = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'ai.js'), 'utf8');
   assert(ai.includes('event.replaceContent || session.contentIsNotice') && ai.includes('session.contentIsNotice = false'), 'Agent model output did not replace an empty-response or validation notice on the first real content delta');
   assert(index.indexOf('id="dependencyDownloadIndicator"') < index.indexOf('id="userProfile"') && index.includes('id="dependencyDownloadRingValue"') && index.includes('id="dependencyDownloadItems"'), 'dependency download indicator is missing or is not positioned before the user profile');
   assert(index.indexOf('src="./dependency-indicator.js"') < index.indexOf('src="./app.js"') && app.includes('requestAnimationFrame(renderDependencyIndicator)') && app.includes('if (rowAtIndex !== row) dependencyDownloadItems.insertBefore') && app.includes("window.dispatchEvent(new CustomEvent('star:focus-dependency'"), 'dependency indicator is not loaded before the app, frame-coalesced, stably reconciled, or connected to dependency-row navigation');

@@ -1,7 +1,7 @@
 {
   "name": "star-owner",
   "productName": "星藏家",
-  "version": "1.6.9",
+  "version": "1.7.0",
   "dependencyReleaseVersion": "1.0.0",
   "private": true,
   "license": "GPL-3.0-or-later",
@@ -43,6 +43,7 @@
     "test:runtime-isolation": "node scripts/runtime-isolation-test.js",
     "test:git-runtime": "node scripts/git-runtime-test.js",
     "test:runtime-node": "node scripts/electron-node-runtime-test.js",
+    "test:library-auth-ui": "node scripts/library-auth-ui-flow-test.js",
     "setup:asr": "powershell -ExecutionPolicy Bypass -File scripts/setup-faster-whisper.ps1",
     "verify:release": "powershell -ExecutionPolicy Bypass -File scripts/verify-release.ps1",
     "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/build-portable-release.ps1 -ModelBundle all -SeparateModelAsset",

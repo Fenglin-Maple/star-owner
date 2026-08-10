@@ -1,6 +1,6 @@
 # 星藏家 Design
 
-Version: `1.6.9`
+Version: `1.7.0`
 
 ## 1. Product Goal
 
@@ -20,7 +20,7 @@ The system optimizes for:
 1. The desktop application is the only writer of SQLite, task state, Workspace indexes, artifacts, cookies, tool runs, and internal Worker records.
 2. Video-summary execution is application-internal. External Agents cannot register video Workers, claim tasks, execute media tools, heartbeat, submit, or abort.
 3. The public local HTTP API is read-only knowledge access across all completed Markdown documents.
-4. Task Overview switches affect internal Agent claim eligibility. A disabled unfinished task is skipped; an already completed document remains readable. The filtered-only action atomically enables exactly the visible task IDs and disables every other unfinished task in the selected collection.
+4. Task Overview switches affect internal Agent claim eligibility only. A disabled unfinished task is skipped, while File Browser video and document libraries continue to show their existing managed records regardless of `enabled`; missing files remain visible as diagnostics. The filtered-only action atomically enables exactly the visible task IDs and disables every other unfinished task in the selected collection.
 5. Each internal queue Agent binds its own collection. No global active external collection exists.
 6. Single-video mode keeps one canonical output per internal collection/BV pair.
 7. Only deletion of a completed task that still belongs to an active Bilibili favorite restores that task to pending.
@@ -107,7 +107,7 @@ The Bilibili WebView uses a persistent partition derived from the normalized abs
 
 Saved account passwords require Electron `safeStorage`. Netscape cookie files remain plaintext because yt-dlp requires them and are stored under the user Workspace hierarchy with export time metadata.
 
-Remote Bilibili video operations require an authenticated application session. Single-video inspection/execution, managed Bilibili cache downloads and multi-part inspection/refresh/execution validate and export a non-empty, unexpired Bilibili Netscape Cookie file before their first network request. Bilibili short-link redirects receive the same Cookie header. Missing Cookies stop before task creation or download and surface a Renderer toast; persisted legacy cache jobs wait for login instead of resuming anonymously. Favorite-based Agent collections keep their existing synchronized Cookie path, while locally imported media remains independent of Bilibili login.
+Remote Bilibili business operations require an authenticated application session. Favorite directory/video reads and synchronization, single-video inspection/execution, managed Bilibili cache downloads and multi-part inspection/refresh/execution all require the current application Cookie; only login-state probing may run without one. Bilibili short-link redirects receive the same Cookie header. Missing Cookies stop before task creation, synchronization or download and surface a bottom-right Renderer toast; persisted legacy cache jobs wait for login instead of resuming anonymously. Locally imported media remains independent of Bilibili login. Collections created for local video/audio imports carry a persistent `local-media` source marker, are inferred once from legacy local-import records when necessary, remain visible in the video library, and are rejected as Bilibili download targets.
 
 ## 7. Collection Sync
 
@@ -381,7 +381,7 @@ The “B站之外” page is organized as independent tool entry cards with comp
 
 ## 22. Verification
 
-`npm run verify:release` checks package/lock versions, machine-specific paths, JavaScript/Python syntax, all integration tests including local media/document tools, multi-part/shared knowledge, Git/Node/Python runtime isolation, both ASR models and npm audit. `test:runtime-node` deliberately removes the global `PATH` and verifies that the bundled Electron Node mode still executes the video tool; `test:runtime-isolation` checks controlled PATH/environment handling and project-owned child-process boundaries; `test:git-runtime` verifies that global Git config and external Git paths are rejected. Shared-knowledge tests additionally cover private authorized reads, owner/Fork routing, repository-contract validation and registry persistence, repository-specific mounts, repository-isolated batch synchronization, visible operation progress, actual default-branch templates, upload limits/cancellation, repository file allowlists and cross-repository multi-part isolation.
+`npm run verify:release` checks package/lock versions, machine-specific paths, JavaScript/Python syntax, all integration tests including local media/document tools, multi-part/shared knowledge, Git/Node/Python runtime isolation, both ASR models and npm audit. `test:library-auth-ui` additionally starts an isolated Electron fixture and verifies Bilibili login guidance, local-media download-target exclusion, and task-state-independent video/document library display. `test:runtime-node` deliberately removes the global `PATH` and verifies that the bundled Electron Node mode still executes the video tool; `test:runtime-isolation` checks controlled PATH/environment handling and project-owned child-process boundaries; `test:git-runtime` verifies that global Git config and external Git paths are rejected. Shared-knowledge tests additionally cover private authorized reads, owner/Fork routing, repository-contract validation and registry persistence, repository-specific mounts, repository-isolated batch synchronization, visible operation progress, actual default-branch templates, upload limits/cancellation, repository file allowlists and cross-repository multi-part isolation.
 
 Protocol and lifecycle gates include:
 

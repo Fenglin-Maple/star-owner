@@ -7,6 +7,7 @@ const MarkdownIt = require('markdown-it');
 const { buildAnalytics } = require('./core/analytics');
 const { ApiServer } = require('./core/api-server');
 const { BiliClient, assertBilibiliImageUrl, isBilibiliCookieDomain, normalizeBilibiliAssetUrl } = require('./core/bili');
+const { bilibiliCookieRequiredError } = require('./core/bilibili-auth');
 const { LEGACY_BILI_SESSION, migrateLegacyBiliPartition, projectBiliPartition } = require('./core/bili-session');
 const { collectionKindInfo } = require('./core/collection-state');
 const { CollectionSyncService } = require('./core/collection-sync-service');
@@ -515,7 +516,7 @@ ipcMain.handle('bili:prepare-account-switch', async () => {
 ipcMain.handle('bili:list-folders', async () => {
   assertBackendReady();
   if (!currentUser?.isLogin || !currentUser.id || !currentUser.cookieFile) await refreshBilibiliUser();
-  if (!currentUser?.isLogin) throw new Error('Not logged in.');
+  if (!currentUser?.isLogin) throw bilibiliCookieRequiredError('读取 B站收藏夹前未检测到已登录账户。');
   const generation = biliAccountGeneration;
   const user = { ...currentUser };
   const folders = await bili.listFolders(user.mid);
@@ -529,7 +530,7 @@ ipcMain.handle('bili:list-folders', async () => {
 ipcMain.handle('bili:startup-folder-probe', async () => {
   assertBackendReady();
   if (!currentUser?.isLogin || !currentUser.id || !currentUser.cookieFile) await refreshBilibiliUser();
-  if (!currentUser?.isLogin) throw new Error('Not logged in.');
+  if (!currentUser?.isLogin) throw bilibiliCookieRequiredError('启动 B站收藏夹检查前未检测到已登录账户。');
   return startupFolderProbe.run();
 });
 
