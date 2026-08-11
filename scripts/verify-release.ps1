@@ -25,6 +25,7 @@ $required = @(
   "runtime-requirements.txt",
   "tools\updater\StarOwnerUpdater.cs",
   "tools\updater\StandaloneUpdater.cs",
+  "tools\updater\UpdaterBuildInfo.cs",
   "tools\updater\StarOwnerUpdater.exe",
   "tools\updater\build-updater.ps1",
   "tools\updater\build-standalone-asset.ps1",
@@ -85,6 +86,11 @@ $lockVersion = & node -e "const p=require('./package.json'); const l=require('./
 if ($LASTEXITCODE -ne 0 -or $lockVersion -ne $package.version) {
   throw "package.json and package-lock.json versions do not match."
 }
+$buildInfoText = Get-Content -LiteralPath (Join-Path $root "tools\updater\UpdaterBuildInfo.cs") -Raw -Encoding UTF8
+$updaterVersion = [regex]::Match($buildInfoText, 'public const string Version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
+if ($updaterVersion -ne [string]$package.version) {
+  throw "UpdaterBuildInfo.cs version does not match package.json."
+}
 
 $updaterProbeRoot = Join-Path $env:TEMP "star-owner-updater-verify-$PID"
 $updaterProbeExe = Join-Path $updaterProbeRoot "StarOwnerUpdater.exe"
@@ -93,6 +99,8 @@ $updaterProbeComplete = Join-Path $updaterProbeRoot "complete.txt"
 try {
   New-Item -ItemType Directory -Force -Path $updaterProbeRoot | Out-Null
   & (Join-Path $root "tools\updater\build-updater.ps1") -OutputPath $updaterProbeExe
+  $probeVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($updaterProbeExe).ProductVersion
+  if ([string]$probeVersion -ne [string]$package.version) { throw "Native updater file version does not match package.json." }
   $updaterProbe = Start-Process -FilePath $updaterProbeExe -ArgumentList @("--probe", $updaterProbeReady, $updaterProbeComplete, "200", "verify") -PassThru -Wait
   if ($updaterProbe.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $updaterProbeComplete) -or (Get-Content -LiteralPath $updaterProbeComplete -Raw) -ne "verify:complete") {
     throw "Native updater build or probe failed."

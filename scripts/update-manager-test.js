@@ -1,10 +1,12 @@
 const assert = require('assert');
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const { EventEmitter } = require('events');
-const { UpdateManager, cleanupManagedUpdateArtifacts, commandLineContainsProjectRoot, findRunningProjectProcesses, resolveCoreRelease, validateArchiveEntries, validateStagedPackage, waitForUpdaterReady } = require('../src/core/update-manager');
+const { UpdateManager, cleanupManagedUpdateArtifacts, commandLineContainsProjectRoot, findRunningProjectProcesses, probeUpdaterExecutable, resolveCoreRelease, validateArchiveEntries, validateArchiveOutputPaths, validateStagedPackage, waitForUpdaterReady } = require('../src/core/update-manager');
+const packageVersion = require('../package.json').version;
 
 function runPowerShell(script, args) {
   const result = runPowerShellResult(script, args);
@@ -73,7 +75,7 @@ async function waitForJson(file, predicate, timeoutMs = 15000) {
   throw new Error(`Timed out waiting for JSON state in ${file}`);
 }
 
-function createValidStagedPackage(packageRoot, version = '9.9.9') {
+function createValidStagedPackage(packageRoot, version = packageVersion) {
   const files = [
     'src/main.js',
     'Start-StarOwner.cmd',
@@ -81,6 +83,7 @@ function createValidStagedPackage(packageRoot, version = '9.9.9') {
     'scripts/recover-portable-operation.ps1',
     'tools/updater/StarOwnerUpdater.cs',
     'tools/updater/StandaloneUpdater.cs',
+    'tools/updater/UpdaterBuildInfo.cs',
     'tools/updater/StarOwnerUpdater.exe',
     'tools/updater/build-updater.ps1',
     'tools/faster-whisper-cli.py',
@@ -106,9 +109,11 @@ function createValidStagedPackage(packageRoot, version = '9.9.9') {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, 'fixture');
   }
+  fs.copyFileSync(path.join(__dirname, '..', 'tools', 'updater', 'StarOwnerUpdater.exe'), path.join(packageRoot, 'tools', 'updater', 'StarOwnerUpdater.exe'));
+  fs.copyFileSync(path.join(__dirname, '..', 'tools', 'updater', 'UpdaterBuildInfo.cs'), path.join(packageRoot, 'tools', 'updater', 'UpdaterBuildInfo.cs'));
   fs.writeFileSync(path.join(packageRoot, 'package.json'), JSON.stringify({ name: 'star-owner', version, dependencyReleaseVersion: '1.0.0' }));
   fs.writeFileSync(path.join(packageRoot, 'package-lock.json'), JSON.stringify({ name: 'star-owner', version, packages: { '': { name: 'star-owner', version } } }));
-  fs.writeFileSync(path.join(packageRoot, 'portable-manifest.json'), JSON.stringify({ version, dependencyReleaseVersion: '1.0.0', platform: 'win-x64', launcher: 'Start-StarOwner.cmd' }));
+  fs.writeFileSync(path.join(packageRoot, 'portable-manifest.json'), JSON.stringify({ version, dependencyReleaseVersion: '1.0.0', platform: 'win-x64', launcher: 'Start-StarOwner.cmd', updaterVersion: version, updaterProtocolVersion: 1 }));
 }
 
 (async () => {
@@ -141,6 +146,8 @@ function createValidStagedPackage(packageRoot, version = '9.9.9') {
 
   const nativeUpdater = path.join(__dirname, '..', 'tools', 'updater', 'StarOwnerUpdater.exe');
   assert(fs.existsSync(nativeUpdater), 'native updater executable is missing');
+  assert(probeUpdaterExecutable(nativeUpdater, packageVersion), 'native updater embedded version does not match package.json');
+  assert(!probeUpdaterExecutable(nativeUpdater, '9.9.9'), 'native updater accepted a different target version');
   const probeRoot = path.join(root, 'native probe 中文 path');
   fs.mkdirSync(probeRoot, { recursive: true });
   const probeReady = path.join(probeRoot, 'ready.txt');
@@ -172,6 +179,56 @@ function createValidStagedPackage(packageRoot, version = '9.9.9') {
   assert.strictEqual(requests, 2, 'an invalid HTTP 416 partial archive was not restarted from byte zero');
   assert.deepStrictEqual(fs.readFileSync(partial), bytes, 'restarted update download did not write the complete archive');
 
+  const prepareFixtureRoot = path.join(root, 'application prepare fixture');
+  const preparePackageParent = path.join(root, 'application prepare package');
+  const preparePackageName = `Star-Owner-v${packageVersion}-win-x64-core`;
+  const preparePackageRoot = path.join(preparePackageParent, preparePackageName);
+  const prepareArchive = path.join(root, 'application-prepare-core.zip');
+  createValidStagedPackage(preparePackageRoot, packageVersion);
+  const tarResult = spawnSync('tar.exe', ['-a', '-c', '-f', prepareArchive, '-C', preparePackageParent, preparePackageName], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  assert.strictEqual(tarResult.status, 0, `could not build update-manager archive fixture: ${tarResult.stderr || tarResult.stdout}`);
+  const prepareCoreBytes = fs.readFileSync(prepareArchive);
+  const prepareUpdaterBytes = fs.readFileSync(nativeUpdater);
+  const prepareCoreChecksum = crypto.createHash('sha256').update(prepareCoreBytes).digest('hex');
+  const prepareUpdaterChecksum = crypto.createHash('sha256').update(prepareUpdaterBytes).digest('hex');
+  fs.mkdirSync(path.join(prepareFixtureRoot, 'node_modules', 'electron', 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(prepareFixtureRoot, 'package.json'), JSON.stringify({ name: 'star-owner', version: '1.7.2' }));
+  fs.writeFileSync(path.join(prepareFixtureRoot, 'portable-manifest.json'), JSON.stringify({ version: '1.7.2', platform: 'win-x64', launcher: 'Start-StarOwner.cmd' }));
+  fs.writeFileSync(path.join(prepareFixtureRoot, 'Start-StarOwner.cmd'), '@echo off\r\n');
+  fs.writeFileSync(path.join(prepareFixtureRoot, 'node_modules', 'electron', 'dist', 'electron.exe'), 'old-electron');
+  const requestedAssets = [];
+  const prepareManager = new UpdateManager({
+    projectRoot: prepareFixtureRoot,
+    version: '1.7.2',
+    platform: 'win32',
+    fetchImpl: async (url) => {
+      const target = String(url);
+      requestedAssets.push(target);
+      if (target.includes('/updater.exe')) return new Response(prepareUpdaterBytes, { status: 200, headers: { 'content-length': String(prepareUpdaterBytes.length) } });
+      if (target.includes('/core.zip')) return new Response(prepareCoreBytes, { status: 200, headers: { 'content-length': String(prepareCoreBytes.length) } });
+      return new Response(JSON.stringify({
+        id: 173,
+        tag_name: `v${packageVersion}`,
+        name: `Star Owner v${packageVersion}`,
+        draft: false,
+        prerelease: false,
+        html_url: 'https://example.invalid/release',
+        assets: [
+          { name: `Star-Owner-v${packageVersion}-win-x64-core.zip`, browser_download_url: 'https://example.invalid/core.zip', size: prepareCoreBytes.length, digest: `sha256:${prepareCoreChecksum}` },
+          { name: `Star-Owner-Updater-v${packageVersion}-win-x64.exe`, browser_download_url: 'https://example.invalid/updater.exe', size: prepareUpdaterBytes.length, digest: `sha256:${prepareUpdaterChecksum}` }
+        ]
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+  });
+  await prepareManager.check();
+  const preparedState = await prepareManager.prepare();
+  assert(preparedState.prepared && preparedState.status === 'ready', 'application updater did not prepare the exact-version updater and core package');
+  assert(requestedAssets.indexOf('https://example.invalid/updater.exe') >= 0, 'application updater did not download the target-version updater');
+  assert(requestedAssets.indexOf('https://example.invalid/updater.exe') < requestedAssets.indexOf('https://example.invalid/core.zip'), 'application updater downloaded the core before the target-version updater');
+  assert(probeUpdaterExecutable(path.join(prepareManager.downloadRoot, `Star-Owner-Updater-v${packageVersion}-win-x64.exe`), packageVersion), 'prepared updater has the wrong embedded version');
+  assert.strictEqual(path.basename(prepareManager.prepared.stagingRoot), 's', 'application updater did not use the shortest managed staging layout');
+  assert(fs.existsSync(path.join(prepareManager.prepared.packageRoot, 'portable-manifest.json')), 'stripped core archive did not produce a valid package root');
+
   fs.mkdirSync(path.join(manager.updateRoot), { recursive: true });
   fs.writeFileSync(path.join(manager.updateRoot, 'operation-journal.json'), JSON.stringify({ operationId: 'incomplete-1', status: 'applying' }));
   const recovered = new UpdateManager({ projectRoot, version: '1.2.7', platform: 'win32', fetchImpl: async () => { throw new Error('network not used'); } });
@@ -195,11 +252,21 @@ function createValidStagedPackage(packageRoot, version = '9.9.9') {
     assert.throws(() => validateArchiveEntries(['Star-Owner/package.json', unsafeEntry]), /不安全|路径|Win32|控制字符|数据流|保留设备名|尾随字符/);
   }
   assert.throws(() => validateArchiveEntries(['Star-Owner/package.json', 'star-owner/PACKAGE.JSON']), /重复路径/);
+  if (process.platform === 'win32') {
+    const pathBudgetStage = path.join(root, 'path-budget-stage');
+    const stageLength = path.resolve(pathBudgetStage).length;
+    const parentSegment = 'a'.repeat(Math.max(1, 248 - stageLength - 1));
+    assert.throws(
+      () => validateArchiveOutputPaths(['package.json', `${parentSegment}/x`], pathBudgetStage, ''),
+      /目录过深/,
+      'application archive validation accepted a parent directory at the Win32 248-character limit'
+    );
+  }
   const stagedValidationRoot = path.join(root, 'validated-stage');
   createValidStagedPackage(stagedValidationRoot);
-  assert.doesNotThrow(() => validateStagedPackage(stagedValidationRoot, '9.9.9'), 'a complete portable core package was rejected');
+  assert.doesNotThrow(() => validateStagedPackage(stagedValidationRoot, packageVersion), 'a complete portable core package was rejected');
   fs.rmSync(path.join(stagedValidationRoot, 'tools', 'updater', 'StarOwnerUpdater.exe'), { force: true });
-  assert.throws(() => validateStagedPackage(stagedValidationRoot, '9.9.9'), /StarOwnerUpdater|更新器|必需文件/, 'package without the native updater passed staged validation');
+  assert.throws(() => validateStagedPackage(stagedValidationRoot, packageVersion), /StarOwnerUpdater|更新器|必需文件/, 'package without the native updater passed staged validation');
   createValidStagedPackage(stagedValidationRoot);
   const stableAsset = {
     name: 'Star-Owner-v9.9.9-win-x64-core.zip',
@@ -207,19 +274,27 @@ function createValidStagedPackage(packageRoot, version = '9.9.9') {
     size: 123,
     digest: `sha256:${'a'.repeat(64)}`
   };
-  const stableRelease = resolveCoreRelease({ id: 99, tag_name: 'v9.9.9', draft: false, prerelease: false, assets: [stableAsset, { name: `${stableAsset.name}.sha256`, browser_download_url: 'https://example.invalid/core.sha256' }] });
+  const stableUpdaterAsset = {
+    name: 'Star-Owner-Updater-v9.9.9-win-x64.exe',
+    browser_download_url: 'https://example.invalid/updater.exe',
+    size: 456,
+    digest: `sha256:${'b'.repeat(64)}`
+  };
+  const stableRelease = resolveCoreRelease({ id: 99, tag_name: 'v9.9.9', draft: false, prerelease: false, assets: [stableAsset, stableUpdaterAsset, { name: `${stableAsset.name}.sha256`, browser_download_url: 'https://example.invalid/core.sha256' }, { name: `${stableUpdaterAsset.name}.sha256`, browser_download_url: 'https://example.invalid/updater.sha256' }] });
   assert.strictEqual(stableRelease.version, '9.9.9', 'stable core release was not resolved');
+  assert.strictEqual(stableRelease.updater.checksum, 'b'.repeat(64), 'matching updater digest was not resolved');
+  assert.throws(() => resolveCoreRelease({ tag_name: 'v9.9.9', draft: false, prerelease: false, assets: [stableAsset] }), /同版本更新器/, 'release without a matching updater was accepted');
   assert.throws(() => resolveCoreRelease({ tag_name: 'v9.9.10', draft: false, prerelease: true, assets: [] }), /稳定|stable/, 'pre-release was accepted as an automatic update');
   fs.rmSync(path.join(stagedValidationRoot, 'runtime', 'git'), { recursive: true, force: true });
-  assert.throws(() => validateStagedPackage(stagedValidationRoot, '9.9.9'), /runtime\\git|runtime\/git/, 'package without Portable Git passed staged validation');
+  assert.throws(() => validateStagedPackage(stagedValidationRoot, packageVersion), /runtime\\git|runtime\/git/, 'package without Portable Git passed staged validation');
   createValidStagedPackage(stagedValidationRoot);
   const manifest = readJson(path.join(stagedValidationRoot, 'portable-manifest.json'));
   manifest.version = '9.9.8';
   fs.writeFileSync(path.join(stagedValidationRoot, 'portable-manifest.json'), JSON.stringify(manifest));
-  assert.throws(() => validateStagedPackage(stagedValidationRoot, '9.9.9'), /manifest|portable/, 'manifest version mismatch passed staged validation');
+  assert.throws(() => validateStagedPackage(stagedValidationRoot, packageVersion), /manifest|portable/, 'manifest version mismatch passed staged validation');
   createValidStagedPackage(stagedValidationRoot);
   fs.rmSync(path.join(stagedValidationRoot, 'runtime', 'python'), { recursive: true, force: true });
-  assert.throws(() => validateStagedPackage(stagedValidationRoot, '9.9.9'), /基础 Python|Python|必需文件/, 'package without base Python passed staged validation');
+  assert.throws(() => validateStagedPackage(stagedValidationRoot, packageVersion), /基础 Python|Python|必需文件/, 'package without base Python passed staged validation');
   createValidStagedPackage(stagedValidationRoot);
   assert(commandLineContainsProjectRoot('"D:\\Old Star Owner\\node_modules\\electron\\dist\\electron.exe" "D:\\Old Star Owner"', 'D:\\Old Star Owner'), 'project process command line was not recognized');
   assert(!commandLineContainsProjectRoot('"D:\\Old Star Owner 2\\electron.exe"', 'D:\\Old Star Owner'), 'a sibling project command line was treated as the migration source');
@@ -243,9 +318,11 @@ function createValidStagedPackage(packageRoot, version = '9.9.9') {
     touch(partialArchive, index === 1 ? new Date() : oldTime);
   }
   fs.mkdirSync(path.join(cleanupRoot, 'staging-v9.9.9'), { recursive: true });
+  fs.mkdirSync(path.join(cleanupRoot, 's'), { recursive: true });
   fs.writeFileSync(path.join(cleanupRoot, 'user-note.txt'), 'not managed');
   const cleanup = cleanupManagedUpdateArtifacts(cleanupRoot);
   assert(cleanup.removed.some((item) => item.endsWith('staging-v9.9.9')), 'stale update staging directory was retained');
+  assert(cleanup.removed.some((item) => item.endsWith(`${path.sep}s`)), 'stale shortest-form update staging directory was retained');
   assert.strictEqual(fs.readdirSync(cleanupRoot).filter((name) => name.startsWith('operation-backup-')).length, 2, 'operation backup retention did not keep exactly two recent backups');
   assert.strictEqual(fs.readdirSync(cleanupDownloads).filter((name) => CORE_ZIP(name)).length, 2, 'core archive retention did not keep two recent archives');
   assert.strictEqual(fs.readdirSync(cleanupDownloads).filter((name) => name.endsWith('.partial')).length, 1, 'partial archive retention did not keep one resumable download');
@@ -355,7 +432,7 @@ function createValidStagedPackage(packageRoot, version = '9.9.9') {
   fs.writeFileSync(path.join(nativeRoot, 'node_modules', 'electron', 'dist', 'electron.exe'), 'old-electron');
   fs.writeFileSync(path.join(nativeStage, 'templates', 'state.txt'), 'new');
   fs.writeFileSync(path.join(nativeStage, 'node_modules', 'electron', 'dist', 'electron.exe'), 'new-electron');
-  fs.writeFileSync(path.join(nativeStage, 'package.json'), JSON.stringify({ version: '9.9.9' }));
+  fs.writeFileSync(path.join(nativeStage, 'package.json'), JSON.stringify({ version: packageVersion }));
   const nativeRequest = path.join(nativeUpdates, 'operation-request.json');
   const nativeReady = path.join(nativeUpdates, `updater-ready-${nativeOperationId}.json`);
   const nativeAcknowledge = path.join(nativeUpdates, `updater-ack-${nativeOperationId}.json`);
@@ -368,7 +445,8 @@ function createValidStagedPackage(packageRoot, version = '9.9.9') {
     projectRoot: nativeRoot,
     stagedRoot: nativeStage,
     sourceWorkspace: '',
-    targetVersion: '9.9.9',
+    targetVersion: packageVersion,
+    updaterVersion: packageVersion,
     processId: 2147483647,
     updaterHelperPath: helper,
     updaterRecoveryPath: path.join(__dirname, 'recover-portable-operation.ps1'),
@@ -413,7 +491,8 @@ function createValidStagedPackage(packageRoot, version = '9.9.9') {
     projectRoot: crashRoot,
     stagedRoot: path.join(crashUpdates, 'stage'),
     sourceWorkspace: '',
-    targetVersion: '9.9.9',
+    targetVersion: packageVersion,
+    updaterVersion: packageVersion,
     processId: 2147483647,
     updaterHelperPath: crashHelper,
     updaterRecoveryPath: path.join(__dirname, 'recover-portable-operation.ps1'),
@@ -448,18 +527,21 @@ function createValidStagedPackage(packageRoot, version = '9.9.9') {
     'package.json'
   ]) fs.mkdirSync(path.dirname(path.join(handoffRoot, relative)), { recursive: true });
   fs.copyFileSync(nativeUpdater, path.join(handoffRoot, 'tools', 'updater', 'StarOwnerUpdater.exe'));
+  const handoffUpdater = path.join(handoffRoot, '.updates', 'downloads', `Star-Owner-Updater-v${packageVersion}-win-x64.exe`);
+  fs.mkdirSync(path.dirname(handoffUpdater), { recursive: true });
+  fs.copyFileSync(nativeUpdater, handoffUpdater);
   fs.copyFileSync(path.join(__dirname, '..', 'assets', 'star-note.png'), path.join(handoffRoot, 'assets', 'star-note.png'));
   fs.copyFileSync(helper, path.join(handoffRoot, 'scripts', 'apply-portable-operation.ps1'));
   fs.copyFileSync(path.join(__dirname, 'recover-portable-operation.ps1'), path.join(handoffRoot, 'scripts', 'recover-portable-operation.ps1'));
   fs.writeFileSync(path.join(handoffRoot, 'node_modules', 'electron', 'dist', 'electron.exe'), 'old-electron');
-  fs.writeFileSync(path.join(handoffRoot, 'package.json'), JSON.stringify({ version: '1.7.0' }));
+  fs.writeFileSync(path.join(handoffRoot, 'package.json'), JSON.stringify({ version: packageVersion }));
   fs.mkdirSync(path.join(handoffStage, 'scripts'), { recursive: true });
   fs.mkdirSync(path.join(handoffStage, 'node_modules', 'electron', 'dist'), { recursive: true });
   fs.copyFileSync(helper, path.join(handoffStage, 'scripts', 'apply-portable-operation.ps1'));
   fs.copyFileSync(path.join(__dirname, 'recover-portable-operation.ps1'), path.join(handoffStage, 'scripts', 'recover-portable-operation.ps1'));
   fs.writeFileSync(path.join(handoffStage, 'node_modules', 'electron', 'dist', 'electron.exe'), 'new-electron');
-  fs.writeFileSync(path.join(handoffStage, 'package.json'), JSON.stringify({ version: '9.9.9' }));
-  const handoffCode = `const fs=require('fs');const {UpdateManager}=require(${JSON.stringify(path.join(__dirname, '..', 'src', 'core', 'update-manager.js'))});(async()=>{const manager=new UpdateManager({projectRoot:${JSON.stringify(handoffRoot)},version:'1.7.0',platform:'win32',fetchImpl:async()=>{throw new Error('not used')},updaterHeadless:true,updaterDisableRelaunch:true});const value=await manager.launchOperation({mode:'update',stagedRoot:${JSON.stringify(handoffStage)},targetVersion:'9.9.9'});fs.writeFileSync(${JSON.stringify(handoffMarker)},JSON.stringify(value));})().catch(error=>{console.error(error);process.exit(1)});`;
+  fs.writeFileSync(path.join(handoffStage, 'package.json'), JSON.stringify({ version: packageVersion }));
+  const handoffCode = `const fs=require('fs');const {UpdateManager}=require(${JSON.stringify(path.join(__dirname, '..', 'src', 'core', 'update-manager.js'))});(async()=>{const manager=new UpdateManager({projectRoot:${JSON.stringify(handoffRoot)},version:${JSON.stringify(packageVersion)},platform:'win32',fetchImpl:async()=>{throw new Error('not used')},updaterHeadless:true,updaterDisableRelaunch:true});const value=await manager.launchOperation({mode:'update',stagedRoot:${JSON.stringify(handoffStage)},targetVersion:${JSON.stringify(packageVersion)},updaterSource:${JSON.stringify(handoffUpdater)}});fs.writeFileSync(${JSON.stringify(handoffMarker)},JSON.stringify(value));})().catch(error=>{console.error(error);process.exit(1)});`;
   const handoffLauncher = spawnSync(process.execPath, ['-e', handoffCode], { encoding: 'utf8', windowsHide: true, timeout: 20000 });
   assert.strictEqual(handoffLauncher.status, 0, `update-manager handoff process failed: ${handoffLauncher.stderr || handoffLauncher.stdout}`);
   const handoff = readJson(handoffMarker);

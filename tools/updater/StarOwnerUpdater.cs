@@ -8,6 +8,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
@@ -23,6 +24,11 @@ namespace StarOwnerUpdater
         private static int Main(string[] args)
         {
             try { SetProcessDPIAware(); } catch { }
+
+            if (args.Length >= 2 && String.Equals(args[0], "--version-file", StringComparison.OrdinalIgnoreCase))
+            {
+                return WriteVersionFile(args[1]);
+            }
 
             int standaloneExitCode;
             if (StandaloneUpdaterCommands.TryRun(args, out standaloneExitCode)) return standaloneExitCode;
@@ -58,8 +64,22 @@ namespace StarOwnerUpdater
 
             if (args.Length >= 1 && String.Equals(args[0], "--standalone-child", StringComparison.OrdinalIgnoreCase))
             {
-                Application.Run(new StandaloneUpdaterForm(false, String.Empty));
-                return 0;
+                try
+                {
+                    StandaloneStartupOptions options = StandaloneStartupOptions.Parse(args);
+                    if (!String.IsNullOrEmpty(options.ExpectedVersion)
+                        && !String.Equals(options.ExpectedVersion, UpdaterBuildInfo.Version, StringComparison.Ordinal))
+                    {
+                        throw new InvalidDataException("下载的更新器版本与目标星藏家版本不一致。");
+                    }
+                    Application.Run(new StandaloneUpdaterForm(false, String.Empty, options));
+                    return 0;
+                }
+                catch (Exception error)
+                {
+                    MessageBox.Show("无法启动同版本更新器：\r\n" + error.Message, "星藏家更新器", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return 7;
+                }
             }
 
             string requestPath = ReadOption(args, "--request");
@@ -96,6 +116,20 @@ namespace StarOwnerUpdater
             catch { return 4; }
         }
 
+        private static int WriteVersionFile(string path)
+        {
+            try
+            {
+                Dictionary<string, object> value = new Dictionary<string, object>();
+                value["product"] = "star-owner-updater";
+                value["version"] = UpdaterBuildInfo.Version;
+                value["protocolVersion"] = UpdaterBuildInfo.ProtocolVersion;
+                JsonFiles.WriteObjectAtomic(Path.GetFullPath(path), value);
+                return 0;
+            }
+            catch { return 6; }
+        }
+
         private static string ReadOption(string[] args, string name)
         {
             for (int index = 0; index < args.Length - 1; index++)
@@ -115,6 +149,7 @@ namespace StarOwnerUpdater
         public string StagedRoot;
         public string SourceWorkspace;
         public string TargetVersion;
+        public string UpdaterVersion;
         public string HelperPath;
         public string RecoveryPath;
         public string PowerShellPath;
@@ -143,6 +178,7 @@ namespace StarOwnerUpdater
             value.StagedRoot = OptionalFullPath(JsonFiles.StringValue(data, "stagedRoot"));
             value.SourceWorkspace = OptionalFullPath(JsonFiles.StringValue(data, "sourceWorkspace"));
             value.TargetVersion = JsonFiles.StringValue(data, "targetVersion");
+            value.UpdaterVersion = JsonFiles.StringValue(data, "updaterVersion");
             value.HelperPath = FullPath(JsonFiles.StringValue(data, "updaterHelperPath"), "updaterHelperPath");
             value.RecoveryPath = FullPath(JsonFiles.StringValue(data, "updaterRecoveryPath"), "updaterRecoveryPath");
             value.PowerShellPath = FullPath(JsonFiles.StringValue(data, "updaterPowerShellPath"), "updaterPowerShellPath");
@@ -159,6 +195,12 @@ namespace StarOwnerUpdater
             if (String.IsNullOrWhiteSpace(value.OperationId)) throw new InvalidDataException("operationId is missing.");
             if (value.Mode != "update" && value.Mode != "migrate") throw new InvalidDataException("mode must be update or migrate.");
             if (value.ProcessId <= 0) throw new InvalidDataException("processId is invalid.");
+            if (!Regex.IsMatch(value.TargetVersion ?? String.Empty, "^[0-9]+\\.[0-9]+\\.[0-9]+$")) throw new InvalidDataException("targetVersion is invalid.");
+            if (!String.Equals(value.UpdaterVersion, value.TargetVersion, StringComparison.Ordinal)
+                || !String.Equals(UpdaterBuildInfo.Version, value.TargetVersion, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("The updater version must exactly match the target Star Owner version.");
+            }
             RequireFile(value.HelperPath, "operation helper");
             RequireFile(value.RecoveryPath, "recovery helper");
             RequireFile(value.PowerShellPath, "Windows PowerShell");
@@ -323,7 +365,8 @@ namespace StarOwnerUpdater
             UpdaterRequest demo = new UpdaterRequest();
             demo.OperationId = "preview";
             demo.Mode = "update";
-            demo.TargetVersion = "1.7.2";
+            demo.TargetVersion = UpdaterBuildInfo.Version;
+            demo.UpdaterVersion = UpdaterBuildInfo.Version;
             demo.IconPath = iconPath;
             demo.ProjectRoot = Environment.CurrentDirectory;
             return new UpdaterForm(demo, true, imagePath);

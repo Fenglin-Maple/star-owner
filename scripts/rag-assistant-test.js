@@ -137,7 +137,7 @@ async function startFakeProvider() {
       return;
     }
     if (userText.includes('BROWSE_CANCEL_TEST') && !toolResult) {
-      sse(response, [{ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-browse-cancel', type: 'function', function: { name: 'browse_url', arguments: '{"url":"https://cancel.example/page"}' } }] } }] }]);
+      sse(response, [{ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-browse-cancel', type: 'function', function: { name: 'browse_url', arguments: '{"url":"https://93.184.216.34/cancel-fixture"}' } }] } }] }]);
       return;
     }
     if (userText.includes('AFTER_CANCEL_TEST')) {
@@ -296,7 +296,7 @@ async function startFakeProvider() {
       requestApproval: async (request) => { approvals.push(request); return { approved: false }; },
       browseHidden: async (url, options = {}) => {
         browseCalls += 1;
-        if (String(url).includes('cancel.example')) {
+        if (String(url).includes('/cancel-fixture')) {
           return new Promise((resolve, reject) => {
             const onAbort = () => {
               browseAbortObserved = true;
@@ -610,8 +610,21 @@ async function startFakeProvider() {
     assert(denied && approvals.length === 1, 'restricted outside-sandbox approval was not enforced');
 
     const cancellationSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', title: 'Web cancellation recovery' });
-    const pendingCancellation = assistant.send(cancellationSession.id, { content: 'BROWSE_CANCEL_TEST' });
-    await waitFor(() => events.some((item) => item.type === 'tool' && item.sessionId === cancellationSession.id && item.tool?.status === 'running') && browseCalls > 0);
+    let cancellationFailure = null;
+    let cancellationSettled = false;
+    let cancellationResult = null;
+    const pendingCancellation = assistant.send(cancellationSession.id, { content: 'BROWSE_CANCEL_TEST' }).then((result) => {
+      cancellationSettled = true;
+      cancellationResult = result;
+      return result;
+    }, (error) => {
+      cancellationSettled = true;
+      cancellationFailure = error;
+      return null;
+    });
+    await waitFor(() => cancellationSettled || (events.some((item) => item.type === 'tool' && item.sessionId === cancellationSession.id && item.tool?.status === 'running') && browseCalls > 0), 5000);
+    if (cancellationFailure) throw cancellationFailure;
+    if (cancellationSettled) throw new Error(`RAG cancellation fixture completed before the web tool started: ${JSON.stringify(cancellationResult)}`);
     const cancelStartedAt = Date.now();
     assert(assistant.cancel(cancellationSession.id).cancelled, 'RAG cancel did not find the active web-tool request');
     const cancelledMessage = await Promise.race([

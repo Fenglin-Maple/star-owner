@@ -11,6 +11,8 @@ const { ensureDir } = require('./workspace');
 const REPOSITORY = 'Fenglin-Maple/star-owner';
 const RELEASES_URL = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
 const CORE_ASSET = /^Star-Owner-v([0-9]+\.[0-9]+\.[0-9]+)-win-x64-core\.zip$/i;
+const UPDATER_ASSET = /^Star-Owner-Updater-v([0-9]+\.[0-9]+\.[0-9]+)-win-x64\.exe$/i;
+const UPDATER_PROTOCOL_VERSION = 1;
 const MIN_MIGRATION_VERSION = '1.0.3';
 const UPDATE_BACKUP_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 const UPDATE_DOWNLOAD_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -69,9 +71,13 @@ class UpdateManager {
     this.publish({ status: 'checking', progress: 0.02, message: '正在查询 GitHub 最新稳定 Release' });
     try {
       const release = await this.fetchJson(RELEASES_URL);
-      const resolved = resolveCoreRelease(release);
-      resolved.checksum = await this.resolveChecksum(resolved);
-      const updateAvailable = compareVersions(resolved.version, this.version) > 0;
+      const releaseVersion = resolveReleaseVersion(release);
+      const updateAvailable = compareVersions(releaseVersion, this.version) > 0;
+      const resolved = resolveCoreRelease(release, { requireUpdater: updateAvailable });
+      if (updateAvailable) {
+        resolved.updater.checksum = await this.resolveAssetChecksum(resolved.updater, '同版本更新器');
+        resolved.checksum = await this.resolveAssetChecksum({ ...resolved.asset, checksum: resolved.checksum, checksumUrl: resolved.checksumUrl }, '核心包');
+      }
       this.publish({
         status: updateAvailable ? 'available' : 'up-to-date',
         progress: 1,
@@ -101,12 +107,27 @@ class UpdateManager {
     const release = this.stateData.release;
     if (!release || compareVersions(release.version, this.version) <= 0) return this.state();
     if (!release.checksum) throw new Error('GitHub Release 缺少核心包 SHA-256 校验值，已停止安装。请补充同名 .sha256 资产后重试。');
+    if (!release.updater?.checksum) throw new Error('GitHub Release 缺少同版本更新器 SHA-256，已停止安装。');
     if (!this.isPortable()) throw new Error('当前目录不是便携发布包，开发目录不能直接覆盖更新。请下载新 Release 或先完成手动迁移。');
+    const updater = path.join(this.downloadRoot, release.updater.name);
+    const updaterPartial = `${updater}.partial`;
+    this.publish({ status: 'downloading', progress: 0.01, downloadedBytes: fs.existsSync(updaterPartial) ? fs.statSync(updaterPartial).size : 0, totalBytes: Number(release.updater.size || 0), message: `正在下载目标版本更新器 ${release.updater.name}` });
+    if (!fs.existsSync(updater) || await sha256(updater) !== release.updater.checksum || !probeUpdaterExecutable(updater, release.version)) {
+      fs.rmSync(updater, { force: true });
+      await this.downloadFile(release.updater.url, updaterPartial, release.updater.name, Number(release.updater.size || 0), release.updater.checksum, { progressStart: 0.01, progressEnd: 0.08 });
+      if (fs.existsSync(updater)) fs.rmSync(updater, { force: true });
+      fs.renameSync(updaterPartial, updater);
+    }
+    const updaterHash = await sha256(updater);
+    if (updaterHash !== release.updater.checksum || !probeUpdaterExecutable(updater, release.version)) {
+      fs.rmSync(updater, { force: true });
+      throw new Error(`目标版本更新器校验失败，必须使用 v${release.version} 更新器安装 v${release.version}。`);
+    }
     const archive = path.join(this.downloadRoot, release.asset.name);
     const partial = `${archive}.partial`;
-    this.publish({ status: 'downloading', progress: 0.03, downloadedBytes: fs.existsSync(partial) ? fs.statSync(partial).size : 0, totalBytes: Number(release.asset.size || 0), message: `正在下载 ${release.asset.name}` });
+    this.publish({ status: 'downloading', progress: 0.08, downloadedBytes: fs.existsSync(partial) ? fs.statSync(partial).size : 0, totalBytes: Number(release.asset.size || 0), message: `正在下载 ${release.asset.name}` });
     if (!fs.existsSync(archive) || await sha256(archive) !== release.checksum) {
-      await this.downloadFile(release.asset.url, partial, release.asset.name, Number(release.asset.size || 0), release.checksum);
+      await this.downloadFile(release.asset.url, partial, release.asset.name, Number(release.asset.size || 0), release.checksum, { progressStart: 0.08, progressEnd: 0.88 });
       if (fs.existsSync(archive)) fs.rmSync(archive, { force: true });
       fs.renameSync(partial, archive);
       this.publish({ status: 'verifying', progress: 0.9, message: '正在校验核心包 SHA-256' });
@@ -119,25 +140,31 @@ class UpdateManager {
     const tar = resolveSystemExecutable('tar.exe');
     if (!tar) throw new Error('Windows 系统缺少 tar.exe，无法检查更新包。');
     const inspection = await inspectArchive(archive, this.projectRoot, tar);
-    const stagingRoot = path.join(this.updateRoot, `staging-v${release.version}`);
+    const stagingRoot = path.join(this.updateRoot, 's');
     fs.rmSync(stagingRoot, { recursive: true, force: true });
     ensureDir(stagingRoot);
-    await runCommand(tar, ['-xf', archive, '-C', stagingRoot], this.projectRoot);
-    const packageRoot = locatePackageRoot(stagingRoot, inspection.prefix);
+    validateArchiveOutputPaths(inspection.entries, stagingRoot, inspection.prefix);
+    const stripDepth = inspection.prefix ? inspection.prefix.split('/').length : 0;
+    const extractionArgs = ['-xf', archive, '-C', stagingRoot];
+    if (stripDepth) extractionArgs.push('--strip-components', String(stripDepth));
+    await runCommand(tar, extractionArgs, this.projectRoot);
+    const packageRoot = stagingRoot;
     validateStagedPackage(packageRoot, release.version);
-    this.prepared = { archive, stagingRoot, packageRoot, release };
+    this.prepared = { archive, stagingRoot, packageRoot, updater, release };
     this.cleanupArtifacts();
-    this.publish({ status: 'ready', progress: 1, prepared: true, message: `v${release.version} 已下载并校验通过，等待重启安装` });
+    this.publish({ status: 'ready', progress: 1, prepared: true, message: `v${release.version} 核心包与同版本更新器均已校验通过，等待重启安装` });
     return this.state();
   }
 
   async launchPreparedUpdate() {
     if (!this.prepared || !fs.existsSync(this.prepared.packageRoot)) throw new Error('没有可安装的已校验更新包，请重新检查更新。');
     validateStagedPackage(this.prepared.packageRoot, this.prepared.release.version);
+    if (!fs.existsSync(this.prepared.updater) || !probeUpdaterExecutable(this.prepared.updater, this.prepared.release.version)) throw new Error('目标版本更新器缺失或版本不一致，请重新准备更新。');
     return this.launchOperation({
       mode: 'update',
       stagedRoot: this.prepared.packageRoot,
-      targetVersion: this.prepared.release.version
+      targetVersion: this.prepared.release.version,
+      updaterSource: this.prepared.updater
     });
   }
 
@@ -164,7 +191,7 @@ class UpdateManager {
     return this.launchOperation({ mode: 'migrate', sourceWorkspace: migration.sourceWorkspace, targetVersion: this.version });
   }
 
-  async launchOperation({ mode, stagedRoot = '', sourceWorkspace = '', targetVersion = '' }) {
+  async launchOperation({ mode, stagedRoot = '', sourceWorkspace = '', targetVersion = '', updaterSource = '' }) {
     if (this.platform !== 'win32') throw new Error('便携自动更新和迁移目前只支持 Windows。');
     const helperSource = mode === 'update' && stagedRoot
       ? path.join(path.resolve(stagedRoot), 'scripts', 'apply-portable-operation.ps1')
@@ -172,13 +199,16 @@ class UpdateManager {
     const recoverySource = mode === 'update' && stagedRoot
       ? path.join(path.resolve(stagedRoot), 'scripts', 'recover-portable-operation.ps1')
       : path.join(this.projectRoot, 'scripts', 'recover-portable-operation.ps1');
-    const updaterSource = path.join(this.projectRoot, 'tools', 'updater', 'StarOwnerUpdater.exe');
+    const bundledUpdaterSource = path.join(this.projectRoot, 'tools', 'updater', 'StarOwnerUpdater.exe');
+    const selectedUpdaterSource = updaterSource ? path.resolve(updaterSource) : bundledUpdaterSource;
     const iconSource = path.join(this.projectRoot, 'assets', 'star-note.png');
     if (!fs.existsSync(helperSource)) throw new Error('更新事务脚本缺失，无法安全更新。');
     if (!fs.existsSync(recoverySource)) throw new Error('更新回退脚本缺失，无法安全更新。');
-    if (!fs.existsSync(updaterSource)) throw new Error('独立更新器缺失，请手动安装完整核心包后重试。');
+    if (!fs.existsSync(selectedUpdaterSource)) throw new Error('独立更新器缺失，请手动安装完整核心包后重试。');
     if (!fs.existsSync(iconSource)) throw new Error('更新器应用图标缺失，无法启动更新界面。');
     if (mode === 'update' && !isInside(this.updateRoot, helperSource)) throw new Error('更新事务脚本不在受管暂存目录中。');
+    if (mode === 'update' && !isInside(this.downloadRoot, selectedUpdaterSource)) throw new Error('目标版本更新器不在受管下载目录中。');
+    if (!probeUpdaterExecutable(selectedUpdaterSource, targetVersion)) throw new Error(`更新器版本必须与目标星藏家 v${targetVersion} 完全一致。`);
     if (fs.existsSync(path.join(this.updateRoot, 'operation-journal.json'))) throw new Error('检测到尚未恢复的更新事务，请重新启动应用完成回退后再试。');
     const operationId = `operation-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
     const requestFile = path.join(this.updateRoot, 'operation-request.json');
@@ -193,7 +223,7 @@ class UpdateManager {
     const helper = path.join(temporaryRoot, 'apply-portable-operation.ps1');
     const recovery = path.join(temporaryRoot, 'recover-portable-operation.ps1');
     const icon = path.join(temporaryRoot, 'star-note.png');
-    fs.copyFileSync(updaterSource, updater);
+    fs.copyFileSync(selectedUpdaterSource, updater);
     fs.copyFileSync(helperSource, helper);
     fs.copyFileSync(recoverySource, recovery);
     fs.copyFileSync(iconSource, icon);
@@ -209,6 +239,7 @@ class UpdateManager {
       stagedRoot: stagedRoot ? path.resolve(stagedRoot) : '',
       sourceWorkspace: sourceWorkspace ? path.resolve(sourceWorkspace) : '',
       targetVersion,
+      updaterVersion: targetVersion,
       helperSource,
       processId: process.pid,
       updaterHelperPath: helper,
@@ -258,21 +289,21 @@ class UpdateManager {
     return response.json();
   }
 
-  async resolveChecksum(release) {
-    if (release.checksum) return release.checksum;
-    if (!release.checksumUrl) return '';
-    const response = await this.fetchImpl(release.checksumUrl, {
+  async resolveAssetChecksum(asset, label) {
+    if (asset.checksum) return asset.checksum;
+    if (!asset.checksumUrl) return '';
+    const response = await this.fetchImpl(asset.checksumUrl, {
       headers: { Accept: 'text/plain', 'User-Agent': 'star-owner-update-check' },
       redirect: 'follow',
       signal: AbortSignal.timeout(30000)
     });
-    if (!response.ok) throw new Error(`无法读取核心包 SHA-256 校验文件（${response.status}）。`);
+    if (!response.ok) throw new Error(`无法读取${label} SHA-256 校验文件（${response.status}）。`);
     const checksum = parseChecksumText(await response.text());
-    if (!checksum) throw new Error('核心包 SHA-256 校验文件格式无效，已停止安装。');
+    if (!checksum) throw new Error(`${label} SHA-256 校验文件格式无效，已停止安装。`);
     return checksum;
   }
 
-  async downloadFile(url, target, label, expectedTotal = 0, expectedChecksum = '') {
+  async downloadFile(url, target, label, expectedTotal = 0, expectedChecksum = '', progressRange = {}) {
     expectedChecksum = String(expectedChecksum || '').toLowerCase();
     let existing = fs.existsSync(target) ? fs.statSync(target).size : 0;
     const headers = { Accept: 'application/octet-stream', 'User-Agent': 'star-owner-updater' };
@@ -308,7 +339,9 @@ class UpdateManager {
       transform: (chunk, _encoding, callback) => {
         downloaded += chunk.length;
         const fraction = total ? downloaded / total : 0;
-        this.publish({ status: 'downloading', progress: Math.min(0.88, 0.03 + fraction * 0.84), downloadedBytes: downloaded, totalBytes: total, message: `${label}：${formatBytes(downloaded)}${total ? ` / ${formatBytes(total)}` : ''}` });
+        const progressStart = Number(progressRange.progressStart ?? 0.03);
+        const progressEnd = Number(progressRange.progressEnd ?? 0.88);
+        this.publish({ status: 'downloading', progress: Math.min(progressEnd, progressStart + fraction * Math.max(0, progressEnd - progressStart)), downloadedBytes: downloaded, totalBytes: total, message: `${label}：${formatBytes(downloaded)}${total ? ` / ${formatBytes(total)}` : ''}` });
         callback(null, chunk);
       }
     });
@@ -343,15 +376,25 @@ class UpdateManager {
   }
 }
 
-function resolveCoreRelease(release) {
+function resolveReleaseVersion(release) {
   if (!release || release.draft || release.prerelease) throw new Error('GitHub 最新 Release 不是可安装的稳定版本。');
   const tag = String(release.tag_name || '').replace(/^v/i, '');
   const match = tag.match(/^\d+\.\d+\.\d+$/);
   if (!match) throw new Error('GitHub Release 版本号不是有效的三段式版本。');
+  return tag;
+}
+
+function resolveCoreRelease(release, options = {}) {
+  const tag = resolveReleaseVersion(release);
+  const requireUpdater = options.requireUpdater !== false;
   const asset = (release.assets || []).find((item) => CORE_ASSET.test(String(item.name || '')) && CORE_ASSET.exec(String(item.name))[1] === tag);
   if (!asset) throw new Error(`Release v${tag} 中没有找到核心包 Star-Owner-v${tag}-win-x64-core.zip。`);
+  const updaterAsset = (release.assets || []).find((item) => UPDATER_ASSET.test(String(item.name || '')) && UPDATER_ASSET.exec(String(item.name))[1] === tag);
+  if (!updaterAsset && requireUpdater) throw new Error(`Release v${tag} 中缺少同版本更新器 Star-Owner-Updater-v${tag}-win-x64.exe。`);
   const checksumAsset = (release.assets || []).find((item) => item.name === `${asset.name}.sha256`);
+  const updaterChecksumAsset = updaterAsset ? (release.assets || []).find((item) => item.name === `${updaterAsset.name}.sha256`) : null;
   const digest = String(asset.digest || '').match(/^sha256:([0-9a-f]{64})$/i)?.[1]?.toLowerCase() || '';
+  const updaterDigest = String(updaterAsset?.digest || '').match(/^sha256:([0-9a-f]{64})$/i)?.[1]?.toLowerCase() || '';
   return {
     id: release.id || tag,
     version: tag,
@@ -360,7 +403,14 @@ function resolveCoreRelease(release) {
     url: release.html_url || `https://github.com/${REPOSITORY}/releases/tag/v${tag}`,
     checksumUrl: checksumAsset?.browser_download_url || '',
     checksum: digest,
-    asset: { name: asset.name, url: asset.browser_download_url, size: Number(asset.size || 0) }
+    asset: { name: asset.name, url: asset.browser_download_url, size: Number(asset.size || 0) },
+    updater: updaterAsset ? {
+      name: updaterAsset.name,
+      url: updaterAsset.browser_download_url,
+      size: Number(updaterAsset.size || 0),
+      checksum: updaterDigest,
+      checksumUrl: updaterChecksumAsset?.browser_download_url || ''
+    } : null
   };
 }
 
@@ -415,6 +465,26 @@ function locatePackageRoot(stagingRoot, prefix) {
   return path.resolve(root);
 }
 
+function validateArchiveOutputPaths(entries, stagingRoot, prefix) {
+  const root = path.resolve(stagingRoot);
+  const expectedPrefix = prefix ? `${prefix}/` : '';
+  for (const normalized of entries) {
+    let relative = normalized;
+    if (prefix) {
+      if (normalized === prefix) continue;
+      if (!normalized.toLowerCase().startsWith(expectedPrefix.toLowerCase())) throw new Error('更新包包含多个顶层目录，已拒绝安装。');
+      relative = normalized.slice(expectedPrefix.length);
+    }
+    if (!relative) continue;
+    const output = path.resolve(root, ...relative.split('/'));
+    if (!isInside(root, output)) throw new Error(`更新包路径越过了解压目录：${normalized}`);
+    const parent = path.dirname(output);
+    if (process.platform === 'win32' && (output.length >= 259 || parent.length >= 248)) {
+      throw new Error('当前项目目录过深，无法安全解压最新版本。请先把完整项目目录移动到更短路径后重试。');
+    }
+  }
+}
+
 function validateStagedPackage(packageRoot, version) {
   const required = [
     'package.json',
@@ -426,6 +496,7 @@ function validateStagedPackage(packageRoot, version) {
     'scripts/recover-portable-operation.ps1',
     'tools/updater/StarOwnerUpdater.cs',
     'tools/updater/StandaloneUpdater.cs',
+    'tools/updater/UpdaterBuildInfo.cs',
     'tools/updater/StarOwnerUpdater.exe',
     'tools/updater/build-updater.ps1',
     'tools/faster-whisper-cli.py',
@@ -460,6 +531,15 @@ function validateStagedPackage(packageRoot, version) {
   if (String(manifest?.platform || '') !== 'win-x64') throw new Error('更新包平台不是受支持的 win-x64。');
   if (String(manifest?.dependencyReleaseVersion || '') !== String(packageJson.dependencyReleaseVersion)) throw new Error('更新包依赖基线与 portable manifest 不一致。');
   if (String(manifest?.launcher || '') !== 'Start-StarOwner.cmd') throw new Error('更新包 portable manifest 的启动器声明不正确。');
+  if (compareVersions(version, '1.7.3') >= 0) {
+    if (String(manifest?.updaterVersion || '') !== String(version) || Number(manifest?.updaterProtocolVersion) !== UPDATER_PROTOCOL_VERSION) {
+      throw new Error('更新包的更新器版本或协议声明与目标应用不一致。');
+    }
+    if (!probeUpdaterExecutable(path.join(packageRoot, 'tools', 'updater', 'StarOwnerUpdater.exe'), version)) throw new Error('更新包内置更新器版本与目标应用不一致。');
+    const buildInfo = fs.readFileSync(path.join(packageRoot, 'tools', 'updater', 'UpdaterBuildInfo.cs'), 'utf8');
+    const declared = buildInfo.match(/public const string Version\s*=\s*"(\d+\.\d+\.\d+)"/i)?.[1] || '';
+    if (declared !== String(version)) throw new Error('更新器源码版本与目标应用不一致。');
+  }
 
   const basePythonRoot = path.join(packageRoot, 'runtime', 'python');
   const hasBasePython = fs.readdirSync(basePythonRoot, { withFileTypes: true }).some((entry) => (
@@ -474,6 +554,24 @@ function validateStagedPackage(packageRoot, version) {
 function readJsonIfPresent(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); }
   catch { return null; }
+}
+
+function probeUpdaterExecutable(file, expectedVersion) {
+  if (process.platform !== 'win32' || !fs.existsSync(file)) return false;
+  const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'star-owner-updater-version-'));
+  const output = path.join(probeRoot, 'version.json');
+  try {
+    const result = spawnSync(file, ['--version-file', output], { windowsHide: true, stdio: 'ignore', timeout: 10000 });
+    const value = readJsonIfPresent(output);
+    return !result.error && result.status === 0
+      && value?.product === 'star-owner-updater'
+      && String(value?.version || '') === String(expectedVersion || '')
+      && Number(value?.protocolVersion) === UPDATER_PROTOCOL_VERSION;
+  } catch {
+    return false;
+  } finally {
+    fs.rmSync(probeRoot, { recursive: true, force: true });
+  }
 }
 
 function parseContentRange(value) {
@@ -576,12 +674,13 @@ function cleanupManagedUpdateArtifacts(updateRoot, options = {}) {
   }
   if (['rollback-failed', 'recovery-failed'].includes(String(result?.status || ''))) protect(result?.backup);
   protect(options.prepared?.archive);
+  protect(options.prepared?.updater);
   protect(options.prepared?.stagingRoot);
   protect(options.prepared?.packageRoot);
 
   const removed = [];
   const directEntries = fs.readdirSync(root, { withFileTypes: true }).map((entry) => managedEntry(root, entry.name)).filter(Boolean);
-  const staging = directEntries.filter((entry) => /^staging-v\d+\.\d+\.\d+$/i.test(entry.name));
+  const staging = directEntries.filter((entry) => /^(?:s|(?:staging|s)-v\d+\.\d+\.\d+)$/i.test(entry.name));
   for (const entry of staging) {
     if (!protectedPaths.has(pathKey(entry.path)) && !journal && !requestActive) removeManagedEntry(root, entry, removed);
   }
@@ -599,6 +698,8 @@ function cleanupManagedUpdateArtifacts(updateRoot, options = {}) {
   const downloadEntries = fs.readdirSync(downloads, { withFileTypes: true }).map((entry) => managedEntry(downloads, entry.name)).filter(Boolean);
   cleanupDownloadGroup(downloads, downloadEntries.filter((entry) => CORE_ASSET.test(entry.name)), 2, UPDATE_DOWNLOAD_RETENTION_MS, now, protectedPaths, removed);
   cleanupDownloadGroup(downloads, downloadEntries.filter((entry) => CORE_ASSET.test(entry.name.replace(/\.partial$/i, '')) && /\.partial$/i.test(entry.name)), 1, UPDATE_DOWNLOAD_RETENTION_MS, now, protectedPaths, removed);
+  cleanupDownloadGroup(downloads, downloadEntries.filter((entry) => UPDATER_ASSET.test(entry.name)), 2, UPDATE_DOWNLOAD_RETENTION_MS, now, protectedPaths, removed);
+  cleanupDownloadGroup(downloads, downloadEntries.filter((entry) => UPDATER_ASSET.test(entry.name.replace(/\.partial$/i, '')) && /\.partial$/i.test(entry.name)), 1, UPDATE_DOWNLOAD_RETENTION_MS, now, protectedPaths, removed);
   return { removed, retainedBackups, activeOperation: Boolean(journal || requestActive) };
 }
 
@@ -714,6 +815,8 @@ function waitForUpdaterReady({ child, readyFile, acknowledgeFile = '', operation
 
 module.exports = {
   CORE_ASSET,
+  UPDATER_ASSET,
+  UPDATER_PROTOCOL_VERSION,
   MIN_MIGRATION_VERSION,
   REPOSITORY,
   UpdateManager,
@@ -722,8 +825,11 @@ module.exports = {
   compareVersions,
   findRunningProjectProcesses,
   parseChecksumText,
+  probeUpdaterExecutable,
   resolveCoreRelease,
+  resolveReleaseVersion,
   validateArchiveEntries,
+  validateArchiveOutputPaths,
   validateStagedPackage,
   waitForUpdaterReady
 };

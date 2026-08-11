@@ -65,6 +65,51 @@ namespace StarOwnerUpdater
         }
     }
 
+    internal sealed class StandaloneStartupOptions
+    {
+        public string ProjectRoot = String.Empty;
+        public string ExpectedVersion = String.Empty;
+        public string ReleaseApi = String.Empty;
+        public string ReadyFile = String.Empty;
+        public string HandoffId = String.Empty;
+        public int ParentProcessId;
+        public bool AutoStart;
+
+        public static StandaloneStartupOptions Parse(string[] args)
+        {
+            StandaloneStartupOptions value = new StandaloneStartupOptions();
+            value.ProjectRoot = FullPathOption(args, "--project-root");
+            value.ExpectedVersion = ReadOption(args, "--expected-version");
+            value.ReleaseApi = ReadOption(args, "--release-api");
+            value.ReadyFile = FullPathOption(args, "--ready-file");
+            value.HandoffId = ReadOption(args, "--handoff-id");
+            Int32.TryParse(ReadOption(args, "--parent-pid"), NumberStyles.Integer, CultureInfo.InvariantCulture, out value.ParentProcessId);
+            value.AutoStart = HasOption(args, "--auto-start");
+            if (!String.IsNullOrEmpty(value.ExpectedVersion) && !Regex.IsMatch(value.ExpectedVersion, "^[0-9]+\\.[0-9]+\\.[0-9]+$"))
+                throw new ArgumentException("expected updater version is invalid.");
+            return value;
+        }
+
+        private static string ReadOption(string[] args, string name)
+        {
+            for (int index = 0; args != null && index < args.Length - 1; index++)
+                if (String.Equals(args[index], name, StringComparison.OrdinalIgnoreCase)) return args[index + 1] ?? String.Empty;
+            return String.Empty;
+        }
+
+        private static string FullPathOption(string[] args, string name)
+        {
+            string value = ReadOption(args, name);
+            return String.IsNullOrWhiteSpace(value) ? String.Empty : Path.GetFullPath(value);
+        }
+
+        private static bool HasOption(string[] args, string name)
+        {
+            foreach (string value in args ?? new string[0]) if (String.Equals(value, name, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+    }
+
     internal static class StandaloneUpdaterCommands
     {
         public static bool TryRun(string[] args, out int exitCode)
@@ -77,7 +122,7 @@ namespace StarOwnerUpdater
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 if (args.Length < 2) { exitCode = 21; return true; }
-                Application.Run(new StandaloneUpdaterForm(true, args[1]));
+                Application.Run(new StandaloneUpdaterForm(true, args[1], null));
                 return true;
             }
             if (!command.StartsWith("--standalone-test-", StringComparison.OrdinalIgnoreCase)) return false;
@@ -123,6 +168,20 @@ namespace StarOwnerUpdater
                         result["updaterPid"] = handoff.UpdaterPid;
                         result["accepted"] = true;
                     }
+                    WriteResult(args[3], result);
+                }
+                else if (String.Equals(command, "--standalone-test-handoff", StringComparison.OrdinalIgnoreCase))
+                {
+                    RequireArguments(args, 4);
+                    StandaloneUpdateService service = new StandaloneUpdateService(args[1], args[2], null, null);
+                    InstalledProject project = service.InspectTarget(true);
+                    StandaloneRelease release = service.FetchLatest();
+                    ControllerHandoff handoff = service.LaunchMatchingUpdater(release);
+                    Dictionary<string, object> result = release.ToDictionary();
+                    result["projectVersion"] = project.Version;
+                    result["handoffId"] = handoff.OperationId;
+                    result["updaterPid"] = handoff.UpdaterPid;
+                    result["sourceUpdaterVersion"] = UpdaterBuildInfo.Version;
                     WriteResult(args[3], result);
                 }
                 else
@@ -202,6 +261,11 @@ namespace StarOwnerUpdater
         public long AssetSize;
         public string Checksum;
         public string ChecksumUrl;
+        public string UpdaterAssetName;
+        public string UpdaterAssetUrl;
+        public long UpdaterAssetSize;
+        public string UpdaterChecksum;
+        public string UpdaterChecksumUrl;
 
         public static StandaloneRelease Parse(string json)
         {
@@ -211,17 +275,25 @@ namespace StarOwnerUpdater
             if (version.StartsWith("v", StringComparison.OrdinalIgnoreCase)) version = version.Substring(1);
             if (!Regex.IsMatch(version, "^[0-9]+\\.[0-9]+\\.[0-9]+$")) throw new InvalidDataException("GitHub Release 版本号不是有效的三段式版本。");
             string expectedName = "Star-Owner-v" + version + "-win-x64-core.zip";
+            string expectedUpdaterName = "Star-Owner-Updater-v" + version + "-win-x64.exe";
             Dictionary<string, object> asset = null;
             Dictionary<string, object> checksumAsset = null;
+            Dictionary<string, object> updaterAsset = null;
+            Dictionary<string, object> updaterChecksumAsset = null;
             foreach (Dictionary<string, object> candidate in JsonFiles.ObjectList(release, "assets"))
             {
                 string name = JsonFiles.StringValue(candidate, "name");
                 if (String.Equals(name, expectedName, StringComparison.OrdinalIgnoreCase)) asset = candidate;
                 if (String.Equals(name, expectedName + ".sha256", StringComparison.OrdinalIgnoreCase)) checksumAsset = candidate;
+                if (String.Equals(name, expectedUpdaterName, StringComparison.OrdinalIgnoreCase)) updaterAsset = candidate;
+                if (String.Equals(name, expectedUpdaterName + ".sha256", StringComparison.OrdinalIgnoreCase)) updaterChecksumAsset = candidate;
             }
             if (asset == null) throw new InvalidDataException("Release v" + version + " 中没有找到 " + expectedName + "。");
+            if (updaterAsset == null) throw new InvalidDataException("Release v" + version + " 缺少同版本更新器 " + expectedUpdaterName + "，已拒绝自动更新。");
             string digest = JsonFiles.StringValue(asset, "digest");
             Match digestMatch = Regex.Match(digest, "^sha256:([0-9a-f]{64})$", RegexOptions.IgnoreCase);
+            string updaterDigest = JsonFiles.StringValue(updaterAsset, "digest");
+            Match updaterDigestMatch = Regex.Match(updaterDigest, "^sha256:([0-9a-f]{64})$", RegexOptions.IgnoreCase);
             StandaloneRelease value = new StandaloneRelease();
             value.Version = version;
             value.Name = JsonFiles.StringValue(release, "name");
@@ -232,7 +304,13 @@ namespace StarOwnerUpdater
             value.AssetSize = JsonFiles.LongValue(asset, "size");
             value.Checksum = digestMatch.Success ? digestMatch.Groups[1].Value.ToLowerInvariant() : String.Empty;
             value.ChecksumUrl = checksumAsset == null ? String.Empty : JsonFiles.StringValue(checksumAsset, "browser_download_url");
+            value.UpdaterAssetName = expectedUpdaterName;
+            value.UpdaterAssetUrl = JsonFiles.StringValue(updaterAsset, "browser_download_url");
+            value.UpdaterAssetSize = JsonFiles.LongValue(updaterAsset, "size");
+            value.UpdaterChecksum = updaterDigestMatch.Success ? updaterDigestMatch.Groups[1].Value.ToLowerInvariant() : String.Empty;
+            value.UpdaterChecksumUrl = updaterChecksumAsset == null ? String.Empty : JsonFiles.StringValue(updaterChecksumAsset, "browser_download_url");
             if (String.IsNullOrWhiteSpace(value.AssetUrl)) throw new InvalidDataException("核心包缺少有效的下载地址。");
+            if (String.IsNullOrWhiteSpace(value.UpdaterAssetUrl)) throw new InvalidDataException("同版本更新器缺少有效的下载地址。");
             return value;
         }
 
@@ -248,6 +326,11 @@ namespace StarOwnerUpdater
             value["assetSize"] = AssetSize;
             value["checksum"] = Checksum;
             value["checksumUrl"] = ChecksumUrl;
+            value["updaterAssetName"] = UpdaterAssetName;
+            value["updaterAssetUrl"] = UpdaterAssetUrl;
+            value["updaterAssetSize"] = UpdaterAssetSize;
+            value["updaterChecksum"] = UpdaterChecksum;
+            value["updaterChecksumUrl"] = UpdaterChecksumUrl;
             return value;
         }
     }
@@ -329,6 +412,7 @@ namespace StarOwnerUpdater
     {
         private readonly bool previewMode;
         private readonly string previewPath;
+        private readonly StandaloneStartupOptions startupOptions;
         private readonly AnimatedLogo animation;
         private readonly SmoothProgress progressBar;
         private readonly TextBox pathBox;
@@ -359,11 +443,12 @@ namespace StarOwnerUpdater
         private string logPath = String.Empty;
         private readonly object logLock = new object();
 
-        public StandaloneUpdaterForm(bool preview, string outputPath)
+        public StandaloneUpdaterForm(bool preview, string outputPath, StandaloneStartupOptions startup)
         {
             previewMode = preview;
             previewPath = outputPath;
-            Text = "星藏家独立更新器";
+            startupOptions = startup;
+            Text = "星藏家独立更新器 v" + UpdaterBuildInfo.Version;
             ClientSize = new Size(760, 720);
             MinimumSize = new Size(776, 759);
             MaximumSize = new Size(776, 759);
@@ -442,7 +527,7 @@ namespace StarOwnerUpdater
             latestTitle.Text = "GitHub latest";
             Controls.Add(latestTitle);
             latestVersionLabel = MakeLabel(new Rectangle(222, 351, 165, 31), 13F, FontStyle.Bold, Color.FromArgb(31, 137, 106));
-            latestVersionLabel.Text = preview ? "v1.7.2" : "尚未检查";
+            latestVersionLabel.Text = preview ? "v" + UpdaterBuildInfo.Version : "尚未检查";
             Controls.Add(latestVersionLabel);
             Label dataTitle = MakeLabel(new Rectangle(408, 329, 316, 22), 8.5F, FontStyle.Regular, Color.FromArgb(111, 132, 146));
             dataTitle.Text = "安全继承检查";
@@ -491,6 +576,8 @@ namespace StarOwnerUpdater
             cancelButton.Click += delegate { CancelOrClose(); };
             Controls.Add(cancelButton);
 
+            if (startupOptions != null && !String.IsNullOrWhiteSpace(startupOptions.ProjectRoot)) pathBox.Text = startupOptions.ProjectRoot;
+
             animationTimer = new System.Windows.Forms.Timer();
             animationTimer.Interval = 33;
             animationTimer.Tick += delegate
@@ -516,22 +603,77 @@ namespace StarOwnerUpdater
         private void OnShown()
         {
             animationTimer.Start();
-            if (!previewMode) return;
-            System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
-            timer.Interval = 700;
-            timer.Tick += delegate
+            if (previewMode)
             {
-                timer.Stop();
-                Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(previewPath)));
-                using (Bitmap bitmap = new Bitmap(ClientSize.Width, ClientSize.Height))
+                System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
+                timer.Interval = 700;
+                timer.Tick += delegate
                 {
-                    DrawToBitmap(bitmap, new Rectangle(Point.Empty, ClientSize));
-                    bitmap.Save(previewPath, System.Drawing.Imaging.ImageFormat.Png);
+                    timer.Stop();
+                    Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(previewPath)));
+                    using (Bitmap bitmap = new Bitmap(ClientSize.Width, ClientSize.Height))
+                    {
+                        DrawToBitmap(bitmap, new Rectangle(Point.Empty, ClientSize));
+                        bitmap.Save(previewPath, System.Drawing.Imaging.ImageFormat.Png);
+                    }
+                    closeRequested = true;
+                    Close();
+                };
+                timer.Start();
+                return;
+            }
+            if (startupOptions == null) return;
+            SignalStartupReady();
+            if (!startupOptions.AutoStart || String.IsNullOrWhiteSpace(startupOptions.ProjectRoot)) return;
+            statusLabel.Text = "同版本更新器已接管";
+            detailLabel.Text = startupOptions.ParentProcessId > 0 ? "正在等待上一版本更新器安全退出。" : "正在开始检测旧项目。";
+            Thread worker = new Thread(new ThreadStart(delegate
+            {
+                try
+                {
+                    WaitForParentExit(startupOptions.ParentProcessId);
+                    SafeUi(delegate { BeginInspection(true); });
                 }
-                closeRequested = true;
-                Close();
-            };
-            timer.Start();
+                catch (Exception error)
+                {
+                    SafeUi(delegate { ShowOperationError("无法接管更新任务", error); });
+                }
+            }));
+            worker.IsBackground = true;
+            worker.Name = "StarOwnerUpdaterHandoffWait";
+            worker.Start();
+        }
+
+        private void SignalStartupReady()
+        {
+            if (String.IsNullOrWhiteSpace(startupOptions.ReadyFile)) return;
+            Dictionary<string, object> value = new Dictionary<string, object>();
+            value["handoffId"] = startupOptions.HandoffId;
+            value["status"] = "ready";
+            value["updaterPid"] = Process.GetCurrentProcess().Id;
+            value["updaterVersion"] = UpdaterBuildInfo.Version;
+            value["protocolVersion"] = UpdaterBuildInfo.ProtocolVersion;
+            value["readyAt"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+            JsonFiles.WriteObjectAtomic(startupOptions.ReadyFile, value);
+        }
+
+        private static void WaitForParentExit(int processId)
+        {
+            if (processId <= 0 || processId == Process.GetCurrentProcess().Id) return;
+            DateTime deadline = DateTime.UtcNow.AddMinutes(3D);
+            while (DateTime.UtcNow < deadline)
+            {
+                try
+                {
+                    using (Process process = Process.GetProcessById(processId))
+                    {
+                        if (process.HasExited) return;
+                    }
+                }
+                catch (ArgumentException) { return; }
+                Thread.Sleep(120);
+            }
+            throw new TimeoutException("上一版本应用或更新器没有在三分钟内退出，未修改旧项目。");
         }
 
         private void ChooseDirectory()
@@ -550,6 +692,11 @@ namespace StarOwnerUpdater
         }
 
         private void BeginInspection()
+        {
+            BeginInspection(false);
+        }
+
+        private void BeginInspection(bool automaticStart)
         {
             if (operationActive) return;
             string root = pathBox.Text.Trim().Trim('"');
@@ -575,7 +722,7 @@ namespace StarOwnerUpdater
             {
                 try
                 {
-                    StandaloneUpdateService service = new StandaloneUpdateService(root, StandaloneUpdateService.DefaultReleaseApi, ApplyProgress, IsCancellationRequested);
+                    StandaloneUpdateService service = new StandaloneUpdateService(root, EffectiveReleaseApi(), ApplyProgress, IsCancellationRequested);
                     activeService = service;
                     InstalledProject project = service.InspectTarget(true);
                     StandaloneRelease release = service.FetchLatest();
@@ -589,12 +736,22 @@ namespace StarOwnerUpdater
                         dataLabel.Text = project.HasDatabase ? "已确认 Workspace 数据库有效" : "未发现数据库，将保留现有目录";
                         bool available = StandaloneUpdateService.CompareVersions(release.Version, project.Version) > 0;
                         statusLabel.Text = available ? "可以安全更新到 v" + release.Version : "当前目录已是最新稳定版本";
-                        detailLabel.Text = available ? "点击“开始安全更新”后自动下载、校验、解压并由事务更新器接管。" : "不会自动降级或重复覆盖同一稳定版本。";
+                        bool matchingUpdater = service.IsCurrentUpdaterFor(release);
+                        detailLabel.Text = available
+                            ? (matchingUpdater ? "点击“开始安全更新”后自动下载、校验、解压并由事务更新器接管。" : "将先下载并切换到 v" + release.Version + " 同版本更新器，再开始核心更新。")
+                            : "不会自动降级或重复覆盖同一稳定版本。";
                         progressBar.Indeterminate = false;
                         progressBar.Value = 1D;
                         percentLabel.Text = "100%";
                         startButton.Enabled = available;
                         FinishBackgroundOperation();
+                        if (available && automaticStart)
+                        {
+                            System.Windows.Forms.Timer starter = new System.Windows.Forms.Timer();
+                            starter.Interval = 50;
+                            starter.Tick += delegate { starter.Stop(); BeginUpdate(false); };
+                            starter.Start();
+                        }
                     });
                 }
                 catch (OperationCanceledException)
@@ -614,13 +771,21 @@ namespace StarOwnerUpdater
 
         private void BeginUpdate()
         {
+            BeginUpdate(true);
+        }
+
+        private void BeginUpdate(bool requireConfirmation)
+        {
             if (operationActive || inspectedProject == null || inspectedRelease == null) return;
-            DialogResult answer = MessageBox.Show(this,
-                "将把当前目录从 v" + inspectedProject.Version + " 更新到 v" + inspectedRelease.Version + "。\r\n\r\n"
-                + "Workspace、收藏夹、RAG 文档、模型、缓存、登录状态和 GitHub 私有凭据都会原地保留。\r\n"
-                + "替换阶段可随时点击“中止并安全回退”。继续吗？",
-                "开始安全更新", MessageBoxButtons.YesNo, MessageBoxIcon.Information, MessageBoxDefaultButton.Button1);
-            if (answer != DialogResult.Yes) return;
+            if (requireConfirmation)
+            {
+                DialogResult answer = MessageBox.Show(this,
+                    "将把当前目录从 v" + inspectedProject.Version + " 更新到 v" + inspectedRelease.Version + "。\r\n\r\n"
+                    + "Workspace、收藏夹、RAG 文档、模型、缓存、登录状态和 GitHub 私有凭据都会原地保留。\r\n"
+                    + "替换阶段可随时点击“中止并安全回退”。继续吗？",
+                    "开始安全更新", MessageBoxButtons.YesNo, MessageBoxIcon.Information, MessageBoxDefaultButton.Button1);
+                if (answer != DialogResult.Yes) return;
+            }
             string root = inspectedProject.Root;
             generation++;
             int currentGeneration = generation;
@@ -644,8 +809,27 @@ namespace StarOwnerUpdater
             {
                 try
                 {
-                    StandaloneUpdateService service = new StandaloneUpdateService(root, StandaloneUpdateService.DefaultReleaseApi, ApplyProgress, IsCancellationRequested);
+                    StandaloneUpdateService service = new StandaloneUpdateService(root, EffectiveReleaseApi(), ApplyProgress, IsCancellationRequested);
                     activeService = service;
+                    if (!service.IsCurrentUpdaterFor(inspectedRelease))
+                    {
+                        SafeUi(delegate { statusLabel.Text = "正在下载 v" + inspectedRelease.Version + " 同版本更新器"; detailLabel.Text = "核心包不会由旧更新器直接安装。"; });
+                        ControllerHandoff versionHandoff = service.LaunchMatchingUpdater(inspectedRelease);
+                        AppendLog("Matching updater v" + inspectedRelease.Version + " accepted handoff (PID " + versionHandoff.UpdaterPid.ToString(CultureInfo.InvariantCulture) + ").");
+                        SafeUi(delegate
+                        {
+                            handoffAccepted = true;
+                            progressBar.Value = 1D;
+                            percentLabel.Text = "100%";
+                            statusLabel.Text = "v" + inspectedRelease.Version + " 更新器已接管";
+                            detailLabel.Text = "本窗口退出后，同版本更新器会继续下载并安全安装核心包。";
+                            System.Windows.Forms.Timer closer = new System.Windows.Forms.Timer();
+                            closer.Interval = 500;
+                            closer.Tick += delegate { closer.Stop(); closeRequested = true; Close(); };
+                            closer.Start();
+                        });
+                        return;
+                    }
                     StandalonePreparedUpdate prepared = service.Prepare();
                     if (IsCancellationRequested()) throw new OperationCanceledException();
                     SafeUi(delegate { statusLabel.Text = "正在启动事务更新器"; detailLabel.Text = "接管完成后，本窗口退出，文件替换才会开始。"; progressBar.Indeterminate = true; percentLabel.Text = "接管中"; cancelButton.Enabled = false; });
@@ -690,6 +874,13 @@ namespace StarOwnerUpdater
             worker.IsBackground = true;
             worker.Name = "StarOwnerStandalonePrepare";
             worker.Start();
+        }
+
+        private string EffectiveReleaseApi()
+        {
+            return startupOptions != null && !String.IsNullOrWhiteSpace(startupOptions.ReleaseApi)
+                ? startupOptions.ReleaseApi
+                : StandaloneUpdateService.DefaultReleaseApi;
         }
 
         private void ApplyProgress(StandaloneProgressInfo info)
@@ -916,6 +1107,89 @@ namespace StarOwnerUpdater
             return release;
         }
 
+        public bool IsCurrentUpdaterFor(StandaloneRelease release)
+        {
+            return release != null && String.Equals(UpdaterBuildInfo.Version, release.Version, StringComparison.Ordinal);
+        }
+
+        public ControllerHandoff LaunchMatchingUpdater(StandaloneRelease release)
+        {
+            if (release == null) throw new ArgumentNullException("release");
+            if (IsCurrentUpdaterFor(release)) throw new InvalidOperationException("当前更新器已经与目标版本一致，无需再次移交。");
+            string checksum = ResolveAssetChecksum(release.UpdaterChecksum, release.UpdaterChecksumUrl, release.UpdaterAssetName, "同版本更新器");
+            release.UpdaterChecksum = checksum;
+            string cacheRoot = Path.Combine(Path.GetTempPath(), "StarOwner", "updater-cache", "v" + release.Version);
+            Directory.CreateDirectory(cacheRoot);
+            string updater = Path.Combine(cacheRoot, release.UpdaterAssetName);
+            string partial = updater + ".partial";
+            if (File.Exists(updater) && (!String.Equals(ComputeSha256(updater), checksum, StringComparison.OrdinalIgnoreCase) || !UpdaterExecutableMatches(updater, release.Version)))
+                File.Delete(updater);
+            if (!File.Exists(updater))
+            {
+                DownloadAsset(release.UpdaterAssetUrl, release.UpdaterAssetSize, checksum, partial, release.UpdaterAssetName, "正在下载 v" + release.Version + " 同版本更新器", 0.1D, 0.72D);
+                string actual = ComputeSha256(partial);
+                if (!String.Equals(actual, checksum, StringComparison.OrdinalIgnoreCase))
+                {
+                    DeleteIfExists(partial);
+                    throw new InvalidDataException("同版本更新器 SHA-256 不匹配，已拒绝运行。实际值：" + actual);
+                }
+                if (!UpdaterExecutableMatches(partial, release.Version))
+                {
+                    DeleteIfExists(partial);
+                    throw new InvalidDataException("下载的更新器内嵌版本不是 v" + release.Version + "，已拒绝运行。");
+                }
+                DeleteIfExists(updater);
+                File.Move(partial, updater);
+            }
+            if (!UpdaterExecutableMatches(updater, release.Version)) throw new InvalidDataException("同版本更新器文件版本校验失败。");
+
+            string handoffId = "updater-version-" + Guid.NewGuid().ToString("N");
+            string readyFile = Path.Combine(cacheRoot, "handoff-ready-" + handoffId + ".json");
+            DeleteIfExists(readyFile);
+            ProcessStartInfo info = new ProcessStartInfo();
+            info.FileName = updater;
+            info.Arguments = JoinArguments(new string[] {
+                "--standalone-child", "--project-root", projectRoot, "--expected-version", release.Version,
+                "--release-api", releaseApi, "--parent-pid", Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture),
+                "--ready-file", readyFile, "--handoff-id", handoffId, "--auto-start"
+            });
+            info.WorkingDirectory = cacheRoot;
+            info.UseShellExecute = false;
+            info.CreateNoWindow = false;
+            Process child = Process.Start(info);
+            DateTime deadline = DateTime.UtcNow.AddSeconds(20D);
+            bool accepted = false;
+            try
+            {
+                while (DateTime.UtcNow < deadline)
+                {
+                    ThrowIfCancelled();
+                    Dictionary<string, object> ready = TryReadObject(readyFile);
+                    if (ready != null
+                        && String.Equals(JsonFiles.StringValue(ready, "handoffId"), handoffId, StringComparison.Ordinal)
+                        && String.Equals(JsonFiles.StringValue(ready, "status"), "ready", StringComparison.Ordinal)
+                        && String.Equals(JsonFiles.StringValue(ready, "updaterVersion"), release.Version, StringComparison.Ordinal))
+                    {
+                        ControllerHandoff handoff = new ControllerHandoff();
+                        handoff.OperationId = handoffId;
+                        handoff.UpdaterPid = JsonFiles.IntValue(ready, "updaterPid");
+                        if (handoff.UpdaterPid <= 0) throw new InvalidDataException("同版本更新器没有返回有效进程 ID。");
+                        accepted = true;
+                        Report("handoff", "v" + release.Version + " 同版本更新器已接管", "旧更新器退出后会自动继续，不会由旧二进制安装未来核心包。", 1D, release.UpdaterAssetSize, release.UpdaterAssetSize, true);
+                        return handoff;
+                    }
+                    if (child.HasExited) throw new InvalidOperationException("同版本更新器在接管前意外退出。");
+                    Thread.Sleep(80);
+                }
+                throw new TimeoutException("同版本更新器启动超时，旧项目未被修改。");
+            }
+            finally
+            {
+                if (!accepted) try { if (!child.HasExited) child.Kill(); } catch { }
+                DeleteIfExists(readyFile);
+            }
+        }
+
         public StandalonePreparedUpdate Prepare()
         {
             InstalledProject project = InspectTarget(true);
@@ -923,15 +1197,8 @@ namespace StarOwnerUpdater
             project = InspectTarget(true);
             StandaloneRelease release = FetchLatest();
             if (CompareVersions(release.Version, project.Version) <= 0) throw new InvalidOperationException("当前目录已是最新稳定版 v" + project.Version + "，无需覆盖更新。");
-            string checksum = release.Checksum;
-            if (String.IsNullOrEmpty(checksum) && !String.IsNullOrEmpty(release.ChecksumUrl))
-            {
-                Report("checking", "正在读取 SHA-256 校验文件", release.AssetName + ".sha256", 0.1D, 0L, release.AssetSize, true);
-                Match match = Regex.Match(DownloadText(release.ChecksumUrl, "text/plain", 30000), "\\b([0-9a-f]{64})\\b", RegexOptions.IgnoreCase);
-                if (match.Success) checksum = match.Groups[1].Value.ToLowerInvariant();
-            }
-            if (!Regex.IsMatch(checksum ?? String.Empty, "^[0-9a-f]{64}$", RegexOptions.IgnoreCase)) throw new InvalidDataException("最新 Release 缺少有效的核心包 SHA-256，已停止安装。");
-            release.Checksum = checksum.ToLowerInvariant();
+            if (!IsCurrentUpdaterFor(release)) throw new InvalidOperationException("必须先切换到 v" + release.Version + " 同版本更新器，旧更新器不得下载或安装该核心包。");
+            release.Checksum = ResolveAssetChecksum(release.Checksum, release.ChecksumUrl, release.AssetName, "核心包");
             EnsureInitialDiskSpace(release.AssetSize);
             string updates = Path.Combine(projectRoot, ".updates");
             string downloads = Path.Combine(updates, "downloads");
@@ -956,7 +1223,7 @@ namespace StarOwnerUpdater
                 if (File.Exists(archive)) File.Delete(archive);
                 File.Move(partial, archive);
             }
-            string staging = Path.Combine(updates, "staging-v" + release.Version);
+            string staging = Path.Combine(updates, "s");
             SafeDeleteStaging(staging);
             Directory.CreateDirectory(staging);
             string packageRoot;
@@ -1008,6 +1275,7 @@ namespace StarOwnerUpdater
             payload["stagedRoot"] = prepared.PackageRoot;
             payload["sourceWorkspace"] = String.Empty;
             payload["targetVersion"] = prepared.Release.Version;
+            payload["updaterVersion"] = UpdaterBuildInfo.Version;
             payload["processId"] = Process.GetCurrentProcess().Id;
             payload["updaterHelperPath"] = helper;
             payload["updaterRecoveryPath"] = recovery;
@@ -1110,12 +1378,17 @@ namespace StarOwnerUpdater
 
         private void DownloadArchive(StandaloneRelease release, string partial)
         {
+            DownloadAsset(release.AssetUrl, release.AssetSize, release.Checksum, partial, release.AssetName, "正在下载星藏家 v" + release.Version, 0.1D, 0.52D);
+        }
+
+        private void DownloadAsset(string url, long expectedSize, string checksum, string partial, string label, string status, double progressStart, double progressSpan)
+        {
             long existing = File.Exists(partial) ? new FileInfo(partial).Length : 0L;
-            if (release.AssetSize > 0L && existing > release.AssetSize) { File.Delete(partial); existing = 0L; }
+            if (expectedSize > 0L && existing > expectedSize) { File.Delete(partial); existing = 0L; }
             for (int attempt = 0; attempt < 2; attempt++)
             {
                 ThrowIfCancelled();
-                HttpWebRequest request = CreateRequest(release.AssetUrl, "application/octet-stream", 6 * 60 * 60 * 1000);
+                HttpWebRequest request = CreateRequest(url, "application/octet-stream", 6 * 60 * 60 * 1000);
                 if (existing > 0L) request.AddRange(existing);
                 HttpWebResponse response = null;
                 try
@@ -1125,13 +1398,13 @@ namespace StarOwnerUpdater
                 catch (WebException error)
                 {
                     response = error.Response as HttpWebResponse;
-                    if (response == null || response.StatusCode != HttpStatusCode.RequestedRangeNotSatisfiable) throw NetworkError(error, response, "更新包下载失败");
+                    if (response == null || response.StatusCode != HttpStatusCode.RequestedRangeNotSatisfiable) throw NetworkError(error, response, label + " 下载失败");
                 }
                 using (response)
                 {
                     if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
                     {
-                        if (existing > 0L && String.Equals(ComputeSha256(partial), release.Checksum, StringComparison.OrdinalIgnoreCase)) return;
+                        if (existing > 0L && String.Equals(ComputeSha256(partial), checksum, StringComparison.OrdinalIgnoreCase)) return;
                         DeleteIfExists(partial);
                         existing = 0L;
                         continue;
@@ -1142,7 +1415,7 @@ namespace StarOwnerUpdater
                         DeleteIfExists(partial);
                         existing = 0L;
                     }
-                    long total = release.AssetSize > 0L ? release.AssetSize : (response.ContentLength > 0L ? existing + response.ContentLength : 0L);
+                    long total = expectedSize > 0L ? expectedSize : (response.ContentLength > 0L ? existing + response.ContentLength : 0L);
                     FileMode mode = resumed ? FileMode.Append : FileMode.Create;
                     long downloaded = resumed ? existing : 0L;
                     byte[] buffer = new byte[1024 * 1024];
@@ -1157,7 +1430,7 @@ namespace StarOwnerUpdater
                             output.Write(buffer, 0, read);
                             downloaded += read;
                             double fraction = total > 0L ? Math.Min(1D, downloaded / (double)total) : 0D;
-                            Report("downloading", "正在下载星藏家 v" + release.Version, FormatBytes(downloaded) + (total > 0L ? " / " + FormatBytes(total) : String.Empty), 0.1D + fraction * 0.52D, downloaded, total, false);
+                            Report("downloading", status, FormatBytes(downloaded) + (total > 0L ? " / " + FormatBytes(total) : String.Empty), progressStart + fraction * progressSpan, downloaded, total, false);
                         }
                         output.Flush(true);
                     }
@@ -1165,7 +1438,30 @@ namespace StarOwnerUpdater
                     return;
                 }
             }
-            throw new IOException("无法继续更新包断点下载，请重试。");
+            throw new IOException("无法继续 " + label + " 断点下载，请重试。");
+        }
+
+        private string ResolveAssetChecksum(string checksum, string checksumUrl, string assetName, string label)
+        {
+            string resolved = checksum ?? String.Empty;
+            if (String.IsNullOrEmpty(resolved) && !String.IsNullOrEmpty(checksumUrl))
+            {
+                Report("checking", "正在读取 " + label + " SHA-256", assetName + ".sha256", 0.09D, 0L, 0L, true);
+                Match match = Regex.Match(DownloadText(checksumUrl, "text/plain", 30000), "\\b([0-9a-f]{64})\\b", RegexOptions.IgnoreCase);
+                if (match.Success) resolved = match.Groups[1].Value.ToLowerInvariant();
+            }
+            if (!Regex.IsMatch(resolved, "^[0-9a-f]{64}$", RegexOptions.IgnoreCase)) throw new InvalidDataException("最新 Release 缺少有效的 " + label + " SHA-256，已停止安装。");
+            return resolved.ToLowerInvariant();
+        }
+
+        private static bool UpdaterExecutableMatches(string path, string version)
+        {
+            try
+            {
+                FileVersionInfo info = FileVersionInfo.GetVersionInfo(path);
+                return String.Equals(info.ProductVersion, version, StringComparison.Ordinal);
+            }
+            catch { return false; }
         }
 
         private string ExtractArchive(string archivePath, string stagingRoot, string version)
@@ -1187,7 +1483,11 @@ namespace StarOwnerUpdater
                 {
                     ThrowIfCancelled();
                     string normalized = entry.FullName.Replace('\\', '/').TrimEnd('/');
-                    string outputPath = Path.GetFullPath(Path.Combine(stagingRoot, normalized.Replace('/', Path.DirectorySeparatorChar)));
+                    string relative = StripArchivePrefix(normalized, plan.Prefix);
+                    if (String.IsNullOrEmpty(relative)) continue;
+                    string outputPath = Path.GetFullPath(Path.Combine(stagingRoot, relative.Replace('/', Path.DirectorySeparatorChar)));
+                    if (!IsInsidePath(stagingRoot, outputPath)) throw new InvalidDataException("更新包路径越过了解压目录：" + normalized);
+                    if (outputPath.Length >= 259) throw new PathTooLongException("旧项目目录过深，无法安全解压最新版本。请先把整个项目目录移动到更短的位置后重试。");
                     bool directory = String.IsNullOrEmpty(entry.Name) || entry.FullName.EndsWith("/", StringComparison.Ordinal) || entry.FullName.EndsWith("\\", StringComparison.Ordinal);
                     if (directory)
                     {
@@ -1211,9 +1511,25 @@ namespace StarOwnerUpdater
                         }
                     }
                 }
-                string packageRoot = String.IsNullOrEmpty(plan.Prefix) ? stagingRoot : Path.Combine(stagingRoot, plan.Prefix.Replace('/', Path.DirectorySeparatorChar));
-                return Path.GetFullPath(packageRoot);
+                return Path.GetFullPath(stagingRoot);
             }
+        }
+
+        private static string StripArchivePrefix(string normalized, string prefix)
+        {
+            if (String.IsNullOrEmpty(prefix)) return normalized;
+            if (String.Equals(normalized, prefix, StringComparison.OrdinalIgnoreCase)) return String.Empty;
+            string expected = prefix + "/";
+            if (!normalized.StartsWith(expected, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("更新包包含多个顶层目录，已拒绝安装。");
+            return normalized.Substring(expected.Length);
+        }
+
+        private static bool IsInsidePath(string root, string candidate)
+        {
+            string normalizedRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string normalizedCandidate = Path.GetFullPath(candidate);
+            return String.Equals(normalizedRoot, normalizedCandidate, StringComparison.OrdinalIgnoreCase)
+                || normalizedCandidate.StartsWith(normalizedRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
         }
 
         private void ValidateStagedPackage(string root, string version)
@@ -1238,6 +1554,7 @@ namespace StarOwnerUpdater
                 required.Add(Path.Combine("tools", "updater", "build-updater.ps1"));
             }
             if (CompareVersions(version, "1.7.2") >= 0) required.Add(Path.Combine("tools", "updater", "StandaloneUpdater.cs"));
+            if (CompareVersions(version, "1.7.3") >= 0) required.Add(Path.Combine("tools", "updater", "UpdaterBuildInfo.cs"));
             foreach (string relative in required) if (!File.Exists(Path.Combine(root, relative)) && !Directory.Exists(Path.Combine(root, relative))) throw new InvalidDataException("更新包缺少必需文件：" + relative);
             Dictionary<string, object> package = JsonFiles.ReadObject(Path.Combine(root, "package.json"));
             Dictionary<string, object> packageLock = JsonFiles.ReadObject(Path.Combine(root, "package-lock.json"));
@@ -1254,6 +1571,17 @@ namespace StarOwnerUpdater
                 || !String.Equals(JsonFiles.StringValue(manifest, "platform"), "win-x64", StringComparison.Ordinal)
                 || !String.Equals(JsonFiles.StringValue(manifest, "launcher"), "Start-StarOwner.cmd", StringComparison.Ordinal)
                 || !String.Equals(JsonFiles.StringValue(manifest, "dependencyReleaseVersion"), dependencyVersion, StringComparison.Ordinal)) throw new InvalidDataException("更新包 portable-manifest.json 校验失败。");
+            if (CompareVersions(version, "1.7.3") >= 0)
+            {
+                if (!String.Equals(JsonFiles.StringValue(manifest, "updaterVersion"), version, StringComparison.Ordinal)
+                    || JsonFiles.IntValue(manifest, "updaterProtocolVersion") != UpdaterBuildInfo.ProtocolVersion)
+                    throw new InvalidDataException("更新包的更新器版本或协议声明与应用版本不一致。");
+                string updater = Path.Combine(root, "tools", "updater", "StarOwnerUpdater.exe");
+                if (!UpdaterExecutableMatches(updater, version)) throw new InvalidDataException("更新包内置更新器版本与目标应用版本不一致。");
+                string buildInfo = File.ReadAllText(Path.Combine(root, "tools", "updater", "UpdaterBuildInfo.cs"), Encoding.UTF8);
+                Match declared = Regex.Match(buildInfo, "public const string Version\\s*=\\s*\"([0-9]+\\.[0-9]+\\.[0-9]+)\"");
+                if (!declared.Success || !String.Equals(declared.Groups[1].Value, version, StringComparison.Ordinal)) throw new InvalidDataException("更新器源码版本与目标应用版本不一致。");
+            }
             bool hasPython = false;
             foreach (string directory in Directory.GetDirectories(Path.Combine(root, "runtime", "python"))) if (File.Exists(Path.Combine(directory, "python.exe"))) { hasPython = true; break; }
             if (!hasPython) throw new InvalidDataException("更新包缺少项目内置基础 Python。");
@@ -1386,7 +1714,7 @@ namespace StarOwnerUpdater
         {
             string updates = Path.GetFullPath(Path.Combine(projectRoot, ".updates")).TrimEnd('\\');
             string target = Path.GetFullPath(path);
-            if (!String.Equals(Path.GetDirectoryName(target), updates, StringComparison.OrdinalIgnoreCase) || !Regex.IsMatch(Path.GetFileName(target), "^staging-v[0-9]+\\.[0-9]+\\.[0-9]+$", RegexOptions.IgnoreCase)) throw new InvalidOperationException("拒绝清理不属于更新器管理的暂存目录。");
+            if (!String.Equals(Path.GetDirectoryName(target), updates, StringComparison.OrdinalIgnoreCase) || !Regex.IsMatch(Path.GetFileName(target), "^(?:s|(?:staging|s)-v[0-9]+\\.[0-9]+\\.[0-9]+)$", RegexOptions.IgnoreCase)) throw new InvalidOperationException("拒绝清理不属于更新器管理的暂存目录。");
             if (Directory.Exists(target)) Directory.Delete(target, true);
         }
 
@@ -1483,6 +1811,13 @@ namespace StarOwnerUpdater
             return result.ToString();
         }
 
+        private static string JoinArguments(string[] arguments)
+        {
+            List<string> values = new List<string>();
+            foreach (string argument in arguments ?? new string[0]) values.Add(QuoteArgument(argument));
+            return String.Join(" ", values.ToArray());
+        }
+
         private static bool ContentRangeStartsAt(string value, long expected)
         {
             Match match = Regex.Match(value ?? String.Empty, "^bytes\\s+([0-9]+)-([0-9]+)/([0-9*]+)$", RegexOptions.IgnoreCase);
@@ -1554,9 +1889,6 @@ namespace StarOwnerUpdater
                     if (totalBytes > MaximumExpandedBytes) throw new InvalidDataException("更新包解压后的体积超过安全上限。");
                     if (raw.CompressedLength > 0L && raw.Length > 1024L * 1024L && raw.Length / Math.Max(1L, raw.CompressedLength) > 5000L) throw new InvalidDataException("更新包包含异常压缩比文件，已拒绝安装：" + normalized);
                 }
-                string output = Path.GetFullPath(Path.Combine(stage, normalized.Replace('/', Path.DirectorySeparatorChar)));
-                if (!IsInside(stage, output)) throw new InvalidDataException("更新包路径越过了解压目录：" + normalized);
-                if (output.Length >= 259) throw new PathTooLongException("旧项目目录过深，无法安全解压最新版本。请先把整个项目目录移动到更短的位置后重试。");
                 if (normalized.EndsWith("/package.json", StringComparison.OrdinalIgnoreCase) || String.Equals(normalized, "package.json", StringComparison.OrdinalIgnoreCase))
                 {
                     packageEntries.Add(normalized);
@@ -1578,6 +1910,19 @@ namespace StarOwnerUpdater
             {
                 if (!String.IsNullOrEmpty(prefix) && !String.Equals(entry, prefix, StringComparison.OrdinalIgnoreCase) && !entry.StartsWith(allowedPrefix, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException("更新包包含多个顶层目录，已拒绝安装。");
+                string relative = entry;
+                if (!String.IsNullOrEmpty(prefix))
+                {
+                    if (String.Equals(entry, prefix, StringComparison.OrdinalIgnoreCase)) continue;
+                    relative = entry.Substring(allowedPrefix.Length);
+                }
+                if (String.IsNullOrEmpty(relative)) continue;
+                string output = Path.GetFullPath(Path.Combine(stage, relative.Replace('/', Path.DirectorySeparatorChar)));
+                if (!IsInside(stage, output)) throw new InvalidDataException("更新包路径越过了解压目录：" + entry);
+                bool directory = identities[entry];
+                string parent = directory ? output : Path.GetDirectoryName(output);
+                if (output.Length >= 259 || (!String.IsNullOrEmpty(parent) && parent.Length >= 248))
+                    throw new PathTooLongException("旧项目目录过深，无法安全解压最新版本。请先把整个项目目录移动到更短的位置后重试。");
             }
             StandaloneArchivePlan plan = new StandaloneArchivePlan();
             plan.Prefix = prefix;

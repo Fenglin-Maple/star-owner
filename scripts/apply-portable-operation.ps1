@@ -36,10 +36,31 @@ $progress = 0.01
 function Write-JsonAtomic([string]$Path, $Payload) {
   $parent = Split-Path -Parent $Path
   if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
-  $temporary = "$Path.tmp-$PID"
+  $temporary = "$Path.tmp-$PID-$([Guid]::NewGuid().ToString('N'))"
+  $replacementBackup = "$Path.replace-$PID-$([Guid]::NewGuid().ToString('N'))"
   $json = $Payload | ConvertTo-Json -Depth 10
   [IO.File]::WriteAllText($temporary, $json, (New-Object Text.UTF8Encoding($false)))
-  Move-Item -LiteralPath $temporary -Destination $Path -Force
+  $lastError = $null
+  $published = $false
+  try {
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+      try {
+        if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary, $Path, $replacementBackup, $true) }
+        else { [IO.File]::Move($temporary, $Path) }
+        $published = $true
+        break
+      } catch [IO.IOException] {
+        $lastError = $_.Exception
+      } catch [UnauthorizedAccessException] {
+        $lastError = $_.Exception
+      }
+      Start-Sleep -Milliseconds ([Math]::Min(120, 10 + ($attempt * 5)))
+    }
+    if (-not $published) { throw $lastError }
+  } finally {
+    if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $replacementBackup) { Remove-Item -LiteralPath $replacementBackup -Force -ErrorAction SilentlyContinue }
+  }
 }
 
 function Test-CancelRequested {

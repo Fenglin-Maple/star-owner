@@ -16,6 +16,10 @@ if (-not $SkipBuild) {
 
 $source = Join-Path $PSScriptRoot 'StarOwnerUpdater.exe'
 if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw 'StarOwnerUpdater.exe is missing.' }
+$fileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($source)
+if ([string]$fileVersion.ProductVersion -ne [string]$package.version) {
+  throw "StarOwnerUpdater.exe version $($fileVersion.ProductVersion) does not match package.json $($package.version)."
+}
 $outputRoot = [IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 $asset = Join-Path $outputRoot "Star-Owner-Updater-v$($package.version)-win-x64.exe"

@@ -688,14 +688,14 @@
               </section>
               <section class="section-block update-settings">
                 <div class="section-title">
-                  <div><h2>应用更新与迁移</h2><p>检查稳定版 Release；更新只替换程序文件，保留 workspace、runtime 与已生成产物。</p></div>
+                  <div><h2>应用更新与迁移</h2><p>先校验目标版本更新器，再准备稳定版核心包；更新保留 workspace、runtime 与已生成产物。</p></div>
                   <span id="updateVersionLabel" class="muted-count">v-</span>
                 </div>
                 <div id="updateStatus" class="update-status">尚未检查更新。</div>
                 <div class="button-row">
                   <button id="checkUpdate" class="secondary-button" type="button">检查更新</button>
-                  <button id="prepareUpdate" class="primary-button" type="button" disabled>下载并准备更新</button>
-                  <button id="applyUpdate" class="primary-button" type="button" disabled>重启安装</button>
+                  <button id="prepareUpdate" class="primary-button" type="button" disabled>下载更新器与核心包</button>
+                  <button id="applyUpdate" class="primary-button" type="button" disabled>启动同版本更新器</button>
                 </div>
                 <div class="update-migration-row"><button id="inspectMigration" class="secondary-button" type="button">从 v1.0.3 迁移数据</button><span>选择旧版安装目录，确认后应用会退出并迁移 workspace。</span></div>
               </section>

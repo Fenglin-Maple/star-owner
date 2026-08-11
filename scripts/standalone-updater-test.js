@@ -67,7 +67,7 @@ function createOldProject(root, version = '1.5.1-beta.1') {
   writeFile(root, '.cache/shared-git/credential.txt', 'private-token');
 }
 
-async function createCoreArchive(file, version = '9.9.9', options = {}) {
+async function createCoreArchive(file, version = packageVersion, options = {}) {
   const zip = new JSZip();
   const prefix = `Star-Owner-v${version}-win-x64-core`;
   const add = (relative, value = 'fixture', options) => zip.file(`${prefix}/${relative}`, value, options);
@@ -97,27 +97,32 @@ async function createCoreArchive(file, version = '9.9.9', options = {}) {
   if (!options.legacyUpdaterless) required.push(
     'tools/updater/StarOwnerUpdater.cs',
     'tools/updater/StandaloneUpdater.cs',
+    'tools/updater/UpdaterBuildInfo.cs',
     'tools/updater/StarOwnerUpdater.exe',
     'tools/updater/build-updater.ps1'
   );
   for (const relative of required) add(relative);
   add('scripts/apply-portable-operation.ps1', fs.readFileSync(path.join(repoRoot, 'scripts', 'apply-portable-operation.ps1')));
   add('scripts/recover-portable-operation.ps1', fs.readFileSync(path.join(repoRoot, 'scripts', 'recover-portable-operation.ps1')));
-  if (!options.legacyUpdaterless) add('tools/updater/StarOwnerUpdater.exe', fs.readFileSync(updater));
+  if (!options.legacyUpdaterless) {
+    add('tools/updater/StarOwnerUpdater.exe', fs.readFileSync(updater));
+    add('tools/updater/UpdaterBuildInfo.cs', fs.readFileSync(path.join(repoRoot, 'tools', 'updater', 'UpdaterBuildInfo.cs')));
+  }
   add('assets/state.txt', 'new-core');
   add('assets/star-note.png', fs.readFileSync(path.join(repoRoot, 'assets', 'star-note.png')));
   add('templates/state.txt', 'new-template');
   add('package.json', JSON.stringify({ name: 'star-owner', version, dependencyReleaseVersion: '1.0.0' }));
   add('package-lock.json', JSON.stringify({ name: 'star-owner', version, packages: { '': { name: 'star-owner', version } } }));
-  add('portable-manifest.json', JSON.stringify({ version, dependencyReleaseVersion: '1.0.0', platform: 'win-x64', launcher: 'Start-StarOwner.cmd' }));
+  add('portable-manifest.json', JSON.stringify({ version, dependencyReleaseVersion: '1.0.0', platform: 'win-x64', launcher: 'Start-StarOwner.cmd', updaterVersion: version, updaterProtocolVersion: 1 }));
   add('payload.bin', crypto.randomBytes(3 * 1024 * 1024), { compression: 'STORE' });
   const bytes = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 1 }, platform: 'DOS' });
   fs.writeFileSync(file, bytes);
   return bytes;
 }
 
-function createReleaseServer(coreBytes, version = '9.9.9') {
+function createReleaseServer(coreBytes, version = packageVersion, updaterBytes = fs.readFileSync(updater)) {
   const checksum = crypto.createHash('sha256').update(coreBytes).digest('hex');
+  const updaterChecksum = crypto.createHash('sha256').update(updaterBytes).digest('hex');
   const state = { rangeRequests: 0, slow: false, downloadStarted: Promise.resolve(), signalDownload: null };
   state.armDownload = () => {
     state.downloadStarted = new Promise((resolve) => { state.signalDownload = resolve; });
@@ -136,7 +141,9 @@ function createReleaseServer(coreBytes, version = '9.9.9') {
         published_at: '2026-08-11T00:00:00Z',
         assets: [
           { name: `Star-Owner-v${version}-win-x64-core.zip`, browser_download_url: `${base}/core.zip`, size: coreBytes.length },
-          { name: `Star-Owner-v${version}-win-x64-core.zip.sha256`, browser_download_url: `${base}/core.zip.sha256`, size: 100 }
+          { name: `Star-Owner-v${version}-win-x64-core.zip.sha256`, browser_download_url: `${base}/core.zip.sha256`, size: 100 },
+          { name: `Star-Owner-Updater-v${version}-win-x64.exe`, browser_download_url: `${base}/updater.exe`, size: updaterBytes.length },
+          { name: `Star-Owner-Updater-v${version}-win-x64.exe.sha256`, browser_download_url: `${base}/updater.exe.sha256`, size: 100 }
         ]
       }));
       response.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': body.length });
@@ -147,6 +154,17 @@ function createReleaseServer(coreBytes, version = '9.9.9') {
       const body = Buffer.from(`${checksum}  Star-Owner-v${version}-win-x64-core.zip\n`, 'ascii');
       response.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Length': body.length });
       response.end(body);
+      return;
+    }
+    if (request.url === '/updater.exe.sha256') {
+      const body = Buffer.from(`${updaterChecksum}  Star-Owner-Updater-v${version}-win-x64.exe\n`, 'ascii');
+      response.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Length': body.length });
+      response.end(body);
+      return;
+    }
+    if (request.url === '/updater.exe') {
+      response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': updaterBytes.length });
+      response.end(updaterBytes);
       return;
     }
     if (request.url === '/core.zip') {
@@ -183,7 +201,7 @@ function createReleaseServer(coreBytes, version = '9.9.9') {
     response.writeHead(404);
     response.end();
   });
-  return { server, state, checksum };
+  return { server, state, checksum, updaterChecksum };
 }
 
 (async () => {
@@ -207,6 +225,26 @@ function createReleaseServer(coreBytes, version = '9.9.9') {
     const preview = path.join(root, 'standalone-preview.png');
     assert.strictEqual(await runUpdater(['--standalone-preview', preview]), 0, 'standalone updater preview failed');
     assert(fs.statSync(preview).size > 10000, 'standalone updater preview is blank or incomplete');
+
+    const oldUpdater = path.join(root, 'StarOwnerUpdater-v1.7.2-test.exe');
+    assert.strictEqual(await waitForExit(spawn('pwsh', ['-NoProfile', '-File', path.join(repoRoot, 'tools', 'updater', 'build-updater.ps1'), '-OutputPath', oldUpdater, '-TestVersionOverride', '1.7.2'], { cwd: repoRoot, windowsHide: true, stdio: 'ignore' }), 30000), 0, 'old updater compatibility fixture could not be built');
+    const oldVersionOutput = path.join(root, 'old-updater-version.json');
+    assert.strictEqual(await waitForExit(spawn(oldUpdater, ['--version-file', oldVersionOutput], { cwd: root, windowsHide: true, stdio: 'ignore' }), 10000), 0, 'old updater fixture did not report its version');
+    assert.strictEqual(readJson(oldVersionOutput).version, '1.7.2', 'old updater fixture has the wrong embedded version');
+
+    const versionHandoffRoot = path.join(root, 'version handoff project');
+    createOldProject(versionHandoffRoot, '1.6.2');
+    const versionHandoffOutput = path.join(root, 'version-handoff.json');
+    assert.strictEqual(await waitForExit(spawn(oldUpdater, ['--standalone-test-handoff', versionHandoffRoot, releaseApi, versionHandoffOutput], { cwd: root, windowsHide: true, stdio: 'ignore' }), 120000), 0, 'old updater did not hand off to the target-version updater');
+    const versionHandoff = readJson(versionHandoffOutput);
+    assert.strictEqual(versionHandoff.sourceUpdaterVersion, '1.7.2', 'handoff was not initiated by the simulated old updater');
+    assert.strictEqual(versionHandoff.version, packageVersion, 'handoff did not select the latest target version');
+    const versionHandoffResult = await waitFor(() => {
+      const file = path.join(versionHandoffRoot, '.updates', 'operation-result.json');
+      try { const value = readJson(file); return value.status === 'succeeded' ? value : null; } catch { return null; }
+    }, 120000);
+    assert.strictEqual(versionHandoffResult.targetVersion, packageVersion, 'matching updater installed a different application version');
+    assert.strictEqual(readJson(path.join(versionHandoffRoot, 'package.json')).version, packageVersion, 'matching updater handoff did not update the project');
 
     const inspectRoot = path.join(root, '旧版 pre release 项目');
     createOldProject(inspectRoot);
@@ -239,7 +277,10 @@ function createReleaseServer(coreBytes, version = '9.9.9') {
     const releaseJson = path.join(root, 'release.json');
     fs.writeFileSync(releaseJson, JSON.stringify({
       tag_name: 'v9.9.9', draft: false, prerelease: false,
-      assets: [{ name: 'Star-Owner-v9.9.9-win-x64-core.zip', browser_download_url: 'https://example.invalid/core.zip', size: 1, digest: `sha256:${'a'.repeat(64)}` }]
+      assets: [
+        { name: 'Star-Owner-v9.9.9-win-x64-core.zip', browser_download_url: 'https://example.invalid/core.zip', size: 1, digest: `sha256:${'a'.repeat(64)}` },
+        { name: 'Star-Owner-Updater-v9.9.9-win-x64.exe', browser_download_url: 'https://example.invalid/updater.exe', size: 1, digest: `sha256:${'b'.repeat(64)}` }
+      ]
     }));
     const releaseOutput = path.join(root, 'release-output.json');
     assert.strictEqual(await runUpdater(['--standalone-test-release', releaseJson, releaseOutput]), 0, 'stable release was rejected');
@@ -258,6 +299,14 @@ function createReleaseServer(coreBytes, version = '9.9.9') {
     const collisionOutput = path.join(root, 'collision-output.json');
     assert.notStrictEqual(await runUpdater(['--standalone-test-entries', collisionEntries, path.join(root, 'collision-stage'), collisionOutput]), 0, 'case-insensitive path collision was accepted');
 
+    const longPrefixEntries = path.join(root, 'long-prefix-entries.txt');
+    const longPrefix = `Star-Owner-v${packageVersion}-win-x64-core`;
+    fs.writeFileSync(longPrefixEntries, `${longPrefix}/package.json\n${longPrefix}/runtime/python/${'nested/'.repeat(9)}probe.txt\n`);
+    const longPrefixStage = path.join(root, `long-stage-${'x'.repeat(72)}`);
+    const longPrefixOutput = path.join(root, 'long-prefix-output.json');
+    assert.strictEqual(await runUpdater(['--standalone-test-entries', longPrefixEntries, longPrefixStage, longPrefixOutput]), 0, 'validated ZIP prefix was counted against the real extraction path budget');
+    assert.strictEqual(readJson(longPrefixOutput).prefix, longPrefix, 'long-path archive prefix was not detected before output-path validation');
+
     const recoveryRoot = path.join(root, 'interrupted old update');
     createOldProject(recoveryRoot, '1.6.2');
     const recoveryUpdates = path.join(recoveryRoot, '.updates');
@@ -275,7 +324,7 @@ function createReleaseServer(coreBytes, version = '9.9.9') {
 
     const prepareRoot = path.join(root, 'prepare 中文 path');
     createOldProject(prepareRoot, '1.0.3');
-    const partial = path.join(prepareRoot, '.updates', 'downloads', 'Star-Owner-v9.9.9-win-x64-core.zip.partial');
+    const partial = path.join(prepareRoot, '.updates', 'downloads', `Star-Owner-v${packageVersion}-win-x64-core.zip.partial`);
     fs.mkdirSync(path.dirname(partial), { recursive: true });
     fs.writeFileSync(partial, coreBytes.subarray(0, 65536));
     const prepareOutput = path.join(root, 'prepare-output.json');
@@ -295,8 +344,8 @@ function createReleaseServer(coreBytes, version = '9.9.9') {
       const legacyOutput = path.join(root, 'legacy-output.json');
       const legacyApi = `http://127.0.0.1:${legacyRemote.server.address().port}/latest`;
       const legacyCode = await runUpdater(['--standalone-test-prepare', legacyTarget, legacyApi, legacyOutput], 120000);
-      assert.strictEqual(legacyCode, 0, `valid v1.7.0 latest package was rejected: ${fs.existsSync(legacyOutput) ? readJson(legacyOutput).message || '' : 'no result'}`);
-      assert.strictEqual(readJson(legacyOutput).release.version, '1.7.0', 'legacy latest version was not prepared');
+      assert.notStrictEqual(legacyCode, 0, 'a target without a matching-version updater was accepted');
+      assert.match(readJson(legacyOutput).message, /同版本更新器|必须先切换/, 'legacy updater refusal did not explain the version lock');
     } finally {
       await new Promise((resolve) => legacyRemote.server.close(resolve));
     }
@@ -319,7 +368,7 @@ function createReleaseServer(coreBytes, version = '9.9.9') {
       try { const value = readJson(file); return value.status === 'succeeded' ? value : null; } catch { return null; }
     }, 120000);
     assert.strictEqual(operationResult.status, 'succeeded', 'standalone transaction did not complete');
-    assert.strictEqual(readJson(path.join(installRoot, 'package.json')).version, '9.9.9', 'standalone update did not install latest package');
+    assert.strictEqual(readJson(path.join(installRoot, 'package.json')).version, packageVersion, 'standalone update did not install latest package');
     assert.strictEqual(fs.readFileSync(path.join(installRoot, 'assets', 'state.txt'), 'utf8'), 'new-core', 'standalone update did not replace core files');
     assert.deepStrictEqual(fs.readFileSync(path.join(installRoot, 'workspace', 'orchestrator.sqlite')), preserved.database, 'workspace database changed');
     assert.deepStrictEqual(fs.readFileSync(path.join(installRoot, 'runtime', 'models', 'small', 'model.bin')), preserved.model, 'model changed');

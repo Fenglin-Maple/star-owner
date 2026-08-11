@@ -3042,7 +3042,7 @@ prepareUpdateButton?.addEventListener('click', async () => {
   catch (error) { showToast(TEXT.toastError, error.message || String(error), 'error'); }
 });
 applyUpdateButton?.addEventListener('click', async () => {
-  if (!window.confirm('应用将退出并安装已校验的新版本，workspace 和 runtime 会保留。继续吗？')) return;
+  if (!window.confirm('应用将退出，并由已校验的目标同版本更新器执行安装；workspace 和 runtime 会保留。继续吗？')) return;
   try { await window.orchestrator.applyUpdate(); }
   catch (error) { showToast(TEXT.toastError, error.message || String(error), 'error'); }
 });
