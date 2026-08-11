@@ -1,9 +1,9 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { readBilibiliCookieHeader, requireBilibiliCookie } = require('./bilibili-auth');
+const { bilibiliCookieRequiredError, readBilibiliCookieHeader, requireBilibiliCookie } = require('./bilibili-auth');
 const { applySubmissionFinalization, stageSubmissionFinalization } = require('./submission-artifacts');
-const { collectionBlockReason, collectionKindInfo, collectionStorageName } = require('./collection-state');
+const { collectionBlockReason, collectionKindInfo, collectionStorageName, isBiliCollection } = require('./collection-state');
 const { promoteMindMap } = require('./markdown');
 const { isLoginRequiredMessage, isVideoUnavailableMessage, loginRequiredError } = require('./media-errors');
 const { abortTaskAttempt, cleanupAttemptFiles, createWorkId } = require('./task-attempt');
@@ -377,6 +377,62 @@ class InternalAgentManager {
     return { cookieFile, cookieHeader: readBilibiliCookieHeader(cookieFile) };
   }
 
+  async prepareQueueAuthentication(session, purpose, signal) {
+    if (session.mode !== 'queue') return { required: false };
+    const collection = this.store.getCollectionById(String(session.collectionId || ''));
+    if (!collection) throw new Error('工作收藏夹已不存在。');
+    this.reclaimExpired(collection.id);
+    const remoteTasks = this.store.listTasks({ collectionId: collection.id })
+      .filter((task) => isAgentTaskCandidate(task, session))
+      .filter(taskRequiresBilibiliAuthentication);
+    if (!remoteTasks.length) return { required: false, collection };
+
+    const user = this.getCurrentUser();
+    if (!user?.isLogin) throw bilibiliCookieRequiredError(`${purpose}前未检测到已登录的 B站账户。`);
+    const userId = bilibiliUserId(user);
+    if (!userId) throw bilibiliCookieRequiredError(`${purpose}前无法确认当前 B站登录账户。`);
+    const expectedUserIds = expectedBilibiliUserIds(collection, remoteTasks);
+    if (expectedUserIds.size > 1) {
+      throw bilibiliAccountMismatchError('所选收藏夹中的待处理任务来自多个 B站账户，不能共用同一份登录 Cookie。请分别放入对应账户的收藏夹后重试。');
+    }
+    const expectedUserId = [...expectedUserIds][0] || '';
+    if (expectedUserId && expectedUserId !== userId) {
+      throw bilibiliAccountMismatchError(`所选收藏夹属于 B站 UID ${expectedUserId}，当前登录的是 UID ${userId}。请先切换到该收藏夹所属账户。`);
+    }
+
+    const cookieFile = await requireBilibiliCookie({
+      bili: this.bili,
+      user,
+      purpose,
+      refresh: true,
+      requireLoginCookie: true
+    });
+    const latestUser = this.getCurrentUser();
+    if (!latestUser?.isLogin || bilibiliUserId(latestUser) !== userId) {
+      throw bilibiliAccountMismatchError('导出 Cookie 期间 B站登录账户发生了变化，未修改收藏夹。请确认当前账户后重试。', 'BILIBILI_ACCOUNT_CHANGED');
+    }
+    if (signal?.aborted) return { required: true, cancelled: true };
+
+    const latestCollection = this.store.getCollectionById(collection.id);
+    if (!latestCollection) throw new Error('工作收藏夹在 Cookie 校验期间被删除。');
+    const now = new Date().toISOString();
+    const updatedCollection = { ...latestCollection, cookieFile, cookieExportedAt: now };
+    this.store.transaction(() => {
+      this.store.set('collections', updatedCollection.id, updatedCollection);
+      for (const task of remoteTasks.filter((item) => item.singleTask === true)) {
+        const latestTask = this.store.getTask(task.id);
+        if (!latestTask || !isAgentTaskCandidate(latestTask, session)) continue;
+        this.store.set('tasks', latestTask.id, {
+          ...latestTask,
+          cookieFile,
+          publicAttempt: false,
+          updatedAt: now
+        });
+      }
+    });
+    return { required: true, cookieFile, collection: updatedCollection };
+  }
+
   removeSingleTaskSiblings(keepTask) {
     const siblings = this.store.listTasks({ collectionId: keepTask.collectionId })
       .filter((task) => task.id !== keepTask.id && task.singleTask === true && task.bvid === keepTask.bvid);
@@ -466,6 +522,27 @@ class InternalAgentManager {
       this.store.upsertTask(task);
       this.store.commit();
       if (wasWaitingForLogin) this.log(session, '已重新同步 B站登录 Cookie，准备从头重试。');
+    } else if (session.mode === 'queue') {
+      const wasWaitingForLogin = session.status === 'waiting-login';
+      const startupController = new AbortController();
+      this.controllers.set(session.id, startupController);
+      let authentication;
+      try {
+        authentication = await this.prepareQueueAuthentication(
+          session,
+          wasWaitingForLogin ? '重新开始 Agent 视频总结工作流' : '开始 Agent 视频总结工作流',
+          startupController.signal
+        );
+      } catch (error) {
+        if (this.controllers.get(session.id) === startupController) this.controllers.delete(session.id);
+        throw error;
+      }
+      if (startupController.signal.aborted || authentication.cancelled) {
+        if (this.controllers.get(session.id) === startupController) this.controllers.delete(session.id);
+        return this.publicSession(this.requireSession(session.id));
+      }
+      if (this.controllers.get(session.id) === startupController) this.controllers.delete(session.id);
+      if (wasWaitingForLogin && authentication.required) this.log(session, '已重新同步 B站登录 Cookie，准备继续领取任务。');
     }
     const worker = this.store.getWorker(session.workerId);
     if (worker?.status === 'paused') this.store.updateWorker(worker.id, { status: 'active' });
@@ -794,8 +871,9 @@ class InternalAgentManager {
           this.emit({ type: 'infrastructure-stopped', sessionId: latest.id, taskId: task.id, report, possibleCauses });
           return;
         }
-        if (latest.mode === 'single' && error.code === 'BILIBILI_LOGIN_REQUIRED') {
+        if (['single', 'queue'].includes(latest.mode) && error.code === 'BILIBILI_LOGIN_REQUIRED') {
           this.abortAttempt(task.id, latest.workerId, error.message || String(error), 'login-required');
+          latest.acceptNewTasks = false;
           latest.status = 'waiting-login';
           latest.phase = 'B站登录 Cookie 已失效';
           latest.lastError = error.message || String(error);
@@ -804,7 +882,8 @@ class InternalAgentManager {
           latest.progress = Math.max(0.08, Number(latest.progress || 0));
           this.saveSession(latest);
           this.log(latest, `B站拒绝了当前登录 Cookie：${latest.lastError}`);
-          this.emit({ type: 'bilibili-cookie-required', sessionId: latest.id, bvid: task.bvid, title: task.title, reason: '当前 B站登录 Cookie 已失效。请重新登录 B站，再回到“视频总结（单个）”点击“登录后重试”。' });
+          const retryTarget = latest.mode === 'single' ? '“视频总结（单个）”' : '“Agent 视频总结工作流”';
+          this.emit({ type: 'bilibili-cookie-required', sessionId: latest.id, bvid: task.bvid, title: task.title, reason: `当前 B站登录 Cookie 已失效。请重新登录 B站，再回到${retryTarget}点击“登录后重试”。` });
           return;
         }
         excluded.add(task.id);
@@ -837,15 +916,8 @@ class InternalAgentManager {
     const collectionReason = agentCollectionBlockReason(collection);
     if (collectionReason) throw new Error(collectionReason);
     this.reclaimExpired(collection.id);
-    const task = this.store.listTasks({ collectionId: collection.id }).find((item) => {
-      if (excluded.has(item.id) || item.enabled === false || item.unsupportedVideo) return false;
-      if (session.mode === 'single' && item.id !== session.singleTaskId) return false;
-      if (session.mode === 'multipart') {
-        if (item.multiPartRole !== 'part' || item.multiPartParentId !== session.multiPartParentId) return false;
-        if (session.multiPartTaskIds?.length && !session.multiPartTaskIds.includes(String(item.id))) return false;
-      } else if (item.multiPartParentId) return false;
-      return item.status === 'pending' || item.status === 'failed' || (item.status === 'rejected' && !item.workId && !item.claimedBy);
-    });
+    const task = this.store.listTasks({ collectionId: collection.id })
+      .find((item) => isAgentTaskCandidate(item, session, excluded));
     if (!task) return null;
     const dirs = this.collectionDirectories(collection);
     const canReuse = task.artifactDir && (task.cachedVideoId
@@ -973,7 +1045,11 @@ class InternalAgentManager {
       if (TERMINAL_RUNS.has(run.status)) {
         if (run.status !== 'succeeded') {
           const message = `${run.toolName || run.toolId} ${run.status}：${run.error || '请查看运行日志'}`;
-          if (session.mode === 'single' && (run.errorCode === 'BILIBILI_COOKIE_REQUIRED' || isLoginRequiredMessage(message))) throw loginRequiredError(message);
+          if (['single', 'queue'].includes(session.mode)
+            && taskRequiresBilibiliAuthentication(task)
+            && (run.errorCode === 'BILIBILI_COOKIE_REQUIRED' || isLoginRequiredMessage(message))) {
+            throw loginRequiredError(message);
+          }
           const error = new Error(message);
           error.code = run.errorCode || '';
           error.failureKind = run.failureKind || '';
@@ -1806,6 +1882,39 @@ function collectMaterials(artifactDir) {
     station,
     frames
   };
+}
+
+function isAgentTaskCandidate(task = {}, session = {}, excluded = null) {
+  if (excluded?.has?.(task.id) || task.enabled === false || task.unsupportedVideo) return false;
+  if (session.mode === 'single' && task.id !== session.singleTaskId) return false;
+  if (session.mode === 'multipart') {
+    if (task.multiPartRole !== 'part' || task.multiPartParentId !== session.multiPartParentId) return false;
+    if (session.multiPartTaskIds?.length && !session.multiPartTaskIds.includes(String(task.id))) return false;
+  } else if (task.multiPartParentId) return false;
+  return task.status === 'pending' || task.status === 'failed' || (task.status === 'rejected' && !task.workId && !task.claimedBy);
+}
+
+function taskRequiresBilibiliAuthentication(task = {}) {
+  return task.localImported !== true && task.sourceType !== 'local-video';
+}
+
+function expectedBilibiliUserIds(collection = {}, tasks = []) {
+  const ids = new Set();
+  if (isBiliCollection(collection) && collection.userId) ids.add(String(collection.userId));
+  for (const task of tasks) {
+    if (task.singleTask === true && task.sourceBilibiliUid) ids.add(String(task.sourceBilibiliUid));
+  }
+  return ids;
+}
+
+function bilibiliUserId(user = {}) {
+  return String(user.mid || user.id || '').trim();
+}
+
+function bilibiliAccountMismatchError(message, code = 'BILIBILI_ACCOUNT_MISMATCH') {
+  const error = new Error(String(message || '当前 B站登录账户与收藏夹不匹配。'));
+  error.code = code;
+  return error;
 }
 
 function agentCollectionBlockReason(collection) {

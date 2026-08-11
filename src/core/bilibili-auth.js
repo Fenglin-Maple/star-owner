@@ -2,11 +2,11 @@ const fs = require('fs');
 
 const BILIBILI_COOKIE_REQUIRED = 'BILIBILI_COOKIE_REQUIRED';
 
-async function requireBilibiliCookie({ bili, user, purpose = '请求 B站视频' } = {}) {
+async function requireBilibiliCookie({ bili, user, purpose = '请求 B站视频', refresh = false, requireLoginCookie = false } = {}) {
   if (!user?.isLogin) throw bilibiliCookieRequiredError(`${purpose}前未检测到已登录的 B站账户。`);
 
   let cookieFile = String(user.cookieFile || '').trim();
-  if (!isUsableBilibiliCookieFile(cookieFile)) {
+  if (refresh || !isUsableBilibiliCookieFile(cookieFile)) {
     try {
       cookieFile = String(await bili?.exportCookies?.(user.name || String(user.mid || user.id || 'bilibili')) || '').trim();
     } catch (error) {
@@ -15,6 +15,9 @@ async function requireBilibiliCookie({ bili, user, purpose = '请求 B站视频'
   }
   if (!isUsableBilibiliCookieFile(cookieFile)) {
     throw bilibiliCookieRequiredError(`${purpose}前没有找到可用的 B站登录 Cookie。`);
+  }
+  if (requireLoginCookie && !hasBilibiliLoginCookieFile(cookieFile)) {
+    throw bilibiliCookieRequiredError(`${purpose}前导出的 B站登录 Cookie 已失效或不存在。`);
   }
   return cookieFile;
 }
@@ -39,6 +42,17 @@ function readBilibiliCookieHeader(file) {
       .join('; ');
   } catch {
     return '';
+  }
+}
+
+function hasBilibiliLoginCookieFile(file) {
+  const cookieFile = String(file || '').trim();
+  if (!cookieFile) return false;
+  try {
+    return parseBilibiliCookieLines(fs.readFileSync(cookieFile, 'utf8'))
+      .some((cookie) => cookie.name.toUpperCase() === 'SESSDATA');
+  } catch {
+    return false;
   }
 }
 
@@ -76,6 +90,7 @@ function bilibiliCookieRequiredError(detail = '') {
 module.exports = {
   BILIBILI_COOKIE_REQUIRED,
   bilibiliCookieRequiredError,
+  hasBilibiliLoginCookieFile,
   isUsableBilibiliCookieFile,
   readBilibiliCookieHeader,
   requireBilibiliCookie

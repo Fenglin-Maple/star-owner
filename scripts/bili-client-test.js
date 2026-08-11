@@ -1,7 +1,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { isUsableBilibiliCookieFile, readBilibiliCookieHeader, requireBilibiliCookie } = require('../src/core/bilibili-auth');
+const { hasBilibiliLoginCookieFile, isUsableBilibiliCookieFile, readBilibiliCookieHeader, requireBilibiliCookie } = require('../src/core/bilibili-auth');
 const { BiliClient, isBilibiliCookieDomain, normalizeBilibiliAssetUrl } = require('../src/core/bili');
 
 (async () => {
@@ -14,8 +14,28 @@ const { BiliClient, isBilibiliCookieDomain, normalizeBilibiliAssetUrl } = requir
   fs.writeFileSync(cookieFile, '# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tTRUE\t1\tSESSDATA\texpired\n', 'utf8');
   assert.strictEqual(isUsableBilibiliCookieFile(cookieFile), false, 'expired B站 Cookie was treated as usable');
   fs.writeFileSync(cookieFile, '# Netscape HTTP Cookie File\n#HttpOnly_.bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\ttest-session\n', 'utf8');
-  assert(isUsableBilibiliCookieFile(cookieFile) && readBilibiliCookieHeader(cookieFile) === 'SESSDATA=test-session', 'valid HttpOnly B站 Cookie was not parsed');
+  assert(isUsableBilibiliCookieFile(cookieFile) && hasBilibiliLoginCookieFile(cookieFile) && readBilibiliCookieHeader(cookieFile) === 'SESSDATA=test-session', 'valid HttpOnly B站 Cookie was not parsed');
   await assert.rejects(() => requireBilibiliCookie({ bili: {}, user: null, purpose: '测试视频请求' }), (error) => error.code === 'BILIBILI_COOKIE_REQUIRED');
+  const trackingOnlyCookie = path.join(authRoot, 'tracking-only.txt');
+  fs.writeFileSync(trackingOnlyCookie, '# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tFALSE\t0\tbuvid3\tvisitor-only\n', 'utf8');
+  assert(isUsableBilibiliCookieFile(trackingOnlyCookie) && !hasBilibiliLoginCookieFile(trackingOnlyCookie), 'tracking-only Cookie was mistaken for a login session');
+  await assert.rejects(() => requireBilibiliCookie({
+    bili: { exportCookies: async () => trackingOnlyCookie },
+    user: { isLogin: true, mid: '100', name: '测试用户', cookieFile },
+    purpose: '启动 Agent',
+    refresh: true,
+    requireLoginCookie: true
+  }), (error) => error.code === 'BILIBILI_COOKIE_REQUIRED');
+  const refreshedCookie = path.join(authRoot, 'refreshed.txt');
+  fs.writeFileSync(refreshedCookie, '# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\trefreshed-session\n', 'utf8');
+  const selectedCookie = await requireBilibiliCookie({
+    bili: { exportCookies: async () => refreshedCookie },
+    user: { isLogin: true, mid: '100', name: '测试用户', cookieFile },
+    purpose: '启动 Agent',
+    refresh: true,
+    requireLoginCookie: true
+  });
+  assert.strictEqual(selectedCookie, refreshedCookie, 'forced Cookie refresh reused the stale exported file');
 
   assert.strictEqual(normalizeBilibiliAssetUrl('http://i0.hdslb.com/avatar.jpg'), 'https://i0.hdslb.com/avatar.jpg');
   assert.strictEqual(normalizeBilibiliAssetUrl('//i1.hdslb.com/avatar.jpg'), 'https://i1.hdslb.com/avatar.jpg');

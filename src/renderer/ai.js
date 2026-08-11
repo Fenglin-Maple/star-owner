@@ -317,7 +317,9 @@
       if (start) await window.orchestrator.internalAgentStart(session.id);
       await refreshAll({ quiet: true });
       notify('Agent 会话已创建', start ? '已开始从指定收藏夹持续领取任务。' : '可在会话详情中手动启动。', 'success');
-    } catch (error) { notify('无法创建 Agent', error.message || String(error), 'error'); }
+    } catch (error) {
+      if (!window.StarOwnerBilibiliAuthNotice?.notifyBilibiliCookieRequired(error, notify)) notify('无法创建 Agent', error.message || String(error), 'error');
+    }
   }
 
   function populateProviderSelect(providerSelect, modelSelect, providerId, modelId) {
@@ -983,8 +985,8 @@
   function providerName(id) { return state.providers.find((item) => item.id === id)?.name || '未配置供应商'; }
   function statusLabel(status) { return ({ idle: '等待任务', running: '工作中', draining: '即将暂停', paused: '已暂停', blocked: '故障停止', 'waiting-login': '等待登录', stopping: '停止中', stopped: '已停止', completed: '已完成', error: '失败', unavailable: '视频不可用', unsupported: '视频类型暂不支持', 'model-unavailable': '模型不可用', 'collection-unavailable': '收藏夹不可用' })[status] || status || '未知'; }
   function startActionLabel(session) {
+    if (session.status === 'waiting-login') return '登录后重试';
     if (session.mode === 'single') {
-      if (session.status === 'waiting-login') return '登录后重试';
       return session.status === 'idle' ? '开始处理' : '重新开始处理';
     }
     return session.status === 'idle' ? '开始接单' : '重新开始接单';

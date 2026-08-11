@@ -106,10 +106,12 @@ function assert(condition, message) {
   let forceUnsupportedFailure = false;
   let holdToolRuns = false;
   let infrastructureArtifactDir = '';
+  let lastMaterialCollectionCookie = '';
   const toolRunner = {
     getState: () => ({ hardware: { checkedAt: '', localAsrSupported: false }, config: { cpuAsrEnabled: false } }),
     start: ({ task, tool, workerId, collection: runCollection }) => {
       const id = `run-${tool.id}-${Date.now()}`;
+      if (tool.id === 'material-bundle') lastMaterialCollectionCookie = String(runCollection?.cookieFile || '');
       const loginBlocked = forceLoginFailure && tool.id === 'material-bundle';
       const infrastructureBlocked = forceInfrastructureFailure && tool.id === 'material-bundle';
       const unavailable = forceUnavailableFailure && tool.id === 'material-bundle';
@@ -131,7 +133,24 @@ function assert(condition, message) {
   let currentUser = null;
   const cookieFixture = path.join(root, 'login-cookies.txt');
   const cookieText = '# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\ttest-session\n';
-  const manager = new InternalAgentManager({ store, toolRunner, ragAssistant: rag, bili: { exportCookies: async () => { fs.writeFileSync(cookieFixture, cookieText); return cookieFixture; } }, getCurrentUser: () => currentUser, emit: (event) => events.push(event), emptyResponseRetryDelays: [0, 0, 0, 0, 0] });
+  let exportedCookieFile = cookieFixture;
+  let cookieExportCalls = 0;
+  const manager = new InternalAgentManager({
+    store,
+    toolRunner,
+    ragAssistant: rag,
+    bili: {
+      exportCookies: async () => {
+        cookieExportCalls += 1;
+        fs.mkdirSync(path.dirname(exportedCookieFile), { recursive: true });
+        fs.writeFileSync(exportedCookieFile, cookieText);
+        return exportedCookieFile;
+      }
+    },
+    getCurrentUser: () => currentUser,
+    emit: (event) => events.push(event),
+    emptyResponseRetryDelays: [0, 0, 0, 0, 0]
+  });
   const sharedCollection = store.upsertCollection({ id: 'shared-agent-test', userId: 'shared-user', userName: '共享', name: '共享知识测试', internal: true, collectionKind: 'shared', workspaceId: workspace.id, workspaceRoot: workspace.root, collectionRoot: path.join(workspace.root, '共享', '共享知识测试') });
   assert(!manager.state().collections.some((item) => item.id === sharedCollection.id), '共享收藏夹仍出现在 Agent 工作流收藏夹列表');
   assert(!manager.listInternalCollections().some((item) => item.id === sharedCollection.id), '共享收藏夹仍出现在单视频总结收藏夹列表');
@@ -450,6 +469,158 @@ function assert(condition, message) {
   store.upsertCollection({ ...store.getCollectionById(biliCollection.id), syncReady: false, syncState: 'deleted', biliDeleted: true });
   const guardedPublic = manager.publicSession(manager.listSessions().find((item) => item.id === guardedSession.id));
   assert(guardedPublic.collectionAvailable === false && guardedPublic.collectionUnavailableReason.includes('B站收藏夹已删除'), 'deleted collection was not exposed as unavailable to the internal Agent UI');
+
+  const oldQueueCookie = path.join(root, 'old-queue-cookie.txt');
+  fs.writeFileSync(oldQueueCookie, cookieText, 'utf8');
+  const refreshedQueueCookie = path.join(root, 'refreshed-queue-cookie.txt');
+  exportedCookieFile = refreshedQueueCookie;
+  currentUser = { isLogin: true, name: '测试登录用户', mid: '100', cookieFile: oldQueueCookie };
+  const authenticatedCollection = store.upsertCollection({
+    id: '100:agent-cookie-refresh',
+    mediaId: 'agent-cookie-refresh',
+    userId: '100',
+    userName: '测试登录用户',
+    name: 'Agent Cookie 刷新测试',
+    storageName: 'Agent Cookie 刷新测试',
+    workspaceId: workspace.id,
+    workspaceRoot: workspace.root,
+    cookieFile: oldQueueCookie,
+    syncReady: true,
+    syncState: 'ready',
+    lastSyncedAt: new Date().toISOString()
+  });
+  const authenticatedTaskId = `${authenticatedCollection.id}:BVQUEUEAUTH1`;
+  store.upsertTask({ id: authenticatedTaskId, collectionId: authenticatedCollection.id, bvid: 'BVQUEUEAUTH1', title: '队列 Cookie 测试', status: 'pending', enabled: true, attempts: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  store.commit();
+  const authenticatedSession = manager.createSession({ title: '队列 Cookie 测试', collectionId: authenticatedCollection.id, providerId: 'provider-test', modelId: 'model-test' });
+  const exportsBeforeQueueStart = cookieExportCalls;
+  await manager.start(authenticatedSession.id);
+  await waitForCurrentTask(manager, authenticatedSession.id);
+  assert(cookieExportCalls === exportsBeforeQueueStart + 1, 'normal Agent startup did not export a fresh B站 Cookie snapshot exactly once');
+  assert(store.getCollectionById(authenticatedCollection.id)?.cookieFile === refreshedQueueCookie, 'fresh Agent Cookie was not persisted to the B站 collection before task execution');
+  assert(lastMaterialCollectionCookie === refreshedQueueCookie, 'Agent material workflow did not receive the newly persisted collection Cookie');
+  manager.stop(authenticatedSession.id);
+  await waitForStatus(manager, authenticatedSession.id, 'stopped');
+
+  const nextQueueCookie = path.join(root, 'next-queue-cookie.txt');
+  exportedCookieFile = nextQueueCookie;
+  currentUser = { isLogin: true, name: '测试登录用户', mid: '100', cookieFile: refreshedQueueCookie };
+  await manager.start(authenticatedSession.id);
+  await waitForCurrentTask(manager, authenticatedSession.id);
+  assert(store.getCollectionById(authenticatedCollection.id)?.cookieFile === nextQueueCookie && lastMaterialCollectionCookie === nextQueueCookie, 'the next Agent start fell back to the previous collection Cookie');
+  manager.stop(authenticatedSession.id);
+  await waitForStatus(manager, authenticatedSession.id, 'stopped');
+
+  holdToolRuns = false;
+  forceLoginFailure = true;
+  await manager.start(authenticatedSession.id);
+  const queueWaitingForLogin = await waitForStatus(manager, authenticatedSession.id, 'waiting-login');
+  assert(queueWaitingForLogin.acceptNewTasks === false && store.getTask(authenticatedTaskId)?.status === 'pending', 'runtime Cookie rejection did not stop the queue Agent and return its task to pending');
+  assert(events.some((event) => event.type === 'bilibili-cookie-required' && event.sessionId === authenticatedSession.id), 'queue Agent Cookie rejection did not emit the bottom-right login notification');
+  forceLoginFailure = false;
+  holdToolRuns = true;
+
+  const exportsBeforeMismatch = cookieExportCalls;
+  currentUser = { isLogin: true, name: '其它测试用户', mid: '200', cookieFile: nextQueueCookie };
+  let accountMismatchRejected = false;
+  try { await manager.start(authenticatedSession.id); }
+  catch (error) { accountMismatchRejected = error.code === 'BILIBILI_ACCOUNT_MISMATCH'; }
+  assert(accountMismatchRejected, 'Agent startup allowed another B站 account to overwrite the collection Cookie');
+  assert(cookieExportCalls === exportsBeforeMismatch && store.getCollectionById(authenticatedCollection.id)?.cookieFile === nextQueueCookie, 'account mismatch modified or re-exported the collection Cookie');
+  assert(store.getTask(authenticatedTaskId)?.status === 'pending', 'account mismatch claimed a task before authentication completed');
+
+  currentUser = null;
+  let missingQueueLoginRejected = false;
+  try { await manager.start(authenticatedSession.id); }
+  catch (error) { missingQueueLoginRejected = error.code === 'BILIBILI_COOKIE_REQUIRED'; }
+  assert(missingQueueLoginRejected && store.getTask(authenticatedTaskId)?.status === 'pending', 'normal B站 Agent did not stop before task claim when login was missing');
+
+  const localCollectionRoot = path.join(workspace.root, '内置用户', '本地媒体 Agent Cookie 旁路');
+  fs.mkdirSync(localCollectionRoot, { recursive: true });
+  const localCollection = store.upsertCollection({
+    id: 'builtin-video-cache:local-agent-auth-test',
+    userId: 'builtin-agent-user',
+    userName: '内置用户',
+    name: '本地媒体 Agent Cookie 旁路',
+    internal: true,
+    collectionKind: 'video-cache',
+    videoCacheSource: 'local-media',
+    workspaceId: workspace.id,
+    workspaceRoot: workspace.root,
+    collectionRoot: localCollectionRoot,
+    videosDir: localCollectionRoot
+  });
+  const localArtifact = path.join(localCollectionRoot, 'local-task');
+  fs.mkdirSync(localArtifact, { recursive: true });
+  fs.writeFileSync(path.join(localArtifact, 'merged.mp4'), 'local media', 'utf8');
+  const localTaskId = `${localCollection.id}:LOCAL-AUTH-TEST`;
+  store.upsertTask({
+    id: localTaskId,
+    collectionId: localCollection.id,
+    bvid: 'LOCAL-AUTH-TEST',
+    title: '本地导入视频',
+    status: 'pending',
+    enabled: true,
+    cachedVideoId: 'local-cache-record',
+    artifactDir: localArtifact,
+    allowedRoot: localCollectionRoot,
+    localImported: true,
+    sourceType: 'local-video',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+  store.commit();
+  const localSession = manager.createSession({ title: '本地媒体无需 Cookie', collectionId: localCollection.id, providerId: 'provider-test', modelId: 'model-test' });
+  const exportsBeforeLocalStart = cookieExportCalls;
+  await manager.start(localSession.id);
+  await waitForCurrentTask(manager, localSession.id);
+  assert(cookieExportCalls === exportsBeforeLocalStart, 'local imported video/audio Agent unexpectedly required or exported a B站 Cookie');
+  manager.stop(localSession.id);
+  await waitForStatus(manager, localSession.id, 'stopped');
+
+  const downloadedCollectionRoot = path.join(workspace.root, '内置用户', '下载缓存 Agent Cookie');
+  fs.mkdirSync(downloadedCollectionRoot, { recursive: true });
+  const downloadedCollection = store.upsertCollection({
+    id: 'builtin-video-cache:downloaded-agent-auth-test',
+    userId: 'builtin-agent-user',
+    userName: '内置用户',
+    name: '下载缓存 Agent Cookie',
+    internal: true,
+    collectionKind: 'video-cache',
+    workspaceId: workspace.id,
+    workspaceRoot: workspace.root,
+    collectionRoot: downloadedCollectionRoot,
+    videosDir: downloadedCollectionRoot,
+    cookieFile: oldQueueCookie
+  });
+  const downloadedArtifact = path.join(downloadedCollectionRoot, 'downloaded-task');
+  fs.mkdirSync(downloadedArtifact, { recursive: true });
+  fs.writeFileSync(path.join(downloadedArtifact, 'merged.mp4'), 'downloaded media', 'utf8');
+  const downloadedTaskId = `${downloadedCollection.id}:BVCACHEAUTH1`;
+  store.upsertTask({
+    id: downloadedTaskId,
+    collectionId: downloadedCollection.id,
+    bvid: 'BVCACHEAUTH1',
+    title: 'B站下载缓存视频',
+    status: 'pending',
+    enabled: true,
+    cachedVideoId: 'download-cache-record',
+    artifactDir: downloadedArtifact,
+    allowedRoot: downloadedCollectionRoot,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+  store.commit();
+  const downloadedCookie = path.join(root, 'downloaded-cache-agent-cookie.txt');
+  exportedCookieFile = downloadedCookie;
+  currentUser = { isLogin: true, name: '测试登录用户', mid: '100', cookieFile: nextQueueCookie };
+  const downloadedSession = manager.createSession({ title: '下载缓存需要 Cookie', collectionId: downloadedCollection.id, providerId: 'provider-test', modelId: 'model-test' });
+  await manager.start(downloadedSession.id);
+  await waitForCurrentTask(manager, downloadedSession.id);
+  assert(store.getCollectionById(downloadedCollection.id)?.cookieFile === downloadedCookie && lastMaterialCollectionCookie === downloadedCookie, 'B站 downloaded cache Agent did not refresh and use the current login Cookie');
+  manager.stop(downloadedSession.id);
+  await waitForStatus(manager, downloadedSession.id, 'stopped');
+
   holdToolRuns = false;
   manager.shutdown();
   fs.rmSync(root, { recursive: true, force: true });
