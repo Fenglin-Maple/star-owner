@@ -119,7 +119,7 @@ const { MIN_ARTIFACT_NAME_LENGTH, PROJECT_ROOT, PathSafetyError, evaluateWorkspa
   };
   const runner = new ToolRunner({ store });
   const cookieFile = path.join(root, 'cookies.txt');
-  fs.writeFileSync(cookieFile, '# Netscape HTTP Cookie File\n', 'utf8');
+  fs.writeFileSync(cookieFile, '# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\ttest-session\n', 'utf8');
   const multipartArgs = runner.buildArgs({
     task: { bvid: 'BV1xx411c7mD', cid: '123', page: 2, multiPartRole: 'part' },
     action: 'subtitles',
@@ -129,8 +129,26 @@ const { MIN_ARTIFACT_NAME_LENGTH, PROJECT_ROOT, PathSafetyError, evaluateWorkspa
   });
   assert(multipartArgs.includes('--cookies') && multipartArgs.includes(cookieFile), 'multi-part tool arguments did not include the collection Cookie');
   assert(multipartArgs.includes('--reuse-info') && multipartArgs.includes('--risk-control-retries'), 'multi-part tool arguments did not enable metadata reuse and risk-control retry');
-  const ordinaryArgs = runner.buildArgs({ task: { bvid: 'BV1xx411c7mD' }, action: 'subtitles', collection: {}, artifactDir: root, options: {} });
-  assert(!ordinaryArgs.includes('--reuse-info') && !ordinaryArgs.includes('--risk-control-retries'), 'multi-part network safeguards leaked into the ordinary video path');
+  const singleArgs = runner.buildArgs({
+    task: { bvid: 'BV1xx411c7mD', singleTask: true, cookieFile },
+    action: 'info',
+    collection: {},
+    artifactDir: root,
+    options: {}
+  });
+  assert(singleArgs.includes('--cookies') && singleArgs.includes(cookieFile), 'queued single-video arguments lost the task Cookie when the internal collection had none');
+  assert(singleArgs.includes('--risk-control-retries') && singleArgs[singleArgs.indexOf('--risk-control-retries') + 1] === '3', 'single-video metadata did not enable bounded risk-control retries');
+  assert.throws(() => runner.buildArgs({
+    task: { bvid: 'BV1xx411c7mD', singleTask: true, cookieFile: path.join(root, 'missing-cookies.txt') },
+    action: 'info',
+    collection: {},
+    artifactDir: root,
+    options: {}
+  }), (error) => error.code === 'BILIBILI_COOKIE_REQUIRED', 'single-video execution silently fell back to anonymous Bilibili access when its Cookie became unavailable');
+  const ordinaryArgs = runner.buildArgs({ task: { bvid: 'BV1xx411c7mD', cookieFile }, action: 'subtitles', collection: {}, artifactDir: root, options: {} });
+  assert(!ordinaryArgs.includes('--cookies') && !ordinaryArgs.includes('--reuse-info') && !ordinaryArgs.includes('--risk-control-retries'), 'single-video authentication or multi-part safeguards leaked into the ordinary video path');
+  const ordinaryCollectionArgs = runner.buildArgs({ task: { bvid: 'BV1xx411c7mD' }, action: 'info', collection: { cookieFile }, artifactDir: root, options: {} });
+  assert(ordinaryCollectionArgs.includes('--cookies') && ordinaryCollectionArgs.includes(cookieFile) && !ordinaryCollectionArgs.includes('--risk-control-retries'), 'ordinary collection Cookie behavior changed while fixing single-video tasks');
   const result = await runner.runAsrStage({ warnings: [] }, toolRun);
   const asr = JSON.parse(fs.readFileSync(path.join(root, 'asr', 'asr-result.json'), 'utf8'));
   assert(result.ok && result.skipped && asr.noAudioStream && asr.diagnostics.noAudioStream, 'No-audio ASR diagnostic was not generated.');

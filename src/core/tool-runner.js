@@ -4,6 +4,7 @@ const { execFile, spawn, spawnSync } = require('child_process');
 const { promisify } = require('util');
 const { AsrService } = require('./asr-service');
 const { DEFAULT_ASR_MODEL, asrComputeType, getAsrModel, normalizeAsrModel, publicAsrModels } = require('./asr-models');
+const { bilibiliCookieRequiredError, isUsableBilibiliCookieFile } = require('./bilibili-auth');
 const { nodeChildProcessSpec, projectRuntimeEnvironment, readUtf8, resolveNvidiaSmi, resolveSystemExecutable } = require('./child-process-io');
 const { detectAsrHardware } = require('./hardware-capabilities');
 const { isVideoUnavailableMessage, unsupportedVideoError, videoUnavailableError } = require('./media-errors');
@@ -1488,10 +1489,16 @@ class ToolRunner {
 
     if (action !== 'clean-cache') {
       args.push('--out', artifactDir);
-      if (collection?.cookieFile && fs.existsSync(collection.cookieFile)) args.push('--cookies', collection.cookieFile);
+      if (task.singleTask === true && !isUsableBilibiliCookieFile(task.cookieFile)) {
+        throw bilibiliCookieRequiredError('单视频总结请求 B站素材');
+      }
+      const cookieFile = task.singleTask === true && task.cookieFile
+        ? task.cookieFile
+        : collection?.cookieFile;
+      if (cookieFile && fs.existsSync(cookieFile)) args.push('--cookies', cookieFile);
       if (task.page) args.push('--page', String(task.page));
       if (task.cid) args.push('--cid', String(task.cid));
-      if (task.multiPartRole === 'part') args.push('--risk-control-retries', '3');
+      if (task.multiPartRole === 'part' || task.singleTask === true) args.push('--risk-control-retries', '3');
       if (options.reuseInfo) args.push('--reuse-info');
     } else if (options.preserveProcessCache) {
       args.push('--preserve-process-cache');

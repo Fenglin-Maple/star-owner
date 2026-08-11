@@ -558,6 +558,7 @@
       elements.dependencyList.innerHTML = recoveryWarning + packages.map((item) => `<div class="dependency-item" data-dependency-id="${esc(item.id)}" tabindex="-1">
         <div class="dependency-main">
           <div><button class="dependency-name-link" type="button" data-dependency-release></button><span class="dependency-state"></span></div>
+          <small class="dependency-release-hint">点击依赖标题可以跳转到单独下载依赖包的网址，手动进行本地导入</small>
           <p></p>
           <div class="dependency-progress"><span></span></div>
         </div>

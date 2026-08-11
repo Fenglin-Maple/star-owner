@@ -973,7 +973,7 @@ class InternalAgentManager {
       if (TERMINAL_RUNS.has(run.status)) {
         if (run.status !== 'succeeded') {
           const message = `${run.toolName || run.toolId} ${run.status}：${run.error || '请查看运行日志'}`;
-          if (session.mode === 'single' && isLoginRequiredMessage(message)) throw loginRequiredError(message);
+          if (session.mode === 'single' && (run.errorCode === 'BILIBILI_COOKIE_REQUIRED' || isLoginRequiredMessage(message))) throw loginRequiredError(message);
           const error = new Error(message);
           error.code = run.errorCode || '';
           error.failureKind = run.failureKind || '';
