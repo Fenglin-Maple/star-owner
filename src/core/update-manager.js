@@ -16,12 +16,14 @@ const UPDATE_BACKUP_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 const UPDATE_DOWNLOAD_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 class UpdateManager {
-  constructor({ projectRoot, version, emit, fetchImpl = global.fetch, platform = process.platform } = {}) {
+  constructor({ projectRoot, version, emit, fetchImpl = global.fetch, platform = process.platform, updaterHeadless = false, updaterDisableRelaunch = false } = {}) {
     this.projectRoot = path.resolve(projectRoot || process.cwd());
     this.version = String(version || '0.0.0');
     this.emit = emit || (() => {});
     this.fetchImpl = fetchImpl;
     this.platform = platform;
+    this.updaterHeadless = Boolean(updaterHeadless);
+    this.updaterDisableRelaunch = Boolean(updaterDisableRelaunch);
     this.updateRoot = ensureDir(path.join(this.projectRoot, '.updates'));
     this.downloadRoot = ensureDir(path.join(this.updateRoot, 'downloads'));
     this.stateData = {
@@ -129,7 +131,7 @@ class UpdateManager {
     return this.state();
   }
 
-  launchPreparedUpdate() {
+  async launchPreparedUpdate() {
     if (!this.prepared || !fs.existsSync(this.prepared.packageRoot)) throw new Error('没有可安装的已校验更新包，请重新检查更新。');
     validateStagedPackage(this.prepared.packageRoot, this.prepared.release.version);
     return this.launchOperation({
@@ -157,20 +159,49 @@ class UpdateManager {
     return { sourceRoot: source, sourceWorkspace, database, oldVersion: oldVersion || '未知', portable: fs.existsSync(path.join(source, 'portable-manifest.json')) };
   }
 
-  launchMigration(sourceRoot) {
+  async launchMigration(sourceRoot) {
     const migration = this.inspectMigrationSource(sourceRoot);
     return this.launchOperation({ mode: 'migrate', sourceWorkspace: migration.sourceWorkspace, targetVersion: this.version });
   }
 
-  launchOperation({ mode, stagedRoot = '', sourceWorkspace = '', targetVersion = '' }) {
+  async launchOperation({ mode, stagedRoot = '', sourceWorkspace = '', targetVersion = '' }) {
     if (this.platform !== 'win32') throw new Error('便携自动更新和迁移目前只支持 Windows。');
     const helperSource = mode === 'update' && stagedRoot
       ? path.join(path.resolve(stagedRoot), 'scripts', 'apply-portable-operation.ps1')
       : path.join(this.projectRoot, 'scripts', 'apply-portable-operation.ps1');
+    const recoverySource = mode === 'update' && stagedRoot
+      ? path.join(path.resolve(stagedRoot), 'scripts', 'recover-portable-operation.ps1')
+      : path.join(this.projectRoot, 'scripts', 'recover-portable-operation.ps1');
+    const updaterSource = path.join(this.projectRoot, 'tools', 'updater', 'StarOwnerUpdater.exe');
+    const iconSource = path.join(this.projectRoot, 'assets', 'star-note.png');
     if (!fs.existsSync(helperSource)) throw new Error('更新事务脚本缺失，无法安全更新。');
+    if (!fs.existsSync(recoverySource)) throw new Error('更新回退脚本缺失，无法安全更新。');
+    if (!fs.existsSync(updaterSource)) throw new Error('独立更新器缺失，请手动安装完整核心包后重试。');
+    if (!fs.existsSync(iconSource)) throw new Error('更新器应用图标缺失，无法启动更新界面。');
     if (mode === 'update' && !isInside(this.updateRoot, helperSource)) throw new Error('更新事务脚本不在受管暂存目录中。');
+    if (fs.existsSync(path.join(this.updateRoot, 'operation-journal.json'))) throw new Error('检测到尚未恢复的更新事务，请重新启动应用完成回退后再试。');
     const operationId = `operation-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
     const requestFile = path.join(this.updateRoot, 'operation-request.json');
+    const readyFile = path.join(this.updateRoot, `updater-ready-${operationId}.json`);
+    const acknowledgeFile = path.join(this.updateRoot, `updater-ack-${operationId}.json`);
+    const cancelFile = path.join(this.updateRoot, `updater-cancel-${operationId}.json`);
+    const logFile = path.join(this.updateRoot, `updater-${operationId}.log`);
+    const temporaryRoot = path.join(os.tmpdir(), 'StarOwner', 'updater', operationId);
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+    ensureDir(temporaryRoot);
+    const updater = path.join(temporaryRoot, 'StarOwnerUpdater.exe');
+    const helper = path.join(temporaryRoot, 'apply-portable-operation.ps1');
+    const recovery = path.join(temporaryRoot, 'recover-portable-operation.ps1');
+    const icon = path.join(temporaryRoot, 'star-note.png');
+    fs.copyFileSync(updaterSource, updater);
+    fs.copyFileSync(helperSource, helper);
+    fs.copyFileSync(recoverySource, recovery);
+    fs.copyFileSync(iconSource, icon);
+    const powershell = resolveSystemExecutable('powershell.exe');
+    const command = resolveSystemExecutable('cmd.exe');
+    if (!powershell) throw new Error('Windows 系统缺少 PowerShell，无法执行更新或迁移。');
+    if (!command) throw new Error('Windows 系统缺少命令处理器，无法在完成后重新启动应用。');
+    for (const stale of [path.join(this.updateRoot, 'operation-result.json'), requestFile, readyFile, acknowledgeFile, cancelFile]) fs.rmSync(stale, { force: true });
     fs.writeFileSync(requestFile, `${JSON.stringify({
       operationId,
       mode,
@@ -179,22 +210,46 @@ class UpdateManager {
       sourceWorkspace: sourceWorkspace ? path.resolve(sourceWorkspace) : '',
       targetVersion,
       helperSource,
+      processId: process.pid,
+      updaterHelperPath: helper,
+      updaterRecoveryPath: recovery,
+      updaterPowerShellPath: powershell,
+      updaterCommandPath: command,
+      updaterReadyFile: readyFile,
+      updaterAcknowledgeFile: acknowledgeFile,
+      updaterCancelFile: cancelFile,
+      updaterLogFile: logFile,
+      updaterIconPath: icon,
+      headless: this.updaterHeadless,
+      disableRelaunch: this.updaterDisableRelaunch,
       requestedAt: new Date().toISOString()
     }, null, 2)}\n`, 'utf8');
-    const helper = path.join(os.tmpdir(), `star-owner-operation-${process.pid}-${Date.now()}.ps1`);
-    fs.copyFileSync(helperSource, helper);
-    const args = [
-      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', helper,
-      '-Mode', mode, '-ProjectRoot', this.projectRoot, '-ProcessId', String(process.pid),
-      '-StagedRoot', stagedRoot, '-SourceWorkspace', sourceWorkspace,
-      '-TargetVersion', targetVersion, '-OperationId', operationId, '-Relaunch'
-    ];
-    const powershell = resolveSystemExecutable('powershell.exe');
-    if (!powershell) throw new Error('Windows 系统缺少 PowerShell，无法执行更新或迁移。');
-    const child = spawn(powershell, args, { detached: true, env: projectRuntimeEnvironment(), windowsHide: true, stdio: 'ignore' });
-    child.unref();
-    this.publish({ status: 'applying', progress: 1, message: mode === 'update' ? '应用即将退出并安装更新，Workspace 与依赖会保留。' : '应用即将退出并迁移旧版本数据，完成后会自动重启。' });
-    return { scheduled: true, mode, targetVersion };
+    const child = spawn(updater, ['--request', requestFile], {
+      cwd: temporaryRoot,
+      detached: true,
+      env: projectRuntimeEnvironment(process.env, this.projectRoot),
+      windowsHide: false,
+      stdio: 'ignore'
+    });
+    try {
+      const ready = await waitForUpdaterReady({ child, readyFile, acknowledgeFile, operationId });
+      child.unref();
+      this.publish({
+        status: 'applying',
+        progress: 1,
+        message: mode === 'update'
+          ? '独立更新器已接管，应用即将退出；可在更新器中查看进度或中止并回退。'
+          : '独立迁移器已接管，应用即将退出；可在迁移器中查看进度或中止并回退。'
+      });
+      return { scheduled: true, mode, targetVersion, operationId, updaterPid: ready.updaterPid };
+    } catch (error) {
+      try { child.kill(); } catch {}
+      fs.rmSync(requestFile, { force: true });
+      fs.rmSync(readyFile, { force: true });
+      fs.rmSync(acknowledgeFile, { force: true });
+      this.publish({ status: 'error', progress: 0, message: `独立更新器启动失败，应用不会退出：${error.message || error}` });
+      throw error;
+    }
   }
 
   async fetchJson(url) {
@@ -369,6 +424,9 @@ function validateStagedPackage(packageRoot, version) {
     'Start-StarOwner.cmd',
     'scripts/apply-portable-operation.ps1',
     'scripts/recover-portable-operation.ps1',
+    'tools/updater/StarOwnerUpdater.cs',
+    'tools/updater/StarOwnerUpdater.exe',
+    'tools/updater/build-updater.ps1',
     'tools/faster-whisper-cli.py',
     'node_modules/electron/dist/electron.exe',
     'node_modules/mammoth/package.json',
@@ -608,6 +666,51 @@ function formatBytes(value) {
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }
 
+function waitForUpdaterReady({ child, readyFile, acknowledgeFile = '', operationId, timeoutMs = 15000, pollMs = 80 }) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+    let deadline = null;
+    let acknowledged = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearInterval(timer);
+      if (deadline) clearTimeout(deadline);
+      child?.removeListener?.('error', onError);
+      child?.removeListener?.('exit', onExit);
+      callback(value);
+    };
+    const onError = (error) => finish(reject, new Error(`无法启动独立更新器：${error.message || error}`));
+    const onExit = (code, signal) => finish(reject, new Error(`独立更新器在接管前退出（code=${code ?? 'null'}, signal=${signal || 'none'}）。`));
+    const inspect = () => {
+      const ready = readJsonIfPresent(readyFile);
+      if (String(ready?.operationId || '') !== String(operationId || '')) return;
+      if (!Number.isInteger(Number(ready.updaterPid)) || Number(ready.updaterPid) <= 0) return;
+      if (acknowledgeFile) {
+        if (ready.status === 'ready' && !acknowledged) {
+          try {
+            const temporary = `${acknowledgeFile}.tmp-${process.pid}`;
+            fs.writeFileSync(temporary, `${JSON.stringify({ operationId, status: 'acknowledged', acknowledgedAt: new Date().toISOString() }, null, 2)}\n`, 'utf8');
+            fs.renameSync(temporary, acknowledgeFile);
+            acknowledged = true;
+          } catch (error) {
+            finish(reject, new Error(`无法确认独立更新器接管：${error.message || error}`));
+          }
+          return;
+        }
+        if (ready.status !== 'accepted') return;
+      } else if (ready.status !== 'ready' && ready.status !== 'accepted') return;
+      finish(resolve, ready);
+    };
+    child?.once?.('error', onError);
+    child?.once?.('exit', onExit);
+    timer = setInterval(inspect, Math.max(20, Number(pollMs) || 80));
+    deadline = setTimeout(() => finish(reject, new Error('独立更新器启动超时，原应用已保持运行。')), Math.max(100, Number(timeoutMs) || 15000));
+    inspect();
+  });
+}
+
 module.exports = {
   CORE_ASSET,
   MIN_MIGRATION_VERSION,
@@ -620,5 +723,6 @@ module.exports = {
   parseChecksumText,
   resolveCoreRelease,
   validateArchiveEntries,
-  validateStagedPackage
+  validateStagedPackage,
+  waitForUpdaterReady
 };

@@ -1251,7 +1251,7 @@ ipcMain.handle('updates:prepare', async () => {
 });
 ipcMain.handle('updates:apply', async () => {
   assertBackendReady();
-  const result = updateManager.launchPreparedUpdate();
+  const result = await updateManager.launchPreparedUpdate();
   setImmediate(() => app.quit());
   return result;
 });
@@ -1266,7 +1266,7 @@ ipcMain.handle('updates:migration-inspect', async () => {
 });
 ipcMain.handle('updates:migration-apply', async (_event, sourceRoot) => {
   assertBackendReady();
-  const result = updateManager.launchMigration(sourceRoot);
+  const result = await updateManager.launchMigration(sourceRoot);
   setImmediate(() => app.quit());
   return result;
 });

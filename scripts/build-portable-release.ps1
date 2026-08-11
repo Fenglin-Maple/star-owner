@@ -128,6 +128,7 @@ function Assert-NoBuilderPaths([string]$stageRoot) {
 }
 
 Remove-GeneratedProjectCaches
+& (Join-Path $root "tools\updater\build-updater.ps1")
 & (Join-Path $PSScriptRoot "verify-release.ps1")
 Remove-GeneratedProjectCaches
 

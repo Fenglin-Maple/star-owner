@@ -3,7 +3,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
-const { UpdateManager, cleanupManagedUpdateArtifacts, commandLineContainsProjectRoot, findRunningProjectProcesses, resolveCoreRelease, validateArchiveEntries, validateStagedPackage } = require('../src/core/update-manager');
+const { EventEmitter } = require('events');
+const { UpdateManager, cleanupManagedUpdateArtifacts, commandLineContainsProjectRoot, findRunningProjectProcesses, resolveCoreRelease, validateArchiveEntries, validateStagedPackage, waitForUpdaterReady } = require('../src/core/update-manager');
 
 function runPowerShell(script, args) {
   const result = runPowerShellResult(script, args);
@@ -21,7 +22,7 @@ function runPowerShellResult(script, args) {
 }
 
 function helperArgs(mode, root, extra = {}) {
-  return [
+  const args = [
     '-Mode', mode,
     '-ProjectRoot', root,
     '-ProcessId', '2147483647',
@@ -31,6 +32,9 @@ function helperArgs(mode, root, extra = {}) {
     '-OperationId', extra.operationId || `test-operation-${Date.now()}`,
     '-Relaunch'
   ];
+  if (extra.cancelFile) args.push('-CancelFile', extra.cancelFile);
+  if (extra.testStepDelayMilliseconds) args.push('-TestStepDelayMilliseconds', String(extra.testStepDelayMilliseconds));
+  return args;
 }
 
 function readJson(file) {
@@ -48,12 +52,36 @@ function waitForSpawn(child) {
   });
 }
 
+async function waitForPath(file, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(file)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for ${file}`);
+}
+
+async function waitForJson(file, predicate, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const value = readJson(file);
+      if (predicate(value)) return value;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  throw new Error(`Timed out waiting for JSON state in ${file}`);
+}
+
 function createValidStagedPackage(packageRoot, version = '9.9.9') {
   const files = [
     'src/main.js',
     'Start-StarOwner.cmd',
     'scripts/apply-portable-operation.ps1',
     'scripts/recover-portable-operation.ps1',
+    'tools/updater/StarOwnerUpdater.cs',
+    'tools/updater/StarOwnerUpdater.exe',
+    'tools/updater/build-updater.ps1',
     'tools/faster-whisper-cli.py',
     'node_modules/electron/dist/electron.exe',
     'node_modules/mammoth/package.json',
@@ -86,6 +114,44 @@ function createValidStagedPackage(packageRoot, version = '9.9.9') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'star-owner-update-test-'));
   const projectRoot = path.join(root, 'project');
   fs.mkdirSync(projectRoot, { recursive: true });
+
+  const handshakeFile = path.join(root, 'handshake.json');
+  const handshakeChild = new EventEmitter();
+  setTimeout(() => fs.writeFileSync(handshakeFile, JSON.stringify({ operationId: 'handshake-fixture', status: 'ready', updaterPid: 4242 })), 40);
+  const handshake = await waitForUpdaterReady({ child: handshakeChild, readyFile: handshakeFile, operationId: 'handshake-fixture', timeoutMs: 1000, pollMs: 20 });
+  assert.strictEqual(handshake.updaterPid, 4242, 'updater handshake did not return the native updater PID');
+  const twoWayReady = path.join(root, 'two-way-ready.json');
+  const twoWayAcknowledge = path.join(root, 'two-way-ack.json');
+  const twoWayChild = new EventEmitter();
+  setTimeout(() => fs.writeFileSync(twoWayReady, JSON.stringify({ operationId: 'two-way-fixture', status: 'ready', updaterPid: 4343 })), 30);
+  const twoWayResponder = (async () => {
+    await waitForPath(twoWayAcknowledge, 1000);
+    assert.strictEqual(readJson(twoWayAcknowledge).status, 'acknowledged', 'application did not acknowledge updater readiness');
+    fs.writeFileSync(twoWayReady, JSON.stringify({ operationId: 'two-way-fixture', status: 'accepted', updaterPid: 4343, helperPid: 4444 }));
+  })();
+  const twoWayHandshake = await waitForUpdaterReady({ child: twoWayChild, readyFile: twoWayReady, acknowledgeFile: twoWayAcknowledge, operationId: 'two-way-fixture', timeoutMs: 1500, pollMs: 20 });
+  await twoWayResponder;
+  assert.strictEqual(twoWayHandshake.helperPid, 4444, 'application quit before the native updater accepted the handoff');
+  const exitedChild = new EventEmitter();
+  setTimeout(() => exitedChild.emit('exit', 7, null), 20);
+  await assert.rejects(waitForUpdaterReady({ child: exitedChild, readyFile: path.join(root, 'never-ready-exit.json'), operationId: 'exit-fixture', timeoutMs: 1000, pollMs: 20 }), /接管前退出/, 'an updater that exited before readiness was accepted');
+  const timeoutChild = new EventEmitter();
+  await assert.rejects(waitForUpdaterReady({ child: timeoutChild, readyFile: path.join(root, 'never-ready-timeout.json'), operationId: 'timeout-fixture', timeoutMs: 80, pollMs: 20 }), /启动超时/, 'a missing updater handshake did not time out');
+
+  const nativeUpdater = path.join(__dirname, '..', 'tools', 'updater', 'StarOwnerUpdater.exe');
+  assert(fs.existsSync(nativeUpdater), 'native updater executable is missing');
+  const probeRoot = path.join(root, 'native probe 中文 path');
+  fs.mkdirSync(probeRoot, { recursive: true });
+  const probeReady = path.join(probeRoot, 'ready.txt');
+  const probeComplete = path.join(probeRoot, 'complete.txt');
+  const probeArgs = ['--probe', probeReady, probeComplete, '900', 'detached-fixture'];
+  const launcherCode = `const {spawn}=require('child_process');const child=spawn(${JSON.stringify(nativeUpdater)},${JSON.stringify(probeArgs)},{detached:true,windowsHide:true,stdio:'ignore'});child.unref();`;
+  const probeLauncher = spawnSync(process.execPath, ['-e', launcherCode], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+  assert.strictEqual(probeLauncher.status, 0, `native updater probe launcher failed: ${probeLauncher.stderr || probeLauncher.stdout}`);
+  await waitForPath(probeReady, 5000);
+  await waitForPath(probeComplete, 5000);
+  assert.strictEqual(fs.readFileSync(probeComplete, 'utf8'), 'detached-fixture:complete', 'native updater did not survive its launcher process');
+
   const manager = new UpdateManager({ projectRoot, version: '1.2.7', platform: 'win32', fetchImpl: async () => { throw new Error('network not used'); } });
   const partial = path.join(manager.downloadRoot, 'core.zip.partial');
   const bytes = Buffer.from('complete archive fixture');
@@ -131,6 +197,9 @@ function createValidStagedPackage(packageRoot, version = '9.9.9') {
   const stagedValidationRoot = path.join(root, 'validated-stage');
   createValidStagedPackage(stagedValidationRoot);
   assert.doesNotThrow(() => validateStagedPackage(stagedValidationRoot, '9.9.9'), 'a complete portable core package was rejected');
+  fs.rmSync(path.join(stagedValidationRoot, 'tools', 'updater', 'StarOwnerUpdater.exe'), { force: true });
+  assert.throws(() => validateStagedPackage(stagedValidationRoot, '9.9.9'), /StarOwnerUpdater|更新器|必需文件/, 'package without the native updater passed staged validation');
+  createValidStagedPackage(stagedValidationRoot);
   const stableAsset = {
     name: 'Star-Owner-v9.9.9-win-x64-core.zip',
     browser_download_url: 'https://example.invalid/core.zip',
@@ -224,7 +293,179 @@ function createValidStagedPackage(packageRoot, version = '9.9.9') {
   for (const [relative, content] of preservedRuntime) {
     assert.strictEqual(fs.readFileSync(path.join(projectRoot, relative), 'utf8'), content, `portable update unexpectedly replaced preserved runtime path: ${relative}`);
   }
-  assert.strictEqual(readJson(path.join(projectRoot, '.updates', 'operation-result.json')).status, 'succeeded', 'portable update helper did not write a success result');
+  const successfulResult = readJson(path.join(projectRoot, '.updates', 'operation-result.json'));
+  assert.strictEqual(successfulResult.status, 'succeeded', 'portable update helper did not write a success result');
+  assert.strictEqual(successfulResult.phase, 'complete', 'portable update helper did not record its terminal phase');
+  assert.strictEqual(successfulResult.progress, 1, 'portable update helper did not complete its progress contract');
+
+  const cancelledRoot = path.join(root, 'cancelled update 中文 project');
+  const cancelledStage = path.join(cancelledRoot, '.updates', 'stage');
+  const cancelledFile = path.join(cancelledRoot, '.updates', 'updater-cancel-cancel-fixture.json');
+  fs.mkdirSync(path.join(cancelledRoot, 'assets'), { recursive: true });
+  fs.mkdirSync(path.join(cancelledStage, 'node_modules', 'electron', 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(cancelledRoot, 'assets', 'state.txt'), 'original');
+  fs.writeFileSync(path.join(cancelledStage, 'package.json'), JSON.stringify({ version: '9.9.9' }));
+  fs.writeFileSync(path.join(cancelledStage, 'node_modules', 'electron', 'dist', 'electron.exe'), 'electron');
+  fs.writeFileSync(cancelledFile, JSON.stringify({ operationId: 'cancel-fixture' }));
+  const cancelled = runPowerShellResult(helper, helperArgs('update', cancelledRoot, { stagedRoot: cancelledStage, targetVersion: '9.9.9', operationId: 'cancel-fixture', cancelFile: cancelledFile }));
+  assert.notStrictEqual(cancelled.status, 0, 'a pre-requested cancellation unexpectedly succeeded');
+  assert.strictEqual(fs.readFileSync(path.join(cancelledRoot, 'assets', 'state.txt'), 'utf8'), 'original', 'cancellation changed the original application before rollback');
+  assert.strictEqual(readJson(path.join(cancelledRoot, '.updates', 'operation-result.json')).status, 'cancelled', 'cancellation did not record a cancelled terminal result');
+
+  const partialRoot = path.join(root, 'partial apply cancellation project');
+  const partialStage = path.join(partialRoot, '.updates', 'stage');
+  const partialCancel = path.join(partialRoot, '.updates', 'updater-cancel-partial-cancel.json');
+  for (const relative of ['assets', 'src']) {
+    fs.mkdirSync(path.join(partialRoot, relative), { recursive: true });
+    fs.mkdirSync(path.join(partialStage, relative), { recursive: true });
+    fs.writeFileSync(path.join(partialRoot, relative, 'state.txt'), `old-${relative}`);
+    fs.writeFileSync(path.join(partialStage, relative, 'state.txt'), `new-${relative}`);
+  }
+  fs.mkdirSync(path.join(partialStage, 'node_modules', 'electron', 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(partialStage, 'node_modules', 'electron', 'dist', 'electron.exe'), 'electron');
+  fs.writeFileSync(path.join(partialStage, 'package.json'), JSON.stringify({ version: '9.9.9' }));
+  const partialArgs = helperArgs('update', partialRoot, {
+    stagedRoot: partialStage,
+    targetVersion: '9.9.9',
+    operationId: 'partial-cancel',
+    cancelFile: partialCancel,
+    testStepDelayMilliseconds: 180
+  });
+  const partialProcess = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', helper, ...partialArgs], { windowsHide: true, stdio: 'ignore' });
+  await waitForSpawn(partialProcess);
+  await waitForJson(path.join(partialRoot, '.updates', 'operation-journal.json'), (value) => value.status === 'applying' && value.item === 'src', 30000);
+  assert.strictEqual(fs.readFileSync(path.join(partialRoot, 'assets', 'state.txt'), 'utf8'), 'new-assets', 'partial cancellation fixture did not reach a changed state');
+  fs.writeFileSync(partialCancel, JSON.stringify({ operationId: 'partial-cancel' }));
+  const partialExit = await new Promise((resolve) => partialProcess.once('exit', resolve));
+  assert.notStrictEqual(partialExit, 0, 'mid-apply cancellation unexpectedly succeeded');
+  assert.strictEqual(readJson(path.join(partialRoot, '.updates', 'operation-result.json')).status, 'cancelled', 'mid-apply cancellation did not record a cancelled result');
+  assert.strictEqual(fs.readFileSync(path.join(partialRoot, 'assets', 'state.txt'), 'utf8'), 'old-assets', 'mid-apply cancellation did not restore an already replaced directory');
+  assert.strictEqual(fs.readFileSync(path.join(partialRoot, 'src', 'state.txt'), 'utf8'), 'old-src', 'mid-apply cancellation did not preserve the next directory');
+
+  const nativeRoot = path.join(root, 'native updater 中文 project');
+  const nativeUpdates = path.join(nativeRoot, '.updates');
+  const nativeStage = path.join(nativeUpdates, 'stage');
+  const nativeOperationId = 'native-updater-fixture';
+  fs.mkdirSync(path.join(nativeRoot, 'templates'), { recursive: true });
+  fs.mkdirSync(path.join(nativeRoot, 'node_modules', 'electron', 'dist'), { recursive: true });
+  fs.mkdirSync(path.join(nativeStage, 'templates'), { recursive: true });
+  fs.mkdirSync(path.join(nativeStage, 'node_modules', 'electron', 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(nativeRoot, 'templates', 'state.txt'), 'old');
+  fs.writeFileSync(path.join(nativeRoot, 'node_modules', 'electron', 'dist', 'electron.exe'), 'old-electron');
+  fs.writeFileSync(path.join(nativeStage, 'templates', 'state.txt'), 'new');
+  fs.writeFileSync(path.join(nativeStage, 'node_modules', 'electron', 'dist', 'electron.exe'), 'new-electron');
+  fs.writeFileSync(path.join(nativeStage, 'package.json'), JSON.stringify({ version: '9.9.9' }));
+  const nativeRequest = path.join(nativeUpdates, 'operation-request.json');
+  const nativeReady = path.join(nativeUpdates, `updater-ready-${nativeOperationId}.json`);
+  const nativeAcknowledge = path.join(nativeUpdates, `updater-ack-${nativeOperationId}.json`);
+  const nativeCancel = path.join(nativeUpdates, `updater-cancel-${nativeOperationId}.json`);
+  const nativeLog = path.join(nativeUpdates, `updater-${nativeOperationId}.log`);
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR;
+  fs.writeFileSync(nativeRequest, JSON.stringify({
+    operationId: nativeOperationId,
+    mode: 'update',
+    projectRoot: nativeRoot,
+    stagedRoot: nativeStage,
+    sourceWorkspace: '',
+    targetVersion: '9.9.9',
+    processId: 2147483647,
+    updaterHelperPath: helper,
+    updaterRecoveryPath: path.join(__dirname, 'recover-portable-operation.ps1'),
+    updaterPowerShellPath: path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    updaterCommandPath: path.join(systemRoot, 'System32', 'cmd.exe'),
+    updaterReadyFile: nativeReady,
+    updaterAcknowledgeFile: nativeAcknowledge,
+    updaterCancelFile: nativeCancel,
+    updaterLogFile: nativeLog,
+    updaterIconPath: path.join(__dirname, '..', 'assets', 'star-note.png'),
+    disableRelaunch: true,
+    headless: true
+  }, null, 2));
+  const nativeProcess = spawn(nativeUpdater, ['--request', nativeRequest], { windowsHide: true, stdio: 'ignore' });
+  await waitForSpawn(nativeProcess);
+  await waitForPath(nativeReady, 5000);
+  fs.writeFileSync(nativeAcknowledge, JSON.stringify({ operationId: nativeOperationId, status: 'acknowledged' }));
+  await waitForPath(path.join(nativeUpdates, 'operation-result.json'), 30000);
+  const nativeResult = readJson(path.join(nativeUpdates, 'operation-result.json'));
+  assert.strictEqual(nativeResult.status, 'succeeded', `native updater operation failed: ${nativeResult.message || ''}`);
+  assert.strictEqual(fs.readFileSync(path.join(nativeRoot, 'templates', 'state.txt'), 'utf8'), 'new', 'native updater did not apply the staged package');
+  assert(fs.readFileSync(nativeLog, 'utf8').includes('helper process started'), 'native updater did not persist its diagnostic log');
+  if (nativeProcess.exitCode === null && nativeProcess.signalCode === null) await new Promise((resolve) => nativeProcess.once('exit', resolve));
+
+  const crashRoot = path.join(root, 'native crash recovery project');
+  const crashUpdates = path.join(crashRoot, '.updates');
+  const crashBackup = path.join(crashUpdates, 'operation-backup-native-crash-fixture');
+  const crashHelper = path.join(root, 'crashing-helper.ps1');
+  fs.mkdirSync(path.join(crashRoot, 'src'), { recursive: true });
+  fs.mkdirSync(path.join(crashBackup, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(crashRoot, 'src', 'state.txt'), 'partially-replaced');
+  fs.writeFileSync(path.join(crashBackup, 'src', 'state.txt'), 'known-good');
+  fs.writeFileSync(crashHelper, `param([string]$Mode,[string]$ProjectRoot,[int]$ProcessId,[string]$StagedRoot,[string]$SourceWorkspace,[string]$TargetVersion,[string]$OperationId,[string]$CancelFile)\n$updates=Join-Path $ProjectRoot '.updates'\n[ordered]@{operationId=$OperationId;mode=$Mode;status='applying';projectRoot=$ProjectRoot;backup=(Join-Path $updates ('operation-backup-'+$OperationId));backedUpPaths=@('src');absentPaths=@();phase='apply';item='src';progress=0.7}|ConvertTo-Json -Depth 8|Set-Content -LiteralPath (Join-Path $updates 'operation-journal.json') -Encoding UTF8\nexit 9\n`);
+  const crashOperationId = 'native-crash-fixture';
+  const crashRequest = path.join(crashUpdates, 'operation-request.json');
+  const crashReady = path.join(crashUpdates, `updater-ready-${crashOperationId}.json`);
+  const crashAcknowledge = path.join(crashUpdates, `updater-ack-${crashOperationId}.json`);
+  const crashLog = path.join(crashUpdates, `updater-${crashOperationId}.log`);
+  fs.writeFileSync(crashRequest, JSON.stringify({
+    operationId: crashOperationId,
+    mode: 'update',
+    projectRoot: crashRoot,
+    stagedRoot: path.join(crashUpdates, 'stage'),
+    sourceWorkspace: '',
+    targetVersion: '9.9.9',
+    processId: 2147483647,
+    updaterHelperPath: crashHelper,
+    updaterRecoveryPath: path.join(__dirname, 'recover-portable-operation.ps1'),
+    updaterPowerShellPath: path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    updaterCommandPath: path.join(systemRoot, 'System32', 'cmd.exe'),
+    updaterReadyFile: crashReady,
+    updaterAcknowledgeFile: crashAcknowledge,
+    updaterCancelFile: path.join(crashUpdates, `updater-cancel-${crashOperationId}.json`),
+    updaterLogFile: crashLog,
+    updaterIconPath: path.join(__dirname, '..', 'assets', 'star-note.png'),
+    disableRelaunch: true,
+    headless: true
+  }, null, 2));
+  const crashUpdater = spawn(nativeUpdater, ['--request', crashRequest], { windowsHide: true, stdio: 'ignore' });
+  await waitForSpawn(crashUpdater);
+  await waitForPath(crashReady, 5000);
+  fs.writeFileSync(crashAcknowledge, JSON.stringify({ operationId: crashOperationId, status: 'acknowledged' }));
+  await waitForJson(path.join(crashUpdates, 'operation-result.json'), (value) => value.status === 'rolled-back', 30000);
+  assert.strictEqual(fs.readFileSync(path.join(crashRoot, 'src', 'state.txt'), 'utf8'), 'known-good', 'native updater did not recover after an abrupt helper exit');
+  assert(fs.readFileSync(crashLog, 'utf8').includes('Starting recovery helper'), 'native updater did not log automatic recovery');
+  if (crashUpdater.exitCode === null && crashUpdater.signalCode === null) await new Promise((resolve) => crashUpdater.once('exit', resolve));
+
+  const handoffRoot = path.join(root, 'full handoff 中文 project');
+  const handoffStage = path.join(handoffRoot, '.updates', 'stage');
+  const handoffMarker = path.join(root, 'handoff-scheduled.json');
+  for (const relative of [
+    'tools/updater/StarOwnerUpdater.exe',
+    'assets/star-note.png',
+    'scripts/apply-portable-operation.ps1',
+    'scripts/recover-portable-operation.ps1',
+    'node_modules/electron/dist/electron.exe',
+    'package.json'
+  ]) fs.mkdirSync(path.dirname(path.join(handoffRoot, relative)), { recursive: true });
+  fs.copyFileSync(nativeUpdater, path.join(handoffRoot, 'tools', 'updater', 'StarOwnerUpdater.exe'));
+  fs.copyFileSync(path.join(__dirname, '..', 'assets', 'star-note.png'), path.join(handoffRoot, 'assets', 'star-note.png'));
+  fs.copyFileSync(helper, path.join(handoffRoot, 'scripts', 'apply-portable-operation.ps1'));
+  fs.copyFileSync(path.join(__dirname, 'recover-portable-operation.ps1'), path.join(handoffRoot, 'scripts', 'recover-portable-operation.ps1'));
+  fs.writeFileSync(path.join(handoffRoot, 'node_modules', 'electron', 'dist', 'electron.exe'), 'old-electron');
+  fs.writeFileSync(path.join(handoffRoot, 'package.json'), JSON.stringify({ version: '1.7.0' }));
+  fs.mkdirSync(path.join(handoffStage, 'scripts'), { recursive: true });
+  fs.mkdirSync(path.join(handoffStage, 'node_modules', 'electron', 'dist'), { recursive: true });
+  fs.copyFileSync(helper, path.join(handoffStage, 'scripts', 'apply-portable-operation.ps1'));
+  fs.copyFileSync(path.join(__dirname, 'recover-portable-operation.ps1'), path.join(handoffStage, 'scripts', 'recover-portable-operation.ps1'));
+  fs.writeFileSync(path.join(handoffStage, 'node_modules', 'electron', 'dist', 'electron.exe'), 'new-electron');
+  fs.writeFileSync(path.join(handoffStage, 'package.json'), JSON.stringify({ version: '9.9.9' }));
+  const handoffCode = `const fs=require('fs');const {UpdateManager}=require(${JSON.stringify(path.join(__dirname, '..', 'src', 'core', 'update-manager.js'))});(async()=>{const manager=new UpdateManager({projectRoot:${JSON.stringify(handoffRoot)},version:'1.7.0',platform:'win32',fetchImpl:async()=>{throw new Error('not used')},updaterHeadless:true,updaterDisableRelaunch:true});const value=await manager.launchOperation({mode:'update',stagedRoot:${JSON.stringify(handoffStage)},targetVersion:'9.9.9'});fs.writeFileSync(${JSON.stringify(handoffMarker)},JSON.stringify(value));})().catch(error=>{console.error(error);process.exit(1)});`;
+  const handoffLauncher = spawnSync(process.execPath, ['-e', handoffCode], { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+  assert.strictEqual(handoffLauncher.status, 0, `update-manager handoff process failed: ${handoffLauncher.stderr || handoffLauncher.stdout}`);
+  const handoff = readJson(handoffMarker);
+  assert.strictEqual(handoff.scheduled, true, 'update manager did not acknowledge the native updater handshake');
+  assert(Number(handoff.updaterPid) > 0, 'update manager did not return the updater process ID');
+  await waitForJson(path.join(handoffRoot, '.updates', 'operation-result.json'), (value) => value.status === 'succeeded', 30000);
+  assert.strictEqual(fs.readFileSync(path.join(handoffRoot, 'node_modules', 'electron', 'dist', 'electron.exe'), 'utf8'), 'new-electron', 'full update-manager handoff did not apply the staged package');
 
   const failedRoot = path.join(root, 'backup-failure-project');
   const failedStage = path.join(failedRoot, '.updates', 'stage');
@@ -264,6 +505,8 @@ function createValidStagedPackage(packageRoot, version = '9.9.9') {
   assert.strictEqual(readJson(path.join(recoveryUpdates, 'operation-result.json')).status, 'rolled-back', 'pre-launch recovery did not record a rolled-back result');
   const launcher = fs.readFileSync(path.join(__dirname, '..', 'packaging', 'Start-StarOwner.cmd'), 'utf8');
   assert(launcher.includes('recover-portable-operation.ps1') && launcher.indexOf('recover-portable-operation.ps1') < launcher.indexOf('electron.exe'), 'portable launcher does not recover interrupted operations before Electron starts');
+  const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+  assert(mainSource.includes('await updateManager.launchPreparedUpdate()') && mainSource.includes('await updateManager.launchMigration(sourceRoot)'), 'main process can quit before the updater handoff promise resolves');
 
   const source = path.join(root, 'old project');
   fs.mkdirSync(path.join(source, 'workspace'), { recursive: true });

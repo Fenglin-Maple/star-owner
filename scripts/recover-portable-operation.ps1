@@ -9,6 +9,13 @@ $journalFile = Join-Path $updates 'operation-journal.json'
 $requestFile = Join-Path $updates 'operation-request.json'
 $resultFile = Join-Path $updates 'operation-result.json'
 
+function Write-JsonAtomic([string]$Path, $Payload) {
+  $temporary = "$Path.tmp-$PID"
+  $json = $Payload | ConvertTo-Json -Depth 10
+  [IO.File]::WriteAllText($temporary, $json, (New-Object Text.UTF8Encoding($false)))
+  Move-Item -LiteralPath $temporary -Destination $Path -Force
+}
+
 if (-not (Test-Path -LiteralPath $journalFile -PathType Leaf)) { exit 0 }
 
 function Assert-Under([string]$Parent, [string]$Candidate, [string]$Label) {
@@ -54,23 +61,32 @@ try {
       }
     }
   }
-  [ordered]@{
+  $result = [ordered]@{
     operationId = [string]$journal.operationId
     mode = [string]$journal.mode
     status = 'rolled-back'
     message = 'Recovered an interrupted update or migration before launch.'
     recoveredAt = [DateTime]::UtcNow.ToString('o')
     backup = $backup
-  } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $resultFile -Encoding UTF8
+    phase = 'rollback'
+    progress = 1
+  }
+  Write-JsonAtomic $resultFile $result
   Remove-Item -LiteralPath $journalFile -Force
   Remove-Item -LiteralPath $requestFile -Force -ErrorAction SilentlyContinue
+  if ([string]$journal.operationId -match '^[a-zA-Z0-9._-]+$') {
+    Remove-Item -LiteralPath (Join-Path $updates "updater-ready-$([string]$journal.operationId).json") -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $updates "updater-ack-$([string]$journal.operationId).json") -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $updates "updater-cancel-$([string]$journal.operationId).json") -Force -ErrorAction SilentlyContinue
+  }
   exit 0
 } catch {
-  [ordered]@{
+  $result = [ordered]@{
     status = 'recovery-failed'
     message = $_.Exception.Message
     recoveredAt = [DateTime]::UtcNow.ToString('o')
-  } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $resultFile -Encoding UTF8
+  }
+  Write-JsonAtomic $resultFile $result
   Write-Error "Star Owner update recovery failed: $($_.Exception.Message)"
   exit 1
 }
