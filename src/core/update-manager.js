@@ -425,6 +425,7 @@ function validateStagedPackage(packageRoot, version) {
     'scripts/apply-portable-operation.ps1',
     'scripts/recover-portable-operation.ps1',
     'tools/updater/StarOwnerUpdater.cs',
+    'tools/updater/StandaloneUpdater.cs',
     'tools/updater/StarOwnerUpdater.exe',
     'tools/updater/build-updater.ps1',
     'tools/faster-whisper-cli.py',

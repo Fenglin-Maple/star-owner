@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -23,6 +24,9 @@ namespace StarOwnerUpdater
         {
             try { SetProcessDPIAware(); } catch { }
 
+            int standaloneExitCode;
+            if (StandaloneUpdaterCommands.TryRun(args, out standaloneExitCode)) return standaloneExitCode;
+
             if (args.Length >= 5 && String.Equals(args[0], "--probe", StringComparison.OrdinalIgnoreCase))
             {
                 return RunProbe(args[1], args[2], args[3], args[4]);
@@ -45,6 +49,17 @@ namespace StarOwnerUpdater
                     File.WriteAllText(Path.GetFullPath(args[1]) + ".error.txt", diagnostic, new UTF8Encoding(false));
                     return 5;
                 }
+            }
+
+            if (args.Length == 0 || (args.Length >= 1 && String.Equals(args[0], "--standalone", StringComparison.OrdinalIgnoreCase)))
+            {
+                return StandaloneUpdaterBootstrap.LaunchRelocated();
+            }
+
+            if (args.Length >= 1 && String.Equals(args[0], "--standalone-child", StringComparison.OrdinalIgnoreCase))
+            {
+                Application.Run(new StandaloneUpdaterForm(false, String.Empty));
+                return 0;
             }
 
             string requestPath = ReadOption(args, "--request");
@@ -173,6 +188,13 @@ namespace StarOwnerUpdater
     {
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer();
 
+        public static Dictionary<string, object> SerializerDeserialize(string text)
+        {
+            Dictionary<string, object> value = Serializer.Deserialize<Dictionary<string, object>>((text ?? String.Empty).TrimStart('\uFEFF'));
+            if (value == null) throw new InvalidDataException("JSON object is empty.");
+            return value;
+        }
+
         public static Dictionary<string, object> ReadObject(string path)
         {
             string text;
@@ -219,6 +241,35 @@ namespace StarOwnerUpdater
             object value;
             int result;
             return data.TryGetValue(key, out value) && Int32.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture), out result) ? result : 0;
+        }
+
+        public static long LongValue(IDictionary<string, object> data, string key)
+        {
+            object value;
+            long result;
+            return data != null && data.TryGetValue(key, out value) && Int64.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture), NumberStyles.Integer, CultureInfo.InvariantCulture, out result) ? result : 0L;
+        }
+
+        public static Dictionary<string, object> ObjectValue(IDictionary<string, object> data, string key)
+        {
+            object value;
+            if (data == null || !data.TryGetValue(key, out value) || value == null) return null;
+            return value as Dictionary<string, object>;
+        }
+
+        public static List<Dictionary<string, object>> ObjectList(IDictionary<string, object> data, string key)
+        {
+            List<Dictionary<string, object>> values = new List<Dictionary<string, object>>();
+            object raw;
+            if (data == null || !data.TryGetValue(key, out raw) || raw == null) return values;
+            IEnumerable sequence = raw as IEnumerable;
+            if (sequence == null || raw is string) return values;
+            foreach (object item in sequence)
+            {
+                Dictionary<string, object> value = item as Dictionary<string, object>;
+                if (value != null) values.Add(value);
+            }
+            return values;
         }
 
         public static double DoubleValue(IDictionary<string, object> data, string key, double fallback)
@@ -272,7 +323,7 @@ namespace StarOwnerUpdater
             UpdaterRequest demo = new UpdaterRequest();
             demo.OperationId = "preview";
             demo.Mode = "update";
-            demo.TargetVersion = "1.7.1";
+            demo.TargetVersion = "1.7.2";
             demo.IconPath = iconPath;
             demo.ProjectRoot = Environment.CurrentDirectory;
             return new UpdaterForm(demo, true, imagePath);

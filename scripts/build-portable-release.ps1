@@ -143,6 +143,10 @@ if ($ModelOnly) {
   Write-Host "Model dependency archive complete." -ForegroundColor Green
   exit 0
 }
+if (-not $NoArchive) {
+  & (Join-Path $root "tools\updater\build-standalone-asset.ps1") -OutputDirectory $distRoot -SkipBuild
+  if (-not $?) { throw "Could not create the standalone updater Release asset." }
+}
 Assert-InsideDist $stage
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null

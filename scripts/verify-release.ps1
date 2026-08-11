@@ -24,8 +24,10 @@ $required = @(
   "DESIGN_SHARED_KNOWLEDGE.md",
   "runtime-requirements.txt",
   "tools\updater\StarOwnerUpdater.cs",
+  "tools\updater\StandaloneUpdater.cs",
   "tools\updater\StarOwnerUpdater.exe",
   "tools\updater\build-updater.ps1",
+  "tools\updater\build-standalone-asset.ps1",
   "package.json",
   "package-lock.json",
   "node_modules\electron\dist\electron.exe",
@@ -164,6 +166,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Dependency package manifest test failed." }
   & npm run test:update-migration
   if ($LASTEXITCODE -ne 0) { throw "Update and migration test failed." }
+  & npm run test:standalone-updater
+  if ($LASTEXITCODE -ne 0) { throw "Standalone updater test failed." }
   & npm run test:bili-client
   if ($LASTEXITCODE -ne 0) { throw "Bilibili client test failed." }
   & npm run test:asr-format
