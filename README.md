@@ -370,6 +370,8 @@ npm run setup:asr
 npm run verify:release
 ```
 
+维护者发布任何正式版或 pre-release 时，都必须在同一 Release 页面同时提供该版本的 core ZIP、同版本更新器 EXE 和两份 SHA-256，并在仓库外的本地测试目录完成规定的旧版本升级、中止回退及数据完整性矩阵。应用和旧更新器主动检查更新时只读取稳定 `latest`、忽略 pre-release；用户直接下载某个 pre-release 的同版本更新器时，才允许明确更新到该 pre-release。pre-release 定向安装是后续发布前必须实现和通过测试的门禁，v1.7.3 尚未具备。完整发布门禁和当前实现边界见 [DEPLOYMENT.md](DEPLOYMENT.md#6-release-checklist)。
+
 新增重点测试：
 
 ```powershell

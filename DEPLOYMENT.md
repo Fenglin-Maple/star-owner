@@ -223,6 +223,39 @@ The builder verifies required runtime files, model files, license notices, packa
 
 ## 6. Release Checklist
 
+### Mandatory updater publication policy
+
+Every application Release is incomplete until its own GitHub Release page contains all four version-matched assets, regardless of whether the Release is stable/latest or pre-release:
+
+```text
+Star-Owner-vX.Y.Z-win-x64-core.zip
+Star-Owner-vX.Y.Z-win-x64-core.zip.sha256
+Star-Owner-Updater-vX.Y.Z-win-x64.exe
+Star-Owner-Updater-vX.Y.Z-win-x64.exe.sha256
+```
+
+Application vX.Y.Z may be installed only by updater vX.Y.Z. Update target selection has two deliberately separate contracts:
+
+| Entry path | Target selection | Pre-release behavior |
+| --- | --- | --- |
+| The installed application or an older updater actively checks for updates | Query only GitHub's stable `latest` Release. If it is newer, obtain its exact same-version updater and hand off before installing the core. | Ignore every draft and pre-release. A newly published pre-release must never appear as an automatic update. |
+| The user directly runs the updater downloaded from a particular Release page | Pin the target to that updater's own embedded version and the exact matching Release/tag assets. The selected project must be v1.0.3 or newer and older than the target. | A pre-release updater may update an older supported project directly to its own pre-release version, without making that version discoverable through automatic checks. |
+
+An older bootstrap-capable updater may discover a newer stable `latest`, but it must only verify, launch and transfer state to the target-version updater; it must never install that future core itself. Direct target mode must never downgrade an installation. Version-pinned direct installation for pre-release assets is a required release-gate capability but is not implemented by v1.7.3, whose standalone network resolution still supports stable `latest` only. Do not publish a future pre-release as updater-complete until that pinned-target path and its tests are implemented.
+
+### Mandatory candidate migration gate
+
+Before uploading any stable or pre-release application assets, copy representative old portable installations into an external local test directory such as `E:\测试`; never run destructive migration tests against the source repository, the only copy of user data or historical GitHub Release assets. Serve the exact candidate core, updater and checksum files through the local Release fixture, then run the native updater and real transaction against this matrix:
+
+| Source installation | Requirement |
+| --- | --- |
+| v1.0.3 stable | Mandatory for every application Release. |
+| v1.6.2 stable | Mandatory for every application Release. |
+| Any one historical pre-release newer than v1.0.3 and older than v1.6.2 | Mandatory for every application Release; rotate the sample when practical. |
+| Any one historical pre-release newer than v1.6.2 | Optional additional coverage, strongly recommended after updater, transaction, runtime-layout or persistence changes. |
+
+Each mandatory source must pass a complete update to the candidate version and before/after integrity checks for `workspace/`, SQLite data, generated documents, login state, application-private GitHub credentials, models, caches and retained runtime directories. At least one source must also be cancelled before replacement to prove that the old project remains untouched, and at least one must be cancelled after replacement begins to prove that journal recovery restores the exact source version and data. Verify the updater/core download order, SHA-256 values, embedded updater version, protocol, staged manifest, final package version, restart path and absence of updater/helper processes after completion. For a pre-release candidate, additionally prove that its directly downloaded same-version updater installs that exact pre-release while ordinary application/old-updater discovery continues to ignore it and observe only stable `latest`.
+
 1. Ensure `package.json` and `package-lock.json` versions match.
 2. Update README, DESIGN, DEPLOYMENT, AGENTS, SECURITY and CODE_REVIEW for changed contracts.
 3. Run `npm run verify:release`.
@@ -230,8 +263,9 @@ The builder verifies required runtime files, model files, license notices, packa
 5. Build portable archives only when a Release is requested.
 6. Verify archive extraction in a clean directory.
 7. Check shortcuts, icon, first-run dependency prompt, login persistence, both themes and one real video workflow.
-8. For every application Release, upload the core ZIP, same-version standalone updater EXE, and both checksums. Confirm `package.json`, `UpdaterBuildInfo.cs`, executable product version and `portable-manifest.json` all name the same target version and protocol before publishing. Keep `dependencyReleaseVersion` pinned to the compatible dependency Release; publish new model/runtime assets only when their content or layout changes.
-9. Write the GitHub Release title and body in a UTF-8 Markdown file (prefer UTF-8 without BOM). When updating through PowerShell/API, send UTF-8 bytes explicitly; do not use the shell's default `Out-File`/`Set-Content` encoding for Chinese text. After publishing, read the Release back and verify the title, body and unchanged asset names before announcing it.
+8. Complete the mandatory local candidate migration matrix above and retain its machine-readable before/after, operation-result and cancellation/rollback reports outside the repository.
+9. For every stable or pre-release application Release, upload the core ZIP, same-version standalone updater EXE, and both checksums to that exact Release page. Confirm `package.json`, `UpdaterBuildInfo.cs`, executable product version and `portable-manifest.json` all name the same target version and protocol before publishing. Keep `dependencyReleaseVersion` pinned to the compatible dependency Release; publish new model/runtime assets only when their content or layout changes.
+10. Write the GitHub Release title and body in a UTF-8 Markdown file (prefer UTF-8 without BOM). When updating through PowerShell/API, send UTF-8 bytes explicitly; do not use the shell's default `Out-File`/`Set-Content` encoding for Chinese text. After publishing, read the Release back and verify the title, body and unchanged asset names before announcing it.
 
 ## 7. Verification Commands
 
