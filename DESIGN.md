@@ -1,6 +1,6 @@
 # 星藏家 Design
 
-Version: `1.7.3`
+Version: `1.7.4`
 
 ## 1. Product Goal
 
@@ -290,6 +290,8 @@ RAG sessions share provider/model configuration with video Agents but have separ
 Version `1.6.2` extends the RAG cancellation contract through DNS resolution, approval promises, hidden BrowserWindow navigation, bounded DOM extraction and the temporary proxy. A canceled tool event is persisted as `cancelled`, the outer response is saved as a canceled assistant message, and the controller is released in `finally`, so the same session can send a new turn. `browse_url` is explicitly text/link-only: obvious image URLs are rejected before network work, and image content types return immediately without the dynamic wait. Unsupported image errors disable further web-tool retries for that response; no webpage pixel-viewing tool is added.
 
 The UI displays only reasoning text returned by the provider. Unsupported vision, tools, reasoning, image output, compression or subagent capabilities degrade honestly.
+
+OpenAI-compatible stream boundaries are normalized conservatively. Tool-call names and arguments are treated as incremental fragments by default, so repeated characters at a chunk boundary are preserved; a gateway is treated as cumulative only after a new fragment unambiguously extends the already assembled prefix. Leading model formatting characters (`U+200B`-`U+200D`, `U+2060` and `U+FEFF`) are removed at the output boundary before RAG persistence and Markdown validation, while ordinary indentation and zero-width characters inside content remain unchanged.
 
 ## 16. UI Design
 

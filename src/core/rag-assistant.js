@@ -10,6 +10,7 @@ const pdf = require('pdf-parse');
 const mammoth = require('mammoth');
 const { projectRuntimeEnvironment, resolveSystemExecutable } = require('./child-process-io');
 const { collectionKindInfo, collectionUserKindInfo, favoriteStatus } = require('./collection-state');
+const { stripLeadingModelFormatting } = require('./model-text');
 const { isPrivateNetworkHost, parseHttpUrl } = require('./network-policy');
 const { assertSafeWindowsPath, ensureDir: ensureWorkspaceDir } = require('./workspace');
 
@@ -688,13 +689,15 @@ class RagAssistant {
         }
       }
       if (!finished && toolEvents.length) throw new Error(`The model exceeded the ${MAX_RAG_TOOL_CALLS}-tool-call limit. Refine the request and try again.`);
-      if (!content.trim() && !reasoning.trim()) throw new Error('The model returned an empty response. Check the model and provider compatibility settings.');
+      const finalContent = stripLeadingModelFormatting(content);
+      const finalReasoning = stripLeadingModelFormatting(reasoning);
+      if (!finalContent.trim() && !finalReasoning.trim()) throw new Error('The model returned an empty response. Check the model and provider compatibility settings.');
       const finishedAt = new Date().toISOString();
-      return { content, reasoning, usage, toolEvents, toolCallCount: toolCallsUsed, startedAt, finishedAt, durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)) };
+      return { content: finalContent, reasoning: finalReasoning, usage, toolEvents, toolCallCount: toolCallsUsed, startedAt, finishedAt, durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)) };
     } catch (error) {
       error.ragToolEvents = toolEvents;
-      error.ragContent = content;
-      error.ragReasoning = reasoning;
+      error.ragContent = stripLeadingModelFormatting(content);
+      error.ragReasoning = stripLeadingModelFormatting(reasoning);
       error.ragUsage = usage;
       error.ragToolCallCount = toolCallsUsed;
       error.ragStartedAt = startedAt;
@@ -1365,11 +1368,13 @@ class RagAssistant {
       const choice = payload.choices?.[0] || {};
       const message = choice.message || choice.delta || {};
       const normalized = normalizeResponseMessage(message);
-      if (normalized.content) onDelta?.({ content: normalized.content });
-      if (normalized.reasoning) onDelta?.({ reasoning: normalized.reasoning });
+      const content = stripLeadingModelFormatting(normalized.content);
+      const reasoning = stripLeadingModelFormatting(normalized.reasoning);
+      if (content) onDelta?.({ content });
+      if (reasoning) onDelta?.({ reasoning });
       return {
-        content: normalized.content,
-        reasoning: normalized.reasoning,
+        content,
+        reasoning,
         usage: normalizeUsage(payload.usage || {}),
         toolCalls: normalizeToolCalls(message.tool_calls || []),
         finishReason: String(choice.finish_reason || payload.finish_reason || '')
@@ -1385,6 +1390,8 @@ class RagAssistant {
     let finishReason = '';
     const toolCalls = new Map();
     const inlineReasoning = new InlineReasoningStreamParser();
+    const contentPrefix = { started: false };
+    const reasoningPrefix = { started: false };
     const consumeEvent = (event) => {
       for (const line of event.split(/\r?\n/)) {
         if (!line.startsWith('data:')) continue;
@@ -1397,8 +1404,8 @@ class RagAssistant {
         for (const choice of payload.choices || []) {
           if (choice.finish_reason !== undefined && choice.finish_reason !== null) finishReason = String(choice.finish_reason);
           const delta = choice.delta || choice.message || {};
-          const text = normalizeContent(delta.content);
-          const thought = normalizeContent(delta.reasoning_content ?? delta.reasoning ?? delta.thinking);
+          const text = sanitizeLeadingDelta(normalizeContent(delta.content), contentPrefix);
+          const thought = sanitizeLeadingDelta(normalizeContent(delta.reasoning_content ?? delta.reasoning ?? delta.thinking), reasoningPrefix);
           if (text) {
             const parsed = inlineReasoning.push(text);
             if (parsed.content) { content += parsed.content; onDelta?.({ content: parsed.content }); }
@@ -1410,10 +1417,16 @@ class RagAssistant {
               ? [...toolCalls.entries()].find(([, call]) => call.id === item.id)?.[0]
               : undefined;
             const index = item.index ?? matchingIndex ?? (toolCalls.size === 1 ? toolCalls.keys().next().value : toolCalls.size);
-            const current = toolCalls.get(index) || { id: item.id || `call-${index}`, name: '', arguments: '' };
+            const current = toolCalls.get(index) || {
+              id: item.id || `call-${index}`,
+              name: '',
+              arguments: '',
+              mergeState: { name: {}, arguments: {} }
+            };
+            current.mergeState ||= { name: {}, arguments: {} };
             if (item.id) current.id = item.id;
-            current.name = mergeStreamFragment(current.name, item.function?.name);
-            current.arguments = mergeStreamFragment(current.arguments, item.function?.arguments);
+            current.name = mergeStreamFragment(current.name, item.function?.name, current.mergeState.name);
+            current.arguments = mergeStreamFragment(current.arguments, item.function?.arguments, current.mergeState.arguments);
             toolCalls.set(index, current);
           }
         }
@@ -1432,7 +1445,13 @@ class RagAssistant {
     const inlineTail = inlineReasoning.finish();
     if (inlineTail.content) { content += inlineTail.content; onDelta?.({ content: inlineTail.content }); }
     if (inlineTail.reasoning) { reasoning += inlineTail.reasoning; onDelta?.({ reasoning: inlineTail.reasoning }); }
-    return { content, reasoning, usage, toolCalls: [...toolCalls.values()], finishReason };
+    return {
+      content: stripLeadingModelFormatting(content),
+      reasoning: stripLeadingModelFormatting(reasoning),
+      usage,
+      toolCalls: [...toolCalls.values()].map(({ mergeState, ...call }) => call),
+      finishReason
+    };
   }
 
   async complete(provider, body, signal) {
@@ -1446,7 +1465,12 @@ class RagAssistant {
       const choice = payload.choices?.[0] || {};
       const message = choice.message || {};
       const normalized = normalizeResponseMessage(message);
-      return { content: normalized.content, reasoning: normalized.reasoning, usage: normalizeUsage(payload.usage || {}), finishReason: String(choice.finish_reason || payload.finish_reason || '') };
+      return {
+        content: stripLeadingModelFormatting(normalized.content),
+        reasoning: stripLeadingModelFormatting(normalized.reasoning),
+        usage: normalizeUsage(payload.usage || {}),
+        finishReason: String(choice.finish_reason || payload.finish_reason || '')
+      };
     } catch (error) {
       throw normalizeProviderError(error, signal);
     }
@@ -1979,6 +2003,14 @@ function normalizeContent(value) {
   }).join('');
 }
 
+function sanitizeLeadingDelta(value, state = {}) {
+  const text = String(value || '');
+  if (state.started) return text;
+  const normalized = stripLeadingModelFormatting(text);
+  if (normalized) state.started = true;
+  return normalized;
+}
+
 function normalizeResponseMessage(message = {}) {
   const content = splitInlineReasoning(normalizeContent(message.content));
   const explicit = splitInlineReasoning(normalizeContent(message.reasoning_content ?? message.reasoning ?? message.thinking));
@@ -2100,11 +2132,23 @@ function normalizeToolCalls(items) {
   })).filter((item) => item.name);
 }
 
-function mergeStreamFragment(current, incoming) {
+function mergeStreamFragment(current, incoming, state = {}) {
   const left = String(current || '');
   const right = String(incoming || '');
-  if (!right || left === right || left.endsWith(right)) return left;
-  if (!left || right.startsWith(left)) return right;
+  if (!right) return left;
+  if (!left) return right;
+
+  // OpenAI-compatible tool arguments are normally incremental deltas. Some gateways
+  // send cumulative snapshots instead; only replace when that format is unambiguous.
+  if (state.mode === 'cumulative') {
+    if (right.startsWith(left)) return right;
+    if (left.startsWith(right)) return left;
+    return left + right;
+  }
+  if (right.startsWith(left) && right.length > left.length) {
+    state.mode = 'cumulative';
+    return right;
+  }
   return left + right;
 }
 
@@ -2463,6 +2507,7 @@ module.exports = {
   RAG_AUTO_COMPACT_TRIGGER,
   RagAssistant,
   isLikelyImageUrl,
+  mergeStreamFragment,
   normalizeModel,
   readUtf8LineRange,
   splitInlineReasoning,

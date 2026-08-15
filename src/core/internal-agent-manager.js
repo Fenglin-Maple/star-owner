@@ -6,6 +6,7 @@ const { applySubmissionFinalization, stageSubmissionFinalization } = require('./
 const { collectionBlockReason, collectionKindInfo, collectionStorageName, isBiliCollection } = require('./collection-state');
 const { promoteMindMap } = require('./markdown');
 const { isLoginRequiredMessage, isVideoUnavailableMessage, loginRequiredError } = require('./media-errors');
+const { stripLeadingModelFormatting } = require('./model-text');
 const { abortTaskAttempt, cleanupAttemptFiles, createWorkId } = require('./task-attempt');
 const { removeUnavailableTask } = require('./unavailable-task');
 const { resolveBvid } = require('./video-cache-manager');
@@ -1240,10 +1241,12 @@ class InternalAgentManager {
         continue;
       }
       this.addUsage(session, result.usage || {});
-      if (hasUsableGeneratedContent(result.content)) {
+      const normalizedContent = stripLeadingModelFormatting(result.content);
+      if (normalizedContent !== result.content) result = { ...result, content: normalizedContent };
+      if (hasUsableGeneratedContent(normalizedContent)) {
         const completed = this.requireSession(session.id);
-        if (completed.contentIsNotice || !hasUsableGeneratedContent(completed.content)) {
-          completed.content = String(result.content || '');
+        if (completed.contentIsNotice || !hasUsableGeneratedContent(completed.content) || normalizedContent !== completed.content) {
+          completed.content = normalizedContent;
           completed.contentIsNotice = false;
           this.saveSession(completed);
           Object.assign(session, completed);
@@ -1416,7 +1419,7 @@ class InternalAgentManager {
       }
     }
     this.addUsage(session, result.usage || {});
-    const content = String(result.content || '').trim();
+    const content = stripLeadingModelFormatting(result.content).trim();
     if (!content) throw new Error('上下文整理 Agent 未返回可用内容。');
     return content;
   }
@@ -2099,7 +2102,7 @@ function injectFrameGallery(markdown, frames) {
 }
 
 function normalizeGeneratedMarkdown(markdown, task, materials) {
-  let result = String(markdown || '').trim();
+  let result = stripLeadingModelFormatting(markdown).trim();
   result = repairGeneratedFrameReferences(result, materials.frames || []);
   result = canonicalizeRequiredHeadings(result);
   result = normalizeLeadingSectionOrder(result);

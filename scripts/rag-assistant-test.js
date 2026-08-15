@@ -3,12 +3,27 @@ const http = require('http');
 const path = require('path');
 const MarkdownIt = require('markdown-it');
 const { Store } = require('../src/core/store');
-const { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, MAX_RAG_SEARCH_CHUNKS, MAX_RAG_TOOL_ROUNDS, RAG_AUTO_COMPACT_TRIGGER, RagAssistant, isLikelyImageUrl, normalizeModel, splitTextByTokenBudget, readUtf8LineRange, estimateAttachmentTokens } = require('../src/core/rag-assistant');
+const { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, MAX_RAG_SEARCH_CHUNKS, MAX_RAG_TOOL_ROUNDS, RAG_AUTO_COMPACT_TRIGGER, RagAssistant, isLikelyImageUrl, mergeStreamFragment, normalizeModel, splitTextByTokenBudget, readUtf8LineRange, estimateAttachmentTokens } = require('../src/core/rag-assistant');
+const { stripLeadingModelFormatting } = require('../src/core/model-text');
 const { wrapMarkdownTables } = require('../src/core/markdown');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
+
+const repeatedDeltaState = {};
+let repeatedDelta = mergeStreamFragment('...1462', '2', repeatedDeltaState);
+repeatedDelta = mergeStreamFragment(repeatedDelta, '-e48439', repeatedDeltaState);
+assert(repeatedDelta === '...14622-e48439', 'incremental tool fragments dropped a repeated character at a chunk boundary');
+const sameFragmentState = {};
+let sameFragment = mergeStreamFragment('', '2', sameFragmentState);
+sameFragment = mergeStreamFragment(sameFragment, '2', sameFragmentState);
+assert(sameFragment === '22', 'identical incremental tool fragments were incorrectly deduplicated');
+const cumulativeState = {};
+let cumulative = mergeStreamFragment('', '{"document', cumulativeState);
+cumulative = mergeStreamFragment(cumulative, '{"document_id":"doc-22"}', cumulativeState);
+assert(cumulative === '{"document_id":"doc-22"}', 'cumulative tool snapshots were not normalized without duplication');
+assert(stripLeadingModelFormatting('\u200b---') === '---' && stripLeadingModelFormatting('  code') === '  code' && stripLeadingModelFormatting('正文\u200b中间') === '正文\u200b中间', 'model formatting cleanup changed non-leading content or ordinary indentation');
 
 async function waitFor(predicate, timeoutMs = 1500) {
   const startedAt = Date.now();
@@ -153,6 +168,14 @@ async function startFakeProvider() {
       ]);
       return;
     }
+    if (userText.includes('STREAM_TEXT_EDGE_TEST')) {
+      sse(response, [
+        { choices: [{ delta: { content: '\u200b' } }] },
+        { choices: [{ delta: { content: '第一' } }] },
+        { choices: [{ delta: { content: '一段' } }] }
+      ]);
+      return;
+    }
     if (userText.includes('JSON_FALLBACK')) {
       response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
       response.end(JSON.stringify({ choices: [{ message: { reasoning_content: '普通 JSON 推理', content: '普通 JSON 兼容成功。' } }], usage: { prompt_tokens: 9, completion_tokens: 6, total_tokens: 15 } }));
@@ -186,6 +209,18 @@ async function startFakeProvider() {
         ]);
       } else {
         sse(response, [{ choices: [{ delta: { content: '工具后。' } }] }]);
+      }
+      return;
+    }
+    if (userText.includes('TOOL_FRAGMENT_EDGE_TEST')) {
+      if (!toolResult) {
+        sse(response, [
+          { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-fragment-edge', type: 'function', function: { name: 'knowledge_search', arguments: '{"query":"builtin:mrigqywi-4a967b:BV1aag36jEws:single-178676001462' } }] } }] },
+          { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '2' } }] } }] },
+          { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '-e48439","limit":1}' } }] } }] }
+        ]);
+      } else {
+        sse(response, [{ choices: [{ delta: { content: '文档 ID 片段拼接成功。' } }] }]);
       }
       return;
     }
@@ -406,8 +441,15 @@ async function startFakeProvider() {
     const storedUser = store.list('ragMessages').find((item) => item.role === 'user');
     assert(!storedUser.attachments[0].extractedText && !storedUser.attachments[0].path, 'message storage duplicated private attachment content');
 
+    const streamEdgeReply = await assistant.send(session.id, { content: 'STREAM_TEXT_EDGE_TEST' });
+    assert(streamEdgeReply.content === '第一一段' && !streamEdgeReply.content.includes('\u200b'), 'leading model formatting characters or repeated streamed text were not handled safely');
+
     const positionedReply = await assistant.send(session.id, { content: 'TOOL_POSITION_TEST' });
     assert(positionedReply.content === '工具前。工具后。' && positionedReply.toolEvents.length === 1 && positionedReply.toolEvents[0].contentOffset === '工具前。'.length, 'tool event was not anchored to the actual response position');
+    const fragmentEdgeReply = await assistant.send(session.id, { content: 'TOOL_FRAGMENT_EDGE_TEST' });
+    const fragmentEdgeRequest = [...fake.requests].reverse().find((item) => item.messages?.some((message) => message.role === 'assistant' && message.tool_calls?.some((call) => call.id === 'call-fragment-edge')));
+    const fragmentEdgeCall = fragmentEdgeRequest?.messages?.find((message) => message.role === 'assistant' && message.tool_calls?.some((call) => call.id === 'call-fragment-edge'))?.tool_calls?.find((call) => call.id === 'call-fragment-edge');
+    assert(fragmentEdgeReply.content === '文档 ID 片段拼接成功。' && fragmentEdgeCall?.function?.arguments === '{"query":"builtin:mrigqywi-4a967b:BV1aag36jEws:single-1786760014622-e48439","limit":1}', `tool-call fragments lost a repeated character in the end-to-end request: ${JSON.stringify({ reply: fragmentEdgeReply.content, call: fragmentEdgeCall })}`);
     const toolFailureSession = assistant.createSession({ providerId: provider.id, modelId: 'fake-agent', knowledgeCollectionIds: ['rag-collection'], title: 'Tool failure timeline test' });
     let toolFailure = null;
     try { await assistant.send(toolFailureSession.id, { content: 'TOOL_THEN_FAILURE' }); }
