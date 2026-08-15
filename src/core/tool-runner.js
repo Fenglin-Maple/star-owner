@@ -7,7 +7,8 @@ const { DEFAULT_ASR_MODEL, asrComputeType, getAsrModel, normalizeAsrModel, publi
 const { bilibiliCookieRequiredError, isUsableBilibiliCookieFile } = require('./bilibili-auth');
 const { nodeChildProcessSpec, projectRuntimeEnvironment, readUtf8, resolveNvidiaSmi, resolveSystemExecutable } = require('./child-process-io');
 const { detectAsrHardware } = require('./hardware-capabilities');
-const { isVideoUnavailableMessage, unsupportedVideoError, videoUnavailableError } = require('./media-errors');
+const { isBiliCollection } = require('./collection-state');
+const { bilibiliMetadataIncompleteError, isBilibiliMetadataIncompleteMessage, isVideoUnavailableMessage, unsupportedVideoError, videoUnavailableError } = require('./media-errors');
 const { ResourceScheduler } = require('./resource-scheduler');
 const { abortTaskAttempt, recoverPendingAttemptCleanups } = require('./task-attempt');
 const { removeUnavailableTask } = require('./unavailable-task');
@@ -355,7 +356,7 @@ class ToolRunner {
         this.publish({ type: 'video-unavailable', taskId: task.id, collectionId: task.collectionId, bvid: task.bvid, reason: terminalError.message, removed: removal.removed });
         error = terminalError;
       }
-      const status = ['BILIBILI_VIDEO_UNAVAILABLE', 'UNSUPPORTED_VIDEO_TYPE'].includes(error.code) ? 'skipped' : (error.code === 'TOOL_TIMEOUT' ? 'timeout' : 'failed');
+      const status = ['BILIBILI_VIDEO_UNAVAILABLE', 'UNSUPPORTED_VIDEO_TYPE', 'BILIBILI_METADATA_INCOMPLETE'].includes(error.code) ? 'skipped' : (error.code === 'TOOL_TIMEOUT' ? 'timeout' : 'failed');
       const finished = this.finishRun(state, status, {
         signal: status === 'timeout' ? 'TIMEOUT' : '',
         error: error.message || String(error),
@@ -831,6 +832,12 @@ class ToolRunner {
             const unavailable = videoUnavailableError(detail);
             unavailable.exitCode = code;
             return finish(unavailable);
+          }
+          if (isBilibiliMetadataIncompleteMessage(detail)) {
+            const attempts = Number(String(detail).match(/(?:已尝试|attempts?\s*)\s*(\d+)\s*次?/i)?.[1] || 0);
+            const incomplete = bilibiliMetadataIncompleteError(detail, attempts);
+            incomplete.exitCode = code;
+            return finish(incomplete);
           }
           return finish(error);
         }
@@ -1499,6 +1506,7 @@ class ToolRunner {
       if (task.page) args.push('--page', String(task.page));
       if (task.cid) args.push('--cid', String(task.cid));
       if (task.multiPartRole === 'part' || task.singleTask === true) args.push('--risk-control-retries', '3');
+      if (requiresCompleteBilibiliMetadata(task, collection, options)) args.push('--metadata-retries', '2');
       if (options.reuseInfo) args.push('--reuse-info');
     } else if (options.preserveProcessCache) {
       args.push('--preserve-process-cache');
@@ -1905,4 +1913,10 @@ function killProcessTree(child) {
   try { child.kill('SIGTERM'); } catch {}
 }
 
-module.exports = { DEFAULT_CONFIG, ToolRunner, asrInfrastructureError, hasReusableMultipartInfo, isAsrInfrastructureFailure };
+function requiresCompleteBilibiliMetadata(task = {}, collection = {}, options = {}) {
+  if (options.requireCompleteMetadata !== true) return false;
+  if (task.localImported === true || task.sourceType === 'local-video') return false;
+  return isBiliCollection(collection);
+}
+
+module.exports = { DEFAULT_CONFIG, ToolRunner, asrInfrastructureError, hasReusableMultipartInfo, isAsrInfrastructureFailure, requiresCompleteBilibiliMetadata };

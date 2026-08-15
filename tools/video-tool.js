@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const { projectRuntimeEnvironment } = require('../src/core/child-process-io');
+const { bilibiliMetadataIncompleteError } = require('../src/core/media-errors');
 const { repairPortablePythonHome } = require('../src/core/portable-runtime');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -89,7 +90,7 @@ function printHelp() {
   console.log(`星藏家 video-tool
 
 用法:
-  node tools/video-tool.js info <视频链接或BV号> --out <目录> [--cookies <cookie.txt>]
+  node tools/video-tool.js info <视频链接或BV号> --out <目录> [--cookies <cookie.txt>] [--metadata-retries 2]
   node tools/video-tool.js subtitles <视频链接或BV号> --out <目录> [--cookies <cookie.txt>]
   node tools/video-tool.js comments <视频链接或BV号> --out <目录> [--cookies <cookie.txt>] [--comment-limit 3]
   node tools/video-tool.js merged <视频链接或BV号> --out <目录> [--cookies <cookie.txt>] [--height 720]
@@ -558,8 +559,9 @@ function isProcessCacheFile(root, file) {
 
 async function getVideoInfo(videoUrl, args) {
   const bvid = extractBvid(videoUrl);
-  const apiUrl = `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`;
-  const json = await fetchJson(apiUrl, args);
+  const json = hasCompleteMetadataRequirement(args)
+    ? await fetchCompleteVideoData(bvid, args)
+    : await fetchJson(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`, args);
   const data = json.data || {};
   const requestedPage = Number(args?.page || new URL(videoUrl).searchParams.get('p') || 0);
   const requestedCid = String(args?.cid || '').trim();
@@ -579,6 +581,7 @@ async function getVideoInfo(videoUrl, args) {
     pic: data.pic,
     duration: data.duration,
     dimension: data.dimension || null,
+    videos: Number(data.videos || allPages.length || 0),
     pages: selectedPage ? [selectedPage] : allPages,
     page: selectedPage?.page || 1,
     cid: selectedPage?.cid || '',
@@ -589,6 +592,10 @@ async function getVideoInfo(videoUrl, args) {
     url: videoUrl,
     fetchedAt: new Date().toISOString()
   };
+}
+
+function hasCompleteMetadataRequirement(args = {}) {
+  return Object.prototype.hasOwnProperty.call(args, 'metadata-retries');
 }
 
 async function getTags(bvid, args) {
@@ -638,6 +645,40 @@ async function fetchPlainJson(url, args) {
     return json;
   }
   throw bilibiliRiskControlError(retries);
+}
+
+async function fetchCompleteVideoData(bvid, args = {}, fetcher = fetchJson) {
+  const apiUrl = `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(String(bvid || ''))}`;
+  const retries = boundedInteger(args?.['metadata-retries'], 0, 2, 0);
+  let lastAssessment = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const json = await fetcher(apiUrl, args);
+    const assessment = assessBilibiliPageMetadata(json?.data);
+    if (assessment.complete) return json;
+    lastAssessment = assessment;
+    if (attempt >= retries) break;
+    const waitMs = bilibiliMetadataRetryDelay(attempt, args);
+    console.error(`[video-tool] Bilibili video metadata is incomplete; retry ${attempt + 1}/${retries} after ${waitMs} ms.`);
+    await delay(waitMs);
+  }
+  throw bilibiliMetadataIncompleteError(lastAssessment?.reason, retries + 1);
+}
+
+function assessBilibiliPageMetadata(data = {}) {
+  const pages = Array.isArray(data?.pages) ? data.pages : [];
+  const videos = Number(data?.videos);
+  if (!pages.length) {
+    return { complete: false, pages: 0, videos: Number.isFinite(videos) ? videos : 0, reason: '接口未返回 pages，或 pages 为空。' };
+  }
+  if (Number.isFinite(videos) && videos > 0 && pages.length !== videos) {
+    return { complete: false, pages: pages.length, videos, reason: `接口返回 ${videos} 个视频，但 pages 只有 ${pages.length} 项。` };
+  }
+  return { complete: true, pages: pages.length, videos: Number.isFinite(videos) && videos > 0 ? videos : pages.length, reason: '' };
+}
+
+function bilibiliMetadataRetryDelay(attempt, args = {}) {
+  const base = boundedInteger(args?.['metadata-retry-base-delay-ms'], 0, 10_000, 800);
+  return Math.min(10_000, base * (Number(attempt) + 1));
 }
 
 function readReusableVideoInfo(videoUrl, outDir, args = {}) {
@@ -987,10 +1028,14 @@ function* walk(root) {
 
 module.exports = {
   assessSubtitle,
+  assessBilibiliPageMetadata,
   bilibiliRiskControlDelay,
+  bilibiliMetadataRetryDelay,
   buildBundle,
   extractFrames,
+  fetchCompleteVideoData,
   fetchPlainJson,
+  hasCompleteMetadataRequirement,
   isBilibiliRiskControlResponse,
   isNoAudioStreamError,
   normalizeVideoUrl,

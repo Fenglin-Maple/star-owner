@@ -5,8 +5,9 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { PassThrough } = require('stream');
 const { nodeChildProcessSpec, readUtf8, utf8ChildEnvironment } = require('../src/core/child-process-io');
-const { bilibiliRiskControlDelay, buildBundle, extractFrames, fetchPlainJson, isBilibiliRiskControlResponse, readReusableVideoInfo, resolveCommand } = require('../tools/video-tool');
-const { hasReusableMultipartInfo, ToolRunner } = require('../src/core/tool-runner');
+const { assessBilibiliPageMetadata, bilibiliMetadataRetryDelay, bilibiliRiskControlDelay, buildBundle, extractFrames, fetchCompleteVideoData, fetchPlainJson, hasCompleteMetadataRequirement, isBilibiliRiskControlResponse, readReusableVideoInfo, resolveCommand } = require('../tools/video-tool');
+const { hasReusableMultipartInfo, requiresCompleteBilibiliMetadata, ToolRunner } = require('../src/core/tool-runner');
+const { isBilibiliMetadataIncompleteMessage } = require('../src/core/media-errors');
 const { MIN_ARTIFACT_NAME_LENGTH, PROJECT_ROOT, PathSafetyError, evaluateWorkspacePathSafety, fitArtifactName, safeName } = require('../src/core/workspace');
 
 (async () => {
@@ -24,6 +25,31 @@ const { MIN_ARTIFACT_NAME_LENGTH, PROJECT_ROOT, PathSafetyError, evaluateWorkspa
   assert(isBilibiliRiskControlResponse(200, { code: -412 }, ''), 'Bilibili API -412 was not recognized when HTTP status was 200');
   const retryDelay = bilibiliRiskControlDelay(0, { 'risk-control-base-delay-ms': 100 });
   assert(retryDelay >= 350 && retryDelay < 1000, 'Bilibili risk-control retry delay is outside the bounded jitter window');
+  assert.deepStrictEqual(assessBilibiliPageMetadata({ videos: 1, pages: [{ page: 1 }] }).complete, true, 'complete single-part metadata was rejected');
+  assert.deepStrictEqual(assessBilibiliPageMetadata({ videos: 2, pages: [{ page: 1 }, { page: 2 }] }).complete, true, 'complete multi-part metadata was rejected before support inspection');
+  assert.strictEqual(assessBilibiliPageMetadata({ videos: 2, pages: [{ page: 1 }] }).complete, false, 'partial pages response was accepted despite a videos count mismatch');
+  assert.strictEqual(assessBilibiliPageMetadata({ videos: 1, pages: [] }).complete, false, 'empty pages response was accepted');
+  assert.strictEqual(hasCompleteMetadataRequirement({}), false, 'complete metadata validation became implicit for ordinary video requests');
+  assert.strictEqual(hasCompleteMetadataRequirement({ 'metadata-retries': 2 }), true, 'complete metadata validation flag was not recognized');
+  assert(isBilibiliMetadataIncompleteMessage('[video-tool] B站视频元数据不完整（已尝试 3 次）'), 'metadata-incomplete child-process output was not classified');
+  assert.strictEqual(bilibiliMetadataRetryDelay(0, { 'metadata-retry-base-delay-ms': 0 }), 0, 'metadata retry test delay was not configurable');
+  let metadataRequests = 0;
+  const recoveredMetadata = await fetchCompleteVideoData('BV1metadata01', { 'metadata-retries': 2, 'metadata-retry-base-delay-ms': 0 }, async () => {
+    metadataRequests += 1;
+    return metadataRequests < 3
+      ? { code: 0, data: { videos: 2, pages: [{ page: 1 }] } }
+      : { code: 0, data: { videos: 2, pages: [{ page: 1 }, { page: 2 }] } };
+  });
+  assert(metadataRequests === 3 && recoveredMetadata.data.pages.length === 2, 'incomplete metadata did not recover on the third bounded attempt');
+  let incompleteMetadataError = null;
+  metadataRequests = 0;
+  try {
+    await fetchCompleteVideoData('BV1metadata02', { 'metadata-retries': 2, 'metadata-retry-base-delay-ms': 0 }, async () => {
+      metadataRequests += 1;
+      return { code: 0, data: { videos: 87, pages: [{ page: 1 }] } };
+    });
+  } catch (error) { incompleteMetadataError = error; }
+  assert(metadataRequests === 3 && incompleteMetadataError?.code === 'BILIBILI_METADATA_INCOMPLETE' && incompleteMetadataError.attempts === 3, 'persistent incomplete metadata did not stop after three attempts with a dedicated error');
   let riskControlRequests = 0;
   const riskControlServer = http.createServer((_request, response) => {
     riskControlRequests += 1;
@@ -118,6 +144,27 @@ const { MIN_ARTIFACT_NAME_LENGTH, PROJECT_ROOT, PathSafetyError, evaluateWorkspa
     updateToolRun: (_id, patch) => { toolRun = { ...toolRun, ...patch }; return toolRun; }
   };
   const runner = new ToolRunner({ store });
+  let childToolRun = { id: 'metadata-child-process-run', logFile: path.join(root, 'metadata-child-process.log') };
+  const childRunner = new ToolRunner({
+    store: {
+      getToolRun: () => childToolRun,
+      updateToolRun: (_id, patch) => {
+        childToolRun = { ...childToolRun, ...patch };
+        return childToolRun;
+      }
+    }
+  });
+  let childProcessError = null;
+  try {
+    await childRunner.runChild(
+      { runId: childToolRun.id, cancelled: false },
+      ['-e', "process.stderr.write('B站视频元数据不完整（已尝试 3 次）：pages 缺失。'); process.exit(7)"],
+      60_000
+    );
+  } catch (error) {
+    childProcessError = error;
+  }
+  assert(childProcessError?.code === 'BILIBILI_METADATA_INCOMPLETE' && childProcessError.attempts === 3, 'ToolRunner did not preserve the dedicated metadata error from a child process');
   const cookieFile = path.join(root, 'cookies.txt');
   fs.writeFileSync(cookieFile, '# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\ttest-session\n', 'utf8');
   const multipartArgs = runner.buildArgs({
@@ -146,9 +193,19 @@ const { MIN_ARTIFACT_NAME_LENGTH, PROJECT_ROOT, PathSafetyError, evaluateWorkspa
     options: {}
   }), (error) => error.code === 'BILIBILI_COOKIE_REQUIRED', 'single-video execution silently fell back to anonymous Bilibili access when its Cookie became unavailable');
   const ordinaryArgs = runner.buildArgs({ task: { bvid: 'BV1xx411c7mD', cookieFile }, action: 'subtitles', collection: {}, artifactDir: root, options: {} });
-  assert(!ordinaryArgs.includes('--cookies') && !ordinaryArgs.includes('--reuse-info') && !ordinaryArgs.includes('--risk-control-retries'), 'single-video authentication or multi-part safeguards leaked into the ordinary video path');
+  assert(!ordinaryArgs.includes('--cookies') && !ordinaryArgs.includes('--reuse-info') && !ordinaryArgs.includes('--risk-control-retries') && !ordinaryArgs.includes('--metadata-retries'), 'Bilibili safeguards leaked into an unclassified ordinary video path');
   const ordinaryCollectionArgs = runner.buildArgs({ task: { bvid: 'BV1xx411c7mD' }, action: 'info', collection: { cookieFile }, artifactDir: root, options: {} });
-  assert(ordinaryCollectionArgs.includes('--cookies') && ordinaryCollectionArgs.includes(cookieFile) && !ordinaryCollectionArgs.includes('--risk-control-retries'), 'ordinary collection Cookie behavior changed while fixing single-video tasks');
+  assert(ordinaryCollectionArgs.includes('--cookies') && ordinaryCollectionArgs.includes(cookieFile) && !ordinaryCollectionArgs.includes('--metadata-retries'), 'unclassified collection unexpectedly received Bilibili pages validation');
+  const biliCollectionArgs = runner.buildArgs({ task: { bvid: 'BV1xx411c7mD' }, action: 'info', collection: { mediaId: 'folder-1', cookieFile }, artifactDir: root, options: { requireCompleteMetadata: true } });
+  assert(biliCollectionArgs.includes('--metadata-retries'), 'Bilibili favorite collection did not enable complete metadata validation');
+  const localCacheArgs = runner.buildArgs({ task: { bvid: 'LOCAL-VIDEO', localImported: true, sourceType: 'local-video' }, action: 'info', collection: { collectionKind: 'video-cache', videoCacheSource: 'local-media', cookieFile }, artifactDir: root, options: { requireCompleteMetadata: true } });
+  assert(!localCacheArgs.includes('--metadata-retries'), 'local imported media incorrectly received Bilibili pages validation');
+  const downloadedCacheArgs = runner.buildArgs({ task: { bvid: 'BV1xx411c7mD', cachedVideoId: 'cache-1' }, action: 'info', collection: { collectionKind: 'video-cache', cookieFile }, artifactDir: root, options: { requireCompleteMetadata: true } });
+  assert(!downloadedCacheArgs.includes('--metadata-retries'), 'downloaded Bilibili cache unexpectedly received the Agent-only pages validation');
+  assert(requiresCompleteBilibiliMetadata({ bvid: 'BV1xx411c7mD' }, { mediaId: 'folder-1' }, { requireCompleteMetadata: true }) === true, 'Bilibili favorite collection did not qualify for complete metadata validation');
+  assert(requiresCompleteBilibiliMetadata({ singleTask: true, bvid: 'BV1xx411c7mD' }, { internal: true }, { requireCompleteMetadata: true }) === false, 'single-video internal collection inherited the Agent-only pages validation');
+  assert(requiresCompleteBilibiliMetadata({ bvid: 'BV1xx411c7mD' }, { collectionKind: 'video-cache' }, { requireCompleteMetadata: true }) === false, 'video-cache collection inherited the Agent-only pages validation');
+  assert(requiresCompleteBilibiliMetadata({ localImported: true, bvid: 'LOCAL-VIDEO' }, { mediaId: 'folder-1' }, { requireCompleteMetadata: true }) === false, 'local media bypass did not take priority over a Bilibili-shaped collection');
   const result = await runner.runAsrStage({ warnings: [] }, toolRun);
   const asr = JSON.parse(fs.readFileSync(path.join(root, 'asr', 'asr-result.json'), 'utf8'));
   assert(result.ok && result.skipped && asr.noAudioStream && asr.diagnostics.noAudioStream, 'No-audio ASR diagnostic was not generated.');

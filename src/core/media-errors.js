@@ -82,7 +82,22 @@ function unsupportedVideoError(detail, kind = 'unsupported-video') {
   return error;
 }
 
+function bilibiliMetadataIncompleteError(detail, attempts = 0) {
+  const count = Number(attempts) > 0 ? `（已尝试 ${Number(attempts)} 次）` : '';
+  const error = new Error(`B站视频元数据不完整${count}：${String(detail || '接口没有返回完整的 pages 列表。').slice(0, 1000)} 请稍后重试。`);
+  error.code = 'BILIBILI_METADATA_INCOMPLETE';
+  error.failureKind = 'metadata-incomplete';
+  error.attempts = Number(attempts) || 0;
+  return error;
+}
+
+function isBilibiliMetadataIncompleteMessage(value) {
+  return /B站视频元数据不完整|Bilibili video metadata is incomplete/i.test(String(value || ''));
+}
+
 module.exports = {
+  bilibiliMetadataIncompleteError,
+  isBilibiliMetadataIncompleteMessage,
   isLoginRequiredMessage,
   isSubmissionValidationMessage,
   isVideoUnavailableMessage,

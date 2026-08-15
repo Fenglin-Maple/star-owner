@@ -106,22 +106,29 @@ function assert(condition, message) {
   let forceInfrastructureFailure = false;
   let forceUnavailableFailure = false;
   let forceUnsupportedFailure = false;
+  let metadataIncompleteRuns = 0;
   let holdToolRuns = false;
   let infrastructureArtifactDir = '';
   let lastMaterialCollectionCookie = '';
+  const metadataRequirementByCollection = new Map();
   const toolRunner = {
     getState: () => ({ hardware: { checkedAt: '', localAsrSupported: false }, config: { cpuAsrEnabled: false } }),
-    start: ({ task, tool, workerId, collection: runCollection }) => {
+    start: ({ task, tool, workerId, collection: runCollection, options }) => {
       const id = `run-${tool.id}-${Date.now()}`;
-      if (tool.id === 'material-bundle') lastMaterialCollectionCookie = String(runCollection?.cookieFile || '');
+      if (tool.id === 'material-bundle') {
+        lastMaterialCollectionCookie = String(runCollection?.cookieFile || '');
+        metadataRequirementByCollection.set(task.collectionId, options?.requireCompleteMetadata === true);
+      }
       const loginBlocked = forceLoginFailure && tool.id === 'material-bundle';
       const infrastructureBlocked = forceInfrastructureFailure && tool.id === 'material-bundle';
       const unavailable = forceUnavailableFailure && tool.id === 'material-bundle';
       const unsupported = forceUnsupportedFailure && tool.id === 'material-bundle';
-      if (tool.id === 'material-bundle' && !loginBlocked && !unavailable && !unsupported) writeMaterials(task.artifactDir);
+      const metadataIncomplete = metadataIncompleteRuns > 0 && tool.id === 'material-bundle';
+      if (metadataIncomplete) metadataIncompleteRuns -= 1;
+      if (tool.id === 'material-bundle' && !loginBlocked && !unavailable && !unsupported && !metadataIncomplete) writeMaterials(task.artifactDir);
       if (infrastructureBlocked) infrastructureArtifactDir = task.artifactDir;
       const waiting = holdToolRuns && tool.id === 'material-bundle';
-      store.createToolRun({ id, taskId: task.id, collectionId: task.collectionId, toolId: tool.id, toolName: tool.name, workerId, status: waiting ? 'running' : (unsupported ? 'skipped' : (loginBlocked || infrastructureBlocked || unavailable ? 'failed' : 'succeeded')), stage: waiting ? 'test-hold' : (loginBlocked || infrastructureBlocked || unavailable || unsupported ? 'error' : 'complete'), error: loginBlocked ? 'This video is only available for registered users. Use --cookies.' : (infrastructureBlocked ? 'GPU ASR 常驻服务连续 3 次启动失败，应用已停止相关 Agent。' : (unavailable ? 'Bilibili 视频已删除、下架或不可用：已失效视频' : (unsupported ? '当前版本暂不支持多 P 视频（检测到 2 个分 P），任务已关闭。' : ''))), errorCode: infrastructureBlocked ? 'ASR_INFRASTRUCTURE_FAILURE' : (unavailable ? 'BILIBILI_VIDEO_UNAVAILABLE' : (unsupported ? 'UNSUPPORTED_VIDEO_TYPE' : '')), failureKind: infrastructureBlocked ? 'infrastructure' : (unavailable ? 'terminal-video' : (unsupported ? 'unsupported-video' : '')), unsupportedKind: unsupported ? 'multi-part' : '', possibleCauses: infrastructureBlocked ? ['CTranslate2 原生运行库访问冲突', '项目依赖损坏'] : [], createdAt: new Date().toISOString(), finishedAt: waiting ? '' : new Date().toISOString() });
+      store.createToolRun({ id, taskId: task.id, collectionId: task.collectionId, toolId: tool.id, toolName: tool.name, workerId, status: waiting ? 'running' : (unsupported || metadataIncomplete ? 'skipped' : (loginBlocked || infrastructureBlocked || unavailable ? 'failed' : 'succeeded')), stage: waiting ? 'test-hold' : (loginBlocked || infrastructureBlocked || unavailable || unsupported || metadataIncomplete ? 'error' : 'complete'), error: loginBlocked ? 'This video is only available for registered users. Use --cookies.' : (infrastructureBlocked ? 'GPU ASR 常驻服务连续 3 次启动失败，应用已停止相关 Agent。' : (unavailable ? 'Bilibili 视频已删除、下架或不可用：已失效视频' : (unsupported ? '当前版本暂不支持多 P 视频（检测到 2 个分 P），任务已关闭。' : (metadataIncomplete ? 'B站视频元数据不完整（已尝试 3 次）：接口返回 87 个视频，但 pages 只有 1 项。' : '')))), errorCode: infrastructureBlocked ? 'ASR_INFRASTRUCTURE_FAILURE' : (unavailable ? 'BILIBILI_VIDEO_UNAVAILABLE' : (unsupported ? 'UNSUPPORTED_VIDEO_TYPE' : (metadataIncomplete ? 'BILIBILI_METADATA_INCOMPLETE' : ''))), failureKind: infrastructureBlocked ? 'infrastructure' : (unavailable ? 'terminal-video' : (unsupported ? 'unsupported-video' : (metadataIncomplete ? 'metadata-incomplete' : ''))), unsupportedKind: unsupported ? 'multi-part' : '', possibleCauses: infrastructureBlocked ? ['CTranslate2 原生运行库访问冲突', '项目依赖损坏'] : [], createdAt: new Date().toISOString(), finishedAt: waiting ? '' : new Date().toISOString() });
       return store.getToolRun(id);
     },
     cancel: (runId) => {
@@ -377,6 +384,37 @@ function assert(condition, message) {
   assert(new Set(queueClaims.map((event) => event.workerId)).size === 1 && queueClaims[0]?.workerId === queueSession.workerId, 'continuous context rotation changed the Worker ID');
   assert(new Set(queueClaims.map((event) => event.workId)).size === 2, 'continuous Agent reused a workId across videos');
 
+  const metadataCollection = store.upsertCollection({
+    id: '100:agent-metadata-validation',
+    mediaId: 'agent-metadata-validation',
+    userId: '100',
+    userName: '测试登录用户',
+    name: 'B站元数据校验测试',
+    storageName: 'B站元数据校验测试',
+    workspaceId: workspace.id,
+    workspaceRoot: workspace.root,
+    collectionRoot: path.join(workspace.root, '测试登录用户', 'B站元数据校验测试'),
+    syncReady: true,
+    syncState: 'ready',
+    lastSyncedAt: new Date().toISOString()
+  });
+  const metadataTaskId = `${metadataCollection.id}:BVMETADATA001:queue-test`;
+  store.upsertTask({ id: metadataTaskId, collectionId: metadataCollection.id, bvid: 'BVMETADATA001', title: '元数据完整性测试', status: 'pending', enabled: true, attempts: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  store.commit();
+  metadataIncompleteRuns = 1;
+  const metadataSession = manager.createSession({ title: '元数据异常跳过测试', collectionId: metadataCollection.id, providerId: 'provider-test', modelId: 'model-test' });
+  await manager.start(metadataSession.id);
+  const metadataSkipped = await waitForStatus(manager, metadataSession.id, 'idle');
+  const metadataTask = store.getTask(metadataTaskId);
+  assert(metadataSkipped.skipped === 1 && metadataSkipped.failed === 0 && metadataTask?.enabled === false && metadataTask.metadataIncomplete === true && metadataTask.status === 'pending', 'incomplete Bilibili metadata was not closed and skipped as a retryable task exception');
+  assert(events.some((event) => event.type === 'video-metadata-incomplete' && event.taskId === metadataTaskId), 'metadata-incomplete event was not emitted');
+  assert(metadataRequirementByCollection.get(metadataCollection.id) === true, 'Bilibili favorite Agent did not receive the complete metadata requirement');
+  assert(metadataRequirementByCollection.get(collection.id) === false, 'ordinary internal single-video Agent unexpectedly received the complete metadata requirement');
+  store.updateTasksEnabled([metadataTaskId], true);
+  await manager.start(metadataSession.id);
+  const metadataRecovered = await waitForStatus(manager, metadataSession.id, 'idle');
+  assert(metadataRecovered.completed === 1 && store.getTask(metadataTaskId)?.status === 'done' && store.getTask(metadataTaskId)?.metadataIncomplete === false, 'a manually re-enabled metadata task did not recover cleanly');
+
   holdToolRuns = true;
   const stoppedSession = await manager.createSingleTask({ video: 'BVMANUAL0001', collectionId: collection.id, providerId: 'provider-test', modelId: 'model-test' });
   await manager.start(stoppedSession.id);
@@ -577,6 +615,7 @@ function assert(condition, message) {
   await manager.start(localSession.id);
   await waitForCurrentTask(manager, localSession.id);
   assert(cookieExportCalls === exportsBeforeLocalStart, 'local imported video/audio Agent unexpectedly required or exported a B站 Cookie');
+  assert(metadataRequirementByCollection.get(localCollection.id) === false, 'local imported video/audio Agent unexpectedly received the Bilibili pages requirement');
   manager.stop(localSession.id);
   await waitForStatus(manager, localSession.id, 'stopped');
 
@@ -620,6 +659,7 @@ function assert(condition, message) {
   await manager.start(downloadedSession.id);
   await waitForCurrentTask(manager, downloadedSession.id);
   assert(store.getCollectionById(downloadedCollection.id)?.cookieFile === downloadedCookie && lastMaterialCollectionCookie === downloadedCookie, 'B站 downloaded cache Agent did not refresh and use the current login Cookie');
+  assert(metadataRequirementByCollection.get(downloadedCollection.id) === false, 'downloaded Bilibili cache Agent unexpectedly received the favorite-collection pages requirement');
   manager.stop(downloadedSession.id);
   await waitForStatus(manager, downloadedSession.id, 'stopped');
 

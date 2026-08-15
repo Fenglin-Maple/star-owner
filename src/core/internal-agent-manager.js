@@ -310,6 +310,9 @@ class InternalAgentManager {
       allowedRoot: '',
       validatorErrors: [],
       failureReason: '',
+      metadataIncomplete: false,
+      metadataError: '',
+      metadataIncompleteAt: '',
       infrastructureError: '',
       abortReason: '',
       abortSource: '',
@@ -814,6 +817,40 @@ class InternalAgentManager {
           this.saveSession(latest);
           continue;
         }
+        if (error.code === 'BILIBILI_METADATA_INCOMPLETE' && isBiliCollection(this.store.getCollectionById(task.collectionId) || {})) {
+          const reason = error.message || 'B站视频元数据不完整，任务已跳过。';
+          this.abortAttempt(task.id, latest.workerId, reason, 'metadata-incomplete');
+          const disabled = this.store.getTask(task.id);
+          if (disabled) {
+            Object.assign(disabled, {
+              status: 'pending',
+              enabled: false,
+              metadataIncomplete: true,
+              metadataError: reason,
+              metadataIncompleteAt: new Date().toISOString(),
+              failureReason: reason,
+              updatedAt: new Date().toISOString()
+            });
+            this.store.upsertTask(disabled);
+            this.store.commit();
+            this.store.recordTaskEvent(task.id, 'metadata-incomplete', { collectionId: task.collectionId, workerId: latest.workerId, reason, attempts: error.attempts || 0 });
+          }
+          latest.skipped = Number(latest.skipped || 0) + 1;
+          latest.currentTaskId = '';
+          latest.currentRunId = '';
+          latest.lastError = reason;
+          latest.phase = 'B站视频元数据不完整，任务已关闭并跳过';
+          this.saveSession(latest);
+          this.log(latest, `跳过并关闭 ${task.bvid || task.title}：${reason}`);
+          this.emit({ type: 'video-metadata-incomplete', sessionId: latest.id, taskId: task.id, bvid: task.bvid, reason, attempts: error.attempts || 0 });
+          if (!latest.acceptNewTasks) {
+            this.finishSession(latest, 'paused', '已暂停');
+            return;
+          }
+          latest.status = 'running';
+          this.saveSession(latest);
+          continue;
+        }
         if (error.code === 'BILIBILI_VIDEO_UNAVAILABLE' || isVideoUnavailableMessage(error.message)) {
           const removal = removeUnavailableTask({ store: this.store, toolRunner: this.toolRunner, taskId: task.id, reason: error.message, source: 'internal-agent' });
           latest.skipped = Number(latest.skipped || 0) + 1;
@@ -943,6 +980,9 @@ class InternalAgentManager {
       artifactDir,
       validatorErrors: [],
       failureReason: '',
+      metadataIncomplete: false,
+      metadataError: '',
+      metadataIncompleteAt: '',
       infrastructureError: '',
       abortReason: '',
       abortSource: '',
@@ -985,6 +1025,7 @@ class InternalAgentManager {
       comments: commentLimit > 0,
       skipComments: commentLimit <= 0,
       commentLimit: Math.max(0, commentLimit),
+      requireCompleteMetadata: isBiliCollection(collection),
       timeoutMs: 7_200_000
     });
     await this.waitForRun(session, task, bundle.id, signal, 0.1, 0.52);
